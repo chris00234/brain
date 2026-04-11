@@ -67,3 +67,9 @@ BRAIN_TRUST_RANKING_ENABLED = os.getenv("BRAIN_TRUST_RANKING_ENABLED", "false").
 BRAIN_DISPATCH_CACHE_ENABLED = os.getenv("BRAIN_DISPATCH_CACHE_ENABLED", "false").lower() in ("true", "1", "yes")
 BRAIN_AUTO_HEAL_ENABLED = os.getenv("BRAIN_AUTO_HEAL_ENABLED", "false").lower() in ("true", "1", "yes")
 BRAIN_FINETUNE_ENABLED = os.getenv("BRAIN_FINETUNE_ENABLED", "false").lower() in ("true", "1", "yes")
+# Round 10 — neuromorphic retrieval
+BRAIN_SPREADING_ACTIVATION_ENABLED = os.getenv("BRAIN_SPREADING_ACTIVATION_ENABLED", "false").lower() in ("true", "1", "yes")
+BRAIN_SALIENCE_RANKING_ENABLED = os.getenv("BRAIN_SALIENCE_RANKING_ENABLED", "false").lower() in ("true", "1", "yes")
+BRAIN_MMR_DIVERSITY_ENABLED = os.getenv("BRAIN_MMR_DIVERSITY_ENABLED", "false").lower() in ("true", "1", "yes")
+BRAIN_EPISODIC_BINDING_ENABLED = os.getenv("BRAIN_EPISODIC_BINDING_ENABLED", "false").lower() in ("true", "1", "yes")
+BRAIN_MMR_LAMBDA = float(os.getenv("BRAIN_MMR_LAMBDA", "0.85"))  # 0.85 = strongly relevance-biased; 0.6 was too aggressive on single-shot QA

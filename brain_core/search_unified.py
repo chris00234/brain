@@ -492,7 +492,7 @@ def _dedup_by_content_hash(results: list[dict]) -> list[dict]:
 def search_all(query, limit=5, sources=None, domain=None, original_query=None,
                where=None, collections=None, entity=None, explain=False,
                source_type=None, include_history=False, include_obsolete=False,
-               as_of=None):
+               as_of=None, session_id=None):
     """Unified search across all sources.
 
     Phase 1B/1C/1D filters (applied to semantic_memory by default):
@@ -693,6 +693,27 @@ def search_all(query, limit=5, sources=None, domain=None, original_query=None,
     # Phase C4: Content-hash dedup BEFORE rerank to save compute + improve diversity
     unique = _dedup_by_content_hash(unique)
 
+    # Round 10 A1: spreading activation via Personalized PageRank (HippoRAG-style)
+    # — primes downstream rerank by boosting results whose entities overlap
+    # PPR-activated entities. Session-scoped so follow-up queries inherit warmth.
+    try:
+        from config import BRAIN_SPREADING_ACTIVATION_ENABLED
+    except ImportError:
+        BRAIN_SPREADING_ACTIVATION_ENABLED = False
+    if BRAIN_SPREADING_ACTIVATION_ENABLED:
+        try:
+            from spreading_activation import warm_session, boost_results_by_activation
+            activation = warm_session(session_id or "default", relevance_query)
+            if activation:
+                # strength=0.15 keeps the boost gentle so it can't dominate
+                # the rerank ordering; tuned down from 0.5 after eval showed
+                # aggressive boost demoted single-shot QA accuracy. Activation
+                # is meant to *prime*, not *override*.
+                unique = boost_results_by_activation(unique, activation, strength=0.15)
+                source_timing["activation_entities"] = len(activation)
+        except Exception as e:
+            pass
+
     # Apply rerank + time_decay. Clamp rerank_score to [0,100] so downstream
     # trust_score and time_decay multipliers stay in a well-defined range —
     # rerank_score is base*relevance*...*boost and can exceed 100, which
@@ -717,12 +738,13 @@ def search_all(query, limit=5, sources=None, domain=None, original_query=None,
     except Exception:
         pass
 
-    # Phase 1E: trust_score multiplier (feature-flagged)
+    # Phase 1E: trust_score multiplier (feature-flagged, legacy multiplicative path)
     try:
-        from config import BRAIN_TRUST_RANKING_ENABLED
+        from config import BRAIN_TRUST_RANKING_ENABLED, BRAIN_SALIENCE_RANKING_ENABLED
     except ImportError:
         BRAIN_TRUST_RANKING_ENABLED = False
-    if BRAIN_TRUST_RANKING_ENABLED:
+        BRAIN_SALIENCE_RANKING_ENABLED = False
+    if BRAIN_TRUST_RANKING_ENABLED and not BRAIN_SALIENCE_RANKING_ENABLED:
         for r in unique:
             meta = r.get("metadata") or {}
             try:
@@ -731,6 +753,79 @@ def search_all(query, limit=5, sources=None, domain=None, original_query=None,
                 ts = 0.5
             # trust_score 0.0-1.0 maps to multiplier 0.4-1.0
             r["score"] = r.get("score", 0) * (0.4 + 0.6 * ts)
+        unique.sort(key=lambda x: x.get("score", 0), reverse=True)
+
+    # Round 10 A2: Generative Agents salience scoring — additive recency +
+    # relevance + importance, min-max normalized. Subsumes the old trust
+    # multiplier with a more robust formula that doesn't crush memories
+    # missing one component.
+    if BRAIN_SALIENCE_RANKING_ENABLED and unique:
+        import math as _math
+        from datetime import datetime as _dt, timezone as _tz
+        # Weights tuned for single-shot QA: strongly bias toward relevance,
+        # use recency + importance only as tiebreakers. Generative Agents'
+        # default α=1 across the board is wrong for fact retrieval — it
+        # works for multi-turn conversation simulation where recency carries
+        # narrative weight.
+        ALPHA_REL = 4.0
+        ALPHA_REC = 0.5
+        ALPHA_IMP = 0.5
+        RECENCY_HALFLIFE_DAYS = 90.0  # slower decay so old infra docs aren't punished
+
+        # Compute recency inline from created_at — time_decay's apply_to_results
+        # mutates score but doesn't expose the raw recency component, so we
+        # recompute it here to avoid coupling.
+        def _recency_from_iso(ts: str) -> float:
+            if not ts:
+                return 0.0
+            try:
+                dt = _dt.fromisoformat(ts.rstrip("Zz"))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=_tz.utc)
+                age_days = (_dt.now(_tz.utc) - dt).total_seconds() / 86400
+                if age_days < 0:
+                    return 1.0
+                return _math.exp(-age_days * _math.log(2) / RECENCY_HALFLIFE_DAYS)
+            except Exception:
+                return 0.0
+
+        # Min-max normalize relevance across the candidate pool
+        relevance_vals = [float(r.get("score", 0)) for r in unique]
+        max_rel = max(relevance_vals) if relevance_vals else 0
+        min_rel = min(relevance_vals) if relevance_vals else 0
+        rel_range = max(max_rel - min_rel, 1e-6)
+        for r in unique:
+            meta = r.get("metadata") or {}
+            try:
+                trust = float(meta.get("trust_score", 0.5))
+            except (ValueError, TypeError):
+                trust = 0.5
+            try:
+                access = int(meta.get("access_count", 0))
+            except (ValueError, TypeError):
+                access = 0
+            access_norm = _math.log(access + 1) / _math.log(50)  # ~1.0 at 49 accesses
+            importance = max(min(trust, 1.0), min(access_norm, 1.0))
+
+            # Use the result's recency_score if time_decay set it, otherwise
+            # recompute from created_at.
+            recency = r.get("recency_score")
+            if recency is None:
+                recency = _recency_from_iso(r.get("created_at", "") or meta.get("created_at", ""))
+            recency = float(recency)
+
+            relevance_raw = float(r.get("score", 0))
+            relevance = (relevance_raw - min_rel) / rel_range
+
+            salience_norm = (
+                ALPHA_REL * relevance + ALPHA_REC * recency + ALPHA_IMP * importance
+            ) / (ALPHA_REL + ALPHA_REC + ALPHA_IMP)
+            r["score"] = round(salience_norm * 100, 2)
+            r["salience_components"] = {
+                "relevance": round(relevance, 3),
+                "recency": round(recency, 3),
+                "importance": round(importance, 3),
+            }
         unique.sort(key=lambda x: x.get("score", 0), reverse=True)
 
     try:
@@ -756,6 +851,49 @@ def search_all(query, limit=5, sources=None, domain=None, original_query=None,
                 unique.sort(key=lambda x: x.get("score", 0), reverse=True)
         except Exception:
             pass
+
+    # Round 10 A3: Maximal Marginal Relevance diversity selection
+    # (Carbonell & Goldstein '98). Iteratively pick the candidate with the
+    # best mix of relevance and dissimilarity from already-selected items.
+    # λ=0.6 by default (slight diversity bias).
+    try:
+        from config import BRAIN_MMR_DIVERSITY_ENABLED, BRAIN_MMR_LAMBDA
+    except ImportError:
+        BRAIN_MMR_DIVERSITY_ENABLED = False
+        BRAIN_MMR_LAMBDA = 0.6
+    if BRAIN_MMR_DIVERSITY_ENABLED and len(unique) > limit:
+        from tokenizer import tokenize as _tok
+        # Pre-tokenize once per result to avoid O(n^2) re-tokenization
+        token_cache: list[set[str]] = []
+        for r in unique:
+            text = (r.get("title", "") or "") + " " + (r.get("content", "") or "")[:500]
+            token_cache.append(_tok(text))
+
+        def _jacc(i: int, j: int) -> float:
+            a, b = token_cache[i], token_cache[j]
+            if not a or not b:
+                return 0.0
+            return len(a & b) / max(len(a | b), 1)
+
+        max_score = max((float(r.get("score", 0)) for r in unique), default=1.0) or 1.0
+        # Always seed with the highest-scoring result
+        selected_idx: list[int] = [0]
+        remaining_idx: list[int] = list(range(1, len(unique)))
+        while remaining_idx and len(selected_idx) < limit * 2:
+            best_idx, best_score = -1, -1e9
+            for i in remaining_idx:
+                relevance = float(unique[i].get("score", 0)) / max_score
+                max_sim = max((_jacc(i, s) for s in selected_idx), default=0.0)
+                mmr_score = BRAIN_MMR_LAMBDA * relevance - (1 - BRAIN_MMR_LAMBDA) * max_sim
+                if mmr_score > best_score:
+                    best_score = mmr_score
+                    best_idx = i
+            if best_idx < 0:
+                break
+            selected_idx.append(best_idx)
+            remaining_idx.remove(best_idx)
+        # Reorder unique to match MMR selection order
+        unique = [unique[i] for i in selected_idx] + [unique[i] for i in remaining_idx]
 
     # Source diversity: prevent same source file from dominating top-k
     source_counts: dict[str, int] = {}
