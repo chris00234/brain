@@ -130,6 +130,8 @@ JOB_REGISTRY: dict[str, list[str]] = {
     "gap_detection":       [_py, f"{_bd}/brain_core/pipeline/gap_detector.py"],
     "trust_recompute":     [_py, "-c", f"import sys; sys.path.insert(0,'{_bd}/brain_core'); from memory_lifecycle import recompute_trust_scores; import json; print(json.dumps(recompute_trust_scores()))"],
     "focus_aggregate":     [_py, f"{_bd}/brain_core/pipeline/focus_aggregator.py"],
+    # Round 10 Wave 2 — episodic memory binding (CoALA-style)
+    "episode_binder":      [_py, f"{_bd}/brain_core/pipeline/episode_binder.py"],
     # LoRA fine-tuning — manual trigger only, behind BRAIN_FINETUNE_ENABLED flag.
     # Must run in the brain venv since sentence-transformers/peft/torch are only
     # installed there, not in the system Python.

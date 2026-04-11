@@ -413,6 +413,14 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         agent="system",
         misfire_grace=600,
     ),
+    # Round 10 Wave 2 — episodic memory binding
+    ScheduledJob(
+        name="episode_binder",
+        description="Daily episode clustering + Hebbian boost (3:10am, after entity_resolution)",
+        trigger=CronTrigger(hour=3, minute=10),
+        agent="system",
+        misfire_grace=900,
+    ),
 ]
 
 

@@ -876,6 +876,78 @@ def search_all(query, limit=5, sources=None, domain=None, original_query=None,
         except Exception:
             pass
 
+    # Round 10 B2 (Wave 2): Episodic peer cross-promotion.
+    # When a top-N result has peer memories from the same temporal episode
+    # (built nightly by pipeline/episode_binder.py), boost those peers so the
+    # whole "moment" comes back together. CoALA-style episodic memory binding.
+    #
+    # Two safety conditions copied from the Wave 1.5 fixes:
+    #   1. Confidence skip — don't perturb a clear top-1 result
+    #   2. Tiny bonus cap (2pts) so peers can only displace top-N members
+    #      that are already neck-and-neck with them. Plus the boost is
+    #      capped at min(top_N_score - 1) so it never displaces an
+    #      authoritative top-N member, only joins the bottom of the pack.
+    try:
+        from config import BRAIN_EPISODIC_BINDING_ENABLED
+    except ImportError:
+        BRAIN_EPISODIC_BINDING_ENABLED = False
+    if BRAIN_EPISODIC_BINDING_ENABLED and len(unique) >= 3:
+        try:
+            # Confidence skip: clear top-1 winner stays put
+            top1 = float(unique[0].get("score", 0))
+            top3 = float(unique[min(2, len(unique) - 1)].get("score", 0))
+            if (top1 - top3) <= 8.0:
+                import sqlite3 as _sql
+                from pathlib import Path as _P
+                db_path = _P("/Users/chrischo/server/brain/logs/autonomy.db")
+                if db_path.exists():
+                    top_n = unique[:limit]
+                    top_ids = [r.get("id") or r.get("path", "") for r in top_n if r.get("id") or r.get("path")]
+                    if top_ids:
+                        _conn = _sql.connect(str(db_path))
+                        try:
+                            placeholders = ",".join("?" * len(top_ids))
+                            top_episodes = _conn.execute(
+                                f"SELECT DISTINCT episode_id FROM episode_membership WHERE memory_id IN ({placeholders})",
+                                top_ids,
+                            ).fetchall()
+                            if top_episodes:
+                                ep_ids = [e[0] for e in top_episodes]
+                                ep_placeholders = ",".join("?" * len(ep_ids))
+                                peer_rows = _conn.execute(
+                                    f"SELECT memory_id FROM episode_membership WHERE episode_id IN ({ep_placeholders})",
+                                    ep_ids,
+                                ).fetchall()
+                                peer_set = {pid for pid, in peer_rows}
+                                top_id_set = set(top_ids)
+                                # Floor: peer score after boost must remain
+                                # below the lowest top-N score, so peers can
+                                # only join the bottom, never displace.
+                                lowest_top_n = float(top_n[-1].get("score", 0))
+                                EPISODIC_BONUS_MAX = 2.0
+                                boosted_count = 0
+                                for r in unique:
+                                    rid = r.get("id") or r.get("path", "")
+                                    if rid in peer_set and rid not in top_id_set:
+                                        try:
+                                            cur = float(r.get("score", 0))
+                                            # Cap so the boost doesn't push us above any top-N member
+                                            headroom = max(0.0, lowest_top_n - cur - 0.1)
+                                            bonus = min(EPISODIC_BONUS_MAX, headroom)
+                                            if bonus > 0:
+                                                r["score"] = cur + bonus
+                                                r["episode_peer"] = True
+                                                boosted_count += 1
+                                        except (TypeError, ValueError):
+                                            pass
+                                if boosted_count > 0:
+                                    source_timing["episode_peers_boosted"] = boosted_count
+                                    unique.sort(key=lambda x: x.get("score", 0), reverse=True)
+                        finally:
+                            _conn.close()
+        except Exception:
+            pass
+
     # Round 10 A3 (Wave 1.5): MMR with confidence-aware skip.
     # Carbonell & Goldstein '98 — diversify only when results are genuinely
     # ambiguous. If top-1 dominates the top-N spread, returning the top-N
