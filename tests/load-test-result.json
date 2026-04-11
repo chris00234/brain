@@ -1,0 +1,44 @@
+{
+  "/healthz": {
+    "endpoint": "/healthz",
+    "duration_s": 5.01,
+    "concurrency": 3,
+    "total_requests": 1636,
+    "ok": 1636,
+    "errors": 0,
+    "rps": 326.8,
+    "mean_ms": 9.02,
+    "p50_ms": 8.58,
+    "p95_ms": 11.48,
+    "p99_ms": 17.5,
+    "max_ms": 127.81
+  },
+  "/recall": {
+    "endpoint": "/recall?q={q}&n=5",
+    "duration_s": 5.1,
+    "concurrency": 3,
+    "total_requests": 18,
+    "ok": 18,
+    "errors": 0,
+    "rps": 3.5,
+    "mean_ms": 653.68,
+    "p50_ms": 748.74,
+    "p95_ms": 1007.02,
+    "p99_ms": 1007.02,
+    "max_ms": 1007.02
+  },
+  "/recall/v2": {
+    "endpoint": "/recall/v2?q={q}&n=5",
+    "duration_s": 5.0,
+    "concurrency": 3,
+    "total_requests": 7464,
+    "ok": 7464,
+    "errors": 0,
+    "rps": 1492.4,
+    "mean_ms": 1.88,
+    "p50_ms": 1.42,
+    "p95_ms": 1.75,
+    "p99_ms": 3.35,
+    "max_ms": 340.31
+  }
+}

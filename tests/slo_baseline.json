@@ -1,0 +1,24 @@
+{
+  "timestamp": "2026-04-10T16:27:07",
+  "docs_inserted": 300,
+  "ingest_duration_sec": 30.0,
+  "ingest_throughput_docs_per_sec": 10.0,
+  "recall": {
+    "count": 100,
+    "p50": 85.5,
+    "p95": 265.1,
+    "p99": 301.0,
+    "mean": 101.5,
+    "max": 301.0,
+    "errors": 0
+  },
+  "recall_v2": {
+    "count": 20,
+    "p50": 5.5,
+    "p95": 87.3,
+    "p99": null,
+    "mean": 38.6,
+    "max": 87.3,
+    "errors": 0
+  }
+}
