@@ -231,6 +231,7 @@ def normalize_rag_result(r):
     trust = 1.0 if is_canonical else SOURCE_TRUST.get(collection, 0.7)
     tier = 3 if is_canonical else (2 if r.get("type", "") == "distilled-note" else 1)
     return {
+        "id": r.get("id", ""),  # ChromaDB doc id — needed for reinforce-on-access (R10 C1)
         "score": round(r.get("score", 0) * 100 * trust, 2),
         "source_type": "rag",
         "collection": collection,

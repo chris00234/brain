@@ -132,6 +132,8 @@ JOB_REGISTRY: dict[str, list[str]] = {
     "focus_aggregate":     [_py, f"{_bd}/brain_core/pipeline/focus_aggregator.py"],
     # Round 10 Wave 2 — episodic memory binding (CoALA-style)
     "episode_binder":      [_py, f"{_bd}/brain_core/pipeline/episode_binder.py"],
+    # Round 10 Wave 3 — synaptic pruning of atrophied memories (MemoryBank)
+    "memory_pruning":      [_py, "-c", f"import sys; sys.path.insert(0,'{_bd}/brain_core'); from memory_lifecycle import prune_atrophied_memories; import json; print(json.dumps(prune_atrophied_memories(dry_run=True)))"],
     # LoRA fine-tuning — manual trigger only, behind BRAIN_FINETUNE_ENABLED flag.
     # Must run in the brain venv since sentence-transformers/peft/torch are only
     # installed there, not in the system Python.
@@ -817,6 +819,23 @@ def recall(
     if _filter_free:
         cached = _recall_emb_cache_lookup(q)
         if cached is not None:
+            # Round 10 C1: still reinforce semantic_memory hits even on cache
+            # hit — the user is "accessing" those memories regardless of where
+            # the response comes from. Fire-and-forget so cache lookups stay fast.
+            try:
+                cached_results = cached.get("results", []) if isinstance(cached, dict) else []
+                cached_sem_ids = [
+                    r.get("id") for r in cached_results
+                    if isinstance(r, dict)
+                    and (r.get("collection") == "semantic_memory" or "semantic" in (r.get("collection") or ""))
+                    and r.get("id")
+                ][:5]
+                if cached_sem_ids:
+                    from brain_core.memory_lifecycle import reinforce_on_access
+                    from brain_core.search_unified import _search_bg_pool
+                    _search_bg_pool.submit(reinforce_on_access, cached_sem_ids)
+            except Exception:
+                pass
             return cached
 
     start_dt, end_dt = temporal.parse_range(since, until)
@@ -851,6 +870,24 @@ def recall(
                     "n_results": len(results_list),
                     "max_score": round(max_score, 2),
                 }) + "\n")
+    except Exception:
+        pass
+
+    # Round 10 C1: reinforce-on-access (MemoryBank). Fire-and-forget so we
+    # don't add latency to /recall. Only reinforces semantic_memory hits in
+    # the top-N — they're the only collection with the access_count metadata.
+    try:
+        results_list = payload.get("results", []) if isinstance(payload, dict) else []
+        sem_ids = [
+            r.get("id") for r in results_list
+            if isinstance(r, dict)
+            and (r.get("collection") == "semantic_memory" or "semantic" in (r.get("collection") or ""))
+            and r.get("id")
+        ][:5]
+        if sem_ids:
+            from brain_core.memory_lifecycle import reinforce_on_access
+            from brain_core.search_unified import _search_bg_pool
+            _search_bg_pool.submit(reinforce_on_access, sem_ids)
     except Exception:
         pass
     return payload

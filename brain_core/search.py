@@ -256,6 +256,7 @@ def hybrid_search(query, collections, limit=5, use_keyword=True, where=None):
         col_name, data = fut.result()
         if not data:
             continue
+        ids = (data.get("ids") or [[]])[0]
         docs = (data.get("documents") or [[]])[0]
         metas = (data.get("metadatas") or [[]])[0]
         dists = (data.get("distances") or [[]])[0]
@@ -278,6 +279,7 @@ def hybrid_search(query, collections, limit=5, use_keyword=True, where=None):
             combined = max(0.0, min(1.0, (0.55 * vector_sim) + (0.35 * kw_score) + s_boost))
 
             all_results.append({
+                "id": ids[i] if i < len(ids) else "",
                 "content": docs[i],
                 "source": metas[i].get("source", ""),
                 "agent": metas[i].get("agent", ""),

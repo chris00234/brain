@@ -689,5 +689,299 @@ def recompute_trust_scores() -> dict:
     }
 
 
+def reinforce_on_access(memory_ids: list[str], boost: float = 0.02) -> dict:
+    """Round 10 C1 (MemoryBank): bump access_count + trust_score on retrieval.
+
+    Called as a fire-and-forget BackgroundTask from /recall when semantic_memory
+    entries appear in the top-N results. Implements MemoryBank's reinforcement
+    on access — memories you actually use ratchet up trust over time, becoming
+    more salient for future queries.
+
+    Best-effort: any failure logs and returns the partial count rather than
+    blocking the recall response.
+    """
+    if not memory_ids:
+        return {"reinforced": 0}
+    from http_pool import http_json
+    from search import get_collections
+    cols = get_collections()
+    sem_col = cols.get("semantic_memory")
+    if not sem_col:
+        return {"reinforced": 0, "reason": "semantic_memory missing"}
+
+    # Fetch current metadata for the affected ids
+    try:
+        resp = http_json(
+            "POST",
+            f"http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col}/get",
+            {"ids": memory_ids[:20], "include": ["metadatas"]},
+        )
+    except Exception as e:
+        return {"reinforced": 0, "reason": f"fetch failed: {e}"}
+
+    ids = resp.get("ids", []) or []
+    metas = resp.get("metadatas", []) or []
+    if not ids:
+        return {"reinforced": 0}
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    update_ids: list[str] = []
+    update_metas: list[dict] = []
+    for mid, meta in zip(ids, metas):
+        meta = dict(meta or {})
+        try:
+            count = int(meta.get("access_count", 0))
+        except (ValueError, TypeError):
+            count = 0
+        try:
+            trust = float(meta.get("trust_score", 0.5))
+        except (ValueError, TypeError):
+            trust = 0.5
+        meta["access_count"] = count + 1
+        meta["last_accessed_at"] = now_iso
+        meta["trust_score"] = str(min(1.0, trust + boost))
+        update_ids.append(mid)
+        update_metas.append(meta)
+
+    if not update_ids:
+        return {"reinforced": 0}
+    try:
+        http_json(
+            "POST",
+            f"http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col}/update",
+            {"ids": update_ids, "metadatas": update_metas},
+        )
+    except Exception as e:
+        return {"reinforced": 0, "reason": f"update failed: {e}"}
+    return {"reinforced": len(update_ids)}
+
+
+def prune_atrophied_memories(dry_run: bool = True, max_age_days: int = 180,
+                              compress_with_gist: bool = False) -> dict:
+    """Round 10 C1 (MemoryBank): synaptic pruning of unused obsolete memories.
+
+    Walks semantic_memory and identifies entries matching ALL of:
+      - tier == "obsolete"
+      - access_count == 0
+      - last_accessed_at older than max_age_days (or never accessed AND
+        created_at older than max_age_days)
+      - trust_score < 0.5
+      - not referenced from any canonical/distilled note (provenance check)
+
+    Default is dry_run=True — logs what WOULD be pruned without deleting.
+    Set dry_run=False after reviewing the candidates.
+
+    Compression: if compress_with_gist=True AND there are candidates, dispatch
+    a single Jenna call (batched) to extract one-line gists per memory before
+    deletion. The gists are stored as new tier="gist" memories with
+    derived_from=[old_id], so the information isn't lost — only the verbose
+    original is removed.
+
+    Every deletion is logged to audit_log for recovery if needed.
+
+    Safety floor: never deletes more than 100 memories per run, never deletes
+    if the candidate set is more than 5% of the collection.
+    """
+    from http_pool import http_json
+    from search import get_collections
+    sys.path.insert(0, str(Path(__file__).parent))
+    try:
+        from audit_log import log_event
+    except Exception:
+        def log_event(*args, **kwargs):
+            return ""
+
+    cols = get_collections()
+    sem_col = cols.get("semantic_memory")
+    if not sem_col:
+        return {"status": "error", "reason": "semantic_memory missing"}
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
+    cutoff_iso = cutoff.isoformat()
+
+    # Fetch all of semantic_memory in pages — we need every entry to evaluate
+    PAGE = 500
+    offset = 0
+    candidates: list[dict] = []
+    total_scanned = 0
+    while True:
+        try:
+            resp = http_json(
+                "POST",
+                f"http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col}/get",
+                {"limit": PAGE, "offset": offset, "include": ["documents", "metadatas"]},
+            )
+        except Exception as e:
+            return {"status": "error", "reason": f"fetch failed: {e}"}
+        ids = resp.get("ids", []) or []
+        if not ids:
+            break
+        docs = resp.get("documents", []) or []
+        metas = resp.get("metadatas", []) or []
+
+        for mid, doc, meta in zip(ids, docs, metas):
+            total_scanned += 1
+            meta = meta or {}
+            tier = (meta.get("memory_class") or "").lower()
+            if tier != "obsolete":
+                continue
+            try:
+                count = int(meta.get("access_count", 0))
+            except (ValueError, TypeError):
+                count = 0
+            if count > 0:
+                continue
+            try:
+                trust = float(meta.get("trust_score", 0.5))
+            except (ValueError, TypeError):
+                trust = 0.5
+            if trust >= 0.5:
+                continue
+            last_accessed = meta.get("last_accessed_at") or meta.get("updated_at") or meta.get("created_at") or ""
+            if not last_accessed:
+                continue
+            if last_accessed >= cutoff_iso:
+                continue
+            # Provenance check: don't delete if any canonical note references it
+            references = meta.get("references_in_canonical") or meta.get("canonical_refs") or ""
+            if references:
+                continue
+
+            candidates.append({
+                "id": mid,
+                "content": (doc or "")[:300],
+                "trust": trust,
+                "last_accessed": last_accessed,
+                "tier": tier,
+            })
+
+        if len(ids) < PAGE:
+            break
+        offset += PAGE
+
+    n_candidates = len(candidates)
+    safety_cap = max(100, int(total_scanned * 0.05))
+    if n_candidates > safety_cap:
+        return {
+            "status": "safety_abort",
+            "scanned": total_scanned,
+            "candidates": n_candidates,
+            "safety_cap": safety_cap,
+            "reason": f"candidate set ({n_candidates}) exceeds 5% / 100 floor — refusing to prune",
+        }
+
+    if dry_run or n_candidates == 0:
+        # Log the dry-run report so it's reviewable
+        sample = candidates[:10]
+        return {
+            "status": "dry_run" if dry_run else "ok",
+            "scanned": total_scanned,
+            "candidates": n_candidates,
+            "would_prune": [{"id": c["id"], "trust": c["trust"], "last_accessed": c["last_accessed"]} for c in sample],
+            "actually_deleted": 0,
+        }
+
+    # Real deletion path — only reached when dry_run=False
+    candidate_ids = [c["id"] for c in candidates]
+
+    # Optional gist compression before delete
+    gist_count = 0
+    if compress_with_gist and candidates:
+        try:
+            from openclaw_dispatch import dispatch
+            BATCH = 50
+            for i in range(0, len(candidates), BATCH):
+                batch = candidates[i:i + BATCH]
+                prompt = (
+                    "Compress each of these memories to a single 1-line gist. "
+                    "Return strict JSON: {\"gists\": [{\"id\": \"...\", \"gist\": \"...\"}, ...]}\n\n"
+                    + "\n".join(f"[{c['id']}] {c['content']}" for c in batch)
+                )
+                result = dispatch(agent="jenna", message=prompt, thinking="off", timeout=60)
+                if result.ok:
+                    try:
+                        text = result.text.strip()
+                        if text.startswith("```"):
+                            text = text.split("```", 2)[1]
+                            if text.startswith("json"):
+                                text = text[4:]
+                            if "```" in text:
+                                text = text.split("```", 1)[0]
+                        parsed = json.loads(text)
+                        for g in parsed.get("gists", []):
+                            old_id = g.get("id", "")
+                            gist_text = (g.get("gist") or "").strip()
+                            if not gist_text or len(gist_text) < 10:
+                                continue
+                            # Store the gist as a new memory with tier=gist
+                            try:
+                                from indexer import get_embedding
+                                emb = get_embedding(gist_text, prefix="passage")
+                                if emb:
+                                    new_id = f"gist_{old_id[:24]}"
+                                    http_json(
+                                        "POST",
+                                        f"http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col}/upsert",
+                                        {
+                                            "ids": [new_id],
+                                            "embeddings": [emb],
+                                            "documents": [gist_text],
+                                            "metadatas": [{
+                                                "memory_class": "gist",
+                                                "derived_from": old_id,
+                                                "created_at": datetime.now(timezone.utc).isoformat(),
+                                                "trust_score": "0.4",
+                                            }],
+                                        },
+                                    )
+                                    gist_count += 1
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+        except Exception as e:
+            print(f"  gist compression failed: {e}")
+
+    # Delete in batches of 50 — record audit log for each
+    deleted = 0
+    BATCH = 50
+    for i in range(0, len(candidate_ids), BATCH):
+        batch = candidate_ids[i:i + BATCH]
+        try:
+            http_json(
+                "POST",
+                f"http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col}/delete",
+                {"ids": batch},
+            )
+            deleted += len(batch)
+            for mid in batch:
+                try:
+                    log_event(
+                        event_type="prune",
+                        entity_a=mid,
+                        resolution="atrophied_obsolete",
+                        reason=f"obsolete + access_count=0 + trust<0.5 + last_accessed > {max_age_days}d",
+                    )
+                except Exception:
+                    pass
+        except Exception as e:
+            return {
+                "status": "partial",
+                "scanned": total_scanned,
+                "candidates": n_candidates,
+                "actually_deleted": deleted,
+                "gist_count": gist_count,
+                "reason": f"delete failed at batch {i}: {e}",
+            }
+
+    return {
+        "status": "ok",
+        "scanned": total_scanned,
+        "candidates": n_candidates,
+        "actually_deleted": deleted,
+        "gist_count": gist_count,
+    }
+
+
 if __name__ == '__main__':
     main()

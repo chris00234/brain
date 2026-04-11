@@ -421,6 +421,14 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         agent="system",
         misfire_grace=900,
     ),
+    # Round 10 Wave 3 — synaptic pruning (default dry-run; flip the JOB_REGISTRY entry to dry_run=False after first review)
+    ScheduledJob(
+        name="memory_pruning",
+        description="Monthly atrophied-memory dry-run (15th 4:10am)",
+        trigger=CronTrigger(day=15, hour=4, minute=10),
+        agent="system",
+        misfire_grace=1800,
+    ),
 ]
 
 
