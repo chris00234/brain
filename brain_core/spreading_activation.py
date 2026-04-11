@@ -136,35 +136,48 @@ def _build_graph() -> Any:
 
 
 def _get_graph() -> Any:
-    """Cached graph getter. Refreshes every _GRAPH_TTL_SECONDS."""
+    """Cached graph getter with TTL. Holds the lock for the full check-and-build
+    so concurrent callers under TTL expiry don't trigger N redundant Neo4j
+    fetches — first thread builds, others wait then read the cache.
+    """
     now = time.time()
     with _graph_lock:
         if _graph_cache["graph"] is not None and (now - _graph_cache["fetched_at"]) < _GRAPH_TTL_SECONDS:
             return _graph_cache["graph"]
-    g = _build_graph()
-    with _graph_lock:
+        g = _build_graph()
         _graph_cache["graph"] = g
         _graph_cache["fetched_at"] = now
-    return g
+        return g
 
 
 def _seed_entities_from_query(query: str, max_seeds: int = 8) -> list[str]:
-    """Cheap entity extraction: any node in the cached graph whose name
-    appears as a substring of the query (case-insensitive). Avoids an LLM
-    dispatch for what is otherwise a hot-path operation.
+    """Cheap entity extraction: nodes in the cached graph whose name appears
+    as a *whole word* in the query (case-insensitive). Word-boundary regex
+    avoids spurious matches like "go" → "google", "ago", "argo".
     """
+    import re as _re
     g = _get_graph()
     if g is None:
         return []
     q = (query or "").lower()
     if len(q) < 3:
         return []
+    # Tokenize the query once into a set of word-tokens for O(1) lookup.
+    # This is dramatically faster than running 1000+ regex searches per node.
+    q_tokens = set(_re.findall(r"\w+", q))
     matches: list[tuple[str, int]] = []
     for node in g.nodes():
-        if not isinstance(node, str) or len(node) < 2:
+        if not isinstance(node, str) or len(node) < 3:
             continue
-        if node.lower() in q:
-            # Longer entity matches are more specific — sort by length desc
+        node_lower = node.lower()
+        # Multi-word entity (e.g. "chris cho"): match if every word is in query
+        node_tokens = node_lower.split()
+        if len(node_tokens) > 1:
+            if all(t in q_tokens for t in node_tokens):
+                matches.append((node, len(node)))
+            continue
+        # Single-word entity: must be in the query token set as a whole word
+        if node_lower in q_tokens:
             matches.append((node, len(node)))
     matches.sort(key=lambda kv: -kv[1])
     return [m[0] for m in matches[:max_seeds]]
@@ -273,19 +286,33 @@ def merge_activation(*maps: dict[str, float]) -> dict[str, float]:
     return out
 
 
-def boost_results_by_activation(results: list[dict], activation: dict[str, float], strength: float = 0.5) -> list[dict]:
-    """Multiply each result's score by (1 + strength * max_overlap_activation).
+def boost_results_by_activation(
+    results: list[dict],
+    activation: dict[str, float],
+    bonus_max: float = 5.0,
+    top_n: int | None = None,
+) -> list[dict]:
+    """Add an activation bonus to each result's score, capped at bonus_max.
+
+    Round 11: switched from multiplicative to additive (Wave 1.5 lesson —
+    multiplicative boosts perturb top-N rankings; additive caps the impact).
 
     Looks for activated entity names in (a) `metadata.entities` if present,
-    (b) the result content/title as a substring fallback. The substring path
-    catches results from collections that don't tag entities in metadata
-    (most rag/canonical results). Mutation is in-place.
+    (b) the result content/title as a substring fallback. Substring matches
+    use word-boundary token sets (no spurious "go" → "google").
+
+    `top_n` limits how many results get touched (so we don't waste cycles
+    on low-rank candidates that won't be returned anyway).
+
+    Mutation is in-place; the list is also returned.
     """
     if not activation or not results:
         return results
-    # Pre-lowercase the activation keys for cheap substring matching
-    activation_lower = {k.lower(): (k, v) for k, v in activation.items() if k and len(k) >= 2}
-    for r in results:
+    import re as _re
+    # Pre-lowercase + tokenize the activation keys
+    activation_lower = {k.lower(): v for k, v in activation.items() if k and len(k) >= 3}
+    pool = results if top_n is None else results[:top_n]
+    for r in pool:
         if not isinstance(r, dict):
             continue
         best = 0.0
@@ -298,8 +325,9 @@ def boost_results_by_activation(results: list[dict], activation: dict[str, float
             score = activation.get(ent, 0.0)
             if score > best:
                 best = score
-        # Path B: content + title substring fallback (for results without
-        # explicit entity tagging — most of /recall comes through this path)
+        # Path B: word-boundary substring fallback for results without
+        # explicit entity tagging. Tokenize the haystack once, check
+        # whole-word membership against each activation key.
         if best == 0 and activation_lower:
             haystack = (
                 (r.get("title", "") or "")[:200]
@@ -307,12 +335,18 @@ def boost_results_by_activation(results: list[dict], activation: dict[str, float
                 + (r.get("content", "") or "")[:400]
             ).lower()
             if haystack:
-                for ent_lower, (orig, score) in activation_lower.items():
-                    if ent_lower in haystack and score > best:
-                        best = score
+                tokens = set(_re.findall(r"\w+", haystack))
+                for ent_lower, score in activation_lower.items():
+                    parts = ent_lower.split()
+                    if len(parts) > 1:
+                        if all(p in tokens for p in parts) and score > best:
+                            best = score
+                    else:
+                        if ent_lower in tokens and score > best:
+                            best = score
         if best > 0:
             try:
-                r["score"] = float(r.get("score", 0)) * (1 + strength * best)
+                r["score"] = float(r.get("score", 0)) + bonus_max * best
                 r["activation_boost"] = round(best, 4)
             except (TypeError, ValueError):
                 pass

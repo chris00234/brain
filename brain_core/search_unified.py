@@ -738,43 +738,19 @@ def search_all(query, limit=5, sources=None, domain=None, original_query=None,
         BRAIN_SPREADING_ACTIVATION_ENABLED = False
     if BRAIN_SPREADING_ACTIVATION_ENABLED and len(unique) >= 2:
         try:
-            from spreading_activation import warm_session
-            # Confidence skip: don't perturb a clear top-1
+            from spreading_activation import warm_session, boost_results_by_activation
+            # Confidence skip: don't perturb a clear top-1.
+            # Proportional threshold handles any upstream score range.
             top1 = float(unique[0].get("score", 0))
             top3 = float(unique[min(2, len(unique) - 1)].get("score", 0))
-            if (top1 - top3) <= 8.0:
+            # Require positive scores for both so negative cross-encoder scores
+            # don't silently disable activation. When top1 is weak (<=0) we
+            # fall through to apply activation — that's the case that benefits
+            # most from entity-graph boosting.
+            if top1 > 0 and top3 > 0 and (top3 / top1) >= 0.90:
                 activation = warm_session(session_id or "default", relevance_query)
                 if activation:
-                    act_lower = {k.lower(): (k, v) for k, v in activation.items() if k and len(k) >= 2}
-                    ACTIVATION_BONUS_MAX = 5.0
-                    for r in unique[:limit * 2]:  # only touch the top pool
-                        if not isinstance(r, dict):
-                            continue
-                        best = 0.0
-                        meta = r.get("metadata") or {}
-                        entities = meta.get("entities") or []
-                        if isinstance(entities, str):
-                            entities = [e.strip() for e in entities.split(",") if e.strip()]
-                        for ent in entities:
-                            score = activation.get(ent, 0.0)
-                            if score > best:
-                                best = score
-                        if best == 0 and act_lower:
-                            haystack = (
-                                (r.get("title", "") or "")[:200]
-                                + " "
-                                + (r.get("content", "") or "")[:400]
-                            ).lower()
-                            if haystack:
-                                for ent_lower, (orig, score) in act_lower.items():
-                                    if ent_lower in haystack and score > best:
-                                        best = score
-                        if best > 0:
-                            try:
-                                r["score"] = float(r.get("score", 0)) + ACTIVATION_BONUS_MAX * best
-                                r["activation_boost"] = round(best, 4)
-                            except (TypeError, ValueError):
-                                pass
+                    boost_results_by_activation(unique, activation, bonus_max=5.0, top_n=limit * 2)
                     source_timing["activation_entities"] = len(activation)
                     source_timing["activation_applied"] = True
                     unique.sort(key=lambda x: x.get("score", 0), reverse=True)
@@ -837,7 +813,11 @@ def search_all(query, limit=5, sources=None, domain=None, original_query=None,
             except (ValueError, TypeError):
                 access = 0
             access_norm = _math.log(access + 1) / _math.log(50)
-            importance = max(min(trust, 1.0), min(access_norm, 1.0))
+            # Combine trust + access into a single importance signal — was
+            # using max() which silently dropped whichever was smaller. The
+            # average preserves both signals so a high-trust never-accessed
+            # memory and a low-trust frequently-accessed one each surface.
+            importance = (min(trust, 1.0) + min(access_norm, 1.0)) / 2.0
 
             recency = r.get("recency_score")
             if recency is None:
@@ -894,10 +874,11 @@ def search_all(query, limit=5, sources=None, domain=None, original_query=None,
         BRAIN_EPISODIC_BINDING_ENABLED = False
     if BRAIN_EPISODIC_BINDING_ENABLED and len(unique) >= 3:
         try:
-            # Confidence skip: clear top-1 winner stays put
+            # Confidence skip: clear top-1 winner stays put.
+            # Proportional threshold handles any upstream score range.
             top1 = float(unique[0].get("score", 0))
             top3 = float(unique[min(2, len(unique) - 1)].get("score", 0))
-            if (top1 - top3) <= 8.0:
+            if top1 > 0 and top3 > 0 and (top3 / top1) >= 0.90:
                 import sqlite3 as _sql
                 from pathlib import Path as _P
                 db_path = _P("/Users/chrischo/server/brain/logs/autonomy.db")
@@ -959,11 +940,21 @@ def search_all(query, limit=5, sources=None, domain=None, original_query=None,
         BRAIN_MMR_DIVERSITY_ENABLED = False
         BRAIN_MMR_LAMBDA = 0.85
     # Confidence skip — when top scores are well-separated, MMR can only hurt.
+    # Use a proportional threshold so it works regardless of whether upstream
+    # reranking produced RRF-style scores (~100 range), cross-encoder sigmoid
+    # outputs (~0-10 range), or token overlap ratios (~0-1 range).
     _mmr_should_run = BRAIN_MMR_DIVERSITY_ENABLED and len(unique) > limit
     if _mmr_should_run:
         _top_score = float(unique[0].get("score", 0))
         _nth_score = float(unique[min(limit - 1, len(unique) - 1)].get("score", 0))
-        _mmr_should_run = (_top_score - _nth_score) <= 15.0
+        # Run MMR only if the nth result is >= 85% of top-1 (ambiguous spread).
+        # Non-positive scores disable the skip entirely — fall through to run
+        # MMR, which is the correct behavior when the whole top-N is weak.
+        _mmr_should_run = (
+            _top_score > 0
+            and _nth_score > 0
+            and (_nth_score / _top_score) >= 0.85
+        )
     if _mmr_should_run:
         from tokenizer import tokenize as _tok
         # Pre-tokenize once per result to avoid O(n^2) re-tokenization

@@ -39,23 +39,8 @@ MINIO_ALIAS = "local"
 MINIO_BUCKET = "rag-backups"
 
 
-def _s3_client():
-    import boto3
-    from botocore.config import Config
-    env_path = Path("/Users/chrischo/server/minio/.env")
-    creds = {}
-    if env_path.exists():
-        for line in env_path.read_text().splitlines():
-            if "=" in line and not line.startswith("#"):
-                k, v = line.strip().split("=", 1)
-                creds[k] = v
-    return boto3.client(
-        "s3",
-        endpoint_url=os.getenv("MINIO_ENDPOINT", "http://192.168.97.5:9000"),
-        aws_access_key_id=creds.get("MINIO_ROOT_USER", ""),
-        aws_secret_access_key=creds.get("MINIO_ROOT_PASSWORD", ""),
-        config=Config(signature_version="s3v4"),
-    )
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _minio import s3_client as _s3_client
 
 
 def mc_upload(host_path, remote_name):
@@ -194,19 +179,46 @@ def backup(retain_days):
         print(f"  ERROR: ChromaDB data dir not found: {CHROMA_DATA}")
         return False
 
-    # Checkpoint WAL before copying to ensure consistent state
+    # Copy the non-sqlite bits first (HNSW index files, etc.) via copytree,
+    # skipping the sqlite3 files + their WAL/SHM sidecars — those need the
+    # online backup API for point-in-time consistency while writes continue.
     import sqlite3
-    for db_file in CHROMA_DATA.rglob("*.sqlite3"):
-        try:
-            conn = sqlite3.connect(str(db_file))
-            try:
-                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-            finally:
-                conn.close()
-        except Exception:
-            pass  # best-effort — copy will still work, just may include WAL
 
-    shutil.copytree(CHROMA_DATA, backup_path)
+    def _skip_sqlite(src, names):
+        skipped = []
+        for n in names:
+            if n.endswith(".sqlite3") or n.endswith(".sqlite3-wal") or n.endswith(".sqlite3-shm"):
+                skipped.append(n)
+        return skipped
+
+    shutil.copytree(CHROMA_DATA, backup_path, ignore=_skip_sqlite)
+
+    # For each sqlite3 file, use the online backup API (conn.backup) to get a
+    # consistent snapshot while the live DB is still being written to.
+    # This is transactional — no race between checkpoint and copy.
+    for db_file in CHROMA_DATA.rglob("*.sqlite3"):
+        rel = db_file.relative_to(CHROMA_DATA)
+        dst_file = backup_path / rel
+        dst_file.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            src_conn = sqlite3.connect(str(db_file))
+            dst_conn = sqlite3.connect(str(dst_file))
+            try:
+                src_conn.backup(dst_conn)
+            finally:
+                src_conn.close()
+                dst_conn.close()
+        except Exception as e:
+            print(f"  WARNING: online backup failed for {rel}: {e}, falling back to copy+checkpoint")
+            try:
+                conn = sqlite3.connect(str(db_file))
+                try:
+                    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                finally:
+                    conn.close()
+            except Exception:
+                pass
+            shutil.copy2(db_file, dst_file)
 
     print("[2/4] Compressing...")
     subprocess.run(

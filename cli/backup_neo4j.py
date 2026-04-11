@@ -18,23 +18,8 @@ NEO4J_DATA_DIR = Path("/opt/homebrew/var/neo4j/data")
 MAX_BACKUPS = 14
 
 
-def _s3_client():
-    import boto3
-    from botocore.config import Config
-    env_path = Path("/Users/chrischo/server/minio/.env")
-    creds = {}
-    if env_path.exists():
-        for line in env_path.read_text().splitlines():
-            if "=" in line and not line.startswith("#"):
-                k, v = line.strip().split("=", 1)
-                creds[k] = v
-    return boto3.client(
-        "s3",
-        endpoint_url=os.getenv("MINIO_ENDPOINT", "http://192.168.97.5:9000"),
-        aws_access_key_id=creds.get("MINIO_ROOT_USER", ""),
-        aws_secret_access_key=creds.get("MINIO_ROOT_PASSWORD", ""),
-        config=Config(signature_version="s3v4"),
-    )
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _minio import s3_client as _s3_client
 
 
 def backup():

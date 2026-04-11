@@ -5,6 +5,7 @@ Every dedup/merge/conflict decision in the Brain system should call log_event().
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import sqlite3
 import threading
@@ -18,8 +19,6 @@ except ImportError:
     BRAIN_LOGS_DIR = Path("/Users/chrischo/server/brain/logs")
 
 DB_PATH = BRAIN_LOGS_DIR / "audit.db"
-
-_local = threading.local()
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS audit_events (
@@ -62,15 +61,17 @@ def _ensure_schema():
         _schema_initialized = True
 
 
-def _get_conn() -> sqlite3.Connection:
-    conn = getattr(_local, 'audit_conn', None)
-    if conn is None:
-        _ensure_schema()
-        conn = sqlite3.connect(str(DB_PATH))
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        _local.audit_conn = conn
-    return conn
+@contextlib.contextmanager
+def _conn_ctx():
+    """Short-lived connection — opens, yields, closes. Avoids thread-local
+    leaks in long-running worker thread pools where threads come and go."""
+    _ensure_schema()
+    conn = sqlite3.connect(str(DB_PATH))
+    conn.row_factory = sqlite3.Row
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
 def _now() -> str:
@@ -91,22 +92,22 @@ def log_event(
 ) -> str:
     """Log a dedup/merge/conflict/resolution event. Returns the event ID."""
     event_id = f"audit_{uuid.uuid4().hex[:12]}"
-    conn = _get_conn()
-    conn.execute(
-        "INSERT INTO audit_events "
-        "(id, timestamp, event_type, entity_a, entity_b, match_score, "
-        " conflict_type, resolution, reason, source_evidence, "
-        " review_required, reviewed_by) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (
-            event_id, _now(), event_type, entity_a, entity_b,
-            match_score, conflict_type, resolution, reason,
-            json.dumps(source_evidence or {}),
-            1 if review_required else 0,
-            reviewed_by if not review_required else "",
-        ),
-    )
-    conn.commit()
+    with _conn_ctx() as conn:
+        conn.execute(
+            "INSERT INTO audit_events "
+            "(id, timestamp, event_type, entity_a, entity_b, match_score, "
+            " conflict_type, resolution, reason, source_evidence, "
+            " review_required, reviewed_by) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                event_id, _now(), event_type, entity_a, entity_b,
+                match_score, conflict_type, resolution, reason,
+                json.dumps(source_evidence or {}),
+                1 if review_required else 0,
+                reviewed_by if not review_required else "",
+            ),
+        )
+        conn.commit()
     return event_id
 
 
@@ -117,7 +118,6 @@ def list_events(
     limit: int = 50,
 ) -> list[dict]:
     """Query audit events with optional filters."""
-    conn = _get_conn()
     clauses = []
     params: list = []
     if event_type:
@@ -129,33 +129,34 @@ def list_events(
     if pending_only:
         clauses.append("review_required = 1 AND reviewed_at IS NULL")
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-    rows = conn.execute(
-        f"SELECT * FROM audit_events {where} ORDER BY timestamp DESC LIMIT ?",
-        params + [limit],
-    ).fetchall()
+    with _conn_ctx() as conn:
+        rows = conn.execute(
+            f"SELECT * FROM audit_events {where} ORDER BY timestamp DESC LIMIT ?",
+            params + [limit],
+        ).fetchall()
     return [dict(r) for r in rows]
 
 
 def review_event(event_id: str, reviewed_by: str = "chris") -> bool:
     """Mark an audit event as reviewed."""
-    conn = _get_conn()
-    conn.execute(
-        "UPDATE audit_events SET reviewed_at = ?, reviewed_by = ? WHERE id = ?",
-        (_now(), reviewed_by, event_id),
-    )
-    conn.commit()
+    with _conn_ctx() as conn:
+        conn.execute(
+            "UPDATE audit_events SET reviewed_at = ?, reviewed_by = ? WHERE id = ?",
+            (_now(), reviewed_by, event_id),
+        )
+        conn.commit()
     return True
 
 
 def stats() -> dict:
     """Return audit event counts by type."""
-    conn = _get_conn()
-    rows = conn.execute(
-        "SELECT event_type, COUNT(*) as count FROM audit_events GROUP BY event_type"
-    ).fetchall()
-    pending = conn.execute(
-        "SELECT COUNT(*) FROM audit_events WHERE review_required = 1 AND reviewed_at IS NULL"
-    ).fetchone()[0]
+    with _conn_ctx() as conn:
+        rows = conn.execute(
+            "SELECT event_type, COUNT(*) as count FROM audit_events GROUP BY event_type"
+        ).fetchall()
+        pending = conn.execute(
+            "SELECT COUNT(*) FROM audit_events WHERE review_required = 1 AND reviewed_at IS NULL"
+        ).fetchone()[0]
     return {
         "by_type": {r["event_type"]: r["count"] for r in rows},
         "total": sum(r["count"] for r in rows),

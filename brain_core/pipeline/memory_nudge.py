@@ -23,6 +23,8 @@ DISPATCH_COOLDOWN_HOURS = 22  # ~daily
 
 CHROMA_URL = "http://127.0.0.1:8000"
 CHROMA_API = f"{CHROMA_URL}/api/v2/tenants/default_tenant/databases/default_database/collections"
+BRAIN_URL = "http://127.0.0.1:8791"
+SECRET_FILE = Path("/Users/chrischo/.openclaw/credentials/.personal_webhook_secret")
 
 PROMPT_TEMPLATE = """Review these recent memories from Chris's brain. For each, classify as:
 - durable: should be promoted to canonical knowledge
@@ -104,6 +106,49 @@ def mark_promotion_candidate(sem_id: str, memory_ids: list[str]) -> int:
         return 0
 
 
+def store_patterns(patterns: list[dict]) -> int:
+    """Store extracted behavioral patterns as new preference memories.
+    Uses the brain's /memory endpoint so embedding + dedup flow through the
+    same path as any other memory write.
+    """
+    if not patterns or not SECRET_FILE.exists():
+        return 0
+    try:
+        secret = SECRET_FILE.read_text().strip()
+    except Exception:
+        return 0
+    import urllib.request
+    stored = 0
+    for p in patterns:
+        rule = (p.get("rule") or "").strip()
+        if not rule or len(rule) < 10:
+            continue
+        from_ids = p.get("from") or []
+        reason = f"Derived from memories: {', '.join(str(i) for i in from_ids[:5])}" if from_ids else "Pattern extracted by memory_nudge"
+        payload = json.dumps({
+            "content": rule[:500],
+            "category": "preference",
+            "agent": "jenna",
+            "source": "memory_nudge_pattern",
+            "reason": reason[:200],
+        }).encode()
+        req = urllib.request.Request(
+            f"{BRAIN_URL}/memory",
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {secret}",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=15):
+                stored += 1
+        except Exception as e:
+            print(f"store_patterns [{rule[:40]}...] failed: {e}")
+    return stored
+
+
 def main():
     recent = fetch_recent(7)
     if not recent:
@@ -142,6 +187,7 @@ def main():
     # Act on classifications
     promoted_count = mark_promotion_candidate(sem_id, durable_ids)
     archived_count = mark_obsolete(sem_id, obsolete_ids)
+    patterns_stored = store_patterns(patterns)
 
     report = {
         "timestamp": datetime.now().isoformat(),
@@ -152,7 +198,7 @@ def main():
         "actions": {
             "promotion_flagged": promoted_count,
             "archived": archived_count,
-            "patterns_stored": 0,  # TODO: store patterns as new memories
+            "patterns_stored": patterns_stored,
         },
     }
     OUT_FILE.parent.mkdir(parents=True, exist_ok=True)

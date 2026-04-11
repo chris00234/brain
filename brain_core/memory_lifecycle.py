@@ -724,7 +724,10 @@ def reinforce_on_access(memory_ids: list[str], boost: float = 0.02) -> dict:
     if not ids:
         return {"reinforced": 0}
 
-    now_iso = datetime.now(timezone.utc).isoformat()
+    # Z-suffix matches the convention used by entity_graph._now() and
+    # learn._now_iso() — keeps lexicographic comparison consistent across
+    # all writers (the prune job sorts by these timestamps).
+    now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
     update_ids: list[str] = []
     update_metas: list[dict] = []
     for mid, meta in zip(ids, metas):
@@ -797,7 +800,35 @@ def prune_atrophied_memories(dry_run: bool = True, max_age_days: int = 180,
         return {"status": "error", "reason": "semantic_memory missing"}
 
     cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
-    cutoff_iso = cutoff.isoformat()
+    # Normalize to Z-suffix so lexicographic comparison works against memories
+    # whose timestamps were written by entity_graph._now() (Z-suffix) rather
+    # than reinforce_on_access (+00:00 suffix). "+" sorts after "Z" in ASCII,
+    # so a +00:00 cutoff string was making Z-suffix memories appear OLDER
+    # than the cutoff and bypassing the age filter.
+    cutoff_iso = cutoff.isoformat().replace("+00:00", "Z")
+
+    # Round 11 fix: real provenance check — preload the set of memory IDs
+    # mentioned in any canonical/distilled note. The previous implementation
+    # checked metadata fields that no writer ever populates, making the
+    # provenance gate a no-op.
+    canonical_refs: set[str] = set()
+    try:
+        canonical_refs_path = Path("/Users/chrischo/server/knowledge")
+        for sub in ("canonical", "distilled"):
+            base = canonical_refs_path / sub
+            if not base.exists():
+                continue
+            for f in base.rglob("*.md"):
+                try:
+                    txt = f.read_text(errors="replace")
+                    # Extract semantic_memory:<hex> patterns
+                    import re as _re
+                    for m in _re.finditer(r"semantic_memory:[a-f0-9]{8,40}", txt):
+                        canonical_refs.add(m.group(0))
+                except Exception:
+                    continue
+    except Exception:
+        pass
 
     # Fetch all of semantic_memory in pages — we need every entry to evaluate
     PAGE = 500
@@ -840,11 +871,14 @@ def prune_atrophied_memories(dry_run: bool = True, max_age_days: int = 180,
             last_accessed = meta.get("last_accessed_at") or meta.get("updated_at") or meta.get("created_at") or ""
             if not last_accessed:
                 continue
-            if last_accessed >= cutoff_iso:
+            # Normalize Z/+00:00 suffix for lexicographic comparison (round 11 fix)
+            last_accessed_norm = last_accessed.replace("+00:00", "Z")
+            if last_accessed_norm >= cutoff_iso:
                 continue
-            # Provenance check: don't delete if any canonical note references it
-            references = meta.get("references_in_canonical") or meta.get("canonical_refs") or ""
-            if references:
+            # Provenance check: don't delete if any canonical/distilled note
+            # references this memory id (real check, not the no-op metadata
+            # field that round 10 originally used).
+            if mid in canonical_refs:
                 continue
 
             candidates.append({
@@ -860,7 +894,9 @@ def prune_atrophied_memories(dry_run: bool = True, max_age_days: int = 180,
         offset += PAGE
 
     n_candidates = len(candidates)
-    safety_cap = max(100, int(total_scanned * 0.05))
+    # Take the SMALLER of the two limits — never delete >100/run AND never
+    # delete >5% of the collection. Was using max() which inverted the intent.
+    safety_cap = min(100, max(1, int(total_scanned * 0.05)))
     if n_candidates > safety_cap:
         return {
             "status": "safety_abort",

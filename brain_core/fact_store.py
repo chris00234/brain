@@ -15,6 +15,7 @@ Usage:
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import sqlite3
 import threading
@@ -28,8 +29,6 @@ except ImportError:
     BRAIN_LOGS_DIR = Path("/Users/chrischo/server/brain/logs")
 
 DB_PATH = BRAIN_LOGS_DIR / "facts.db"
-
-_local = threading.local()
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS facts (
@@ -77,15 +76,16 @@ def _ensure_schema():
         _schema_initialized = True
 
 
-def _get_conn() -> sqlite3.Connection:
-    conn = getattr(_local, 'fact_conn', None)
-    if conn is None:
-        _ensure_schema()
-        conn = sqlite3.connect(str(DB_PATH))
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        _local.fact_conn = conn
-    return conn
+@contextlib.contextmanager
+def _conn_ctx():
+    """Short-lived connection — avoids thread-local leaks in worker pools."""
+    _ensure_schema()
+    conn = sqlite3.connect(str(DB_PATH))
+    conn.row_factory = sqlite3.Row
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
 def _now() -> str:
@@ -115,80 +115,74 @@ def store_fact(
     - If temporal: keeps both (different valid_from/valid_to)
     - If same time: supersedes old value with newer one (higher confidence wins)
     """
-    conn = _get_conn()
     now = _now()
     normalized = _normalize(value)
     fact_id = f"fact_{uuid.uuid4().hex[:12]}"
-
-    # Check for existing fact with same entity + attribute
-    existing = conn.execute(
-        "SELECT * FROM facts WHERE entity = ? AND attribute = ? AND status = 'active' "
-        "ORDER BY confidence DESC, updated_at DESC",
-        (entity.lower(), attribute.lower()),
-    ).fetchall()
-
-    # Exact value match — update confidence/observed_at only
-    for ex in existing:
-        if _normalize(ex["value"]) == normalized:
-            conn.execute(
-                "UPDATE facts SET confidence = MAX(confidence, ?), "
-                "observed_at = ?, updated_at = ?, source = COALESCE(NULLIF(?, ''), source) "
-                "WHERE id = ?",
-                (confidence, observed_at or now, now, source, ex["id"]),
-            )
-            conn.commit()
-            return {"status": "updated", "id": ex["id"], "action": "confidence_bump"}
-
-    # Different value — temporal or supersede (transactional to prevent orphaned supersedes)
     action = "created"
-    supersede_ids = []
-    for ex in existing:
-        if ex["valid_to"] and valid_from:
-            continue  # temporal: old fact already expired, keep both
-        if confidence >= (ex["confidence"] or 0):
-            supersede_ids.append(ex["id"])
-            action = "superseded"
-        else:
-            # New fact has lower confidence — store as superseded by existing
-            fact_id_low = f"fact_{uuid.uuid4().hex[:12]}"
+    with _conn_ctx() as conn:
+        existing = conn.execute(
+            "SELECT * FROM facts WHERE entity = ? AND attribute = ? AND status = 'active' "
+            "ORDER BY confidence DESC, updated_at DESC",
+            (entity.lower(), attribute.lower()),
+        ).fetchall()
+
+        for ex in existing:
+            if _normalize(ex["value"]) == normalized:
+                conn.execute(
+                    "UPDATE facts SET confidence = MAX(confidence, ?), "
+                    "observed_at = ?, updated_at = ?, source = COALESCE(NULLIF(?, ''), source) "
+                    "WHERE id = ?",
+                    (confidence, observed_at or now, now, source, ex["id"]),
+                )
+                conn.commit()
+                return {"status": "updated", "id": ex["id"], "action": "confidence_bump"}
+
+        supersede_ids = []
+        for ex in existing:
+            if ex["valid_to"] and valid_from:
+                continue
+            if confidence >= (ex["confidence"] or 0):
+                supersede_ids.append(ex["id"])
+                action = "superseded"
+            else:
+                fact_id_low = f"fact_{uuid.uuid4().hex[:12]}"
+                conn.execute(
+                    "INSERT OR IGNORE INTO facts "
+                    "(id, entity, attribute, value, normalized_value, valid_from, valid_to, "
+                    " observed_at, source, source_type, confidence, status, supersedes, superseded_by, "
+                    " created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'superseded', '', ?, ?, ?)",
+                    (fact_id_low, entity.lower(), attribute.lower(), value, normalized,
+                     valid_from or now, now, observed_at or now,
+                     source, source_type, confidence, ex["id"], now, now),
+                )
+                conn.commit()
+                return {"status": "superseded_by_existing", "id": fact_id_low}
+
+        try:
+            for sid in supersede_ids:
+                conn.execute(
+                    "UPDATE facts SET status = 'superseded', superseded_by = ?, "
+                    "valid_to = ?, updated_at = ? WHERE id = ?",
+                    (fact_id, now, now, sid),
+                )
             conn.execute(
-                "INSERT OR IGNORE INTO facts "
+                "INSERT INTO facts "
                 "(id, entity, attribute, value, normalized_value, valid_from, valid_to, "
-                " observed_at, source, source_type, confidence, status, supersedes, superseded_by, "
+                " observed_at, source, source_type, confidence, status, supersedes, "
                 " created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'superseded', '', ?, ?, ?)",
-                (fact_id_low, entity.lower(), attribute.lower(), value, normalized,
-                 valid_from or now, now, observed_at or now,
-                 source, source_type, confidence, ex["id"], now, now),
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)",
+                (
+                    fact_id, entity.lower(), attribute.lower(), value, normalized,
+                    valid_from or now, valid_to, observed_at or now,
+                    source, source_type, confidence,
+                    ",".join(supersede_ids), now, now,
+                ),
             )
             conn.commit()
-            return {"status": "superseded_by_existing", "id": fact_id_low}
-
-    try:
-        # Atomic: supersede old facts + insert new one in single transaction
-        for sid in supersede_ids:
-            conn.execute(
-                "UPDATE facts SET status = 'superseded', superseded_by = ?, "
-                "valid_to = ?, updated_at = ? WHERE id = ?",
-                (fact_id, now, now, sid),
-            )
-        conn.execute(
-            "INSERT INTO facts "
-            "(id, entity, attribute, value, normalized_value, valid_from, valid_to, "
-            " observed_at, source, source_type, confidence, status, supersedes, "
-            " created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)",
-            (
-                fact_id, entity.lower(), attribute.lower(), value, normalized,
-                valid_from or now, valid_to, observed_at or now,
-                source, source_type, confidence,
-                ",".join(supersede_ids), now, now,
-            ),
-        )
-        conn.commit()
-    except sqlite3.IntegrityError:
-        conn.rollback()
-        return {"status": "duplicate", "action": "skipped"}
+        except sqlite3.IntegrityError:
+            conn.rollback()
+            return {"status": "duplicate", "action": "skipped"}
 
     # Audit trail
     try:
@@ -214,7 +208,6 @@ def query_facts(
     limit: int = 50,
 ) -> list[dict]:
     """Query facts with optional filters."""
-    conn = _get_conn()
     clauses = []
     params: list = []
     if entity:
@@ -226,10 +219,11 @@ def query_facts(
     if active_only:
         clauses.append("status = 'active'")
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-    rows = conn.execute(
-        f"SELECT * FROM facts {where} ORDER BY confidence DESC, updated_at DESC LIMIT ?",
-        params + [limit],
-    ).fetchall()
+    with _conn_ctx() as conn:
+        rows = conn.execute(
+            f"SELECT * FROM facts {where} ORDER BY confidence DESC, updated_at DESC LIMIT ?",
+            params + [limit],
+        ).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -245,11 +239,11 @@ def get_fact_history(entity: str, attribute: str) -> list[dict]:
 
 def stats() -> dict:
     """Return fact store summary stats."""
-    conn = _get_conn()
-    total = conn.execute("SELECT COUNT(*) FROM facts").fetchone()[0]
-    active = conn.execute("SELECT COUNT(*) FROM facts WHERE status = 'active'").fetchone()[0]
-    entities = conn.execute("SELECT COUNT(DISTINCT entity) FROM facts").fetchone()[0]
-    attributes = conn.execute("SELECT COUNT(DISTINCT attribute) FROM facts").fetchone()[0]
+    with _conn_ctx() as conn:
+        total = conn.execute("SELECT COUNT(*) FROM facts").fetchone()[0]
+        active = conn.execute("SELECT COUNT(*) FROM facts WHERE status = 'active'").fetchone()[0]
+        entities = conn.execute("SELECT COUNT(DISTINCT entity) FROM facts").fetchone()[0]
+        attributes = conn.execute("SELECT COUNT(DISTINCT attribute) FROM facts").fetchone()[0]
     return {
         "total_facts": total,
         "active_facts": active,

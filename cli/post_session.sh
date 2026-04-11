@@ -212,15 +212,21 @@ print(json.dumps({
         TASK_ID=$(printf '%s' "$TASK_RESP" | /opt/homebrew/bin/python3 -c "import json,sys; print(json.load(sys.stdin).get('id',''))" 2>/dev/null)
 
         if [[ -n "$TASK_ID" ]]; then
-            # Approve → start → complete the task (recording full lifecycle)
+            # Approve → start → complete the task (recording full lifecycle).
+            # SUMMARY is untrusted transcript text — pass via env to Python
+            # rather than a here-string, matching the TASK_JSON pattern above.
             curl -sf -X POST "http://127.0.0.1:8791/brain/tasks/$TASK_ID/approve" \
                 -H "Authorization: Bearer $SECRET" --max-time 3 >/dev/null 2>&1
             curl -sf -X POST "http://127.0.0.1:8791/brain/tasks/$TASK_ID/start" \
                 -H "Authorization: Bearer $SECRET" --max-time 3 >/dev/null 2>&1
+            COMPLETE_JSON=$(SUMMARY="${SUMMARY:-completed}" /opt/homebrew/bin/python3 -c "
+import json, os
+print(json.dumps({'result': os.environ.get('SUMMARY','')[:500]}))
+" 2>/dev/null)
             curl -sf -X POST "http://127.0.0.1:8791/brain/tasks/$TASK_ID/complete" \
                 -H "Authorization: Bearer $SECRET" \
                 -H "Content-Type: application/json" \
-                -d "$(/opt/homebrew/bin/python3 -c 'import json,sys; print(json.dumps({"result": sys.stdin.read().strip()[:500]}))' <<<"${SUMMARY:-completed}")" \
+                -d "$COMPLETE_JSON" \
                 --max-time 3 >/dev/null 2>&1
             echo "$(date -Iseconds) outcome recorded task=$TASK_ID tools=$TOOL_COUNT" >> "$LOG"
         fi

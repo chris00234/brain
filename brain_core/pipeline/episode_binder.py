@@ -163,8 +163,17 @@ def _cluster_by_window(memories: list[dict]) -> list[list[dict]]:
     window = timedelta(minutes=EPISODE_WINDOW_MINUTES)
     for mem in sorted_mems[1:]:
         gap = mem["created_at"] - current[-1]["created_at"]
-        if gap <= window and len(current) < MAX_EPISODE_MEMORIES:
-            current.append(mem)
+        if gap <= window:
+            if len(current) < MAX_EPISODE_MEMORIES:
+                current.append(mem)
+            else:
+                # Cap reached on a still-close-in-time stream — flush the
+                # full cluster as an episode and start a fresh one with the
+                # current member as the first element. The previous code
+                # silently dropped the full cluster on cap-hit.
+                if len(current) >= MIN_EPISODE_SIZE:
+                    clusters.append(current)
+                current = [mem]
         else:
             if len(current) >= MIN_EPISODE_SIZE:
                 clusters.append(current)

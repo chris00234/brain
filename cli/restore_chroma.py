@@ -10,6 +10,7 @@ import hashlib
 import os
 import subprocess
 import shutil
+import sys
 from pathlib import Path
 
 
@@ -17,24 +18,8 @@ CHROMA_DATA = Path("/Users/chrischo/server/rag/chroma-data")
 BACKUP_DIR = Path("/Users/chrischo/server/rag/chroma-backups")
 MINIO_BUCKET = "rag-backups"
 
-
-def _s3_client():
-    import boto3
-    from botocore.config import Config
-    env_path = Path("/Users/chrischo/server/minio/.env")
-    creds = {}
-    if env_path.exists():
-        for line in env_path.read_text().splitlines():
-            if "=" in line and not line.startswith("#"):
-                k, v = line.strip().split("=", 1)
-                creds[k] = v
-    return boto3.client(
-        "s3",
-        endpoint_url=os.getenv("MINIO_ENDPOINT", "http://192.168.97.5:9000"),
-        aws_access_key_id=creds.get("MINIO_ROOT_USER", ""),
-        aws_secret_access_key=creds.get("MINIO_ROOT_PASSWORD", ""),
-        config=Config(signature_version="s3v4"),
-    )
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _minio import s3_client as _s3_client
 
 
 def restore(date_str):
@@ -102,8 +87,12 @@ def restore(date_str):
     # Retention: each restore moves the current data to a timestamped
     # pre-restore-YYYY-MM-DD dir, and only copies older than 30 days are pruned.
     # This matches the CLAUDE.md 30-day backup retention rule.
-    extracted_data = extract_dir / "data"
-    src = extracted_data if extracted_data.is_dir() else extract_dir
+    # backup_chroma.py creates the tarball from the copied CHROMA_DATA directory
+    # with name "chroma-backup-YYYY-MM-DD", so extracted content lives directly
+    # under extract_dir — no "data" subdir.
+    src = extract_dir
+    if not src.is_dir() or not any(src.iterdir()):
+        raise RuntimeError(f"Extracted backup dir is empty or missing: {src}")
     new_dir = CHROMA_DATA.parent / "chroma-data.new-restore"
     from datetime import datetime as _dt, timedelta as _td
     stamp = _dt.now().strftime("%Y%m%d_%H%M%S")

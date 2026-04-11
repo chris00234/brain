@@ -223,7 +223,11 @@ def _migrate_semantic_memory_3_to_4() -> dict:
             http_json(
                 "POST",
                 f"http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col}/update",
-                {"ids": batch, "metadatas": [{"trust_score": 0.5} for _ in batch]},
+                # Round 11 fix: use string format to match all other writers
+                # (learn.py, memory_lifecycle.py, entity_graph.py). Float
+                # storage was breaking ChromaDB $lt/$gt where filters that
+                # expect type-consistent values across rows.
+                {"ids": batch, "metadatas": [{"trust_score": "0.5"} for _ in batch]},
             )
             updated += len(batch)
 

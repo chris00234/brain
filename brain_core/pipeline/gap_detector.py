@@ -58,7 +58,12 @@ def main() -> int:
     promoted = state.get("promoted_queries", {})  # normalized → last_promoted_iso
     cutoff = datetime.now(timezone.utc) - timedelta(days=WINDOW_DAYS)
 
-    # Read every entry, group by normalized query, ignore entries older than the window.
+    # Read every entry within the window. Group by normalized query.
+    # The window cutoff is the correctness gate; the watermark below it is
+    # only a performance hint to skip already-processed lines, but we still
+    # need to count occurrences of repeating queries within the window so
+    # we can't ONLY look at lines past the watermark — we read the full
+    # window each time.
     by_query: dict[str, list[dict]] = defaultdict(list)
     new_max_ts = high_watermark
     with GAP_LOG.open() as f:

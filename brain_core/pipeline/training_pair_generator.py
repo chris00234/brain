@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import random
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -39,7 +39,7 @@ def read_feedback_events(since_days: int = 30) -> list[dict]:
                 events.append(entry)
             except Exception:
                 continue
-    cutoff = datetime.now() - timedelta(days=since_days)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=since_days)
     filtered: list[dict] = []
     for e in events:
         ts = e.get("timestamp", "")
@@ -47,8 +47,8 @@ def read_feedback_events(since_days: int = 30) -> list[dict]:
             continue
         try:
             entry_dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-            if entry_dt.tzinfo is not None:
-                entry_dt = entry_dt.replace(tzinfo=None)
+            if entry_dt.tzinfo is None:
+                entry_dt = entry_dt.replace(tzinfo=timezone.utc)
         except Exception:
             continue
         if entry_dt >= cutoff:

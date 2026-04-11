@@ -344,15 +344,6 @@ class GoalCreateRequest(BaseModel):
     auto_decompose: bool = True
 
 
-class MessageRequest(BaseModel):
-    from_agent: str = Field(..., max_length=32)
-    to_agent: str = Field(..., max_length=32)
-    content: str = Field(..., min_length=1, max_length=5000)
-    message_type: str = Field(default="info")
-    priority: int = Field(default=5, ge=1, le=10)
-    parent_task_id: str | None = None
-
-
 class FocusRequest(BaseModel):
     content: str = Field(..., min_length=3, max_length=500)
     category: str = Field(default="focus")
@@ -824,12 +815,18 @@ def recall(
             # the response comes from. Fire-and-forget so cache lookups stay fast.
             try:
                 cached_results = cached.get("results", []) if isinstance(cached, dict) else []
-                cached_sem_ids = [
-                    r.get("id") for r in cached_results
-                    if isinstance(r, dict)
-                    and (r.get("collection") == "semantic_memory" or "semantic" in (r.get("collection") or ""))
-                    and r.get("id")
-                ][:5]
+                cached_sem_ids = []
+                for r in cached_results:
+                    if not isinstance(r, dict):
+                        continue
+                    col = r.get("collection") or ""
+                    if col != "semantic_memory" and "semantic" not in col:
+                        continue
+                    rid = r.get("id") or (r.get("metadata") or {}).get("id")
+                    if rid:
+                        cached_sem_ids.append(rid)
+                    if len(cached_sem_ids) >= 5:
+                        break
                 if cached_sem_ids:
                     from brain_core.memory_lifecycle import reinforce_on_access
                     from brain_core.search_unified import _search_bg_pool
@@ -876,14 +873,22 @@ def recall(
     # Round 10 C1: reinforce-on-access (MemoryBank). Fire-and-forget so we
     # don't add latency to /recall. Only reinforces semantic_memory hits in
     # the top-N — they're the only collection with the access_count metadata.
+    # The id may live at top-level (rag results) or nested under metadata.id
+    # (canonical results) so we check both paths.
     try:
         results_list = payload.get("results", []) if isinstance(payload, dict) else []
-        sem_ids = [
-            r.get("id") for r in results_list
-            if isinstance(r, dict)
-            and (r.get("collection") == "semantic_memory" or "semantic" in (r.get("collection") or ""))
-            and r.get("id")
-        ][:5]
+        sem_ids = []
+        for r in results_list:
+            if not isinstance(r, dict):
+                continue
+            col = r.get("collection") or ""
+            if col != "semantic_memory" and "semantic" not in col:
+                continue
+            rid = r.get("id") or (r.get("metadata") or {}).get("id")
+            if rid:
+                sem_ids.append(rid)
+            if len(sem_ids) >= 5:
+                break
         if sem_ids:
             from brain_core.memory_lifecycle import reinforce_on_access
             from brain_core.search_unified import _search_bg_pool
@@ -2392,7 +2397,9 @@ def brain_insights(days: int = Query(default=7, ge=1, le=30)) -> dict:
     markdown body containing one section per insight.
     """
     from datetime import datetime as _dt, timedelta as _td
-    insights_dir = Path("/Users/chrischo/server/knowledge/distilled/insights")
+    # Sibling of DISTILLED_DAILY (knowledge/distilled/daily) — derive from
+    # config so this respects KNOWLEDGE_DIR / BRAIN_DIR overrides.
+    insights_dir = DISTILLED_DAILY.parent / "insights"
     if not insights_dir.exists():
         return {"days": days, "files": 0, "results": []}
 
@@ -2728,8 +2735,17 @@ def decompose_goal_endpoint(goal_id: str) -> dict:
         raise HTTPException(status_code=500, detail=str(e)[:200])
 
 
+class AgentMessageRequest(BaseModel):
+    from_agent: str = Field(..., max_length=32)
+    to_agent: str = Field(..., max_length=32)
+    content: str = Field(..., min_length=1, max_length=5000)
+    message_type: str = Field(default="info", max_length=32)
+    priority: int = Field(default=5, ge=1, le=10)
+    parent_task_id: str | None = None
+
+
 @app.post("/brain/message", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
-def send_message(req: MessageRequest) -> dict:
+def send_message(req: AgentMessageRequest) -> dict:
     try:
         from brain_core.agent_messenger import send_message
         return send_message(req.from_agent, req.to_agent, req.content,
@@ -2767,15 +2783,6 @@ def delete_focus(focus_id: str) -> dict:
 
 
 # ── Phase D1: Agent messaging endpoints ──
-class AgentMessageRequest(BaseModel):
-    from_agent: str = Field(..., max_length=32)
-    to_agent: str = Field(..., max_length=32)
-    content: str = Field(..., min_length=1, max_length=5000)
-    message_type: str = Field(default="info", max_length=32)
-    priority: int = Field(default=5, ge=1, le=10)
-    parent_task_id: str | None = None
-
-
 @app.post("/brain/messages", tags=["coordination"], dependencies=[Depends(verify_bearer)])
 def send_agent_message(req: AgentMessageRequest) -> dict:
     """Send a message from one agent to another via the brain."""

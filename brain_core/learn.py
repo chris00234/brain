@@ -47,8 +47,17 @@ except ImportError:
 SEMANTIC_COLLECTION = "semantic_memory"
 CONTRADICTIONS_COLLECTION = "semantic_contradictions"
 MAX_PER_SESSION = 5  # matches CLAUDE.md self-learning protocol cap
-SIMILARITY_THRESHOLD = 0.85  # cosine distance below this = potential contradiction
-TOKEN_DIVERGENCE_THRESHOLD = 0.5  # token overlap below this = contradicts (semantically close, lexically different)
+SIMILARITY_THRESHOLD = 0.90  # cosine similarity above this = potential contradiction
+# Real contradictions share most of their wording but differ on a key term
+# ("lives in Irvine" vs "lives in San Francisco"). Low-overlap pairs are
+# almost always complementary, not contradictory.
+MIN_CONTRADICTION_OVERLAP = 0.55
+# Exclude "wants / would like / prefers / should" statements about broad topics
+# from contradiction detection — these are additive preferences, not flips.
+PREFERENCE_STOPWORDS = frozenset({
+    "chris", "wants", "want", "prefers", "prefer", "likes", "like",
+    "would", "should", "brain", "system", "the", "a", "to", "be",
+})
 DISTILL_TIMEOUT_SEC = 90
 EMBED_TRUNCATE = 1000
 
@@ -487,9 +496,17 @@ def embed_and_store(memories: list[dict[str, Any]], source: str, agent: str) -> 
 def check_contradictions(stored: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """For each new memory, find existing entries that may contradict it.
 
-    Heuristic: same category + high vector similarity (>0.85) + low token overlap (<0.5)
-    means "we said something semantically related but lexically different" — likely
-    a flip, edit, or correction. Flagged for human review via Brain UI.
+    Heuristic (Round 11): real contradictions share most of their wording but
+    differ on a key content word (e.g. "lives in Irvine" vs "lives in San
+    Francisco"). We require:
+      - same category, AND
+      - cosine similarity >= SIMILARITY_THRESHOLD (near-duplicate embeddings), AND
+      - token overlap >= MIN_CONTRADICTION_OVERLAP (lexically similar), AND
+      - the symmetric-difference tokens are not all generic preference stopwords.
+
+    Previous versions required LOW overlap, which was semantically backward —
+    low overlap pairs are complementary/paraphrased, not contradictory, and
+    that produced 31 false positives on one week of brain activity.
     """
     if not stored:
         return []
@@ -534,13 +551,23 @@ def check_contradictions(stored: list[dict[str, Any]]) -> list[dict[str, Any]]:
             if other_category and other_category != new_category:
                 continue
             # ChromaDB returns cosine distance in [0, 2] (0 = identical).
-            # Use the declared SIMILARITY_THRESHOLD: distance > (1 - 0.85) = 0.15 → not similar enough.
+            # Require very high similarity (distance <= 1 - 0.90 = 0.10) — we
+            # only want near-duplicates in embedding space.
             if other_dist > (1 - SIMILARITY_THRESHOLD):
                 continue
             other_tokens = _tokenize(other_doc)
             overlap = _jaccard(new_tokens, other_tokens)
-            if overlap >= TOKEN_DIVERGENCE_THRESHOLD:
-                continue  # similar enough lexically — not a flip
+            # Real contradictions share most wording but differ on a key term.
+            # Previous logic (flag when overlap < 0.5) was semantically backward
+            # and produced mostly false positives on complementary preferences.
+            if overlap < MIN_CONTRADICTION_OVERLAP:
+                continue
+            # Content-word diff check: ignore pairs whose only differences are
+            # generic preference stopwords. A real contradiction must differ on
+            # a content word that's not in the stopword set.
+            sym_diff = (new_tokens ^ other_tokens) - PREFERENCE_STOPWORDS
+            if not sym_diff:
+                continue  # differences are all generic filler
 
             # Record the contradiction
             contradiction = {

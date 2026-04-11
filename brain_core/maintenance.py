@@ -198,13 +198,20 @@ def prune_memory_access(keep_days: int = 180) -> dict:
 
 
 def rotate_jsonl_logs(max_lines: int = 500) -> dict:
-    """Truncate JSONL failure logs to last max_lines entries. Prevents unbounded growth."""
+    """Truncate JSONL failure logs to last max_lines entries. Prevents unbounded growth.
+
+    Atomic write: tail to .tmp + os.replace, so a crash mid-rotation can't
+    truncate or corrupt the source file.
+    """
+    import os as _os
     rotated = 0
     for f in LOGS_DIR.glob("*.jsonl"):
         try:
             lines = f.read_text().splitlines()
             if len(lines) > max_lines:
-                f.write_text("\n".join(lines[-max_lines:]) + "\n")
+                tmp = f.with_suffix(f.suffix + ".rot.tmp")
+                tmp.write_text("\n".join(lines[-max_lines:]) + "\n")
+                _os.replace(tmp, f)
                 rotated += 1
         except Exception:
             pass
