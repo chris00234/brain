@@ -52,6 +52,50 @@ TOKEN_DIVERGENCE_THRESHOLD = 0.5  # token overlap below this = contradicts (sema
 DISTILL_TIMEOUT_SEC = 90
 EMBED_TRUNCATE = 1000
 
+# Round 9 B3: collections to scan for cross-source corroboration. A new fact
+# mentioned in N of these gets a higher trust_score than a singleton.
+CORROBORATION_COLLECTIONS = ("semantic_memory", "canonical", "experience", "knowledge")
+TRUST_BASELINE = 0.4
+TRUST_PER_SOURCE = 0.1
+TRUST_MAX_SOURCES = 6
+
+
+def _count_corroborating_trust(content: str) -> float:
+    """Compute a trust score in [0.4, 1.0] based on how many distinct
+    collections already contain a similar fact. Cheap embedding-search query
+    against each collection; thresholds tuned conservatively to avoid
+    false-positive corroboration on near-misses.
+    """
+    text = (content or "").strip()
+    if len(text) < 20:
+        return TRUST_BASELINE
+    try:
+        emb = get_embedding(text[:EMBED_TRUNCATE], prefix="query")
+    except Exception:
+        return TRUST_BASELINE
+    if not emb:
+        return TRUST_BASELINE
+
+    matched = 0
+    for col_name in CORROBORATION_COLLECTIONS:
+        try:
+            col_id = _get_collection_id(col_name)
+            if not col_id:
+                continue
+            resp = chroma_api(
+                "POST",
+                f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/query",
+                {"query_embeddings": [emb], "n_results": 1, "include": ["distances"]},
+            )
+            dists = (resp.get("distances") or [[]])[0] if isinstance(resp, dict) else []
+            if dists and dists[0] is not None and float(dists[0]) <= 0.25:
+                matched += 1
+        except Exception:
+            continue
+
+    score = TRUST_BASELINE + TRUST_PER_SOURCE * min(matched, TRUST_MAX_SOURCES)
+    return round(min(1.0, score), 3)
+
 # ── Trigger heuristics ──────────────────────────────────────────────────
 POSITIVE_TRIGGERS = re.compile(
     r"\b(good|great|perfect|nice|awesome|exactly|love it|brilliant|wonderful|"
@@ -291,8 +335,9 @@ def embed_and_store(memories: list[dict[str, Any]], source: str, agent: str) -> 
             "valid_until": "",
             # Phase 1D: memory class tier (episodic → semantic → obsolete)
             "memory_class": "episodic",
-            # Phase 1E: trust score for ranking (default 0.5)
-            "trust_score": "0.5",
+            # Phase 1E (Round 9 B3): trust_score derived from cross-source
+            # corroboration count. 0.4 baseline + 0.1 per matching source.
+            "trust_score": str(_count_corroborating_trust(mem.get("content", ""))),
         }
 
         # Dedup layer 1: exact content hash match

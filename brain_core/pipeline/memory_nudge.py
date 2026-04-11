@@ -18,6 +18,8 @@ from http_pool import http_json
 from search import get_collections
 
 OUT_FILE = Path("/Users/chrischo/server/brain/logs/memory-nudge-latest.json")
+DISPATCH_STATE = Path("/Users/chrischo/server/brain/logs/memory-nudge-state.json")
+DISPATCH_COOLDOWN_HOURS = 22  # ~daily
 
 CHROMA_URL = "http://127.0.0.1:8000"
 CHROMA_API = f"{CHROMA_URL}/api/v2/tenants/default_tenant/databases/default_database/collections"
@@ -160,6 +162,48 @@ def main():
     print(f"  durable (promotion flagged): {promoted_count}")
     print(f"  obsolete (archived): {archived_count}")
     print(f"  patterns: {len(patterns)}")
+
+    # Telegram dispatch — fire only when there's something material AND we
+    # haven't dispatched in the last cooldown window. Caps spam to ~1/day.
+    severity = "high" if (promoted_count >= 5 or archived_count >= 10 or len(patterns) >= 3) else "low"
+    if severity == "high":
+        try:
+            last = {}
+            if DISPATCH_STATE.exists():
+                last = json.loads(DISPATCH_STATE.read_text())
+            last_iso = last.get("last_dispatched_at", "")
+            should_dispatch = True
+            if last_iso:
+                try:
+                    last_dt = datetime.fromisoformat(last_iso.replace("Z", "+00:00"))
+                    if last_dt.tzinfo is None:
+                        last_dt = last_dt.replace(tzinfo=timezone.utc)
+                    age_hours = (datetime.now(timezone.utc) - last_dt).total_seconds() / 3600
+                    should_dispatch = age_hours >= DISPATCH_COOLDOWN_HOURS
+                except Exception:
+                    pass
+            if should_dispatch:
+                from openclaw_dispatch import dispatch as _dispatch
+                msg = (
+                    f"[BRAIN MEMORY NUDGE] Reviewed {len(recent)} recent memories.\n"
+                    f"  Promoted to canonical-candidate: {promoted_count}\n"
+                    f"  Marked obsolete: {archived_count}\n"
+                    f"  Patterns extracted: {len(patterns)}\n"
+                    f"Review at https://brain.chrischodev.com/memory"
+                )
+                _dispatch(agent="jenna", message=msg, thinking="off", timeout=30)
+                DISPATCH_STATE.parent.mkdir(parents=True, exist_ok=True)
+                DISPATCH_STATE.write_text(json.dumps({
+                    "last_dispatched_at": datetime.now(timezone.utc).isoformat(),
+                    "promoted": promoted_count,
+                    "archived": archived_count,
+                    "patterns": len(patterns),
+                }, indent=2))
+                print(f"  → dispatched memory nudge to Jenna (Telegram)")
+            else:
+                print(f"  → dispatch skipped (cooldown active)")
+        except Exception as e:
+            print(f"  → dispatch failed: {e}")
     return 0
 
 

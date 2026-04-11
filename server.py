@@ -125,6 +125,11 @@ JOB_REGISTRY: dict[str, list[str]] = {
     "hnsw_adaptive":      [_py, f"{_bd}/brain_core/pipeline/hnsw_tuner.py", "--adaptive"],
     "memory_leak_detector": [_py, f"{_bd}/brain_core/pipeline/memory_leak_detector.py"],
     "training_pairs_generate": [_py, f"{_bd}/brain_core/pipeline/training_pair_generator.py"],
+    # Round 9 — Tier 2 new pipelines
+    "code_index_refresh":  [_py, f"{_bd}/ingest/code_repos.py"],
+    "gap_detection":       [_py, f"{_bd}/brain_core/pipeline/gap_detector.py"],
+    "trust_recompute":     [_py, "-c", f"import sys; sys.path.insert(0,'{_bd}/brain_core'); from memory_lifecycle import recompute_trust_scores; import json; print(json.dumps(recompute_trust_scores()))"],
+    "focus_aggregate":     [_py, f"{_bd}/brain_core/pipeline/focus_aggregator.py"],
     # LoRA fine-tuning — manual trigger only, behind BRAIN_FINETUNE_ENABLED flag.
     # Must run in the brain venv since sentence-transformers/peft/torch are only
     # installed there, not in the system Python.
@@ -209,14 +214,15 @@ class RecallResultMetadata(BaseModel):
 
 
 class RecallResult(BaseModel):
+    model_config = {"extra": "allow"}  # tolerate extra fields like rrf_score, provenance
     score: float
-    source_type: str
-    collection: str
-    title: str
-    content: str
-    path: str
-    trust_tier: int
-    metadata: RecallResultMetadata
+    source_type: str = ""  # graph results use "entity"; rag results may omit
+    collection: str = ""
+    title: str = ""
+    content: str = ""
+    path: str = ""
+    trust_tier: int = 1
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class RecallResponse(BaseModel):
@@ -826,6 +832,25 @@ def recall(
     )
     if _filter_free:
         _recall_emb_cache_put(q, payload)
+
+    # Round 9 B2: log low-quality recalls for the gap detector. Only log when
+    # the user actually wanted unfiltered results — filtered queries with no
+    # hits are usually intentional, not knowledge gaps.
+    try:
+        results_list = payload.get("results", []) if isinstance(payload, dict) else []
+        max_score = max((float(r.get("score", 0)) for r in results_list), default=0.0)
+        if _filter_free and (len(results_list) == 0 or max_score < 5.0):
+            gap_log = BRAIN_DIR / "logs" / "recall-gaps.jsonl"
+            gap_log.parent.mkdir(parents=True, exist_ok=True)
+            with gap_log.open("a") as f:
+                f.write(json.dumps({
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "query": q[:500],
+                    "n_results": len(results_list),
+                    "max_score": round(max_score, 2),
+                }) + "\n")
+    except Exception:
+        pass
     return payload
 
 
@@ -2319,6 +2344,87 @@ def dismiss_proactive(insight_id: str) -> dict:
         raise HTTPException(status_code=500, detail=str(e)[:200])
 
 
+@app.get("/brain/insights", tags=["decide"], dependencies=[Depends(verify_bearer)])
+def brain_insights(days: int = Query(default=7, ge=1, le=30)) -> dict:
+    """Return recent daily insights produced by proactive_linker.
+
+    Reads from /Users/chrischo/server/knowledge/distilled/insights/{date}.md.
+    Each file has JSON frontmatter (between `---json` / `---` fences) plus a
+    markdown body containing one section per insight.
+    """
+    from datetime import datetime as _dt, timedelta as _td
+    insights_dir = Path("/Users/chrischo/server/knowledge/distilled/insights")
+    if not insights_dir.exists():
+        return {"days": days, "files": 0, "results": []}
+
+    out: list[dict] = []
+    today = _dt.now().date()
+    for offset in range(days):
+        d = today - _td(days=offset)
+        f = insights_dir / f"{d.isoformat()}.md"
+        if not f.exists():
+            continue
+        try:
+            text = f.read_text()
+        except Exception:
+            continue
+
+        # Parse frontmatter: looks like "---json\n{...}\n---\n# body..."
+        meta: dict = {}
+        body = text
+        if text.startswith("---json"):
+            try:
+                _, rest = text.split("---json\n", 1)
+                meta_json, body = rest.split("\n---\n", 1)
+                meta = json.loads(meta_json)
+            except Exception:
+                pass
+        elif text.startswith("---\n"):
+            try:
+                _, rest = text.split("---\n", 1)
+                meta_block, body = rest.split("\n---\n", 1)
+                meta = json.loads(meta_block) if meta_block.strip().startswith("{") else {}
+            except Exception:
+                pass
+
+        # Parse body sections — `## N. title\n\ndescription\n` blocks
+        sections: list[dict] = []
+        current_title: str | None = None
+        current_desc_lines: list[str] = []
+        for line in body.splitlines():
+            if line.startswith("## "):
+                if current_title is not None:
+                    sections.append({
+                        "title": current_title,
+                        "description": "\n".join(current_desc_lines).strip()[:600],
+                    })
+                # Strip leading "N. " ordinal if present
+                t = line[3:].strip()
+                if t and t[0].isdigit():
+                    parts = t.split(". ", 1)
+                    if len(parts) == 2:
+                        t = parts[1]
+                current_title = t
+                current_desc_lines = []
+            elif current_title is not None:
+                current_desc_lines.append(line)
+        if current_title is not None:
+            sections.append({
+                "title": current_title,
+                "description": "\n".join(current_desc_lines).strip()[:600],
+            })
+
+        out.append({
+            "date": d.isoformat(),
+            "title": meta.get("title", f"Daily Insights — {d.isoformat()}"),
+            "entities": meta.get("entities", []),
+            "confidence": meta.get("confidence", 0.0),
+            "insights": sections,
+        })
+
+    return {"days": days, "files": len(out), "results": out}
+
+
 # ── Routes: autonomy ──────────────────────────────────────
 @app.get("/brain/autopilot", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
 def get_autopilot() -> dict:
@@ -3227,6 +3333,42 @@ def set_session_context(session_id: Annotated[str, PathParam()], req: SessionCon
         return {"status": "ok", "session_id": session_id, "key": req.key}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Round 9: code intelligence ──
+@app.get("/brain/code/find", tags=["brain"], dependencies=[Depends(verify_bearer)])
+def code_find(
+    q: str = Query(..., min_length=1, max_length=500),
+    n: int = Query(default=10, ge=1, le=50),
+) -> dict:
+    """Search the code collection only — function-level results from indexed repos."""
+    try:
+        from search import get_collections, vector_search, get_embedding
+        cols = get_collections()
+        col_id = cols.get("code")
+        if not col_id:
+            return {"results": [], "error": "code collection not found — run /jobs/code_index_refresh first"}
+        emb = get_embedding(q, prefix="query")
+        data = vector_search(col_id, emb, n=n)
+        ids = (data.get("ids") or [[]])[0]
+        docs = (data.get("documents") or [[]])[0]
+        metas = (data.get("metadatas") or [[]])[0]
+        dists = (data.get("distances") or [[]])[0]
+        results = []
+        for i, d, m, dist in zip(ids, docs, metas, dists):
+            results.append({
+                "id": i,
+                "score": round(max(0.0, 1 - float(dist)) * 100, 2),
+                "file_path": (m or {}).get("file_path", ""),
+                "function_name": (m or {}).get("function_name", ""),
+                "signature": (m or {}).get("signature", ""),
+                "language": (m or {}).get("language", ""),
+                "line_start": (m or {}).get("line_start", 0),
+                "snippet": (d or "")[:600],
+            })
+        return {"query": q, "total": len(results), "results": results}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)[:200])
 
 
 # ── Phase E2: TodoWrite sync ──

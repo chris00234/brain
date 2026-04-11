@@ -384,6 +384,35 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         agent="system",
         misfire_grace=900,
     ),
+    # Round 9 — Tier 2 capabilities
+    ScheduledJob(
+        name="code_index_refresh",
+        description="Daily incremental code function indexer (3:25am, after canonical_pipeline)",
+        trigger=CronTrigger(hour=3, minute=25),
+        agent="system",
+        misfire_grace=1200,
+    ),
+    ScheduledJob(
+        name="gap_detection",
+        description="Weekly knowledge gap detection from recall failures (Sunday 9:00am)",
+        trigger=CronTrigger(day_of_week="sun", hour=9, minute=0),
+        agent="system",
+        misfire_grace=900,
+    ),
+    ScheduledJob(
+        name="trust_recompute",
+        description="Weekly cross-source corroboration trust score refresh (Sunday 7:00am)",
+        trigger=CronTrigger(day_of_week="sun", hour=7, minute=0),
+        agent="system",
+        misfire_grace=900,
+    ),
+    ScheduledJob(
+        name="focus_aggregate",
+        description="Daily energy/focus data layer aggregation (4:35am)",
+        trigger=CronTrigger(hour=4, minute=35),
+        agent="system",
+        misfire_grace=600,
+    ),
 ]
 
 

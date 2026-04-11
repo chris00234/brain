@@ -602,5 +602,92 @@ def auto_resolve_stale_contradictions():
     return {"resolved": resolved_count, "kept_for_review": kept_count, "total": len(ids)}
 
 
+def recompute_trust_scores() -> dict:
+    """Round 9 B3: weekly refresh of trust_score from current corroboration counts.
+
+    Walks semantic_memory in pages, recomputes the cross-source corroboration
+    score for each entry, and updates the metadata in place. Memories that
+    gain or lose corroborating sources naturally drift in trust over time.
+    """
+    from http_pool import http_json
+    from search import get_collections
+    sys.path.insert(0, str(Path(__file__).parent))
+    try:
+        from learn import _count_corroborating_trust
+    except Exception as e:
+        return {"status": "error", "reason": f"learn import failed: {e}"}
+
+    cols = get_collections()
+    sem_col = cols.get("semantic_memory")
+    if not sem_col:
+        return {"status": "error", "reason": "semantic_memory missing"}
+
+    PAGE = 500
+    offset = 0
+    total = 0
+    updated = 0
+    drift_up = 0
+    drift_down = 0
+    while True:
+        try:
+            resp = http_json(
+                "POST",
+                f"http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col}/get",
+                {"limit": PAGE, "offset": offset, "include": ["documents", "metadatas"]},
+            )
+        except Exception as e:
+            return {"status": "error", "reason": f"fetch failed at offset={offset}: {e}"}
+        ids = resp.get("ids", []) or []
+        if not ids:
+            break
+        docs = resp.get("documents", []) or []
+        metas = resp.get("metadatas", []) or []
+
+        update_ids: list[str] = []
+        update_metas: list[dict] = []
+        for mid, content, meta in zip(ids, docs, metas):
+            total += 1
+            meta = meta or {}
+            try:
+                old = float(meta.get("trust_score", "0.5"))
+            except Exception:
+                old = 0.5
+            new = _count_corroborating_trust(content or "")
+            if abs(new - old) < 0.05:
+                continue
+            if new > old:
+                drift_up += 1
+            else:
+                drift_down += 1
+            new_meta = dict(meta)
+            new_meta["trust_score"] = str(new)
+            update_ids.append(mid)
+            update_metas.append(new_meta)
+
+        if update_ids:
+            try:
+                http_json(
+                    "POST",
+                    f"http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col}/update",
+                    {"ids": update_ids, "metadatas": update_metas},
+                )
+                updated += len(update_ids)
+            except Exception as e:
+                # Continue — partial updates are fine for a weekly job
+                print(f"  trust_recompute update failed at offset={offset}: {e}")
+
+        if len(ids) < PAGE:
+            break
+        offset += PAGE
+
+    return {
+        "status": "ok",
+        "scanned": total,
+        "updated": updated,
+        "drift_up": drift_up,
+        "drift_down": drift_down,
+    }
+
+
 if __name__ == '__main__':
     main()
