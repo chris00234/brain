@@ -693,26 +693,9 @@ def search_all(query, limit=5, sources=None, domain=None, original_query=None,
     # Phase C4: Content-hash dedup BEFORE rerank to save compute + improve diversity
     unique = _dedup_by_content_hash(unique)
 
-    # Round 10 A1: spreading activation via Personalized PageRank (HippoRAG-style)
-    # — primes downstream rerank by boosting results whose entities overlap
-    # PPR-activated entities. Session-scoped so follow-up queries inherit warmth.
-    try:
-        from config import BRAIN_SPREADING_ACTIVATION_ENABLED
-    except ImportError:
-        BRAIN_SPREADING_ACTIVATION_ENABLED = False
-    if BRAIN_SPREADING_ACTIVATION_ENABLED:
-        try:
-            from spreading_activation import warm_session, boost_results_by_activation
-            activation = warm_session(session_id or "default", relevance_query)
-            if activation:
-                # strength=0.15 keeps the boost gentle so it can't dominate
-                # the rerank ordering; tuned down from 0.5 after eval showed
-                # aggressive boost demoted single-shot QA accuracy. Activation
-                # is meant to *prime*, not *override*.
-                unique = boost_results_by_activation(unique, activation, strength=0.15)
-                source_timing["activation_entities"] = len(activation)
-        except Exception as e:
-            pass
+    # Round 10 A1 was here originally — moved to AFTER cross-encoder rerank
+    # so its boost survives. Rerank replaces r["score"] with rerank_score on
+    # line ~730, which would erase the activation boost if we applied it here.
 
     # Apply rerank + time_decay. Clamp rerank_score to [0,100] so downstream
     # trust_score and time_decay multipliers stay in a well-defined range —
@@ -738,6 +721,69 @@ def search_all(query, limit=5, sources=None, domain=None, original_query=None,
     except Exception:
         pass
 
+    # Round 10 A1 (Wave 1.5b): spreading activation via Personalized PageRank.
+    # Now applied AFTER cross-encoder rerank, with two safety conditions:
+    # (1) confidence skip — only run when top results are bunched (ambiguous
+    #     query); skip when top-1 is a clear winner
+    # (2) tiny bonus cap (5pts) so even at max activation, the boost is a
+    #     tiebreaker, not a re-rank
+    # The activation has its highest value on multi-hop / associative queries
+    # where the right answer is reachable via graph neighbors. On single-shot
+    # QA where rerank already nails the answer, the conservative cap + skip
+    # ensures we don't disturb a correct top-1.
+    try:
+        from config import BRAIN_SPREADING_ACTIVATION_ENABLED
+    except ImportError:
+        BRAIN_SPREADING_ACTIVATION_ENABLED = False
+    if BRAIN_SPREADING_ACTIVATION_ENABLED and len(unique) >= 2:
+        try:
+            from spreading_activation import warm_session
+            # Confidence skip: don't perturb a clear top-1
+            top1 = float(unique[0].get("score", 0))
+            top3 = float(unique[min(2, len(unique) - 1)].get("score", 0))
+            if (top1 - top3) <= 8.0:
+                activation = warm_session(session_id or "default", relevance_query)
+                if activation:
+                    act_lower = {k.lower(): (k, v) for k, v in activation.items() if k and len(k) >= 2}
+                    ACTIVATION_BONUS_MAX = 5.0
+                    for r in unique[:limit * 2]:  # only touch the top pool
+                        if not isinstance(r, dict):
+                            continue
+                        best = 0.0
+                        meta = r.get("metadata") or {}
+                        entities = meta.get("entities") or []
+                        if isinstance(entities, str):
+                            entities = [e.strip() for e in entities.split(",") if e.strip()]
+                        for ent in entities:
+                            score = activation.get(ent, 0.0)
+                            if score > best:
+                                best = score
+                        if best == 0 and act_lower:
+                            haystack = (
+                                (r.get("title", "") or "")[:200]
+                                + " "
+                                + (r.get("content", "") or "")[:400]
+                            ).lower()
+                            if haystack:
+                                for ent_lower, (orig, score) in act_lower.items():
+                                    if ent_lower in haystack and score > best:
+                                        best = score
+                        if best > 0:
+                            try:
+                                r["score"] = float(r.get("score", 0)) + ACTIVATION_BONUS_MAX * best
+                                r["activation_boost"] = round(best, 4)
+                            except (TypeError, ValueError):
+                                pass
+                    source_timing["activation_entities"] = len(activation)
+                    source_timing["activation_applied"] = True
+                    unique.sort(key=lambda x: x.get("score", 0), reverse=True)
+                else:
+                    source_timing["activation_applied"] = False
+            else:
+                source_timing["activation_applied"] = False  # confidence skip
+        except Exception:
+            pass
+
     # Phase 1E: trust_score multiplier (feature-flagged, legacy multiplicative path)
     try:
         from config import BRAIN_TRUST_RANKING_ENABLED, BRAIN_SALIENCE_RANKING_ENABLED
@@ -755,26 +801,16 @@ def search_all(query, limit=5, sources=None, domain=None, original_query=None,
             r["score"] = r.get("score", 0) * (0.4 + 0.6 * ts)
         unique.sort(key=lambda x: x.get("score", 0), reverse=True)
 
-    # Round 10 A2: Generative Agents salience scoring — additive recency +
-    # relevance + importance, min-max normalized. Subsumes the old trust
-    # multiplier with a more robust formula that doesn't crush memories
-    # missing one component.
+    # Round 10 A2 (Wave 1.5): Salience as ADDITIVE bonus, not score replacement.
+    # Generative Agents' formula adapted to act as a tiebreaker rather than a
+    # ranking primary. The rerank_score from cross-encoder is preserved; the
+    # salience bonus (capped at +10pts) only matters when results are tied.
     if BRAIN_SALIENCE_RANKING_ENABLED and unique:
         import math as _math
         from datetime import datetime as _dt, timezone as _tz
-        # Weights tuned for single-shot QA: strongly bias toward relevance,
-        # use recency + importance only as tiebreakers. Generative Agents'
-        # default α=1 across the board is wrong for fact retrieval — it
-        # works for multi-turn conversation simulation where recency carries
-        # narrative weight.
-        ALPHA_REL = 4.0
-        ALPHA_REC = 0.5
-        ALPHA_IMP = 0.5
-        RECENCY_HALFLIFE_DAYS = 90.0  # slower decay so old infra docs aren't punished
+        SALIENCE_BONUS_MAX = 10.0  # bounded — tiebreaks, doesn't dominate
+        RECENCY_HALFLIFE_DAYS = 90.0
 
-        # Compute recency inline from created_at — time_decay's apply_to_results
-        # mutates score but doesn't expose the raw recency component, so we
-        # recompute it here to avoid coupling.
         def _recency_from_iso(ts: str) -> float:
             if not ts:
                 return 0.0
@@ -789,11 +825,6 @@ def search_all(query, limit=5, sources=None, domain=None, original_query=None,
             except Exception:
                 return 0.0
 
-        # Min-max normalize relevance across the candidate pool
-        relevance_vals = [float(r.get("score", 0)) for r in unique]
-        max_rel = max(relevance_vals) if relevance_vals else 0
-        min_rel = min(relevance_vals) if relevance_vals else 0
-        rel_range = max(max_rel - min_rel, 1e-6)
         for r in unique:
             meta = r.get("metadata") or {}
             try:
@@ -804,27 +835,20 @@ def search_all(query, limit=5, sources=None, domain=None, original_query=None,
                 access = int(meta.get("access_count", 0))
             except (ValueError, TypeError):
                 access = 0
-            access_norm = _math.log(access + 1) / _math.log(50)  # ~1.0 at 49 accesses
+            access_norm = _math.log(access + 1) / _math.log(50)
             importance = max(min(trust, 1.0), min(access_norm, 1.0))
 
-            # Use the result's recency_score if time_decay set it, otherwise
-            # recompute from created_at.
             recency = r.get("recency_score")
             if recency is None:
                 recency = _recency_from_iso(r.get("created_at", "") or meta.get("created_at", ""))
             recency = float(recency)
 
-            relevance_raw = float(r.get("score", 0))
-            relevance = (relevance_raw - min_rel) / rel_range
-
-            salience_norm = (
-                ALPHA_REL * relevance + ALPHA_REC * recency + ALPHA_IMP * importance
-            ) / (ALPHA_REL + ALPHA_REC + ALPHA_IMP)
-            r["score"] = round(salience_norm * 100, 2)
+            bonus = SALIENCE_BONUS_MAX * (recency + importance) / 2.0
+            r["score"] = float(r.get("score", 0)) + bonus
             r["salience_components"] = {
-                "relevance": round(relevance, 3),
                 "recency": round(recency, 3),
                 "importance": round(importance, 3),
+                "bonus": round(bonus, 2),
             }
         unique.sort(key=lambda x: x.get("score", 0), reverse=True)
 
@@ -852,16 +876,22 @@ def search_all(query, limit=5, sources=None, domain=None, original_query=None,
         except Exception:
             pass
 
-    # Round 10 A3: Maximal Marginal Relevance diversity selection
-    # (Carbonell & Goldstein '98). Iteratively pick the candidate with the
-    # best mix of relevance and dissimilarity from already-selected items.
-    # λ=0.6 by default (slight diversity bias).
+    # Round 10 A3 (Wave 1.5): MMR with confidence-aware skip.
+    # Carbonell & Goldstein '98 — diversify only when results are genuinely
+    # ambiguous. If top-1 dominates the top-N spread, returning the top-N
+    # by relevance is the correct answer; diversification just adds noise.
     try:
         from config import BRAIN_MMR_DIVERSITY_ENABLED, BRAIN_MMR_LAMBDA
     except ImportError:
         BRAIN_MMR_DIVERSITY_ENABLED = False
-        BRAIN_MMR_LAMBDA = 0.6
-    if BRAIN_MMR_DIVERSITY_ENABLED and len(unique) > limit:
+        BRAIN_MMR_LAMBDA = 0.85
+    # Confidence skip — when top scores are well-separated, MMR can only hurt.
+    _mmr_should_run = BRAIN_MMR_DIVERSITY_ENABLED and len(unique) > limit
+    if _mmr_should_run:
+        _top_score = float(unique[0].get("score", 0))
+        _nth_score = float(unique[min(limit - 1, len(unique) - 1)].get("score", 0))
+        _mmr_should_run = (_top_score - _nth_score) <= 15.0
+    if _mmr_should_run:
         from tokenizer import tokenize as _tok
         # Pre-tokenize once per result to avoid O(n^2) re-tokenization
         token_cache: list[set[str]] = []
