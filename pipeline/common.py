@@ -154,7 +154,12 @@ def iter_note_files(root: Path, folder: str) -> list[Path]:
 
 
 def iter_note_paths(root: Path) -> list[Path]:
-    return sorted(path for path in root.rglob("*.md") if path.is_file())
+    """Iterate schema-compliant notes under root, skipping index / README files."""
+    _SKIP = {"index.md", "readme.md", "README.md"}
+    return sorted(
+        path for path in root.rglob("*.md")
+        if path.is_file() and path.name not in _SKIP
+    )
 
 
 def slugify(value: str) -> str:
@@ -188,31 +193,6 @@ def read_all_notes(root: Path) -> list[dict[str, Any]]:
                 continue
             notes.append({"path": str(path.relative_to(root)), "metadata": metadata, "body": body})
     return notes
-
-
-def is_cross_source_duplicate(content: str, inbox_dir: Path | None = None, window: int = 100, threshold: float = 0.7) -> bool:
-    """Check if content is a near-duplicate of recent raw records in the inbox."""
-    if inbox_dir is None:
-        inbox_dir = ROOT / "raw" / "inbox"
-    content_tokens = set(TOKEN_RE.findall(content.lower()))
-    if len(content_tokens) < 5:
-        return False
-    try:
-        recent = sorted(inbox_dir.glob("raw_*.json"), key=lambda f: f.stat().st_mtime, reverse=True)[:window]
-    except Exception:
-        return False
-    for f in recent:
-        try:
-            existing = json.loads(f.read_text())
-            existing_tokens = set(TOKEN_RE.findall(existing.get("content", "").lower()))
-            if not existing_tokens:
-                continue
-            jaccard = len(content_tokens & existing_tokens) / max(len(content_tokens | existing_tokens), 1)
-            if jaccard > threshold:
-                return True
-        except Exception:
-            continue
-    return False
 
 
 def find_similar_canonical(title: str, body: str, canonical_dir: Path | None = None, threshold: float = 0.7) -> Path | None:

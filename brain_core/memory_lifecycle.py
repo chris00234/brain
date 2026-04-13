@@ -318,10 +318,13 @@ def dedup_semantic_near_duplicates() -> dict:
     if not col_id:
         return {"status": "skip", "reason": "collection not found"}
 
-    # Get all docs with embeddings
+    # Get docs with embeddings — capped at 300 to keep O(n^2) pairwise comparison tractable
+    # without numpy (not in requirements.txt). 300 entries = ~45k comparisons in pure Python ≈ 10s.
+    # Previous cap of 2000 → ~2M comparisons → multi-hour runtime. Order by created_at DESC
+    # to prioritize deduping recent entries.
     req = urllib.request.Request(
         f"{CHROMA}/{col_id}/get",
-        data=json.dumps({"limit": 10000, "include": ["documents", "embeddings", "metadatas"]}).encode(),
+        data=json.dumps({"limit": 300, "include": ["documents", "embeddings", "metadatas"]}).encode(),
         headers={"Content-Type": "application/json"},
         method="POST",
     )
@@ -602,6 +605,109 @@ def auto_resolve_stale_contradictions():
     return {"resolved": resolved_count, "kept_for_review": kept_count, "total": len(ids)}
 
 
+def cleanup_supersession_chains() -> dict:
+    """Find and fix orphaned supersession chains.
+
+    When the head of a supersession chain is deleted, all predecessors
+    are stuck as 'superseded' pointing to a dead ID. This function:
+    1. Finds all memories with a non-empty superseded_by field
+    2. Checks if the superseded_by target still exists
+    3. If the target is missing, clears superseded_by (resurrects the memory)
+    4. If the target itself is superseded, follows the chain to the live head
+    """
+    from http_pool import http_json
+    from search import get_collections
+
+    cols = get_collections()
+    sem_col = cols.get("semantic_memory")
+    if not sem_col:
+        return {"checked": 0, "orphaned": 0, "fixed": 0, "error": "semantic_memory missing"}
+
+    # Fetch all entries in pages — need IDs + metadatas to find superseded_by refs
+    PAGE = 500
+    offset = 0
+    all_ids: set[str] = set()
+    superseded: list[tuple[str, dict]] = []  # (id, metadata) for entries with superseded_by
+
+    while True:
+        try:
+            resp = http_json(
+                "POST",
+                f"http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col}/get",
+                {"limit": PAGE, "offset": offset, "include": ["metadatas"]},
+            )
+        except Exception as e:
+            return {"checked": 0, "orphaned": 0, "fixed": 0, "error": f"fetch failed: {e}"}
+
+        ids = resp.get("ids", []) or []
+        if not ids:
+            break
+        metas = resp.get("metadatas", []) or []
+
+        for mid, meta in zip(ids, metas):
+            all_ids.add(mid)
+            meta = meta or {}
+            target = (meta.get("superseded_by") or "").strip()
+            if target:
+                superseded.append((mid, dict(meta)))
+
+        if len(ids) < PAGE:
+            break
+        offset += PAGE
+
+    # Build lookup for O(1) chain walking
+    superseded_map: dict[str, dict] = {mid: meta for mid, meta in superseded}
+
+    # Find orphans: superseded_by points to a non-existent ID
+    orphaned_ids: list[str] = []
+    orphaned_metas: list[dict] = []
+    for mid, meta in superseded:
+        target = meta["superseded_by"].strip()
+        # Follow chain: if target exists but is itself superseded, walk forward
+        visited: set[str] = {mid}
+        current = target
+        while current in all_ids:
+            # Target exists — check if it's also superseded
+            target_meta = superseded_map.get(current)
+            if target_meta is None:
+                break  # current is live (not superseded) — chain is healthy
+            next_target = (target_meta.get("superseded_by") or "").strip()
+            if not next_target or next_target in visited:
+                break  # chain ends here or is circular
+            visited.add(next_target)
+            current = next_target
+
+        if current not in all_ids:
+            # Chain head is dead — resurrect this memory
+            meta.pop("superseded_by", None)
+            meta.pop("valid_until", None)
+            orphaned_ids.append(mid)
+            orphaned_metas.append(meta)
+
+    # Batch update orphans
+    fixed = 0
+    BATCH = 50
+    for i in range(0, len(orphaned_ids), BATCH):
+        batch_ids = orphaned_ids[i:i + BATCH]
+        batch_metas = orphaned_metas[i:i + BATCH]
+        try:
+            http_json(
+                "POST",
+                f"http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col}/update",
+                {"ids": batch_ids, "metadatas": batch_metas},
+            )
+            fixed += len(batch_ids)
+        except Exception as e:
+            return {
+                "checked": len(superseded),
+                "orphaned": len(orphaned_ids),
+                "fixed": fixed,
+                "error": f"update failed at batch {i}: {e}",
+            }
+
+    return {"checked": len(superseded), "orphaned": len(orphaned_ids), "fixed": fixed}
+
+
 def recompute_trust_scores() -> dict:
     """Round 9 B3: weekly refresh of trust_score from current corroboration counts.
 
@@ -741,6 +847,25 @@ def reinforce_on_access(memory_ids: list[str], boost: float = 0.02) -> dict:
         except (ValueError, TypeError):
             trust = 0.5
         meta["access_count"] = count + 1
+
+        # Decayed access_score: weights recent access more heavily.
+        # Existing score decays at 5% per day, then +1 for current access.
+        last_accessed_raw = meta.get("last_accessed_at", "")
+        existing_score = float(meta.get("access_score", str(count)))
+        if last_accessed_raw:
+            try:
+                last_ts = last_accessed_raw.replace("Z", "+00:00")
+                last_dt = datetime.fromisoformat(last_ts)
+                if last_dt.tzinfo is None:
+                    last_dt = last_dt.replace(tzinfo=timezone.utc)
+                now_dt = datetime.fromisoformat(now_iso.replace("Z", "+00:00"))
+                days_since = max(0, (now_dt - last_dt).total_seconds() / 86400)
+                decay_factor = 0.95 ** days_since
+                existing_score = existing_score * decay_factor
+            except (ValueError, TypeError):
+                pass
+        meta["access_score"] = str(round(existing_score + 1.0, 2))
+
         meta["last_accessed_at"] = now_iso
         meta["trust_score"] = str(min(1.0, trust + boost))
         update_ids.append(mid)
@@ -759,7 +884,7 @@ def reinforce_on_access(memory_ids: list[str], boost: float = 0.02) -> dict:
     return {"reinforced": len(update_ids)}
 
 
-def prune_atrophied_memories(dry_run: bool = True, max_age_days: int = 180,
+def prune_atrophied_memories(dry_run: bool = True, max_age_days: int = 120,
                               compress_with_gist: bool = False) -> dict:
     """Round 10 C1 (MemoryBank): synaptic pruning of unused obsolete memories.
 
@@ -1017,6 +1142,248 @@ def prune_atrophied_memories(dry_run: bool = True, max_age_days: int = 180,
         "actually_deleted": deleted,
         "gist_count": gist_count,
     }
+
+
+def cleanup_stale_superseded() -> dict:
+    """Delete old superseded memories whose replacement exists and were never accessed since.
+
+    Targets memories where:
+      - superseded_by is set AND the target ID exists (chain is valid)
+      - valid_until is set and > 30 days ago (superseded for 30+ days)
+      - access_count == 0 since being superseded
+
+    Safety: max 100 deletions per run, max 5% of collection.
+    """
+    from http_pool import http_json
+    from search import get_collections
+    sys.path.insert(0, str(Path(__file__).parent))
+    try:
+        from audit_log import log_event
+    except Exception:
+        def log_event(*args, **kwargs):
+            return ""
+
+    cols = get_collections()
+    sem_col = cols.get("semantic_memory")
+    if not sem_col:
+        return {"cleaned": 0, "checked": 0, "error": "semantic_memory missing"}
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+    cutoff_iso = cutoff.isoformat().replace("+00:00", "Z")
+
+    # Fetch all entries in pages
+    PAGE = 500
+    offset = 0
+    all_ids: set[str] = set()
+    superseded: list[tuple[str, dict]] = []
+    total_scanned = 0
+
+    while True:
+        try:
+            resp = http_json(
+                "POST",
+                f"http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col}/get",
+                {"limit": PAGE, "offset": offset, "include": ["metadatas"]},
+            )
+        except Exception as e:
+            return {"cleaned": 0, "checked": 0, "error": f"fetch failed: {e}"}
+
+        ids = resp.get("ids", []) or []
+        if not ids:
+            break
+        metas = resp.get("metadatas", []) or []
+
+        for mid, meta in zip(ids, metas):
+            total_scanned += 1
+            all_ids.add(mid)
+            meta = meta or {}
+            target = (meta.get("superseded_by") or "").strip()
+            if target:
+                superseded.append((mid, dict(meta)))
+
+        if len(ids) < PAGE:
+            break
+        offset += PAGE
+
+    # Filter to deletion candidates
+    candidates: list[str] = []
+    for mid, meta in superseded:
+        target = meta["superseded_by"].strip()
+        # Target must exist (chain is valid — not an orphan)
+        if target not in all_ids:
+            continue
+        # valid_until must be set and older than 30 days
+        valid_until = (meta.get("valid_until") or "").strip()
+        if not valid_until:
+            continue
+        valid_until_norm = valid_until.replace("+00:00", "Z")
+        if valid_until_norm >= cutoff_iso:
+            continue  # superseded too recently
+        # access_count must be 0
+        try:
+            count = int(meta.get("access_count", 0))
+        except (ValueError, TypeError):
+            count = 0
+        if count > 0:
+            continue
+        candidates.append(mid)
+
+    checked = len(superseded)
+
+    # Safety floor: max 100, max 5% of collection
+    safety_cap = min(100, max(1, int(total_scanned * 0.05)))
+    if len(candidates) > safety_cap:
+        return {
+            "cleaned": 0,
+            "checked": checked,
+            "candidates": len(candidates),
+            "safety_cap": safety_cap,
+            "reason": f"candidate set ({len(candidates)}) exceeds safety cap — refusing",
+        }
+
+    if not candidates:
+        return {"cleaned": 0, "checked": checked}
+
+    # Delete in batches
+    deleted = 0
+    BATCH = 50
+    for i in range(0, len(candidates), BATCH):
+        batch = candidates[i:i + BATCH]
+        try:
+            http_json(
+                "POST",
+                f"http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col}/delete",
+                {"ids": batch},
+            )
+            deleted += len(batch)
+            for mid in batch:
+                try:
+                    log_event(
+                        event_type="prune",
+                        entity_a=mid,
+                        resolution="stale_superseded",
+                        reason="superseded >30d + target exists + access_count=0",
+                    )
+                except Exception:
+                    pass
+        except Exception as e:
+            return {"cleaned": deleted, "checked": checked, "error": f"delete failed: {e}"}
+
+    return {"cleaned": deleted, "checked": checked}
+
+
+def memory_health_report() -> dict:
+    """Weekly health snapshot of the semantic_memory tier system.
+
+    Aggregates: tier distribution, category breakdown, stuck memories,
+    average age/access per tier, superseded count. Writes JSON to
+    logs/memory_health.json. No ChromaDB writes, no LLM calls.
+    """
+    from http_pool import http_json
+    from search import get_collections
+
+    cols = get_collections()
+    sem_col = cols.get("semantic_memory")
+    if not sem_col:
+        return {"status": "error", "reason": "semantic_memory collection not found"}
+
+    # Fetch all entries in pages
+    PAGE = 500
+    offset = 0
+    all_metas: list[dict] = []
+    while True:
+        try:
+            resp = http_json(
+                "POST",
+                f"http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col}/get",
+                {"limit": PAGE, "offset": offset, "include": ["metadatas"]},
+            )
+        except Exception as e:
+            return {"status": "error", "reason": f"fetch failed at offset={offset}: {e}"}
+        ids = resp.get("ids", []) or []
+        if not ids:
+            break
+        metas = resp.get("metadatas", []) or [{}] * len(ids)
+        all_metas.extend(m or {} for m in metas)
+        if len(ids) < PAGE:
+            break
+        offset += PAGE
+
+    now = datetime.now(timezone.utc)
+    now_iso = now.isoformat().replace("+00:00", "Z")
+    total = len(all_metas)
+
+    # Accumulators
+    tier_counts: dict[str, int] = {}
+    tier_age_sum: dict[str, float] = {}
+    tier_access_sum: dict[str, int] = {}
+    category_counts: dict[str, int] = {}
+    superseded_count = 0
+    stuck_count = 0
+    STUCK_AGE_DAYS = 90
+
+    for meta in all_metas:
+        tier = (meta.get("memory_class") or "episodic").lower()
+        cat = (meta.get("category") or "other").lower()
+
+        tier_counts[tier] = tier_counts.get(tier, 0) + 1
+        category_counts[cat] = category_counts.get(cat, 0) + 1
+
+        # Age
+        created_raw = meta.get("created_at", "")
+        age_days = 0.0
+        if created_raw:
+            try:
+                dt = datetime.fromisoformat(created_raw.rstrip("Z").replace("+00:00", ""))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                age_days = max(0.0, (now - dt).total_seconds() / 86400)
+            except Exception:
+                pass
+        tier_age_sum[tier] = tier_age_sum.get(tier, 0.0) + age_days
+
+        # Access count
+        try:
+            ac = int(meta.get("access_count", 0))
+        except (ValueError, TypeError):
+            ac = 0
+        tier_access_sum[tier] = tier_access_sum.get(tier, 0) + ac
+
+        # Superseded
+        if (meta.get("superseded_by") or "").strip():
+            superseded_count += 1
+
+        # Stuck: episodic, old, never accessed
+        if tier == "episodic" and age_days >= STUCK_AGE_DAYS and ac == 0:
+            stuck_count += 1
+
+    # Compute averages
+    tier_avg_age = {t: round(tier_age_sum.get(t, 0) / max(c, 1), 1)
+                    for t, c in tier_counts.items()}
+    tier_avg_access = {t: round(tier_access_sum.get(t, 0) / max(c, 1), 2)
+                       for t, c in tier_counts.items()}
+
+    report = {
+        "status": "ok",
+        "timestamp": now_iso,
+        "total_memories": total,
+        "by_tier": dict(sorted(tier_counts.items())),
+        "by_category": dict(sorted(category_counts.items())),
+        "stuck_episodic": stuck_count,
+        "superseded": superseded_count,
+        "avg_age_days_by_tier": tier_avg_age,
+        "avg_access_count_by_tier": tier_avg_access,
+    }
+
+    # Write to logs
+    log_path = Path("/Users/chrischo/server/brain/logs/memory_health.json")
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text(json.dumps(report, indent=2))
+    except Exception as e:
+        report["write_error"] = str(e)
+
+    return report
 
 
 if __name__ == '__main__':

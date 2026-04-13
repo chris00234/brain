@@ -217,10 +217,12 @@ _hybrid_pool = ThreadPoolExecutor(max_workers=6, thread_name_prefix="hybrid")
 _atexit.register(_hybrid_pool.shutdown, wait=False)
 
 
-def hybrid_search(query, collections, limit=5, use_keyword=True, where=None):
+def hybrid_search(query, collections, limit=5, use_keyword=True, where=None, deduplicate=True):
     """Hybrid search: vector similarity + keyword boost + query expansion + cross-collection merge.
 
     `where` is an optional ChromaDB v2 metadata filter clause (e.g. temporal range).
+    `deduplicate` controls whether results are deduped by content hash. Set False when
+    results flow into RRF so multi-collection agreement is preserved as a ranking signal.
     Collections are queried in parallel via a shared ThreadPoolExecutor — with 11 collections
     and ~50ms per query, this takes ~50ms instead of ~550ms.
     """
@@ -276,7 +278,9 @@ def hybrid_search(query, collections, limit=5, use_keyword=True, where=None):
             # [0,1] on BOTH sides — source_boost can return a small negative
             # agent-doc penalty which would otherwise push combined below 0,
             # breaking the sort path and propagating a negative RRF input.
-            combined = max(0.0, min(1.0, (0.55 * vector_sim) + (0.35 * kw_score) + s_boost))
+            # s_boost range is [-0.05, 0.45]; normalize to [0,1] then weight by 0.10.
+            s_normalized = max(0.0, min(1.0, s_boost / 0.45)) if s_boost > 0 else 0.0
+            combined = max(0.0, min(1.0, (0.55 * vector_sim) + (0.35 * kw_score) + (0.10 * s_normalized)))
 
             all_results.append({
                 "id": ids[i] if i < len(ids) else "",
@@ -293,16 +297,21 @@ def hybrid_search(query, collections, limit=5, use_keyword=True, where=None):
                 "section": metas[i].get("section", ""),
             })
 
-    # Sort by combined score, deduplicate by full content hash
-    seen = set()
-    unique = []
-    for r in sorted(all_results, key=lambda x: x["score"], reverse=True):
-        content_key = hashlib.md5(r["content"].encode()).hexdigest()
-        if content_key not in seen:
-            seen.add(content_key)
-            unique.append(r)
+    # Sort by combined score, optionally deduplicate by full content hash.
+    # When deduplicate=False (RRF path), keep duplicates so RRF can count
+    # how many collections agreed on a document.
+    sorted_results = sorted(all_results, key=lambda x: x["score"], reverse=True)
+    if deduplicate:
+        seen = set()
+        unique = []
+        for r in sorted_results:
+            content_key = hashlib.md5(r["content"].encode()).hexdigest()
+            if content_key not in seen:
+                seen.add(content_key)
+                unique.append(r)
+        sorted_results = unique
 
-    results = unique[:limit]
+    results = sorted_results[:limit]
 
     # Track references for self-learning
     try:

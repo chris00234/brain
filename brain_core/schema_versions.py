@@ -27,6 +27,7 @@ CURRENT_VERSIONS = {
     "agent_prefs": 1,         # R5 baseline
     "self_heal_state": 1,     # R6 baseline
     "contradiction_votes": 1, # R6 baseline
+    "procedures": 1,         # R11 structured procedural memory
 }
 
 
@@ -116,6 +117,19 @@ def _run_one_migration(component: str, from_ver: int, to_ver: int) -> tuple[bool
         conn.close()
 
 
+def _register_optional_migration_modules() -> None:
+    """Import optional migration modules so their @migration decorators run.
+
+    Modules registered here append to CURRENT_VERSIONS and MIGRATIONS at import
+    time. Failures are logged but never block startup — the migration is just
+    skipped if the module can't load.
+    """
+    try:
+        import migrations_brain_db  # noqa: F401
+    except Exception as exc:
+        log.warning("migrations_brain_db not loaded: %s", exc)
+
+
 def check_and_migrate() -> dict:
     """Check all components. Run pending migrations. Returns status dict.
 
@@ -128,6 +142,7 @@ def check_and_migrate() -> dict:
     the other logging a spurious "failed: database is locked".
     """
     import fcntl
+    _register_optional_migration_modules()
     lock_path = VERSIONS_DB.parent / "schema_versions.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     lock_file = open(lock_path, "w")

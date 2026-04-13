@@ -35,7 +35,6 @@ import sqlite3
 import subprocess
 import sys
 import threading
-import time
 import time as _time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -419,7 +418,7 @@ def dispatch(
                           (callers can still persist this to avoid a data gap)
     """
     global _cb_failures, _cb_open_until
-    t_start = time.time()
+    t_start = _time.time()
     result = DispatchResult(ok=False, attempts=0)
 
     # Semantic cache check — return cached response for near-identical prompts.
@@ -430,7 +429,31 @@ def dispatch(
             log.info("dispatch: semantic cache hit for agent=%s", agent)
             return DispatchResult(ok=True, text=cached_text, error="", attempts=0, duration_ms=0)
 
-    # Circuit breaker check
+    # Phase 5: persistent circuit breaker via brain_core.breakers (replaces
+    # the in-memory CB). Falls back to legacy in-memory CB if breakers module
+    # can't be imported.
+    _persistent_cb = None
+    try:
+        from breakers import peek_breaker as _pb
+        from breakers import record_result as _br_record
+
+        _persistent_cb = (_pb, _br_record)
+        snapshot = _pb("llm.dispatch")
+        if snapshot.is_open:
+            log.warning("llm.dispatch breaker open — fast-failing dispatch to %s", agent)
+            _record_usage(agent, 0, ok=False, skipped_cb=True)
+            return DispatchResult(
+                ok=False,
+                text="",
+                error="circuit breaker open (persistent)",
+                attempts=0,
+                duration_ms=0,
+                degraded="circuit breaker open",
+            )
+    except Exception:
+        _persistent_cb = None
+
+    # Legacy in-memory CB (kept as fallback during cutover)
     with _cb_lock:
         if _time.monotonic() < _cb_open_until:
             log.warning("circuit breaker open — fast-failing dispatch to %s", agent)
@@ -448,7 +471,7 @@ def dispatch(
 
     for attempt_index in range(MAX_ATTEMPTS):
         # Hard wall-time cap — abort early if we've already been retrying too long
-        if (time.time() - t_start) > MAX_TOTAL_SECONDS:
+        if (_time.time() - t_start) > MAX_TOTAL_SECONDS:
             result.error = f"total wall time exceeded {MAX_TOTAL_SECONDS}s"
             break
         result.attempts = attempt_index + 1
@@ -484,9 +507,14 @@ def dispatch(
                     result.text = text
                     result.envelope = envelope
                     result.provider, result.model = _extract_meta(envelope)
-                    result.duration_ms = int((time.time() - t_start) * 1000)
+                    result.duration_ms = int((_time.time() - t_start) * 1000)
                     with _cb_lock:
                         _cb_failures = 0
+                    if _persistent_cb is not None:
+                        try:
+                            _persistent_cb[1]("llm.dispatch", ok=True)
+                        except Exception:
+                            pass
                     _record_usage(agent, result.duration_ms, ok=True)
                     _update_agent_stats(agent, result.duration_ms, True, result.attempts)
                     _check_struggle(agent, message, result.duration_ms, True, result.attempts)
@@ -518,7 +546,7 @@ def dispatch(
 
         if attempt_index < len(RETRY_DELAYS_SECONDS):
             delay = RETRY_DELAYS_SECONDS[attempt_index]
-            time.sleep(delay)
+            _time.sleep(delay)
 
     # All attempts exhausted — degraded fallback.
     with _cb_lock:
@@ -526,7 +554,12 @@ def dispatch(
         if _cb_failures >= _CB_THRESHOLD:
             _cb_open_until = _time.monotonic() + _CB_COOLDOWN
             log.warning("circuit breaker OPEN — %d consecutive failures, cooldown %ds", _cb_failures, _CB_COOLDOWN)
-    result.duration_ms = int((time.time() - t_start) * 1000)
+    if _persistent_cb is not None:
+        try:
+            _persistent_cb[1]("llm.dispatch", ok=False, error=result.error[:200])
+        except Exception:
+            pass
+    result.duration_ms = int((_time.time() - t_start) * 1000)
     result.degraded = degraded_placeholder or _build_degraded_placeholder(agent, message, result)
     _record_usage(agent, result.duration_ms, ok=False)
     _update_agent_stats(agent, result.duration_ms, False, result.attempts)

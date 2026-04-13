@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>BRAIN_ATOMS_ENABLED</key>
+		<string>true</string>
+		<key>BRAIN_ATOMS_READ</key>
+		<string>true</string>
+		<key>BRAIN_AUTO_HEAL_ENABLED</key>
+		<string>true</string>
+		<key>BRAIN_AUTO_HEAL_SOURCES</key>
+		<string>slo_monitor</string>
+		<key>BRAIN_CROSS_ENCODER_ENABLED</key>
+		<string>true</string>
+		<key>BRAIN_EPISODIC_BINDING_ENABLED</key>
+		<string>true</string>
+		<key>BRAIN_MMR_DIVERSITY_ENABLED</key>
+		<string>true</string>
+		<key>BRAIN_SALIENCE_RANKING_ENABLED</key>
+		<string>true</string>
+		<key>BRAIN_SERVER_PORT</key>
+		<string>8791</string>
+		<key>BRAIN_SPREADING_ACTIVATION_ENABLED</key>
+		<string>true</string>
+		<key>HOME</key>
+		<string>/Users/chrischo</string>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+	</dict>
+	<key>KeepAlive</key>
+	<dict>
+		<key>Crashed</key>
+		<true/>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>Label</key>
+	<string>ai.openclaw.brain-server</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/chrischo/server/brain/.venv/bin/python</string>
+		<string>/Users/chrischo/server/brain/server.py</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>/Users/chrischo/server/brain/logs/server.err.log</string>
+	<key>StandardOutPath</key>
+	<string>/Users/chrischo/server/brain/logs/server.log</string>
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+</dict>
+</plist>

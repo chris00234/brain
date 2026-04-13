@@ -72,11 +72,12 @@ COUCH_PASS = os.getenv("OBSIDIAN_COUCH_PASS")
 DB_NAME = os.getenv("OBSIDIAN_COUCH_DB", "obsidian")
 VAULT_DIR = os.getenv("OBSIDIAN_VAULT_DIR", "/Users/chrischo/.openclaw/workspace/obsidian-vault")
 
-if not COUCH_USER or not COUCH_PASS:
-    raise RuntimeError(
-        "Missing Obsidian CouchDB credentials. Set OBSIDIAN_COUCH_USER/OBSIDIAN_COUCH_PASS "
-        "(or create /Users/chrischo/.openclaw/workspace/.obsidian_sync.env)."
-    )
+def _check_creds():
+    if not COUCH_USER or not COUCH_PASS:
+        raise RuntimeError(
+            "Missing Obsidian CouchDB credentials. Set OBSIDIAN_COUCH_USER/OBSIDIAN_COUCH_PASS "
+            "(or create /Users/chrischo/.openclaw/workspace/.obsidian_sync.env)."
+        )
 
 def couch_request(path, method="GET", data=None):
     """Make authenticated CouchDB request"""
@@ -155,7 +156,10 @@ def _sync_md_doc(doc: dict) -> str:
     content = reconstruct_note(doc)
     if content is None:
         return "skipped"
-    file_path = os.path.join(VAULT_DIR, doc.get("path", doc_id))
+    file_path = os.path.realpath(os.path.join(VAULT_DIR, doc.get("path", doc_id)))
+    if not file_path.startswith(os.path.realpath(VAULT_DIR)):
+        log_failure("path_traversal", f"Blocked path outside vault: {doc.get('path', doc_id)}")
+        return "skipped"
     os.makedirs(os.path.dirname(file_path), exist_ok=True)
     if os.path.exists(file_path):
         try:
@@ -174,6 +178,7 @@ def _sync_md_doc(doc: dict) -> str:
 
 def pull_notes_incremental():
     """Incremental sync using CouchDB _changes feed. Only processes changed docs."""
+    _check_creds()
     os.makedirs(VAULT_DIR, exist_ok=True)
     state = load_state()
     since = state.get("last_seq", "0")
@@ -212,6 +217,7 @@ def pull_notes_incremental():
 
 def pull_notes():
     """Pull all notes from CouchDB to local folder"""
+    _check_creds()
     os.makedirs(VAULT_DIR, exist_ok=True)
 
     try:
@@ -243,7 +249,11 @@ def pull_notes():
                 skipped += 1
                 continue
 
-            file_path = os.path.join(VAULT_DIR, doc.get("path", doc_id))
+            file_path = os.path.realpath(os.path.join(VAULT_DIR, doc.get("path", doc_id)))
+            if not file_path.startswith(os.path.realpath(VAULT_DIR)):
+                log_failure("path_traversal", f"Blocked path outside vault: {doc.get('path', doc_id)}")
+                skipped += 1
+                continue
             os.makedirs(os.path.dirname(file_path), exist_ok=True)
 
             # Skip rewrite when content is identical (reduces editor write conflicts)

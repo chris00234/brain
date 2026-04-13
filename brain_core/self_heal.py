@@ -54,21 +54,27 @@ class HealingSignal:
         return asdict(self)
 
 
+_state_db_initialized = False
+
+
 def _init_state_db():
+    global _state_db_initialized
     HEAL_STATE_DB.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(HEAL_STATE_DB))
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS heal_history (
-            signal_type TEXT NOT NULL,
-            target TEXT NOT NULL,
-            last_action_at REAL NOT NULL,
-            action TEXT NOT NULL,
-            result TEXT NOT NULL,
-            PRIMARY KEY (signal_type, target)
-        )
-    """)
-    conn.commit()
+    if not _state_db_initialized:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS heal_history (
+                signal_type TEXT NOT NULL,
+                target TEXT NOT NULL,
+                last_action_at REAL NOT NULL,
+                action TEXT NOT NULL,
+                result TEXT NOT NULL,
+                PRIMARY KEY (signal_type, target)
+            )
+        """)
+        conn.commit()
+        _state_db_initialized = True
     return conn
 
 
@@ -237,10 +243,25 @@ def heal_collection_fragmentation(signal: HealingSignal) -> dict:
 HEALERS: dict[str, Callable[[HealingSignal], dict]] = {
     "eval_regression": heal_eval_regression,
     "slo_latency_breach": heal_slo_latency,
+    "content_quality_breach": heal_eval_regression,  # same action: trigger reindex
     "memory_growth": heal_memory_growth,
     "embed_cache_bloat": heal_embed_cache,
     "collection_fragmentation": heal_collection_fragmentation,
 }
+
+
+SIGNAL_TO_KIND = {
+    "eval_regression": "heal.reindex",
+    "slo_latency_breach": "heal.vacuum_embed_cache",  # vacuum first, escalate later
+    "content_quality_breach": "heal.reindex",
+    "memory_growth": "heal.memory_consolidation",
+    "embed_cache_bloat": "heal.vacuum_embed_cache",
+    "collection_fragmentation": "heal.reindex",
+}
+
+
+def _heal_kind(signal: HealingSignal) -> str:
+    return SIGNAL_TO_KIND.get(signal.signal_type, f"heal.{signal.signal_type}")
 
 
 def dispatch(signal: HealingSignal) -> dict:
@@ -255,6 +276,26 @@ def dispatch(signal: HealingSignal) -> dict:
         _log_event(signal, "source_filtered", f"source={signal.source} not in whitelist {sorted(BRAIN_AUTO_HEAL_SOURCES)}")
         return {"action": "source_filtered", "result": f"source {signal.source} not in whitelist"}
 
+    # Phase 5: route through autonomy gate before existing rate-limit + healer call.
+    kind = _heal_kind(signal)
+    try:
+        from autonomy import authorize as _autonomy_authorize
+
+        gate = _autonomy_authorize(
+            kind,
+            context={"signal_type": signal.signal_type, "target": signal.target, "source": signal.source},
+        )
+        if not gate.allowed:
+            _log_event(signal, "autonomy_blocked", f"kind={kind} reason={gate.reason}")
+            return {"action": "autonomy_blocked", "result": gate.reason}
+        if gate.requires_ack:
+            # L1 → propose only: log + return without firing healer
+            _log_event(signal, "autonomy_propose", f"kind={kind} L1 propose-only")
+            return {"action": "autonomy_propose", "result": "L1 propose-only — see audit_log"}
+    except Exception as exc:
+        # Gate failure should not block heal — fall through with warning
+        _log_event(signal, "autonomy_error", str(exc)[:200])
+
     if _is_rate_limited(signal.signal_type, signal.target):
         _log_event(signal, "rate_limited", f"within {RATE_LIMIT_SECONDS}s window")
         return {"action": "rate_limited", "result": "skipped"}
@@ -268,9 +309,23 @@ def dispatch(signal: HealingSignal) -> dict:
         result = healer(signal)
         _record_action(signal.signal_type, signal.target, result.get("action", "?"), result.get("result", "?"))
         _log_event(signal, result.get("action", "?"), result.get("result", "?"))
+        # Phase 5: feed outcome to breaker so repeated failures open the CB
+        try:
+            from breakers import record_result as _record_breaker
+
+            ok = "failed" not in (result.get("result", "") or "").lower()
+            _record_breaker(kind, ok=ok, error=result.get("result", "") if not ok else "")
+        except Exception:
+            pass
         return result
     except Exception as e:
         _log_event(signal, "error", str(e))
+        try:
+            from breakers import record_result as _record_breaker
+
+            _record_breaker(kind, ok=False, error=str(e)[:200])
+        except Exception:
+            pass
         return {"action": "error", "result": str(e)}
 
 

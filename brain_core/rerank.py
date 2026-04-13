@@ -90,19 +90,33 @@ def score_result(query: str, result: dict[str, Any], debug: bool = False) -> flo
     trust_tier = result.get("trust_tier", 1)
     if not isinstance(trust_tier, (int, float)):
         trust_tier = 1
-    trust_boost = {3: 1.15, 2: 1.05}.get(trust_tier, 1.0)
+    # Trust boost must be strong enough to counterbalance title-overlap wins.
+    # A high-overlap experience hit gets relevance ~3.0x; canonical needs ~1.4x
+    # trust to stay in top-5 against it. Bumped 2026-04-12 after eval regression
+    # showed 5 canonical hits getting pushed out of top-5 by experience notes.
+    trust_boost = {3: 1.4, 2: 1.15}.get(trust_tier, 1.0)
 
     # Use vector_score from ChromaDB when available as semantic relevance signal
     vector_score = float(result.get("metadata", {}).get("vector_score", 0) or result.get("vector_score", 0))
-    semantic_boost = 1.0 + (0.3 * vector_score) if vector_score > 0.7 else 1.0
+    semantic_boost = 1.0 + (0.5 * vector_score) if vector_score > 0.65 else 1.0
 
     # Boost primary source files (config, agent definitions) over derivative canonical notes
     path = result.get("path", "")
     source_boost = 1.0
     if any(p in path for p in ("docker-compose.yml", "/conf.d/", "AGENTS.md", "TOOLS.md")):
         source_boost = 1.2  # primary config files
-    elif "/canonical/" in path and "## Statement" in content[:80]:
-        source_boost = 0.85  # derivative proposal notes
+
+    # Session-dump penalty — raw openclaw/claude_code session distillations are
+    # captured verbatim from agent outputs and flood experience collection after
+    # ingest jobs run. They carry query-like language that matches vector search
+    # but are rarely the actual canonical answer to a retrieval query.
+    # Penalize them so canonical notes win on matched topics.
+    _doc_type = (result.get("type") or (result.get("metadata") or {}).get("type") or "")
+    if _doc_type in ("raw-openclaw_session", "raw-claude_code_session", "raw-screen_time", "raw-browser", "raw-git_activity"):
+        source_boost *= 0.4  # ~60% penalty
+    # Removed 2026-04-12: "## Statement" penalty was hitting EVERY canonical note
+    # (standard heading) not just derivative proposals, causing 5 of 7 eval
+    # regressions to be canonical misses. Canonical trust_boost now carries this.
 
     reranked = base * relevance * pos_mult * trust_boost * semantic_boost * source_boost
 

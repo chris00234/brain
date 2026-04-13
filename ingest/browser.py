@@ -38,33 +38,12 @@ BATCH_SIZE = 50
 CHROME_EPOCH_OFFSET = 11644473600  # seconds between 1601-01-01 and 1970-01-01
 SAFARI_EPOCH_OFFSET = 978307200    # seconds between 1970-01-01 and 2001-01-01
 
-_DEDUP_TOKEN_RE = re.compile(r'[a-z0-9_\-]{3,}')
-_dedup_token_cache: dict[str, set[str]] = {}
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "brain_core"))
+from inbox_utils import is_near_duplicate as _is_near_duplicate_shared
 
 
 def _is_near_duplicate(content: str, inbox_dir: Path, window: int = 50, threshold: float = 0.7) -> bool:
-    """Check if content is a near-duplicate of recent raw records."""
-    tokens = set(_DEDUP_TOKEN_RE.findall(content.lower()))
-    if len(tokens) < 5:
-        return False
-    try:
-        recent = sorted(inbox_dir.glob("raw_*.json"), key=lambda f: f.stat().st_mtime, reverse=True)[:window]
-    except Exception:
-        return False
-    for f in recent:
-        fkey = str(f)
-        if fkey in _dedup_token_cache:
-            et = _dedup_token_cache[fkey]
-        else:
-            try:
-                existing = json.loads(f.read_text())
-                et = set(_DEDUP_TOKEN_RE.findall(existing.get("content", "").lower()))
-                _dedup_token_cache[fkey] = et
-            except Exception:
-                continue
-        if et and len(tokens & et) / max(len(tokens | et), 1) > threshold:
-            return True
-    return False
+    return _is_near_duplicate_shared(content, window=window, threshold=threshold, inbox_dir=inbox_dir)
 
 BROWSER_PATHS = {
     "chrome": Path("/Users/chrischo/Library/Application Support/Google/Chrome/Default/History"),

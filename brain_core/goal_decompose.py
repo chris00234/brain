@@ -105,6 +105,23 @@ def decompose_goal(goal_id: str) -> list[dict]:
 
     Returns the list of created task dicts.
     """
+    # Phase 5 autonomy gate: goal.decompose defaults to L1 (propose only)
+    try:
+        from autonomy import authorize as _autonomy_authorize
+
+        gate = _autonomy_authorize("goal.decompose", context={"goal_id": goal_id})
+        if not gate.allowed:
+            log.info("autonomy gate blocked goal.decompose %s: %s", goal_id, gate.reason)
+            return []
+        if gate.requires_ack:
+            log.info("autonomy L1 — goal.decompose %s requires ack", goal_id)
+            # Still return the proposed subtasks (no execution, no task creation)
+            # Caller is `goal_decompose_endpoint` which surfaces the proposal.
+            # For now: just return empty so it's a no-op until human ACK.
+            return []
+    except Exception:
+        pass
+
     goal = task_queue.get_goal(goal_id)
     if not goal:
         log.error("Goal not found: %s", goal_id)

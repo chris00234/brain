@@ -18,7 +18,7 @@ from datetime import datetime
 
 
 def search(query, collections, limit):
-    cmd = ['/opt/homebrew/bin/python3', '/Users/chrischo/server/brain/brain_core/search.py',
+    cmd = [sys.executable, '/Users/chrischo/server/brain/brain_core/search.py',
            query, '-c', collections, '-n', str(limit), '--json']
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
     return json.loads(result.stdout) if result.stdout.strip() else []

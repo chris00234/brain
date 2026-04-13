@@ -36,7 +36,7 @@ SECRET_DROP_PATTERNS = [
     re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{36,}"),                 # GitHub tokens
     re.compile(r"\bxox[bp]-[A-Za-z0-9-]{10,}"),                   # Slack tokens
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),                          # AWS keys
-    re.compile(r"\b[A-Za-z0-9+/]{40,}={0,2}\b"),                  # Long base64 (catches most embedded tokens)
+    re.compile(r"\b[A-Za-z0-9+/]{64,}={0,2}\b"),                  # Long base64 (catches most embedded tokens)
     re.compile(r"@chris980113|chris980113@", re.I),               # Personal password leak guard
     re.compile(r"\bexport\s+\w+="),                                # env var assignments often have secrets
     re.compile(r"\b(set|setenv)\s+\w+="),                          # ditto
@@ -49,6 +49,27 @@ NOISE_PATTERNS = [
     re.compile(r"^\s*$"),                                          # blank
     re.compile(r"^\s*#"),                                          # comments
 ]
+
+# ── Command family classification ────────────────────────
+COMMAND_FAMILIES = {
+    "git": re.compile(r"^git\b"),
+    "docker": re.compile(r"^(?:docker|docker-compose|podman)\b"),
+    "package": re.compile(r"^(?:npm|yarn|pnpm|pip|brew|cargo)\b"),
+    "build": re.compile(r"^(?:make|cmake|cargo build|npm run build|tsc)\b"),
+    "test": re.compile(r"^(?:pytest|jest|vitest|cargo test|npm test|go test)\b"),
+    "deploy": re.compile(r"^(?:ssh|scp|rsync|kubectl|terraform|ansible|fly)\b"),
+    "server": re.compile(r"^(?:uvicorn|gunicorn|node|python.*server|npm (?:start|run dev))\b"),
+    "system": re.compile(r"^(?:launchctl|systemctl|service|brew services)\b"),
+}
+
+
+def _classify_command(cmd: str) -> str:
+    """Classify a shell command into a family. Returns family name or 'other'."""
+    stripped = cmd.strip().lstrip("sudo ").strip()
+    for family, pattern in COMMAND_FAMILIES.items():
+        if pattern.match(stripped):
+            return family
+    return "other"
 
 
 def load_offset() -> int:
@@ -173,9 +194,88 @@ def bucket_commands(commands: list[tuple[int, str]]) -> list[dict]:
             "end_iso": end_dt.isoformat().replace("+00:00", "Z"),
             "command_count": len(cmd_lines),
             "cwd_hint": cwd_hint,
+            "commands": cmd_lines,
             "summary": summary,
         })
     return out
+
+
+def detect_shell_workflows(buckets: list[dict]) -> list[dict]:
+    """Detect coherent command workflows from time-bucketed shell history.
+
+    Groups consecutive buckets into workflows by detecting task boundaries
+    (time gaps, directory changes, dominant-family shifts). Returns list of
+    {task_type, title, steps, tools, source} dicts for procedure storage.
+    """
+    if not buckets:
+        return []
+
+    # Annotate each bucket with its dominant command family
+    annotated = []
+    for b in buckets:
+        family_counts: dict[str, int] = {}
+        for cmd in b.get("commands", []):
+            fam = _classify_command(cmd)
+            if fam != "other":
+                family_counts[fam] = family_counts.get(fam, 0) + 1
+        dominant = max(family_counts, key=family_counts.get) if family_counts else "other"
+        annotated.append((b, dominant))
+
+    # Group consecutive buckets into workflow segments
+    groups: list[list[tuple[dict, str]]] = []
+    current_group: list[tuple[dict, str]] = [annotated[0]]
+
+    for prev, cur in zip(annotated, annotated[1:]):
+        prev_b, prev_fam = prev
+        cur_b, cur_fam = cur
+        gap = cur_b["bucket_start_ts"] - prev_b["bucket_start_ts"]
+        cwd_changed = (cur_b["cwd_hint"] and prev_b["cwd_hint"]
+                        and cur_b["cwd_hint"] != prev_b["cwd_hint"])
+        family_shifted = (cur_fam != "other" and prev_fam != "other"
+                          and cur_fam != prev_fam)
+
+        if gap > 600 or cwd_changed or family_shifted:
+            groups.append(current_group)
+            current_group = [cur]
+        else:
+            current_group.append(cur)
+
+    groups.append(current_group)
+
+    # Convert qualifying groups into workflow dicts
+    workflows = []
+    for group in groups:
+        all_cmds = []
+        family_counts: dict[str, int] = {}
+        cwd = ""
+        for b, _ in group:
+            for cmd in b.get("commands", []):
+                all_cmds.append(cmd)
+                fam = _classify_command(cmd)
+                if fam != "other":
+                    family_counts[fam] = family_counts.get(fam, 0) + 1
+            if b["cwd_hint"] and not cwd:
+                cwd = b["cwd_hint"]
+
+        if not family_counts:
+            continue
+        dominant = max(family_counts, key=family_counts.get)
+        dominant_count = family_counts[dominant]
+
+        # Need 3+ commands in the dominant family to qualify
+        if dominant_count < 3:
+            continue
+
+        title = f"{dominant} workflow" + (f" in {cwd}" if cwd else "")
+        workflows.append({
+            "task_type": f"{dominant}_workflow",
+            "title": title,
+            "steps": all_cmds,
+            "tools": [dominant],
+            "source": "shell",
+        })
+
+    return workflows
 
 
 def build_raw_record(bucket: dict) -> dict:
@@ -235,6 +335,24 @@ def main() -> None:
         # Keep newest
         buckets = buckets[-args.max_buckets:]
         print(f"Capped to newest {args.max_buckets} buckets")
+
+    # Detect and store shell workflows as procedures
+    workflows = detect_shell_workflows(buckets)
+    if workflows:
+        try:
+            sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "brain_core"))
+            from task_queue import task_queue
+            stored = 0
+            for wf in workflows:
+                try:
+                    task_queue._store_procedure(**wf)
+                    stored += 1
+                except Exception:
+                    pass
+            if stored:
+                print(f"Detected {stored} shell workflows as procedures")
+        except Exception as e:
+            print(f"Shell workflow storage failed: {e}")
 
     if args.dry_run:
         print("\n[DRY RUN] sample bucket:")

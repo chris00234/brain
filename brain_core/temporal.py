@@ -151,17 +151,69 @@ def parse_range(since: Optional[str], until: Optional[str], now: Optional[dateti
 
 
 def to_chroma_where(start: Optional[datetime], end: Optional[datetime], field: str = "created_at") -> Optional[dict]:
-    """Build a ChromaDB v2 `where` clause from a date range. Returns None if no filter."""
+    """DEPRECATED after ChromaDB 1.4.1.
+
+    ChromaDB 1.4.1 tightened validate_where to require isinstance(operand, (int, float))
+    for $gt/$gte/$lt/$lte. All brain writers store `created_at` / `valid_until` as
+    ISO-8601 strings, so passing them as range operands now returns HTTP 400.
+
+    Until we migrate every writer to numeric timestamps, date filtering must happen
+    Python-side. This function always returns None — callers should capture the
+    (start, end) datetimes and call `filter_by_created_at()` on the result list.
+    """
+    return None
+
+
+def filter_by_created_at(
+    rows: list,
+    start: Optional[datetime],
+    end: Optional[datetime],
+    field: str = "created_at",
+    meta_accessor=None,
+) -> list:
+    """Python-side post-filter for ISO-string datetime metadata fields.
+
+    Args:
+        rows: list of items to filter
+        start: inclusive lower bound (or None)
+        end: exclusive upper bound (or None)
+        field: metadata key to read (default "created_at")
+        meta_accessor: callable(row) -> metadata dict. Defaults to row itself if it's
+                       a dict with the field, else row.get("metadata", {}).
+
+    Rows whose metadata timestamp is missing or unparseable are KEPT (fail-open —
+    dropping would silently destroy unsourced data).
+    """
     if not start and not end:
-        return None
-    clauses = []
-    if start:
-        clauses.append({field: {"$gte": start.isoformat().replace("+00:00", "Z")}})
-    if end:
-        clauses.append({field: {"$lt": end.isoformat().replace("+00:00", "Z")}})
-    if len(clauses) == 1:
-        return clauses[0]
-    return {"$and": clauses}
+        return rows
+    start_iso = start.isoformat().replace("+00:00", "Z") if start else None
+    end_iso = end.isoformat().replace("+00:00", "Z") if end else None
+
+    def _get_ts(row) -> str:
+        if meta_accessor is not None:
+            meta = meta_accessor(row) or {}
+        elif isinstance(row, dict):
+            if field in row and isinstance(row[field], str):
+                return row[field]
+            meta = row.get("metadata") or {}
+        else:
+            return ""
+        return (meta or {}).get(field, "") or ""
+
+    kept = []
+    for row in rows:
+        ts = _get_ts(row)
+        if not ts:
+            kept.append(row)  # fail-open
+            continue
+        # Normalize comparison format — both sides as Z-suffix strings
+        ts_norm = ts.replace("+00:00", "Z")
+        if start_iso and ts_norm < start_iso:
+            continue
+        if end_iso and ts_norm >= end_iso:
+            continue
+        kept.append(row)
+    return kept
 
 
 # ── Helpers ──────────────────────────────────────────────

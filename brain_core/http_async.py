@@ -7,6 +7,7 @@ HTTP calls to ChromaDB and Ollama.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import httpx
 
@@ -15,16 +16,27 @@ from http_pool import ChromaAPIError
 log = logging.getLogger("brain.http_async")
 
 _client: httpx.AsyncClient | None = None
+_client_lock: asyncio.Lock | None = None
+
+
+def _get_lock() -> asyncio.Lock:
+    global _client_lock
+    if _client_lock is None:
+        _client_lock = asyncio.Lock()
+    return _client_lock
 
 
 async def get_client() -> httpx.AsyncClient:
     global _client
-    if _client is None or _client.is_closed:
-        _client = httpx.AsyncClient(
-            timeout=60,
-            limits=httpx.Limits(max_connections=32, max_keepalive_connections=16),
-        )
-    return _client
+    if _client is not None and not _client.is_closed:
+        return _client
+    async with _get_lock():
+        if _client is None or _client.is_closed:
+            _client = httpx.AsyncClient(
+                timeout=60,
+                limits=httpx.Limits(max_connections=32, max_keepalive_connections=16),
+            )
+        return _client
 
 
 async def http_json_async(method: str, url: str, payload=None, timeout: int = 60):

@@ -59,7 +59,7 @@ EMBED_MODEL = os.getenv("BRAIN_EMBED_MODEL", "blaifa/multilingual-e5-large-instr
 EMBED_MODEL_VERSION = os.getenv("BRAIN_EMBED_MODEL_VERSION", "multilingual-e5-large-instruct:v1")
 
 # ── Executables ───────────────────────────────────────────
-PYTHON = os.getenv("BRAIN_PYTHON", "/opt/homebrew/bin/python3")
+PYTHON = os.getenv("BRAIN_PYTHON", "/Users/chrischo/server/brain/.venv/bin/python")
 
 # ── Feature flags ─────────────────────────────────────────
 BRAIN_CROSS_ENCODER_ENABLED = os.getenv("BRAIN_CROSS_ENCODER_ENABLED", "false").lower() in ("true", "1", "yes")
@@ -67,9 +67,18 @@ BRAIN_TRUST_RANKING_ENABLED = os.getenv("BRAIN_TRUST_RANKING_ENABLED", "false").
 BRAIN_DISPATCH_CACHE_ENABLED = os.getenv("BRAIN_DISPATCH_CACHE_ENABLED", "false").lower() in ("true", "1", "yes")
 BRAIN_AUTO_HEAL_ENABLED = os.getenv("BRAIN_AUTO_HEAL_ENABLED", "false").lower() in ("true", "1", "yes")
 BRAIN_FINETUNE_ENABLED = os.getenv("BRAIN_FINETUNE_ENABLED", "false").lower() in ("true", "1", "yes")
-# Round 10 — neuromorphic retrieval
-BRAIN_SPREADING_ACTIVATION_ENABLED = os.getenv("BRAIN_SPREADING_ACTIVATION_ENABLED", "false").lower() in ("true", "1", "yes")
-BRAIN_SALIENCE_RANKING_ENABLED = os.getenv("BRAIN_SALIENCE_RANKING_ENABLED", "false").lower() in ("true", "1", "yes")
-BRAIN_MMR_DIVERSITY_ENABLED = os.getenv("BRAIN_MMR_DIVERSITY_ENABLED", "false").lower() in ("true", "1", "yes")
-BRAIN_EPISODIC_BINDING_ENABLED = os.getenv("BRAIN_EPISODIC_BINDING_ENABLED", "false").lower() in ("true", "1", "yes")
+# Round 10 — neuromorphic retrieval (enabled 2026-04-11 after manual verification)
+BRAIN_SPREADING_ACTIVATION_ENABLED = os.getenv("BRAIN_SPREADING_ACTIVATION_ENABLED", "true").lower() in ("true", "1", "yes")
+BRAIN_SALIENCE_RANKING_ENABLED = os.getenv("BRAIN_SALIENCE_RANKING_ENABLED", "true").lower() in ("true", "1", "yes")
+BRAIN_MMR_DIVERSITY_ENABLED = os.getenv("BRAIN_MMR_DIVERSITY_ENABLED", "true").lower() in ("true", "1", "yes")
+BRAIN_EPISODIC_BINDING_ENABLED = os.getenv("BRAIN_EPISODIC_BINDING_ENABLED", "true").lower() in ("true", "1", "yes")
 BRAIN_MMR_LAMBDA = float(os.getenv("BRAIN_MMR_LAMBDA", "0.85"))  # 0.85 = strongly relevance-biased; 0.6 was too aggressive on single-shot QA
+
+# Phase 3 — atoms truth layer (Brain v1 plan)
+# BRAIN_ATOMS_ENABLED: master flag for atoms write path. Default off until verified.
+# BRAIN_ATOMS_READ: read path uses atoms for tier/supersession filtering. Stays off through Phase 5.
+# BRAIN_ENABLE_ATOMS_MIGRATION: whether check_and_migrate runs the atoms backfill on startup.
+BRAIN_ATOMS_ENABLED = os.getenv("BRAIN_ATOMS_ENABLED", "false").lower() in ("true", "1", "yes")
+BRAIN_ATOMS_READ = os.getenv("BRAIN_ATOMS_READ", "false").lower() in ("true", "1", "yes")
+BRAIN_ENABLE_ATOMS_MIGRATION = os.getenv("BRAIN_ENABLE_ATOMS_MIGRATION", "false").lower() in ("true", "1", "yes")
+BRAIN_DB = BRAIN_LOGS_DIR / "brain.db"

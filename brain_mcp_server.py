@@ -140,6 +140,53 @@ def handle_tools_list(params):
                 "required": ["from_agent", "to_agent", "content"],
             },
         },
+        {
+            "name": "brain_changes",
+            "description": "Show what changed in the brain's knowledge over a time range. Returns added, changed, and removed memories.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "since": {"type": "string", "description": "Start of range: '7d', 'last week', '2026-04-01'", "default": "7d"},
+                    "until": {"type": "string", "description": "End of range (default: now)", "default": "now"},
+                },
+            },
+        },
+        {
+            "name": "brain_evolution",
+            "description": "Trace how a preference or topic has evolved over time. Shows the chronological timeline of changes.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "topic": {"type": "string", "description": "Topic to trace, e.g. 'frontend framework', 'deployment strategy'"},
+                },
+                "required": ["topic"],
+            },
+        },
+        {
+            "name": "brain_procedures",
+            "description": "Retrieve learned procedures (step-by-step workflows) from past tasks and shell history.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task_type": {"type": "string", "description": "Filter by type: deploy, git_workflow, docker_workflow, etc."},
+                    "limit": {"type": "integer", "description": "Max results", "default": 5},
+                },
+            },
+        },
+        {
+            "name": "brain_outcome",
+            "description": "Record the outcome of a recommendation or action. Feeds the accuracy tracker so the brain learns from mistakes.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string", "description": "ID of the task or recommendation"},
+                    "success": {"type": "boolean", "description": "Whether the outcome was correct/successful"},
+                    "agent": {"type": "string", "description": "Agent reporting the outcome"},
+                    "notes": {"type": "string", "description": "What went right or wrong"},
+                },
+                "required": ["task_id", "success"],
+            },
+        },
     ]}
 
 
@@ -191,12 +238,33 @@ def handle_tools_call(params):
         })
 
     elif name == "brain_message":
-        result = _brain_request("POST", "/brain/message", {
+        result = _brain_request("POST", "/brain/messages", {
             "from_agent": args["from_agent"],
             "to_agent": args["to_agent"],
             "content": args["content"],
             "message_type": args.get("message_type", "info"),
             "priority": 5,
+        })
+
+    elif name == "brain_changes":
+        since = urllib.parse.quote(args.get("since", "7d"))
+        until = urllib.parse.quote(args.get("until", "now"))
+        result = _brain_request("GET", f"/brain/changes?since={since}&until={until}")
+
+    elif name == "brain_evolution":
+        topic = urllib.parse.quote(args["topic"])
+        result = _brain_request("GET", f"/brain/evolution?topic={topic}")
+
+    elif name == "brain_procedures":
+        params = f"limit={args.get('limit', 5)}"
+        if args.get("task_type"):
+            params += f"&task_type={urllib.parse.quote(args['task_type'])}"
+        result = _brain_request("GET", f"/brain/procedures?{params}")
+
+    elif name == "brain_outcome":
+        result = _brain_request("POST", "/brain/tasks/" + urllib.parse.quote(args["task_id"]) + ("/complete" if args["success"] else "/reject"), {
+            "result": args.get("notes", ""),
+            "agent": args.get("agent", "mcp"),
         })
 
     else:

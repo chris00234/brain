@@ -49,11 +49,12 @@ def _log(msg: str) -> None:
         f.write(f"{datetime.now().isoformat()} {msg}\n")
 
 
-def fetch_recent_memories() -> list[dict]:
+def fetch_recent_memories() -> tuple[list[dict], list[dict]]:
+    """Return (new_memories, all_preferences) for contradiction detection."""
     col_id = _get_collection_id(SEMANTIC_COLLECTION)
     if not col_id:
         _log("ERROR semantic_memory collection not found")
-        return []
+        return [], []
 
     try:
         res = chroma_api(
@@ -63,44 +64,59 @@ def fetch_recent_memories() -> list[dict]:
         )
     except Exception as e:
         _log(f"ERROR chroma get: {e}")
-        return []
+        return [], []
 
     cutoff = datetime.now(timezone.utc) - timedelta(days=LOOKBACK_DAYS)
     ids = res.get("ids") or []
     docs = res.get("documents") or []
     metas = res.get("metadatas") or []
-    out: list[dict] = []
+
+    new_memories: list[dict] = []
+    all_preferences: list[dict] = []
+
     for mem_id, doc, meta in zip(ids, docs, metas):
         meta = meta or {}
         ts_raw = meta.get("created_at") or meta.get("updated_at") or ""
+        category = meta.get("category", "other")
+        superseded = meta.get("superseded_by", "")
+
+        entry = {
+            "id": mem_id,
+            "content": doc or "",
+            "category": category,
+            "agent": meta.get("agent", "unknown"),
+            "source": meta.get("source", "unknown"),
+            "created_at": ts_raw,
+        }
+
+        # All active (non-superseded) preferences — no date filter
+        if category == "preference" and not superseded:
+            all_preferences.append(entry)
+
+        # Recent memories — date-filtered
         try:
             ts = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
         except (TypeError, ValueError):
             continue
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=timezone.utc)
-        if ts < cutoff:
-            continue
-        out.append({
-            "id": mem_id,
-            "content": doc or "",
-            "category": meta.get("category", "other"),
-            "agent": meta.get("agent", "unknown"),
-            "source": meta.get("source", "unknown"),
-            "created_at": ts_raw,
-        })
-    return out
+        if ts >= cutoff:
+            new_memories.append(entry)
+
+    return new_memories, all_preferences
 
 
-REFLECT_PROMPT = """You are Sage. Review these recent learnings about Chris (last 7 days).
+REFLECT_PROMPT = """You are Sage. Review these recent learnings about Chris and compare them against all existing preferences.
 
-Your job: find CONTRADICTIONS — statements that conflict with each other. Examples:
-- Memory A says "Chris prefers React" but Memory B says "Chris switched to Svelte"
-- Memory A says "deploy via docker compose" but Memory B says "moved to native macOS"
-- Memory A says "Ollama runs nomic-embed-text" but Memory B says "switched to multilingual-e5"
+Your job: find CONTRADICTIONS between NEW memories and EXISTING preferences. The most common type: Chris stated a preference months ago, and a new memory shows he changed his mind.
+
+Examples:
+- Old preference says "Chris prefers React" but new memory says "Chris switched to Svelte"
+- Old preference says "deploy via docker compose" but new memory says "moved to native macOS"
+- Old preference says "Ollama runs nomic-embed-text" but new memory says "switched to multilingual-e5"
 - Same preference stated differently at different times (which is current?)
 
-Also find patterns (recurring themes) and gaps (missing context).
+Also find patterns (recurring themes in new memories) and gaps (missing context).
 
 Return JSON ONLY:
 
@@ -118,20 +134,27 @@ Return JSON ONLY:
 
 Maximum 5 entries per array. Be aggressive about finding contradictions — stale preferences that were updated are the most common type. No prose outside JSON. No markdown fences.
 
-Memories ({count} total):
-{memories}
+NEW MEMORIES (last 7 days, {new_count} total):
+{new_memories}
+
+ALL ACTIVE PREFERENCES ({pref_count} total):
+{all_preferences}
 
 JSON:"""
 
 
-def dispatch_to_sage(memories: list[dict]) -> dict | None:
-    if not memories:
+def dispatch_to_sage(new_memories: list[dict], all_preferences: list[dict]) -> dict | None:
+    if not new_memories:
         return None
-    formatted = "\n".join(
-        f"- [{m['id'][:24]}] ({m['category']}, {m['agent']}, {m['created_at'][:10]}) {m['content'][:200]}"
-        for m in memories[:60]
+    fmt = lambda m: f"- [{m['id'][:24]}] ({m['category']}, {m['agent']}, {m['created_at'][:10]}) {m['content'][:200]}"
+    new_fmt = "\n".join(fmt(m) for m in new_memories[:60])
+    pref_fmt = "\n".join(fmt(m) for m in all_preferences[:500]) or "(none)"
+    prompt = REFLECT_PROMPT.format(
+        new_count=len(new_memories),
+        new_memories=new_fmt,
+        pref_count=len(all_preferences),
+        all_preferences=pref_fmt,
     )
-    prompt = REFLECT_PROMPT.format(count=len(memories), memories=formatted)
 
     parsed = dispatch_with_schema(
         agent="sage",
@@ -236,24 +259,24 @@ def write_to_inbox(reflection: dict, memory_count: int) -> Path | None:
 
 def main() -> int:
     _log("=== brain_reflect start ===")
-    memories = fetch_recent_memories()
-    _log(f"fetched {len(memories)} memories from last {LOOKBACK_DAYS}d")
-    if not memories:
+    new_memories, all_preferences = fetch_recent_memories()
+    _log(f"fetched {len(new_memories)} new memories from last {LOOKBACK_DAYS}d, {len(all_preferences)} active preferences")
+    if not new_memories:
         _log("nothing to reflect on, exiting")
         return 0
 
-    reflection = dispatch_to_sage(memories)
+    reflection = dispatch_to_sage(new_memories, all_preferences)
     if not reflection:
         _log("dispatch failed, exiting")
         return 1
 
-    out = write_to_inbox(reflection, len(memories))
+    out = write_to_inbox(reflection, len(new_memories))
     _log(f"wrote {out}")
 
     # Index patterns into ChromaDB patterns collection
     pattern_count = index_patterns(reflection)
 
-    print(json.dumps({"status": "ok", "out": str(out), "memories": len(memories), "patterns_indexed": pattern_count}))
+    print(json.dumps({"status": "ok", "out": str(out), "memories": len(new_memories), "patterns_indexed": pattern_count}))
     return 0
 
 

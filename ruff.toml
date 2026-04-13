@@ -1,0 +1,137 @@
+line-length = 110
+target-version = "py313"
+extend-exclude = [
+  ".venv",
+  "logs",
+  "tests/smoke",
+  "**/__pycache__",
+  # Legacy modules — kept lint-clean opportunistically as each phase touches them.
+  # New modules under brain_core/atoms_*, autonomy.py, breakers.py, sm2.py, etc.
+  # are NOT excluded and must pass.
+  "brain_core/action_triggers.py",
+  "brain_core/agent_messenger.py",
+  "brain_core/agent_preferences.py",
+  "brain_core/audit_log.py",
+  "brain_core/autopilot.py",
+  "brain_core/batch_lock.py",
+  "brain_core/boot_context.py",
+  "brain_core/config.py",
+  "brain_core/cross_encoder_model.py",
+  "brain_core/cross_encoder_rerank.py",
+  "brain_core/embed_cache.py",
+  "brain_core/entity_graph.py",
+  "brain_core/fact_store.py",
+  "brain_core/failure_memory.py",
+  "brain_core/feedback_aggregator.py",
+  "brain_core/fts_index.py",
+  "brain_core/goal_decompose.py",
+  "brain_core/graph_consolidation.py",
+  "brain_core/hooks.py",
+  "brain_core/http_async.py",
+  "brain_core/http_pool.py",
+  "brain_core/hyde.py",
+  "brain_core/inbox_utils.py",
+  "brain_core/indexer.py",
+  "brain_core/learn.py",
+  "brain_core/lora_embedder.py",
+  "brain_core/maintenance.py",
+  "brain_core/memory_lifecycle.py",
+  "brain_core/memory_operations.py",
+  "brain_core/metrics_buffer.py",
+  "brain_core/neo4j_client.py",
+  "brain_core/openclaw_dispatch.py",
+  "brain_core/proactive.py",
+  "brain_core/provenance.py",
+  "brain_core/reasoning.py",
+  "brain_core/reasoning_loop.py",
+  "brain_core/rerank.py",
+  "brain_core/rrf.py",
+  "brain_core/safe_state.py",
+  "brain_core/scheduler.py",
+  "brain_core/schema_versions.py",
+  "brain_core/search.py",
+  "brain_core/search_unified.py",
+  "brain_core/self_heal.py",
+  "brain_core/slo_monitor.py",
+  "brain_core/spreading_activation.py",
+  "brain_core/task_queue.py",
+  "brain_core/temporal.py",
+  "brain_core/temporal_reasoning.py",
+  "brain_core/time_decay.py",
+  "brain_core/tokenizer.py",
+  "brain_core/working_memory.py",
+  "brain_core/pipeline/",
+  "ingest/",
+  "synthesis/",
+  "pipeline/",
+  "server.py",
+  "brain_mcp_server.py",
+  "cli/analyze_boot.py",
+  "cli/backup_chroma.py",
+  "cli/backup_neo4j.py",
+  "cli/backup_verify.py",
+  "cli/batch_learn.py",
+  "cli/batch_learn_openclaw.py",
+  "cli/brain_export.py",
+  "cli/brain_finetune.py",
+  "cli/context_format.py",
+  "cli/eval_compare.py",
+  "cli/eval_extract_failures.py",
+  "cli/eval_gate.py",
+  "cli/eval_merge.py",
+  "cli/eval_mine_canonical.py",
+  "cli/eval_paired_test.py",
+  "cli/eval_split.py",
+  "cli/eval_sweep.py",
+  "cli/eval_sweep_matrix.py",
+  "cli/eval_sweep_verify.py",
+  "cli/eval_validate.py",
+  "cli/hyde_prewarm.py",
+  "cli/memory_store.py",
+  "cli/migrate_to_neo4j.py",
+  "cli/rag_learn.py",
+  "cli/_minio.py",
+  "cli/restore_chroma.py",
+]
+
+[lint]
+select = [
+  "E",   # pycodestyle errors
+  "F",   # pyflakes
+  "I",   # isort
+  "B",   # flake8-bugbear
+  "UP",  # pyupgrade
+  "SIM", # flake8-simplify
+  "RUF", # ruff-specific rules
+  "ANN", # annotations
+  "RET", # return statement smells
+  "PTH", # prefer pathlib
+  "T20", # no print outside CLI
+  "S",   # bandit-lite security checks
+]
+ignore = [
+  "ANN101",  # missing-type-self
+  "ANN102",  # missing-type-cls
+  "ANN401",  # any-type allowed (pragmatic)
+  "E501",    # line-too-long handled by formatter
+  "B008",    # function-call-in-default-arg (FastAPI Depends pattern)
+  "RUF012",  # mutable-class-default
+  "S101",    # asserts allowed
+  "S603",    # subprocess (legit in maintenance.py)
+  "S607",    # partial-executable-path (subprocess)
+]
+
+[lint.per-file-ignores]
+"tests/**" = ["ANN", "T20", "S", "PTH"]
+"brain_core/maintenance.py" = ["S603", "S607", "T20"]
+"cli/**" = ["T20", "S603", "S607"]
+"brain_mcp_server.py" = ["T20"]
+"server.py" = ["T20"]
+
+[lint.isort]
+known-first-party = ["brain_core", "pipeline", "ingest", "synthesis", "cli"]
+
+[format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"

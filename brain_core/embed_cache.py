@@ -28,6 +28,8 @@ _local = threading.local()
 _stats_lock = threading.Lock()
 _cache_hits = 0
 _cache_misses = 0
+_put_counter = 0
+_CHECKPOINT_EVERY = 500
 
 
 def cache_stats() -> dict:
@@ -49,6 +51,7 @@ def _get_conn() -> sqlite3.Connection:
         EMBED_CACHE_DB.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(EMBED_CACHE_DB), check_same_thread=False)
         conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA wal_autocheckpoint=1000")
         conn.execute("PRAGMA cache_size=-16000")
         conn.execute("CREATE TABLE IF NOT EXISTS embeddings (hash TEXT PRIMARY KEY, embedding BLOB)")
         # Additive migration: add created_at column for TTL-based eviction
@@ -86,6 +89,7 @@ def cache_get(key: str) -> list[float] | None:
 
 
 def cache_put(key: str, embedding: list[float]) -> None:
+    global _put_counter
     try:
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -95,5 +99,13 @@ def cache_put(key: str, embedding: list[float]) -> None:
             (key, json.dumps(embedding), now),
         )
         conn.commit()
+        with _stats_lock:
+            _put_counter += 1
+            should_checkpoint = _put_counter % _CHECKPOINT_EVERY == 0
+        if should_checkpoint:
+            try:
+                conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+            except Exception:
+                pass
     except Exception:
         pass

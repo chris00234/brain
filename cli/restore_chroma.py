@@ -1,4 +1,4 @@
-#!/opt/homebrew/bin/python3
+#!/Users/chrischo/server/brain/.venv/bin/python
 """Restore ChromaDB from MinIO backup.
 
 Usage:

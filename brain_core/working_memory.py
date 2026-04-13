@@ -52,7 +52,13 @@ def _init_db() -> None:
         conn.execute(_CREATE_TABLE)
 
 
-_init_db()
+_db_initialized = False
+
+try:
+    _init_db()
+    _db_initialized = True
+except Exception as _init_err:
+    log.warning("working_memory _init_db failed (deferred to first use): %s", _init_err)
 
 
 # ── Helpers ──────────────────────────────────────────────
@@ -61,6 +67,10 @@ from contextlib import contextmanager
 
 @contextmanager
 def _conn():
+    global _db_initialized
+    if not _db_initialized:
+        _init_db()
+        _db_initialized = True
     conn = sqlite3.connect(str(DB_PATH), timeout=10)
     conn.row_factory = sqlite3.Row
     try:
@@ -227,3 +237,60 @@ def remove_focus(focus_id: str) -> bool:
     with _conn() as conn:
         cur = conn.execute("DELETE FROM focus_items WHERE id = ?", (focus_id,))
         return cur.rowcount > 0
+
+
+# ── Session summary helpers ────────────────────────────────
+
+SESSION_SUMMARY_CATEGORY = "session_summary"
+MAX_SESSION_SUMMARIES = 5
+
+
+def add_session_summary(content: str, agent: str = "claude", source: str = "session_auto") -> dict:
+    """Store a session summary and evict oldest if over MAX_SESSION_SUMMARIES."""
+    result = add_focus(
+        content=content,
+        category=SESSION_SUMMARY_CATEGORY,
+        agent=agent,
+        expires_hours=168,  # 1 week TTL
+    )
+    # Attach source in metadata
+    with _conn() as conn:
+        meta = json.dumps({"source": source})
+        conn.execute(
+            "UPDATE focus_items SET metadata = ? WHERE id = ?",
+            (meta, result["id"]),
+        )
+    # Evict oldest beyond MAX_SESSION_SUMMARIES
+    _evict_old_session_summaries()
+    return result
+
+
+def _evict_old_session_summaries() -> int:
+    """Keep only the newest MAX_SESSION_SUMMARIES session summaries."""
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT id FROM focus_items WHERE category = ? ORDER BY created_at DESC",
+            (SESSION_SUMMARY_CATEGORY,),
+        ).fetchall()
+        to_delete = [r["id"] for r in rows[MAX_SESSION_SUMMARIES:]]
+        if to_delete:
+            placeholders = ",".join("?" for _ in to_delete)
+            conn.execute(
+                f"DELETE FROM focus_items WHERE id IN ({placeholders})",
+                to_delete,
+            )
+        return len(to_delete)
+
+
+def get_session_summaries(limit: int = MAX_SESSION_SUMMARIES) -> list[dict]:
+    """Return the most recent session summaries, newest first."""
+    _prune_expired()
+    now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM focus_items "
+            "WHERE category = ? AND (expires_at IS NULL OR expires_at >= ?) "
+            "ORDER BY created_at DESC LIMIT ?",
+            (SESSION_SUMMARY_CATEGORY, now_iso, limit),
+        ).fetchall()
+    return [_row_to_dict(r) for r in rows]

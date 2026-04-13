@@ -78,17 +78,18 @@ def rrf_fuse(
             if doc_id not in best_record:
                 best_record[doc_id] = doc
 
-    # Normalize to 0..100 for compatibility with the existing score scale.
-    if rrf_scores:
-        max_score = max(rrf_scores.values())
-    else:
-        max_score = 1.0
+    # Normalize to 0..100 using the theoretical maximum so multi-source
+    # consensus is preserved.  The theoretical max is achieved when a doc
+    # appears at rank 0 in every source: sum(trust_i / k) for all sources.
+    theoretical_max = sum(trust_weights) / k
+    if theoretical_max <= 0:
+        theoretical_max = 1.0
 
     fused: list[dict[str, Any]] = []
     for doc_id, raw in rrf_scores.items():
         # Shallow copy to avoid mutating the caller's original dicts.
         doc = dict(best_record[doc_id])
-        normalized = (raw / max_score) * 100.0
+        normalized = max(0.0, min(100.0, (raw / theoretical_max) * 100.0))
         doc["rrf_score"] = round(normalized, 2)
         doc["score"] = doc["rrf_score"]
         fused.append(doc)

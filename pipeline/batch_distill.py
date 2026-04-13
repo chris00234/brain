@@ -36,10 +36,27 @@ def infer_subtype(domain: str, raw_record: dict[str, Any]) -> str:
     return "project-memory"
 
 
+_BOILERPLATE_PREFIXES = (
+    "openclaw ",        # "OpenClaw market session (...)"
+    "claude code ",     # "Claude Code session in ... (...)"
+    "signal:",          # "Signal: decision (score 9/10)"
+    "context ",         # "Context — User: ..."
+    "context—",
+    "context-",
+    "context:",
+    "---",
+    "#",                # markdown headers from canonical imports
+)
+
+
 def infer_title(raw_record: dict[str, Any], domain: str) -> str:
     content = str(raw_record.get("content", "")).strip()
-    first = content.splitlines()[0].strip() if content else raw_record["id"]
-    compact = " ".join(first.split())[:72].strip(" .")
+    lines = [ln.strip() for ln in content.splitlines() if ln.strip()]
+    substantive = next(
+        (ln for ln in lines if not ln.lower().startswith(_BOILERPLATE_PREFIXES)),
+        lines[0] if lines else raw_record["id"],
+    )
+    compact = " ".join(substantive.split())[:72].strip(" .")
     if compact:
         return compact[0].upper() + compact[1:]
     return f"{domain.title()} memory"

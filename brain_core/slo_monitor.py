@@ -26,12 +26,21 @@ BRAIN_URL = "http://127.0.0.1:8791"
 SECRET_FILE = Path("/Users/chrischo/.openclaw/credentials/.personal_webhook_secret")
 BASELINE_FILE = Path("/Users/chrischo/server/brain/tests/slo_baseline.json")
 STATE_FILE = Path("/Users/chrischo/server/brain/logs/slo_state.json")
+EVAL_REPORT_FILE = Path("/Users/chrischo/server/brain/logs/eval-report.json")
 
 # Default SLOs if baseline doesn't exist
 DEFAULT_SLOS = {
     "recall_p95_ms": 500,
     "recall_v2_p95_ms": 2000,
     "memory_growth_weekly_pct": 20,
+}
+
+# Content quality baselines — calibrated to the expanded n=744 eval set
+# (2026-04-13). Set ~4pt below the current honest number so normal run-to-run
+# variance doesn't trip the auto-heal doom loop. Tighten as the corpus matures.
+CONTENT_QUALITY_SLOS = {
+    "content_hit_pct": 67.0,  # current ~71.9 on full set
+    "source_hit_pct": 76.0,   # current ~81.2 on full set
 }
 
 # Fixed probe queries so measurements are comparable across cycles
@@ -44,6 +53,18 @@ PROBE_QUERIES = [
     "neo4j graph",
     "canonical knowledge",
     "search index",
+    "nginx reverse proxy",
+    "cloudflare tunnel",
+    "apple notes personal",
+    "imessage conversation",
+    "calendar schedule",
+    "reminders tasks",
+    "daily synthesis",
+    "embedding model ollama",
+    "homelab infrastructure",
+    "git commit history",
+    "profile preferences",
+    "weekly reflection",
 ]
 
 
@@ -132,6 +153,40 @@ def probe() -> dict:
     }
 
 
+def check_content_quality() -> list[dict]:
+    """Read latest eval report and check content/source hit rates against SLOs."""
+    if not EVAL_REPORT_FILE.exists():
+        return []
+    try:
+        report = json.loads(EVAL_REPORT_FILE.read_text())
+    except Exception:
+        return []
+
+    v2 = report.get("v2", {})
+    if not v2:
+        return []
+
+    violations = []
+    content_pct = float(v2.get("hit_content_pct", 0))
+    source_pct = float(v2.get("hit_source_pct", 0))
+
+    if content_pct > 0 and content_pct < CONTENT_QUALITY_SLOS["content_hit_pct"]:
+        violations.append({
+            "slo": "content_hit_pct",
+            "current": content_pct,
+            "baseline": CONTENT_QUALITY_SLOS["content_hit_pct"],
+            "threshold": CONTENT_QUALITY_SLOS["content_hit_pct"],
+        })
+    if source_pct > 0 and source_pct < CONTENT_QUALITY_SLOS["source_hit_pct"]:
+        violations.append({
+            "slo": "source_hit_pct",
+            "current": source_pct,
+            "baseline": CONTENT_QUALITY_SLOS["source_hit_pct"],
+            "threshold": CONTENT_QUALITY_SLOS["source_hit_pct"],
+        })
+    return violations
+
+
 def check_slos() -> dict:
     """Probe current latency and compare against SLOs. Returns status dict."""
     current = probe()
@@ -173,21 +228,27 @@ def monitor_cycle() -> dict:
     result = check_slos()
     violations = result.get("violations", [])
 
+    # Content quality check (from latest eval report)
+    content_violations = check_content_quality()
+    all_violations = violations + content_violations
+
     # Track consecutive violations per SLO
-    for v in violations:
+    for v in all_violations:
         slo_name = v["slo"]
         state["violations"][slo_name] = state["violations"].get(slo_name, 0) + 1
 
     # Reset counters for SLOs that are now healthy
-    violated_slos = {v["slo"] for v in violations}
+    violated_slos = {v["slo"] for v in all_violations}
     for slo_name in list(state["violations"].keys()):
         if slo_name not in violated_slos:
             state["violations"][slo_name] = 0
 
-    # Alert on 3+ consecutive violations
+    # Alert on 3+ consecutive latency violations, 2+ consecutive content violations
     alerts: list[str] = []
+    content_slo_names = set(CONTENT_QUALITY_SLOS.keys())
     for slo_name, count in state["violations"].items():
-        if count >= 3:
+        threshold = 2 if slo_name in content_slo_names else 3
+        if count >= threshold:
             alerts.append(f"SLO {slo_name} breached for {count} consecutive checks")
 
     if alerts:
@@ -204,9 +265,24 @@ def monitor_cycle() -> dict:
         except Exception as e:
             log.warning("alert dispatch failed: %s", e)
 
+    # Phase 5: outer autonomy gate before any heal_dispatch.
+    # Inner self_heal.dispatch() also gates per-kind, but we short-circuit early
+    # so we don't even build healing signals when slo.remediate is blocked.
+    _slo_gate_allowed = True
+    try:
+        from autonomy import authorize as _autonomy_authorize
+
+        gate = _autonomy_authorize("slo.remediate")
+        _slo_gate_allowed = gate.allowed
+    except Exception:
+        pass
+
     # Phase A3: auto-remediation via self_heal
     try:
+        if not _slo_gate_allowed:
+            raise RuntimeError("slo.remediate blocked by autonomy gate")
         from self_heal import HealingSignal, dispatch as heal_dispatch
+        # Latency breaches
         for v in violations:
             slo_name = v["slo"]
             count = state["violations"].get(slo_name, 0)
@@ -215,6 +291,21 @@ def monitor_cycle() -> dict:
                     source="slo_monitor",
                     signal_type="slo_latency_breach",
                     severity="high" if count >= 8 else "medium",
+                    metric=slo_name,
+                    value=v.get("current", 0),
+                    baseline=v.get("baseline", 0),
+                    target="recall",
+                    context={"breach_count": count},
+                ))
+        # Content quality breaches — trigger reindex via eval_regression healer
+        for v in content_violations:
+            slo_name = v["slo"]
+            count = state["violations"].get(slo_name, 0)
+            if count >= 2:
+                heal_dispatch(HealingSignal(
+                    source="slo_monitor",
+                    signal_type="content_quality_breach",
+                    severity="high" if count >= 4 else "medium",
                     metric=slo_name,
                     value=v.get("current", 0),
                     baseline=v.get("baseline", 0),
@@ -236,6 +327,11 @@ def monitor_cycle() -> dict:
     state["history"] = state["history"][-168:]
 
     save_state(state)
+
+    # Merge content quality info into result
+    if content_violations:
+        result["status"] = "breached"
+        result["violations"] = all_violations
 
     return {
         **result,

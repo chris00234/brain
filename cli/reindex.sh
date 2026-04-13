@@ -9,7 +9,7 @@ LOG_FILE="$LOG_DIR/reindex-$TS.log"
 
 {
   echo "[$(date)] RAG incremental reindex start"
-  /opt/homebrew/bin/python3 /Users/chrischo/server/brain/brain_core/indexer.py
+  "${BRAIN_PYTHON:-/Users/chrischo/server/brain/.venv/bin/python}" /Users/chrischo/server/brain/brain_core/indexer.py
   echo "[$(date)] Noise cleanup"
   echo 'DEPRECATED: cleanup_noise.py removed'
   echo "[$(date)] RAG reindex done"

@@ -77,12 +77,11 @@ class MetricsBuffer:
         self._last_learn_success_at: str = ""
         self._last_backup_at: str = ""
         self._last_backup_ok: bool = True
+        self._search_latencies: list[int] = []
 
     def record_search_latency(self, total_ms: int, source_timings: dict[str, int] | None = None) -> None:
         """Record search latency for rolling p50/p95/p99 tracking."""
         with self._lock:
-            if not hasattr(self, '_search_latencies'):
-                self._search_latencies: list[int] = []
             self._search_latencies.append(total_ms)
             if len(self._search_latencies) > 1000:
                 self._search_latencies = self._search_latencies[-1000:]
@@ -97,8 +96,8 @@ class MetricsBuffer:
             n = len(s)
             return {
                 "p50": s[n // 2],
-                "p95": s[int(n * 0.95)],
-                "p99": s[int(n * 0.99)],
+                "p95": s[min(n - 1, int(n * 0.95))],
+                "p99": s[min(n - 1, int(n * 0.99))],
                 "count": n,
             }
 
@@ -211,7 +210,7 @@ class MetricsBuffer:
         conn.execute("""CREATE TABLE IF NOT EXISTS metrics_snapshots (
             id INTEGER PRIMARY KEY, timestamp TEXT, payload TEXT)""")
         conn.execute("INSERT INTO metrics_snapshots (timestamp, payload) VALUES (?, ?)",
-                     (datetime.now().isoformat(), json.dumps(self.snapshot())))
+                     (datetime.now(timezone.utc).isoformat(), json.dumps(self.snapshot())))
         # Prune >90 days
         conn.execute("DELETE FROM metrics_snapshots WHERE timestamp < datetime('now', '-90 days')")
         conn.close()

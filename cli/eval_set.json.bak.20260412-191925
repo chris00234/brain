@@ -1,0 +1,2558 @@
+[
+  {
+    "query": "ghost container port",
+    "collection": "knowledge",
+    "expected_source": "ghost/docker-compose.yml",
+    "expected_content": "2368"
+  },
+  {
+    "query": "ghost nginx proxy",
+    "collection": "knowledge",
+    "expected_source": "nginx/conf.d/ghost.conf",
+    "expected_content": "blog.chrischodev.com"
+  },
+  {
+    "query": "vaultwarden docker compose",
+    "collection": "knowledge",
+    "expected_source": "vaultwarden/docker-compose.yml",
+    "expected_content": "vaultwarden"
+  },
+  {
+    "query": "searxng server block",
+    "collection": "all",
+    "expected_source": "searxng",
+    "expected_content": "searxng"
+  },
+  {
+    "query": "minio storage configuration",
+    "collection": "knowledge",
+    "expected_source": "minio/docker-compose.yml",
+    "expected_content": "minio"
+  },
+  {
+    "query": "cloudflare tunnel setup",
+    "collection": "all",
+    "expected_source": "cloudflare",
+    "expected_content": "Cloudflare"
+  },
+  {
+    "query": "Ellie role and responsibilities",
+    "collection": "all",
+    "expected_source": "ellie",
+    "expected_content": "Ellie"
+  },
+  {
+    "query": "Jenna responsibilities",
+    "collection": "all",
+    "expected_source": "jenna",
+    "expected_content": "Jenna"
+  },
+  {
+    "query": "nginx rate limiting configuration",
+    "collection": "knowledge",
+    "expected_source": "nginx",
+    "expected_content": "limit_req"
+  },
+  {
+    "query": "chromadb docker compose",
+    "collection": "all",
+    "expected_source": "chroma",
+    "expected_content": "chroma"
+  },
+  {
+    "query": "ollama model configuration",
+    "collection": "all",
+    "expected_source": "ollama",
+    "expected_content": "ollama"
+  },
+  {
+    "query": "couchdb port mapping",
+    "collection": "knowledge",
+    "expected_source": "docker-compose.yml",
+    "expected_content": "5984"
+  },
+  {
+    "query": "glance dashboard config",
+    "collection": "knowledge",
+    "expected_source": "glance",
+    "expected_content": "glance"
+  },
+  {
+    "query": "uptime kuma setup",
+    "collection": "all",
+    "expected_source": "uptime-kuma",
+    "expected_content": "uptime"
+  },
+  {
+    "query": "brain api nginx config",
+    "collection": "knowledge",
+    "expected_source": "brain-api.conf",
+    "expected_content": "brain"
+  },
+  {
+    "query": "watchtower auto update schedule",
+    "collection": "knowledge",
+    "expected_source": "docker-compose.yml",
+    "expected_content": "watchtower"
+  },
+  {
+    "query": "cloudflared container image",
+    "collection": "all",
+    "expected_source": "cloudflare",
+    "expected_content": "cloudflare"
+  },
+  {
+    "query": "what frontend stack does Chris prefer",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "React"
+  },
+  {
+    "query": "Chris preferred frontend framework",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "Vite"
+  },
+  {
+    "query": "contract first execution preference",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "contract"
+  },
+  {
+    "query": "canonical memory layer decision",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "canonical"
+  },
+  {
+    "query": "Claude Code reinstated decision",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "Claude Code"
+  },
+  {
+    "query": "RAG retrieval stack architecture",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "RAG"
+  },
+  {
+    "query": "personal intelligence system proposal",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "intelligence"
+  },
+  {
+    "query": "Chris preference for scheduling heavy jobs",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "prefer"
+  },
+  {
+    "query": "deployment rule for new services",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "Uptime Kuma"
+  },
+  {
+    "query": "no extra LLM spending",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "OpenAI"
+  },
+  {
+    "query": "Chris preference for React Vite shadcn",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "React"
+  },
+  {
+    "query": "brain API FastAPI consolidation",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "FastAPI"
+  },
+  {
+    "query": "Cloudflare DNS troubleshooting procedure",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "CNAME"
+  },
+  {
+    "query": "Cloudflare API authentication method",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "API"
+  },
+  {
+    "query": "Chris resource contention scheduling rule",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "Chris"
+  },
+  {
+    "query": "Cloudflare tunnel architecture",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "tunnel"
+  },
+  {
+    "query": "brain UI design preferences",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "brain"
+  },
+  {
+    "query": "parallel subagent execution preference",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "execution"
+  },
+  {
+    "query": "search RAG before grepping files",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "RAG"
+  },
+  {
+    "query": "brain dedup mechanism two layer",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "brain"
+  },
+  {
+    "query": "heartbeat protocol response",
+    "collection": "all",
+    "expected_source": "heartbeat",
+    "expected_content": "heartbeat"
+  },
+  {
+    "query": "영주권 갱신",
+    "collection": "calendar",
+    "expected_source": "personal",
+    "expected_content": "영주권"
+  },
+  {
+    "query": "dinner appointment 저녁 약속",
+    "collection": "calendar",
+    "expected_source": "personal",
+    "expected_content": "저녁"
+  },
+  {
+    "query": "Easter holiday",
+    "collection": "calendar",
+    "expected_source": "personal",
+    "expected_content": "Easter"
+  },
+  {
+    "query": "building personal AI assistant blog",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "intelligence"
+  },
+  {
+    "query": "RESTful API design blog post",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "API"
+  },
+  {
+    "query": "self hosted home server guide blog",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "server"
+  },
+  {
+    "query": "Tesla Fleet API controller blog",
+    "collection": "all",
+    "expected_source": "tesla",
+    "expected_content": "Tesla"
+  },
+  {
+    "query": "what is Chris email address",
+    "collection": "all",
+    "expected_source": "_profile",
+    "expected_content": "wheogus98"
+  },
+  {
+    "query": "Chris location timezone",
+    "collection": "all",
+    "expected_source": "_profile",
+    "expected_content": "Irvine"
+  },
+  {
+    "query": "Chris coding standards TypeScript",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "coding"
+  },
+  {
+    "query": "Liz agent role principal engineer",
+    "collection": "all",
+    "expected_source": "liz",
+    "expected_content": "Liz"
+  },
+  {
+    "query": "Sage research agent",
+    "collection": "all",
+    "expected_source": "sage",
+    "expected_content": "Sage"
+  },
+  {
+    "query": "Market agent growth content",
+    "collection": "all",
+    "expected_source": "market",
+    "expected_content": "Market"
+  },
+  {
+    "query": "OpenClaw gateway port number",
+    "collection": "all",
+    "expected_source": "openclaw",
+    "expected_content": "OpenClaw"
+  },
+  {
+    "query": "stale cloudflare cache after deploy",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "cache"
+  },
+  {
+    "query": "homelab CPU memory limits docker",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "docker"
+  },
+  {
+    "query": "MCC deployment procedure",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "deploy"
+  },
+  {
+    "query": "daily synthesis what does it do",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "daily"
+  },
+  {
+    "query": "Liz frontend redesign website",
+    "collection": "all",
+    "expected_source": "liz",
+    "expected_content": "liz"
+  },
+  {
+    "query": "website glassmorphism UI overhaul",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "UI"
+  },
+  {
+    "query": "how to add new cloudflare subdomain step by step",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "CNAME"
+  },
+  {
+    "query": "what did Chris decide about Podman vs Docker",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "Chris"
+  },
+  {
+    "query": "Chris wants brain to know him better than himself",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "brain"
+  },
+  {
+    "query": "brain system architecture overview",
+    "collection": "all",
+    "expected_source": "obsidian",
+    "expected_content": "brain"
+  },
+  {
+    "query": "Mac Studio migration plan",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "migration"
+  },
+  {
+    "query": "OpenClaw 에이전트 역할 정리",
+    "collection": "all",
+    "expected_source": "openclaw",
+    "expected_content": "OpenClaw"
+  },
+  {
+    "query": "OpenClaw 마스터 플랜 7일",
+    "collection": "all",
+    "expected_source": "openclaw",
+    "expected_content": "OpenClaw"
+  },
+  {
+    "query": "Claude Code 동영상 분석 PPT",
+    "collection": "all",
+    "expected_source": "obsidian",
+    "expected_content": "Claude"
+  },
+  {
+    "query": "필수 스킬 정리 skill selection",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "skill"
+  },
+  {
+    "query": "GITA credentials access",
+    "collection": "all",
+    "expected_source": "obsidian",
+    "expected_content": "GITA"
+  },
+  {
+    "query": "Ultimate Performance power plan Windows",
+    "collection": "all",
+    "expected_source": "obsidian",
+    "expected_content": "Performance"
+  },
+  {
+    "query": "capability-evolver security vulnerability",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "capability"
+  },
+  {
+    "query": "portfolio redesign authentication JWT",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "portfolio"
+  },
+  {
+    "query": "browser history Chrome usage patterns",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "browser"
+  },
+  {
+    "query": "git activity chrischodev portfolio refresh",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "chrischodev"
+  },
+  {
+    "query": "MiniMax API chatbot update",
+    "collection": "all",
+    "expected_source": "obsidian",
+    "expected_content": "chatbot"
+  },
+  {
+    "query": "Liz working on website hero section fix",
+    "collection": "all",
+    "expected_source": "liz",
+    "expected_content": "liz"
+  },
+  {
+    "query": "Ellie infrastructure Docker troubleshooting",
+    "collection": "all",
+    "expected_source": "ellie",
+    "expected_content": "ellie"
+  },
+  {
+    "query": "Jenna scheduling daily synthesis",
+    "collection": "all",
+    "expected_source": "jenna",
+    "expected_content": "Jenna"
+  },
+  {
+    "query": "screen time Chrome Terminal daily pattern",
+    "collection": "all",
+    "expected_source": "screen-time",
+    "expected_content": "screen"
+  },
+  {
+    "query": "Claude Code session action bias preference",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "Claude"
+  },
+  {
+    "query": "LibreUIUX Claude Code project commits",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "Claude"
+  },
+  {
+    "query": "filebrowser docker compose port",
+    "collection": "all",
+    "expected_source": "filebrowser/docker-compose.yml",
+    "expected_content": "filebrowser"
+  },
+  {
+    "query": "tesla app container setup",
+    "collection": "all",
+    "expected_source": "tesla",
+    "expected_content": "tesla"
+  },
+  {
+    "query": "claw3d container port",
+    "collection": "all",
+    "expected_source": "claw3d/docker-compose.yml",
+    "expected_content": "claw3d"
+  },
+  {
+    "query": "watchtower notification config",
+    "collection": "all",
+    "expected_source": "watchtower/docker-compose.yml",
+    "expected_content": "watchtower"
+  },
+  {
+    "query": "nginx default server block",
+    "collection": "all",
+    "expected_source": "default.conf",
+    "expected_content": "server"
+  },
+  {
+    "query": "couchdb admin password setup",
+    "collection": "all",
+    "expected_source": "couchdb/docker-compose.yml",
+    "expected_content": "couchdb"
+  },
+  {
+    "query": "Liz AGENTS.md primary role",
+    "collection": "all",
+    "expected_source": "AGENTS.md",
+    "expected_content": "Engineer"
+  },
+  {
+    "query": "Jenna AGENTS.md scheduling calendar",
+    "collection": "all",
+    "expected_source": "AGENTS.md",
+    "expected_content": "Scheduling"
+  },
+  {
+    "query": "Chris email address wheogus",
+    "collection": "all",
+    "expected_source": "_profile",
+    "expected_content": "wheogus"
+  },
+  {
+    "query": "Chris Korean name",
+    "collection": "all",
+    "expected_source": "_profile",
+    "expected_content": "Chris"
+  },
+  {
+    "query": "brain server FastAPI port 8791",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "brain"
+  },
+  {
+    "query": "chromadb native port 8000",
+    "collection": "all",
+    "expected_source": "obsidian",
+    "expected_content": "chroma"
+  },
+  {
+    "query": "ghost blog CMS docker image",
+    "collection": "all",
+    "expected_source": "ghost/docker-compose.yml",
+    "expected_content": "ghost"
+  },
+  {
+    "query": "obsidian sync CouchDB live",
+    "collection": "all",
+    "expected_source": "couchdb",
+    "expected_content": "couchdb"
+  },
+  {
+    "query": "brain API nginx reverse proxy",
+    "collection": "all",
+    "expected_source": "brain-api.conf",
+    "expected_content": "brain"
+  },
+  {
+    "query": "canonical pipeline nightly promote",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "canonical"
+  },
+  {
+    "query": "shell history ingest adapter",
+    "collection": "all",
+    "expected_source": "experience",
+    "expected_content": "shell"
+  },
+  {
+    "query": "RRF fusion trust weights search",
+    "collection": "all",
+    "expected_source": "semantic_memory",
+    "expected_content": "rrf"
+  },
+  {
+    "query": "brain UI React Vite shadcn",
+    "collection": "all",
+    "expected_source": "obsidian",
+    "expected_content": "React"
+  },
+  {
+    "query": "Uptime Kuma monitoring health",
+    "collection": "all",
+    "expected_source": "obsidian",
+    "expected_content": "Uptime"
+  },
+  {
+    "query": "CloudFlare tunnel cloudflared container",
+    "collection": "all",
+    "expected_source": "cloudflare",
+    "expected_content": "cloudflare"
+  },
+  {
+    "query": "Docker service network server-net",
+    "collection": "all",
+    "expected_source": "docker-compose",
+    "expected_content": "docker"
+  },
+  {
+    "query": "OpenClaw agent gateway port",
+    "collection": "all",
+    "expected_source": "openclaw",
+    "expected_content": "OpenClaw"
+  },
+  {
+    "query": "self learning memory extraction",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "learn"
+  },
+  {
+    "query": "embedding model multilingual e5",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "embedding"
+  },
+  {
+    "query": "conventional commits git workflow",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "commit"
+  },
+  {
+    "query": "proactive check schedule alert",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "proactive"
+  },
+  {
+    "query": "memory lifecycle archive 90 days",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "archive"
+  },
+  {
+    "query": "semantic memory dedup two layer",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "memory"
+  },
+  {
+    "query": "eval regression gate nightly",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "eval"
+  },
+  {
+    "query": "boot context agent startup",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "boot"
+  },
+  {
+    "query": "Apple Notes body extraction protobuf",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "Note"
+  },
+  {
+    "query": "iMessage conversation grouping",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "message"
+  },
+  {
+    "query": "shadcn ui Tailwind v4 dark mode",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "shadcn"
+  },
+  {
+    "query": "OrbStack disk IO write limit Docker",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "OrbStack"
+  },
+  {
+    "query": "Vite SPA route collision API prefix",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "Vite"
+  },
+  {
+    "query": "MinIO S3 backup retention policy",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "backup"
+  },
+  {
+    "query": "launchd plist keepalive brain service",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "launchd"
+  },
+  {
+    "query": "what happened yesterday",
+    "collection": "all",
+    "expected_source": "experience",
+    "expected_content": ""
+  },
+  {
+    "query": "recent changes this week",
+    "collection": "all",
+    "expected_source": "experience",
+    "expected_content": ""
+  },
+  {
+    "query": "last month incidents",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "incident"
+  },
+  {
+    "query": "today's schedule",
+    "collection": "all",
+    "expected_source": "calendar",
+    "expected_content": ""
+  },
+  {
+    "query": "changes since April",
+    "collection": "all",
+    "expected_source": "experience",
+    "expected_content": ""
+  },
+  {
+    "query": "nonexistent service foobar xyz",
+    "collection": "all",
+    "expected_source": "",
+    "expected_content": ""
+  },
+  {
+    "query": "agent named bartholomew",
+    "collection": "all",
+    "expected_source": "",
+    "expected_content": ""
+  },
+  {
+    "query": "recipe for chocolate cake",
+    "collection": "all",
+    "expected_source": "",
+    "expected_content": ""
+  },
+  {
+    "query": "Chris infrastructure overview",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "docker"
+  },
+  {
+    "query": "how agents communicate",
+    "collection": "all",
+    "expected_source": "knowledge",
+    "expected_content": "agent"
+  },
+  {
+    "query": "docker services health",
+    "collection": "all",
+    "expected_source": "knowledge",
+    "expected_content": "docker"
+  },
+  {
+    "query": "recent Liz activity",
+    "collection": "all",
+    "expected_source": "experience",
+    "expected_content": "liz"
+  },
+  {
+    "query": "brain search pipeline architecture",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "search"
+  },
+  {
+    "query": "크리스의 홈랩 서비스",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "docker"
+  },
+  {
+    "query": "에이전트 설정 방법",
+    "collection": "all",
+    "expected_source": "knowledge",
+    "expected_content": "agent"
+  },
+  {
+    "query": "검색 파이프라인 구조",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "search"
+  },
+  {
+    "query": "메모리 시스템 작동 방식",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "memory"
+  },
+  {
+    "query": "Chris preferences dark mode or light mode",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "light"
+  },
+  {
+    "query": "what does Chris think about abstractions",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "abstract"
+  },
+  {
+    "query": "memory dedup strategy",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "dedup"
+  },
+  {
+    "query": "What are Chris's hard rules for agents?",
+    "expected_source": "canonical/chris/_identity.md",
+    "expected_content": "First tool call = action",
+    "collection": "all"
+  },
+  {
+    "query": "Chris 지금 active project 뭐 있어?",
+    "expected_source": "canonical/chris/_state.md",
+    "expected_content": "primary active sprint",
+    "collection": "all"
+  },
+  {
+    "query": "What stack does Chris prefer for frontend?",
+    "expected_source": "canonical/chris/_state.md",
+    "expected_content": "React + Vite + TypeScript",
+    "collection": "all"
+  },
+  {
+    "query": "What should agents do after gateway limits are obvious?",
+    "expected_source": "canonical/chris/after-the-gateway-limitation-was-clear-chris-expected-the-agent-to-keep.md",
+    "expected_content": "instead of pausing",
+    "collection": "all"
+  },
+  {
+    "query": "How should automation continue after a workaround is clear?",
+    "expected_source": "canonical/chris/after-the-gateway-limitation-was-clear-chris-expected-the-agent-to-keep.md",
+    "expected_content": "immediate continuation once the workaround is obvious",
+    "collection": "all"
+  },
+  {
+    "query": "What browser event confirmed OAuth login completion?",
+    "expected_source": "canonical/chris/browser-visit-chrome.md",
+    "expected_content": "Authentication successful",
+    "collection": "all"
+  },
+  {
+    "query": "Which localhost visit shows auth callback success?",
+    "expected_source": "canonical/chris/browser-visit-chrome.md",
+    "expected_content": "Localhost authentication callback confirms",
+    "collection": "all"
+  },
+  {
+    "query": "When did Chris start at GIT America?",
+    "expected_source": "canonical/chris/chris-cho-employment-at-git-america-inc.md",
+    "expected_content": "Start: August 2024",
+    "collection": "all"
+  },
+  {
+    "query": "Chris personal documents 어디 저장돼 있어?",
+    "expected_source": "canonical/chris/chris-cho-personal-documents-index.md",
+    "expected_content": "iCloud Drive Personal Documents",
+    "collection": "all"
+  },
+  {
+    "query": "Where is Chris's marriage certificate stored?",
+    "expected_source": "canonical/chris/chris-cho-personal-documents-index.md",
+    "expected_content": "Marriage Certificate: iCloud Drive",
+    "collection": "all"
+  },
+  {
+    "query": "What immigration form does Chris have on file?",
+    "expected_source": "canonical/chris/chris-cho-personal-documents-index.md",
+    "expected_content": "I-751 Petition to Remove Conditions",
+    "collection": "all"
+  },
+  {
+    "query": "What proof does Chris require before claiming submit worked?",
+    "expected_source": "canonical/chris/chris-corrected-a-false-positive-automation-claim-and-expects-authentica.md",
+    "expected_content": "submission success to be verified",
+    "collection": "all"
+  },
+  {
+    "query": "How should agents handle ambiguous page text in automation?",
+    "expected_source": "canonical/chris/chris-corrected-a-false-positive-automation-claim-and-expects-authentica.md",
+    "expected_content": "not inferred from ambiguous page text",
+    "collection": "all"
+  },
+  {
+    "query": "Chris는 어떤 시장 아이디어를 싫어해?",
+    "expected_source": "canonical/chris/chris-corrected-the-agent-for-anchoring-too-hard-on-obvious-already-dom.md",
+    "expected_content": "obvious, already-dominated markets",
+    "collection": "all"
+  },
+  {
+    "query": "What business opportunities does Chris think are worth pursuing?",
+    "expected_source": "canonical/chris/chris-corrected-the-agent-for-anchoring-too-hard-on-obvious-already-dom.md",
+    "expected_content": "narrow, expensive, underserved pains",
+    "collection": "all"
+  },
+  {
+    "query": "How does Chris want startup ideas framed?",
+    "expected_source": "canonical/chris/chris-corrected-the-agent-for-anchoring-too-hard-on-obvious-already-dom.md",
+    "expected_content": "not generic large categories",
+    "collection": "all"
+  },
+  {
+    "query": "What should idea analysis start from for Chris?",
+    "expected_source": "canonical/chris/chris-corrected-the-agent-for-over-indexing-on-his-existing-brain-stack.md",
+    "expected_content": "painful problems people will pay",
+    "collection": "all"
+  },
+  {
+    "query": "How should agents avoid overfitting to Chris's stack?",
+    "expected_source": "canonical/chris/chris-corrected-the-agent-for-over-indexing-on-his-existing-brain-stack.md",
+    "expected_content": "existing brain stack",
+    "collection": "all"
+  },
+  {
+    "query": "LeetCode 자동화할 때 Chris가 지키라는 게 뭐야?",
+    "expected_source": "canonical/chris/chris-corrected-the-agent-for-wrongly-changing-the-leetcode-language-awa.md",
+    "expected_content": "existing language and starter code path",
+    "collection": "all"
+  },
+  {
+    "query": "What language should agents preserve on LeetCode?",
+    "expected_source": "canonical/chris/chris-corrected-the-agent-for-wrongly-changing-the-leetcode-language-awa.md",
+    "expected_content": "away from Python3",
+    "collection": "all"
+  },
+  {
+    "query": "Ghost heartbeat는 어떤 URL로 체크해야 해?",
+    "expected_source": "canonical/chris/chris-corrected-the-ghost-heartbeat-target-to-use-the-real-production-ur.md",
+    "expected_content": "https://blog.chrischodev.com",
+    "collection": "all"
+  },
+  {
+    "query": "What production URL should Ghost monitoring use?",
+    "expected_source": "canonical/chris/chris-corrected-the-ghost-heartbeat-target-to-use-the-real-production-ur.md",
+    "expected_content": "use that production-facing address",
+    "collection": "all"
+  },
+  {
+    "query": "Should Ghost alerts use localhost or the live blog URL?",
+    "expected_source": "canonical/chris/chris-corrected-the-ghost-heartbeat-target-to-use-the-real-production-ur.md",
+    "expected_content": "instead of localhost",
+    "collection": "all"
+  },
+  {
+    "query": "게이트웨이 문제면 Chris는 뭘 먼저 하길 원해?",
+    "expected_source": "canonical/chris/chris-did-not-want-gateway-reinstall-attempts-from-the-active-assistant.md",
+    "expected_content": "attaching to Chrome/browser control first",
+    "collection": "all"
+  },
+  {
+    "query": "Who should handle gateway reinstalls if needed?",
+    "expected_source": "canonical/chris/chris-did-not-want-gateway-reinstall-attempts-from-the-active-assistant.md",
+    "expected_content": "handling gateway reinstalls manually",
+    "collection": "all"
+  },
+  {
+    "query": "What proof does Chris require before reporting success?",
+    "expected_source": "canonical/chris/chris-explicitly-rejected-claiming-success-without-proof-and-wants-actua.md",
+    "expected_content": "claiming success without proof",
+    "collection": "all"
+  },
+  {
+    "query": "What risk does Chris see in new business ideas?",
+    "expected_source": "canonical/chris/chris-identified-go-to-market-and-sales-as-his-main-concern-once-an-idea.md",
+    "expected_content": "distribution, not product construction",
+    "collection": "all"
+  },
+  {
+    "query": "How should agents frame non-trivial engineering work?",
+    "expected_source": "canonical/chris/chris-prefers-contract-first-execution-for-non-trivial-engineering-work.md",
+    "expected_content": "non-trivial engineering work",
+    "collection": "all"
+  },
+  {
+    "query": "Chris 요즘 제일 관심 있는 시장이 뭐야?",
+    "expected_source": "canonical/chris/chris-said-the-dog-space-is-currently-his-strongest-area-of-interest-th.md",
+    "expected_content": "strongest area of interest",
+    "collection": "all"
+  },
+  {
+    "query": "What product space is Chris most interested in now?",
+    "expected_source": "canonical/chris/chris-said-the-dog-space-is-currently-his-strongest-area-of-interest-th.md",
+    "expected_content": "dog space is currently",
+    "collection": "all"
+  },
+  {
+    "query": "Which market direction is Chris leaning toward lately?",
+    "expected_source": "canonical/chris/chris-said-the-dog-space-is-currently-his-strongest-area-of-interest-th.md",
+    "expected_content": "product and business idea exploration",
+    "collection": "all"
+  },
+  {
+    "query": "eval 5.3pt 떨어지면 Chris는 어떻게 판단해?",
+    "expected_source": "canonical/chris/chris-treated-the-5-3-point-hit-content-5-drop-as-a-likely-real-search-r.md",
+    "expected_content": "likely real search regression",
+    "collection": "all"
+  },
+  {
+    "query": "What should happen after a threshold-crossing eval drop?",
+    "expected_source": "canonical/chris/chris-treated-the-5-3-point-hit-content-5-drop-as-a-likely-real-search-r.md",
+    "expected_content": "taking threshold-crossing eval drops seriously",
+    "collection": "all"
+  },
+  {
+    "query": "How does Chris treat borderline search regression alerts?",
+    "expected_source": "canonical/chris/chris-treated-the-5-3-point-hit-content-5-drop-as-a-likely-real-search-r.md",
+    "expected_content": "rather than dismissing it as noise",
+    "collection": "all"
+  },
+  {
+    "query": "active 세션에서 gateway 재시작해도 돼?",
+    "expected_source": "canonical/chris/chris-understood-that-restarting-the-gateway-from-the-active-session-wou.md",
+    "expected_content": "would interrupt the agent",
+    "collection": "all"
+  },
+  {
+    "query": "What gateway action should be avoided in a live session?",
+    "expected_source": "canonical/chris/chris-understood-that-restarting-the-gateway-from-the-active-session-wou.md",
+    "expected_content": "avoided from within the live session",
+    "collection": "all"
+  },
+  {
+    "query": "Who should handle gateway restart or reinstall?",
+    "expected_source": "canonical/chris/chris-understood-that-restarting-the-gateway-from-the-active-session-wou.md",
+    "expected_content": "gateway restart/reinstall은 네가 할 때만",
+    "collection": "all"
+  },
+  {
+    "query": "Chris는 어떤 이메일만 오래 보관하길 원해?",
+    "expected_source": "canonical/chris/chris-uses-a-conservative-six-month-email-retention-rule-that-keeps-pers.md",
+    "expected_content": "conservative six-month email-retention rule",
+    "collection": "all"
+  },
+  {
+    "query": "What emails should Chris keep for six months?",
+    "expected_source": "canonical/chris/chris-uses-a-conservative-six-month-email-retention-rule-that-keeps-pers.md",
+    "expected_content": "financial, legal, medical, travel",
+    "collection": "all"
+  },
+  {
+    "query": "Which email categories count as noise for Chris?",
+    "expected_source": "canonical/chris/chris-uses-a-conservative-six-month-email-retention-rule-that-keeps-pers.md",
+    "expected_content": "marketing, and social noise",
+    "collection": "all"
+  },
+  {
+    "query": "브라우저 자동화 끝상태가 명확하면 Chris는 뭘 원해?",
+    "expected_source": "canonical/chris/chris-wanted-the-browser-automation-setup-fixed-immediately-once-the-des.md",
+    "expected_content": "fixed immediately once the desired end state was already clear",
+    "collection": "all"
+  },
+  {
+    "query": "What execution style does Chris want in browser troubleshooting?",
+    "expected_source": "canonical/chris/chris-wanted-the-browser-automation-setup-fixed-immediately-once-the-des.md",
+    "expected_content": "more tentative troubleshooting",
+    "collection": "all"
+  },
+  {
+    "query": "Chris는 브라우저 자동화 승인 과정을 어떻게 원해?",
+    "expected_source": "canonical/chris/chris-wants-browser-automation-set-up-so-he-does-not-have-to-approve-rou.md",
+    "expected_content": "approve routine actions every time",
+    "collection": "all"
+  },
+  {
+    "query": "What safety boundary does Chris want for Chrome automation?",
+    "expected_source": "canonical/chris/chris-wants-browser-automation-set-up-so-he-does-not-have-to-approve-rou.md",
+    "expected_content": "unsafe bypasses for Chrome's automation warning flow",
+    "collection": "all"
+  },
+  {
+    "query": "How much repeated approval does Chris want for browser tasks?",
+    "expected_source": "canonical/chris/chris-wants-browser-automation-set-up-so-he-does-not-have-to-approve-rou.md",
+    "expected_content": "does not have to approve",
+    "collection": "all"
+  },
+  {
+    "query": "What is OpenClaw mainly used for by Chris?",
+    "expected_source": "canonical/chris/claude-code-is-positioned-as-the-primary-interactive-coding-agent-with.md",
+    "expected_content": "autonomous multi-agent operations",
+    "collection": "all"
+  },
+  {
+    "query": "Chris는 UI polish 리뷰 결과를 어떻게 받길 원해?",
+    "expected_source": "canonical/chris/claude-code-session-in-counselor-os-sales-demo-2026-03-13.md",
+    "expected_content": "top 10 impact-ranked UI/UX issues",
+    "collection": "all"
+  },
+  {
+    "query": "What production-readiness deliverable did Chris ask for?",
+    "expected_source": "canonical/chris/claude-code-session-in-counselor-os-sales-demo-2026-03-13.md",
+    "expected_content": "prioritized polish plan",
+    "collection": "all"
+  },
+  {
+    "query": "How should redesign review be scoped for counselor-os-sales-demo?",
+    "expected_source": "canonical/chris/claude-code-session-in-counselor-os-sales-demo-2026-03-13.md",
+    "expected_content": "file-level recommendations focused on polish consistency",
+    "collection": "all"
+  },
+  {
+    "query": "OpenClaw exec security 설정에서 뭐가 위험하지?",
+    "expected_source": "canonical/chris/claude-code-session-in-home-2026-03-10.md",
+    "expected_content": "gives all agents unrestricted command execution",
+    "collection": "all"
+  },
+  {
+    "query": "Which agents should get tighter exec permissions?",
+    "expected_source": "canonical/chris/claude-code-session-in-home-2026-03-10.md",
+    "expected_content": "especially for research-only and personal-data agents",
+    "collection": "all"
+  },
+  {
+    "query": "What summary habit should CLAUDE.md reinforce?",
+    "expected_source": "canonical/chris/claude-md-profile-should-continue-to-reinforce-no-surface-level-duplicat.md",
+    "expected_content": "no-surface-level duplication",
+    "collection": "all"
+  },
+  {
+    "query": "How should agents avoid repetitive summaries for Chris?",
+    "expected_source": "canonical/chris/claude-md-profile-should-continue-to-reinforce-no-surface-level-duplicat.md",
+    "expected_content": "continue to reinforce",
+    "collection": "all"
+  },
+  {
+    "query": "What framework should guide non-trivial engineering work?",
+    "expected_source": "canonical/chris/contract-first-execution-is-required-for-non-trivial-engineering-includ.md",
+    "expected_content": "Contract-first execution is required",
+    "collection": "all"
+  },
+  {
+    "query": "What planning order does Chris want before coding?",
+    "expected_source": "canonical/chris/contract-first-execution-preference.md",
+    "expected_content": "Objective -> Acceptance -> Non-goals -> Constraints",
+    "collection": "all"
+  },
+  {
+    "query": "What standing working style does Chris prefer?",
+    "expected_source": "canonical/chris/contract-first-execution-preference.md",
+    "expected_content": "standing working style",
+    "collection": "all"
+  },
+  {
+    "query": "Chris는 contract 방식 계속 쓰길 원해?",
+    "expected_source": "canonical/chris/contract.md",
+    "expected_content": "계속 쓰는거고",
+    "collection": "all"
+  },
+  {
+    "query": "Chase에서 어떤 결제 관련 메일이 왔지?",
+    "expected_source": "canonical/chris/from-chase-no-reply-alerts-chase-com.md",
+    "expected_content": "Your credit card payment is scheduled",
+    "collection": "all"
+  },
+  {
+    "query": "What financial email confirms an upcoming card payment?",
+    "expected_source": "canonical/chris/from-chase-no-reply-alerts-chase-com.md",
+    "expected_content": "proof of an expected payment",
+    "collection": "all"
+  },
+  {
+    "query": "Which email is worth keeping as payment proof?",
+    "expected_source": "canonical/chris/from-chase-no-reply-alerts-chase-com.md",
+    "expected_content": "concrete financial event worth retaining",
+    "collection": "all"
+  },
+  {
+    "query": "TurboTax 결제 확인 메일 어디 있지?",
+    "expected_source": "canonical/chris/from-consumerservicing-intuit-com.md",
+    "expected_content": "Thank You for Your Payment",
+    "collection": "all"
+  },
+  {
+    "query": "What Intuit email confirms Chris made a payment?",
+    "expected_source": "canonical/chris/from-consumerservicing-intuit-com.md",
+    "expected_content": "TurboTax payment confirmation",
+    "collection": "all"
+  },
+  {
+    "query": "Which financial record should be kept from Intuit?",
+    "expected_source": "canonical/chris/from-consumerservicing-intuit-com.md",
+    "expected_content": "financial transaction record worth retaining",
+    "collection": "all"
+  },
+  {
+    "query": "MacPaw 구독 취소 메일 어디 있어?",
+    "expected_source": "canonical/chris/from-macpaw-inc-via-paddle-com-help-paddle-com.md",
+    "expected_content": "Your Subscription for MacPaw has been canceled",
+    "collection": "all"
+  },
+  {
+    "query": "What billing email confirms MacPaw cancellation?",
+    "expected_source": "canonical/chris/from-macpaw-inc-via-paddle-com-help-paddle-com.md",
+    "expected_content": "subscription and billing event",
+    "collection": "all"
+  },
+  {
+    "query": "Which Paddle email is worth keeping for records?",
+    "expected_source": "canonical/chris/from-macpaw-inc-via-paddle-com-help-paddle-com.md",
+    "expected_content": "concrete subscription and billing",
+    "collection": "all"
+  },
+  {
+    "query": "PlayStation Plus 해지 확인 메일 어디 있지?",
+    "expected_source": "canonical/chris/from-playstation-sony-txn-email03-playstation-com.md",
+    "expected_content": "We’re sorry to see you go",
+    "collection": "all"
+  },
+  {
+    "query": "What email confirms Chris canceled PlayStation Plus?",
+    "expected_source": "canonical/chris/from-playstation-sony-txn-email03-playstation-com.md",
+    "expected_content": "PlayStation Plus cancellation confirmation",
+    "collection": "all"
+  },
+  {
+    "query": "Which Sony email is worth keeping for service history?",
+    "expected_source": "canonical/chris/from-playstation-sony-txn-email03-playstation-com.md",
+    "expected_content": "billing and service-history reference",
+    "collection": "all"
+  },
+  {
+    "query": "Sony 패스키 활성화 메일 어디 있지?",
+    "expected_source": "canonical/chris/from-sony-sony-email03-account-sony-com.md",
+    "expected_content": "Passkey Is Now Activated",
+    "collection": "all"
+  },
+  {
+    "query": "What email confirms Chris enabled a Sony passkey?",
+    "expected_source": "canonical/chris/from-sony-sony-email03-account-sony-com.md",
+    "expected_content": "account-security change worth retaining",
+    "collection": "all"
+  },
+  {
+    "query": "Which Sony security event should be kept on record?",
+    "expected_source": "canonical/chris/from-sony-sony-email03-account-sony-com.md",
+    "expected_content": "Sony passkey activation confirmation",
+    "collection": "all"
+  },
+  {
+    "query": "Toyota 결제 반영 메일 어디 있지?",
+    "expected_source": "canonical/chris/from-toyota-financial-services-servicing-emails-toyotafinancial-com.md",
+    "expected_content": "Your Payment has Posted",
+    "collection": "all"
+  },
+  {
+    "query": "What email confirms a Toyota payment posted?",
+    "expected_source": "canonical/chris/from-toyota-financial-services-servicing-emails-toyotafinancial-com.md",
+    "expected_content": "financial transaction confirmation worth keeping",
+    "collection": "all"
+  },
+  {
+    "query": "Which Toyota Financial Services record should be retained?",
+    "expected_source": "canonical/chris/from-toyota-financial-services-servicing-emails-toyotafinancial-com.md",
+    "expected_content": "payment history",
+    "collection": "all"
+  },
+  {
+    "query": "Chris는 프론트엔드 스택으로 뭘 선호해?",
+    "expected_source": "canonical/chris/frontend-stack-preference.md",
+    "expected_content": "React + Vite + TypeScript",
+    "collection": "all"
+  },
+  {
+    "query": "What frontend stack does Chris usually prefer?",
+    "expected_source": "canonical/chris/frontend-stack-preference.md",
+    "expected_content": "consistently favors React + Vite + TypeScript",
+    "collection": "all"
+  },
+  {
+    "query": "Is Next.js acceptable for Chris?",
+    "expected_source": "canonical/chris/frontend-stack-preference.md",
+    "expected_content": "Next.js as an accepted alternative",
+    "collection": "all"
+  },
+  {
+    "query": "What approach does Chris want for automation quality work?",
+    "expected_source": "canonical/chris/openclaw-automation-quality-work-should-stay-practical-and-minimal-risk.md",
+    "expected_content": "verified behavior and documented best practices",
+    "collection": "all"
+  },
+  {
+    "query": "What should automation improvements avoid in OpenClaw?",
+    "expected_source": "canonical/chris/openclaw-automation-quality-work-should-stay-practical-and-minimal-risk.md",
+    "expected_content": "rather than experimental rewrites",
+    "collection": "all"
+  },
+  {
+    "query": "채널이 running disconnected면 Chris는 어떻게 봐?",
+    "expected_source": "canonical/chris/openclaw-ellie-session-2026-02-28.md",
+    "expected_content": "real channel-health problem",
+    "collection": "all"
+  },
+  {
+    "query": "What channel state counts as a real incident?",
+    "expected_source": "canonical/chris/openclaw-ellie-session-2026-02-28.md",
+    "expected_content": "running, disconnected",
+    "collection": "all"
+  },
+  {
+    "query": "Should OpenClaw image generation use API billing?",
+    "expected_source": "canonical/chris/openclaw-ellie-session-2026-03-01.md",
+    "expected_content": "API-billed paths",
+    "collection": "all"
+  },
+  {
+    "query": "Lobster 설치 성공은 뭘로 판단해야 해?",
+    "expected_source": "canonical/chris/openclaw-ellie-session-2026-03-03.md",
+    "expected_content": "plugin enablement and gateway reload",
+    "collection": "all"
+  },
+  {
+    "query": "Is @openclaw/lobster a CLI or plugin package?",
+    "expected_source": "canonical/chris/openclaw-ellie-session-2026-03-03.md",
+    "expected_content": "plugin package, not a standalone CLI binary",
+    "collection": "all"
+  },
+  {
+    "query": "What operational fact mattered in the Lobster check?",
+    "expected_source": "canonical/chris/openclaw-ellie-session-2026-03-03.md",
+    "expected_content": "success should be judged",
+    "collection": "all"
+  },
+  {
+    "query": "sub-agent는 언제 spawn해야 해?",
+    "expected_source": "canonical/chris/openclaw-ellie-session-2026-03-04.md",
+    "expected_content": "runtime='subagent' for general delegation",
+    "collection": "all"
+  },
+  {
+    "query": "When should agents choose run versus session mode?",
+    "expected_source": "canonical/chris/openclaw-ellie-session-2026-03-04.md",
+    "expected_content": "mode:'run' for quick one-off tasks",
+    "collection": "all"
+  },
+  {
+    "query": "heartbeat 체크할 때 Chris 규칙이 뭐야?",
+    "expected_source": "canonical/chris/openclaw-ellie-session-2026-03-06.md",
+    "expected_content": "read `HEARTBEAT.md` directly",
+    "collection": "all"
+  },
+  {
+    "query": "When should agents reply HEARTBEAT_OK?",
+    "expected_source": "canonical/chris/openclaw-ellie-session-2026-03-06.md",
+    "expected_content": "only reply `HEARTBEAT_OK`",
+    "collection": "all"
+  },
+  {
+    "query": "How should heartbeat checks avoid stale context?",
+    "expected_source": "canonical/chris/openclaw-ellie-session-2026-03-06.md",
+    "expected_content": "avoid inferring or reusing prior-chat context",
+    "collection": "all"
+  },
+  {
+    "query": "scheduled maintenance 답변은 Chris가 어떻게 원해?",
+    "expected_source": "canonical/chris/openclaw-ellie-session-2026-03-10.md",
+    "expected_content": "reported with only the final result",
+    "collection": "all"
+  },
+  {
+    "query": "Chris는 Telegram에서 Claude를 어떻게 쓰고 싶어해?",
+    "expected_source": "canonical/chris/openclaw-ellie-session-2026-04-10.md",
+    "expected_content": "without going through OpenClaw",
+    "collection": "all"
+  },
+  {
+    "query": "What direct path was Chris interested in for Claude?",
+    "expected_source": "canonical/chris/openclaw-ellie-session-2026-04-10.md",
+    "expected_content": "direct bot or bridge path",
+    "collection": "all"
+  },
+  {
+    "query": "Does Chris always want Claude routed through OpenClaw?",
+    "expected_source": "canonical/chris/openclaw-ellie-session-2026-04-10.md",
+    "expected_content": "rather than always routing through his existing agent stack",
+    "collection": "all"
+  },
+  {
+    "query": "What kind of answer does Chris want about Claude Code Channels?",
+    "expected_source": "canonical/chris/openclaw-ellie-session-2026-04-11.md",
+    "expected_content": "web-backed, exact answer",
+    "collection": "all"
+  },
+  {
+    "query": "When do Claude Code Channels actually work?",
+    "expected_source": "canonical/chris/openclaw-ellie-session-2026-04-11.md",
+    "expected_content": "only work while",
+    "collection": "all"
+  },
+  {
+    "query": "Chris는 Documents/shared hang를 어떻게 진단하길 원해?",
+    "expected_source": "canonical/chris/openclaw-ellie-session.md",
+    "expected_content": "host-path level",
+    "collection": "all"
+  },
+  {
+    "query": "What lifecycle does Chris want for sensitive keys?",
+    "expected_source": "canonical/chris/openclaw-jenna-session-2026-04-01.md",
+    "expected_content": "rotatable lifecycle management",
+    "collection": "all"
+  },
+  {
+    "query": "Chris가 중요라고 하면 뭐가 바로 되어야 해?",
+    "expected_source": "canonical/chris/openclaw-jenna-session-2026-04-08.md",
+    "expected_content": "trigger immediate save of the core summary",
+    "collection": "all"
+  },
+  {
+    "query": "What shorthand capture rule did Chris accept?",
+    "expected_source": "canonical/chris/openclaw-jenna-session-2026-04-08.md",
+    "expected_content": "lightweight manual capture",
+    "collection": "all"
+  },
+  {
+    "query": "How can Chris quickly save a key summary?",
+    "expected_source": "canonical/chris/openclaw-jenna-session-2026-04-08.md",
+    "expected_content": "saying 'important'",
+    "collection": "all"
+  },
+  {
+    "query": "When did Chris start living in Irvine?",
+    "expected_source": "canonical/chris/openclaw-jenna-session-2026-04-10.md",
+    "expected_content": "Irvine residency since August 2024",
+    "collection": "all"
+  },
+  {
+    "query": "Chris는 어떤 이메일을 6개월 보관해?",
+    "expected_source": "canonical/chris/openclaw-jenna-session.md",
+    "expected_content": "six-month email-retention rule",
+    "collection": "all"
+  },
+  {
+    "query": "What email noise does Chris filter out?",
+    "expected_source": "canonical/chris/openclaw-jenna-session.md",
+    "expected_content": "automation and marketing noise",
+    "collection": "all"
+  },
+  {
+    "query": "작업 중간 진행상황 Chris한테 어떻게 보내야 해?",
+    "expected_source": "canonical/chris/openclaw-liz-session-2026-02-28.md",
+    "expected_content": "ongoing intermediate output",
+    "collection": "all"
+  },
+  {
+    "query": "Why does Chris want progress updates while work runs?",
+    "expected_source": "canonical/chris/openclaw-liz-session-2026-02-28.md",
+    "expected_content": "monitor whether things are actually moving",
+    "collection": "all"
+  },
+  {
+    "query": "What was the real cause instead of session ID mismatch?",
+    "expected_source": "canonical/chris/openclaw-liz-session-2026-03-03.md",
+    "expected_content": "not mismatched session IDs",
+    "collection": "all"
+  },
+  {
+    "query": "What rendering faults were found in the cron calendar UI?",
+    "expected_source": "canonical/chris/openclaw-liz-session-2026-03-05.md",
+    "expected_content": "cron pills mixing with all-day events",
+    "collection": "all"
+  },
+  {
+    "query": "Agent Arena 상태 구분을 Chris는 어떻게 원해?",
+    "expected_source": "canonical/chris/openclaw-liz-session-2026-03-06.md",
+    "expected_content": "visual distinction between `working`, `idle`, `ready`, and `blocked`",
+    "collection": "all"
+  },
+  {
+    "query": "What UI refinement does Chris want for agent avatars?",
+    "expected_source": "canonical/chris/openclaw-liz-session-2026-03-06.md",
+    "expected_content": "avatars feel more characterful",
+    "collection": "all"
+  },
+  {
+    "query": "Audi 월 납부액 최신값 출처가 뭐야?",
+    "expected_source": "canonical/chris/openclaw-market-session-2026-04-02.md",
+    "expected_content": "627불",
+    "collection": "all"
+  },
+  {
+    "query": "Where did the authoritative Audi payment number come from?",
+    "expected_source": "canonical/chris/openclaw-market-session-2026-04-02.md",
+    "expected_content": "latest direct Telegram chat message",
+    "collection": "all"
+  },
+  {
+    "query": "Was the Audi monthly payment sourced from RAG or live chat?",
+    "expected_source": "canonical/chris/openclaw-market-session-2026-04-02.md",
+    "expected_content": "not from email, notes, or RAG",
+    "collection": "all"
+  },
+  {
+    "query": "How should non-trivial changes be handled when evidence is weak?",
+    "expected_source": "canonical/chris/openclaw-sage-session.md",
+    "expected_content": "contract-first plan and approval",
+    "collection": "all"
+  },
+  {
+    "query": "Chris는 프론트엔드 기본 스택으로 뭘 써?",
+    "expected_source": "canonical/chris/preferred-frontend-stack.md",
+    "expected_content": "React + Vite + TypeScript",
+    "collection": "all"
+  },
+  {
+    "query": "When does Chris choose Next.js instead?",
+    "expected_source": "canonical/chris/preferred-frontend-stack.md",
+    "expected_content": "where server features and app-router patterns matter",
+    "collection": "all"
+  },
+  {
+    "query": "What frontend stack shows up across Chris's recent projects?",
+    "expected_source": "canonical/chris/preferred-frontend-stack.md",
+    "expected_content": "repeated implementation choices across recent projects",
+    "collection": "all"
+  },
+  {
+    "query": "What test event was recorded on April 8?",
+    "expected_source": "canonical/chris/received-at-2026-04-08t02-49-25-375909-00-00-event-test-e.md",
+    "expected_content": "\"event\": \"test\"",
+    "collection": "all"
+  },
+  {
+    "query": "2026-04-08에 기록된 test 이벤트 뭐야?",
+    "expected_source": "canonical/chris/received-at-2026-04-08t02-49-25-375909-00-00-event-test-e.md",
+    "expected_content": "\"_received_at\": \"2026-04-08T02:49:25.375909+00:00\"",
+    "collection": "all"
+  },
+  {
+    "query": "Which canonical note stores a raw test event?",
+    "expected_source": "canonical/chris/received-at-2026-04-08t02-49-25-375909-00-00-event-test-e.md",
+    "expected_content": "\"extra\": {}",
+    "collection": "all"
+  },
+  {
+    "query": "What audit event was recorded on April 8?",
+    "expected_source": "canonical/chris/received-at-2026-04-08t03-31-37-452116-00-00-event-audit.md",
+    "expected_content": "\"event\": \"audit\"",
+    "collection": "all"
+  },
+  {
+    "query": "2026-04-08에 기록된 audit 이벤트 뭐야?",
+    "expected_source": "canonical/chris/received-at-2026-04-08t03-31-37-452116-00-00-event-audit.md",
+    "expected_content": "\"_received_at\": \"2026-04-08T03:31:37.452116+00:00\"",
+    "collection": "all"
+  },
+  {
+    "query": "Which canonical note stores the raw audit event?",
+    "expected_source": "canonical/chris/received-at-2026-04-08t03-31-37-452116-00-00-event-audit.md",
+    "expected_content": "\"extra\": {}",
+    "collection": "all"
+  },
+  {
+    "query": "What shell commands ran around 05:25 UTC?",
+    "expected_source": "canonical/chris/shell-session-2026-04-08-05-25-05-26-utc-2-commands.md",
+    "expected_content": "$ claude",
+    "collection": "all"
+  },
+  {
+    "query": "2026-04-08 05:25 UTC쯤 어떤 shell session 있었어?",
+    "expected_source": "canonical/chris/shell-session-2026-04-08-05-25-05-26-utc-2-commands.md",
+    "expected_content": "Shell session 2026-04-08 05:25–05:26 UTC",
+    "collection": "all"
+  },
+  {
+    "query": "Which canonical note records two claude commands?",
+    "expected_source": "canonical/chris/shell-session-2026-04-08-05-25-05-26-utc-2-commands.md",
+    "expected_content": "2 commands",
+    "collection": "all"
+  },
+  {
+    "query": "What shell session had three claude commands?",
+    "expected_source": "canonical/chris/shell-session-2026-04-08-09-15-09-15-utc-3-commands.md",
+    "expected_content": "$ claude",
+    "collection": "all"
+  },
+  {
+    "query": "2026-04-08 09:15 UTC에 어떤 shell 기록이 있어?",
+    "expected_source": "canonical/chris/shell-session-2026-04-08-09-15-09-15-utc-3-commands.md",
+    "expected_content": "Shell session 2026-04-08 09:15–09:15 UTC",
+    "collection": "all"
+  },
+  {
+    "query": "What did Chris decide about Brain and OpenClaw that week?",
+    "expected_source": "canonical/chris/weekly/2026-W15.md",
+    "expected_content": "canonical memory as the current-truth governance layer",
+    "collection": "all"
+  },
+  {
+    "query": "Which project did Chris archive in W15?",
+    "expected_source": "canonical/chris/weekly/2026-W15.md",
+    "expected_content": "Archive MCC as of 2026-04-11",
+    "collection": "all"
+  },
+  {
+    "query": "What diagnosis did Chris care about for Liz reliability?",
+    "expected_source": "canonical/decisions/a-key-diagnosis-chris-cared-about-was-that-liz-s-stop-after-one-step-beh.md",
+    "expected_content": "real model or compatibility failure",
+    "collection": "all"
+  },
+  {
+    "query": "Why wasn't Liz's failure just a config issue?",
+    "expected_source": "canonical/decisions/a-key-diagnosis-chris-cared-about-was-that-liz-s-stop-after-one-step-beh.md",
+    "expected_content": "rather than just a simple config issue",
+    "collection": "all"
+  },
+  {
+    "query": "Tesla incident 이후 Chris가 승인한 hardening 뭐야?",
+    "expected_source": "canonical/decisions/after-the-tesla-incident-chris-approved-a-postmortem-hardening-plan-wit.md",
+    "expected_content": "postmortem hardening plan",
+    "collection": "all"
+  },
+  {
+    "query": "What controls did Chris approve after the Tesla incident?",
+    "expected_source": "canonical/decisions/after-the-tesla-incident-chris-approved-a-postmortem-hardening-plan-wit.md",
+    "expected_content": "snapshot, canary, auto-rollback, and alerting",
+    "collection": "all"
+  },
+  {
+    "query": "How should config apply be hardened after the incident?",
+    "expected_source": "canonical/decisions/after-the-tesla-incident-chris-approved-a-postmortem-hardening-plan-wit.md",
+    "expected_content": "transactional config apply",
+    "collection": "all"
+  },
+  {
+    "query": "Wave 1 조합이 왜 파괴적이었어?",
+    "expected_source": "canonical/decisions/author-chris-cho-body-wave-1-was-destructive-in-combination-b.md",
+    "expected_content": "destructive in combination",
+    "collection": "all"
+  },
+  {
+    "query": "What structural fixes did Chris outline for Wave 1?",
+    "expected_source": "canonical/decisions/author-chris-cho-body-wave-1-was-destructive-in-combination-b.md",
+    "expected_content": "Three structural fixes",
+    "collection": "all"
+  },
+  {
+    "query": "How should spreading activation be ordered in the pipeline?",
+    "expected_source": "canonical/decisions/author-chris-cho-body-wave-1-was-destructive-in-combination-b.md",
+    "expected_content": "AFTER cross-encoder rerank",
+    "collection": "all"
+  },
+  {
+    "query": "왜 canonical memory layer를 쓰는 거야?",
+    "expected_source": "canonical/decisions/canonical-memory-layer.md",
+    "expected_content": "current truth and governance layer",
+    "collection": "all"
+  },
+  {
+    "query": "OpenClaw에 native Ralph Loop 있어?",
+    "expected_source": "canonical/decisions/chris-accepted-the-correction-that-openclaw-2026-3-8-does-not-have-a-nat.md",
+    "expected_content": "does not have a native Ralph Loop",
+    "collection": "all"
+  },
+  {
+    "query": "How should long-running autonomy work in OpenClaw?",
+    "expected_source": "canonical/decisions/chris-accepted-the-correction-that-openclaw-2026-3-8-does-not-have-a-nat.md",
+    "expected_content": "rely on heartbeat, cron",
+    "collection": "all"
+  },
+  {
+    "query": "What should agents assume instead of built-in Ralph Loop support?",
+    "expected_source": "canonical/decisions/chris-accepted-the-correction-that-openclaw-2026-3-8-does-not-have-a-nat.md",
+    "expected_content": "explicitly built external loop",
+    "collection": "all"
+  },
+  {
+    "query": "Chris는 Market 에이전트를 실제로 어떻게 써?",
+    "expected_source": "canonical/decisions/chris-actively-uses-market-for-brainstorming-rather-than-keeping-it-mere.md",
+    "expected_content": "actively uses Market for brainstorming",
+    "collection": "all"
+  },
+  {
+    "query": "Is Market just configured or actively used by Chris?",
+    "expected_source": "canonical/decisions/chris-actively-uses-market-for-brainstorming-rather-than-keeping-it-mere.md",
+    "expected_content": "merely configured and idle",
+    "collection": "all"
+  },
+  {
+    "query": "What role does Market play in Chris's workflow?",
+    "expected_source": "canonical/decisions/chris-actively-uses-market-for-brainstorming-rather-than-keeping-it-mere.md",
+    "expected_content": "durable workflow fact",
+    "collection": "all"
+  },
+  {
+    "query": "ACP 응답 빠질 때 sessions_history만 믿으면 안 되는 이유가 뭐야?",
+    "expected_source": "canonical/decisions/chris-corrected-the-acp-operating-rule-so-sessions-history-is-no-longe.md",
+    "expected_content": "no longer treated as the single source of truth",
+    "collection": "all"
+  },
+  {
+    "query": "What fallback chain should agents use for ACP gaps?",
+    "expected_source": "canonical/decisions/chris-corrected-the-acp-operating-rule-so-sessions-history-is-no-longe.md",
+    "expected_content": "history check, announce wait, and gateway-log verification",
+    "collection": "all"
+  },
+  {
+    "query": "How should ACP completion be verified beyond sessions_history?",
+    "expected_source": "canonical/decisions/chris-corrected-the-acp-operating-rule-so-sessions-history-is-no-longe.md",
+    "expected_content": "durable diagnostic correction",
+    "collection": "all"
+  },
+  {
+    "query": "cron 작업은 Chris 기준으로 어떻게 답해야 해?",
+    "expected_source": "canonical/decisions/chris-corrected-the-agent-for-acknowledging-a-cron-task-without-finishin.md",
+    "expected_content": "answered only with the final summary",
+    "collection": "all"
+  },
+  {
+    "query": "What did Chris correct about unfinished cron acknowledgements?",
+    "expected_source": "canonical/decisions/chris-corrected-the-agent-for-acknowledging-a-cron-task-without-finishin.md",
+    "expected_content": "cron task without finishing it",
+    "collection": "all"
+  },
+  {
+    "query": "How should cron work be executed for Chris?",
+    "expected_source": "canonical/decisions/chris-corrected-the-agent-for-acknowledging-a-cron-task-without-finishin.md",
+    "expected_content": "executed end-to-end with tools",
+    "collection": "all"
+  },
+  {
+    "query": "What reporting style does Chris require for cron tasks?",
+    "expected_source": "canonical/decisions/chris-corrected-the-agent-for-giving-acknowledgement-only-cron-replies-a.md",
+    "expected_content": "acknowledgement-only cron replies",
+    "collection": "all"
+  },
+  {
+    "query": "How should agents avoid status chatter on cron work?",
+    "expected_source": "canonical/decisions/chris-corrected-the-agent-for-giving-acknowledgement-only-cron-replies-a.md",
+    "expected_content": "instead of status chatter like “on it.”",
+    "collection": "all"
+  },
+  {
+    "query": "Claude Code와 assistant 역할을 Chris는 어떻게 나눠?",
+    "expected_source": "canonical/decisions/chris-decided-claude-code-should-be-used-primarily-as-the-planning-engin.md",
+    "expected_content": "planning engine",
+    "collection": "all"
+  },
+  {
+    "query": "What should execute automatically without repeated approvals?",
+    "expected_source": "canonical/decisions/chris-decided-claude-code-should-be-used-primarily-as-the-planning-engin.md",
+    "expected_content": "without pausing for repeated approvals",
+    "collection": "all"
+  },
+  {
+    "query": "Chris는 Claude Code를 주로 뭐로 쓰길 원해?",
+    "expected_source": "canonical/decisions/chris-decided-claude-code-should-be-used-primarily-as-the-planning-engin.md",
+    "expected_content": "used primarily as the planning engine",
+    "collection": "all"
+  },
+  {
+    "query": "7시 아침 브리핑은 Chris 기준으로 어떻게 보내야 해?",
+    "expected_source": "canonical/decisions/chris-decided-the-7-00-am-morning-briefing-should-send-one-concise-combi.md",
+    "expected_content": "one concise combined Telegram briefing",
+    "collection": "all"
+  },
+  {
+    "query": "What should happen if morning briefing scripts fail?",
+    "expected_source": "canonical/decisions/chris-decided-the-7-00-am-morning-briefing-should-send-one-concise-combi.md",
+    "expected_content": "failure alerts instead of success spam",
+    "collection": "all"
+  },
+  {
+    "query": "What reporting style did Chris choose for 7:00 AM briefings?",
+    "expected_source": "canonical/decisions/chris-decided-the-7-00-am-morning-briefing-should-send-one-concise-combi.md",
+    "expected_content": "7:00 AM morning briefing",
+    "collection": "all"
+  },
+  {
+    "query": "Chris는 브라우저 자동화용 크롬을 어떻게 분리하길 원해?",
+    "expected_source": "canonical/decisions/chris-decided-to-create-a-dedicated-automation-chrome-profile-instead-of.md",
+    "expected_content": "dedicated automation Chrome profile",
+    "collection": "all"
+  },
+  {
+    "query": "What profile setup did Chris choose for browser automation?",
+    "expected_source": "canonical/decisions/chris-decided-to-create-a-dedicated-automation-chrome-profile-instead-of.md",
+    "expected_content": "instead of relying on his main everyday profile",
+    "collection": "all"
+  },
+  {
+    "query": "How should Chrome be set up for future automation work?",
+    "expected_source": "canonical/decisions/chris-decided-to-create-a-dedicated-automation-chrome-profile-instead-of.md",
+    "expected_content": "durable workflow decision for future browser automation",
+    "collection": "all"
+  },
+  {
+    "query": "Chris는 웹 브라우징을 어떤 툴 경로로 하길 원해?",
+    "expected_source": "canonical/decisions/chris-decided-to-install-gstack-under-claude-skills-gstack-and-to-m.md",
+    "expected_content": "gstack `/browse`",
+    "collection": "all"
+  },
+  {
+    "query": "Where did Chris decide to install gstack?",
+    "expected_source": "canonical/decisions/chris-decided-to-install-gstack-under-claude-skills-gstack-and-to-m.md",
+    "expected_content": "`~/.claude/skills/gstack`",
+    "collection": "all"
+  },
+  {
+    "query": "What browsing tools did Chris want replaced in CLAUDE.md?",
+    "expected_source": "canonical/decisions/chris-decided-to-install-gstack-under-claude-skills-gstack-and-to-m.md",
+    "expected_content": "`mcp__claude-in-chrome__*` tools",
+    "collection": "all"
+  },
+  {
+    "query": "Chris는 MCC를 지금도 하고 있어?",
+    "expected_source": "canonical/decisions/chris-decided-to-stop-working-on-mcc-this-is-a-direct-project-priority.md",
+    "expected_content": "stop working on MCC",
+    "collection": "all"
+  },
+  {
+    "query": "What project priority change did Chris make about MCC?",
+    "expected_source": "canonical/decisions/chris-decided-to-stop-working-on-mcc-this-is-a-direct-project-priority.md",
+    "expected_content": "direct project-priority change",
+    "collection": "all"
+  },
+  {
+    "query": "MCC 중단 이후 Chris의 남은 축은 뭐야?",
+    "expected_source": "canonical/decisions/chris-decided-to-stop-working-on-mcc-this-is-a-direct-project-priority.md",
+    "expected_content": "OpenClaw",
+    "collection": "all"
+  },
+  {
+    "query": "주간 reboot 워크플로우를 Chris는 어떻게 정했어?",
+    "expected_source": "canonical/decisions/chris-defined-a-structured-weekly-reboot-workflow-with-a-pre-reboot-tele.md",
+    "expected_content": "pre-reboot Telegram warning",
+    "collection": "all"
+  },
+  {
+    "query": "What script does Chris use for weekly reboot?",
+    "expected_source": "canonical/decisions/chris-defined-a-structured-weekly-reboot-workflow-with-a-pre-reboot-tele.md",
+    "expected_content": "weekly_reboot.sh",
+    "collection": "all"
+  },
+  {
+    "query": "What success marker confirms the reboot workflow ran?",
+    "expected_source": "canonical/decisions/chris-defined-a-structured-weekly-reboot-workflow-with-a-pre-reboot-tele.md",
+    "expected_content": "REBOOT_TRIGGERED",
+    "collection": "all"
+  },
+  {
+    "query": "ACP 변경 완료는 Chris가 뭘 확인해야 인정해?",
+    "expected_source": "canonical/decisions/chris-does-not-consider-acp-changes-done-until-they-pass-a-smoke-test-an.md",
+    "expected_content": "pass a smoke test",
+    "collection": "all"
+  },
+  {
+    "query": "What proof does Chris require for ACP changes?",
+    "expected_source": "canonical/decisions/chris-does-not-consider-acp-changes-done-until-they-pass-a-smoke-test-an.md",
+    "expected_content": "verified in gateway logs",
+    "collection": "all"
+  },
+  {
+    "query": "When are ACP changes actually done for Chris?",
+    "expected_source": "canonical/decisions/chris-does-not-consider-acp-changes-done-until-they-pass-a-smoke-test-an.md",
+    "expected_content": "proof-based validation",
+    "collection": "all"
+  },
+  {
+    "query": "모델이 등록돼도 picker에 안 보이면 Chris는 어떻게 판단해?",
+    "expected_source": "canonical/decisions/chris-established-a-practical-diagnostic-rule-that-model-registration-al.md",
+    "expected_content": "model registration alone is not enough",
+    "collection": "all"
+  },
+  {
+    "query": "What healthcheck standard did Chris accept for brain ops?",
+    "expected_source": "canonical/decisions/chris-established-a-practical-diagnostic-rule-that-model-registration-al.md",
+    "expected_content": "in-container `/api/healthz` plus external route checks",
+    "collection": "all"
+  },
+  {
+    "query": "When is a model not truly usable despite being added?",
+    "expected_source": "canonical/decisions/chris-established-a-practical-diagnostic-rule-that-model-registration-al.md",
+    "expected_content": "picker/session allowlist",
+    "collection": "all"
+  },
+  {
+    "query": "What Telegram session should receive Claude ACP results?",
+    "expected_source": "canonical/decisions/chris-established-a-routing-policy-that-claude-acp-results-should-be-rel.md",
+    "expected_content": "Liz Telegram direct session",
+    "collection": "all"
+  },
+  {
+    "query": "How should agent:nested responses be formatted?",
+    "expected_source": "canonical/decisions/chris-established-a-routing-policy-that-claude-acp-results-should-be-rel.md",
+    "expected_content": "summary, status, and next action",
+    "collection": "all"
+  },
+  {
+    "query": "Telegram에서 Claude ACP는 어떤 operating model로 돌려야 해?",
+    "expected_source": "canonical/decisions/chris-established-a-telegram-claude-acp-operating-model-that-avoids-open.md",
+    "expected_content": "avoids OpenClaw `mode:\"session\"`",
+    "collection": "all"
+  },
+  {
+    "query": "What internal session rule did Chris set for Telegram ACP?",
+    "expected_source": "canonical/decisions/chris-established-a-telegram-claude-acp-operating-model-that-avoids-open.md",
+    "expected_content": "keeps only one internal session",
+    "collection": "all"
+  },
+  {
+    "query": "How long before Telegram Claude ACP should idle out?",
+    "expected_source": "canonical/decisions/chris-established-a-telegram-claude-acp-operating-model-that-avoids-open.md",
+    "expected_content": "idles out after 5 minutes",
+    "collection": "all"
+  },
+  {
+    "query": "Playwright로 연 브라우저는 작업 끝나면 어떻게 해야 해?",
+    "expected_source": "canonical/decisions/chris-expects-browser-instances-opened-for-playwright-or-browser-based-v.md",
+    "expected_content": "closed after the work is done",
+    "collection": "all"
+  },
+  {
+    "query": "What should happen to verification browsers after use?",
+    "expected_source": "canonical/decisions/chris-expects-browser-instances-opened-for-playwright-or-browser-based-v.md",
+    "expected_content": "browser-based verification",
+    "collection": "all"
+  },
+  {
+    "query": "How does Chris want Playwright browser instances handled?",
+    "expected_source": "canonical/decisions/chris-expects-browser-instances-opened-for-playwright-or-browser-based-v.md",
+    "expected_content": "durable operational preference",
+    "collection": "all"
+  },
+  {
+    "query": "What docs should track new MCP tools?",
+    "expected_source": "canonical/decisions/chris-expects-claude-md-and-each-agent-s-agents-md-to-be-updated-wheneve.md",
+    "expected_content": "whenever new brain capabilities or MCP tools are added",
+    "collection": "all"
+  },
+  {
+    "query": "How does Chris want docs kept aligned with the live system?",
+    "expected_source": "canonical/decisions/chris-expects-claude-md-and-each-agent-s-agents-md-to-be-updated-wheneve.md",
+    "expected_content": "documentation and system-maintenance preference",
+    "collection": "all"
+  },
+  {
+    "query": "Chris는 변경 전후 검증을 어떻게 하길 원해?",
+    "expected_source": "canonical/decisions/chris-expects-explicit-verification-steps-before-and-after-changes-rathe.md",
+    "expected_content": "explicit verification steps before and after changes",
+    "collection": "all"
+  },
+  {
+    "query": "What validation style does Chris prefer over implicit completion claims?",
+    "expected_source": "canonical/decisions/chris-expects-explicit-verification-steps-before-and-after-changes-rathe.md",
+    "expected_content": "implicit claims that work is complete",
+    "collection": "all"
+  },
+  {
+    "query": "How should stalled ACP or Brain work be reported?",
+    "expected_source": "canonical/decisions/chris-expects-quick-one-line-status-updates-when-an-operation-appears-st.md",
+    "expected_content": "durable responsiveness preference",
+    "collection": "all"
+  },
+  {
+    "query": "What assignee behavior does Chris expect from task systems?",
+    "expected_source": "canonical/decisions/chris-expects-task-management-actions-to-support-correct-assignee-change.md",
+    "expected_content": "correct assignee changes",
+    "collection": "all"
+  },
+  {
+    "query": "How should items move after completion in Chris's task flow?",
+    "expected_source": "canonical/decisions/chris-expects-task-management-actions-to-support-correct-assignee-change.md",
+    "expected_content": "from in progress to done",
+    "collection": "all"
+  },
+  {
+    "query": "Chris는 /tasks 추가 후 시스템이 뭘 해주길 원해?",
+    "expected_source": "canonical/decisions/chris-expects-tasks-additions-to-be-automatically-tracked-and-progres.md",
+    "expected_content": "automatically tracked and progressed",
+    "collection": "all"
+  },
+  {
+    "query": "What follow-up does Chris not want for task items?",
+    "expected_source": "canonical/decisions/chris-expects-tasks-additions-to-be-automatically-tracked-and-progres.md",
+    "expected_content": "without manual follow-up",
+    "collection": "all"
+  },
+  {
+    "query": "How autonomous should task tracking be for Chris?",
+    "expected_source": "canonical/decisions/chris-expects-tasks-additions-to-be-automatically-tracked-and-progres.md",
+    "expected_content": "durable preference for autonomous task tracking",
+    "collection": "all"
+  },
+  {
+    "query": "How should agents handle tasks that can use subtasks?",
+    "expected_source": "canonical/decisions/chris-expects-tasks-to-be-fully-executed-in-one-final-response-and-rejec.md",
+    "expected_content": "tools and parallel subtasks used as needed",
+    "collection": "all"
+  },
+  {
+    "query": "Telegram 명령이 사라지면 Chris는 바로 눈치채는 게 뭐야?",
+    "expected_source": "canonical/decisions/chris-expects-telegram-command-availability-to-remain-stable-and-notices.md",
+    "expected_content": "only `/task` and `/tasks` remain",
+    "collection": "all"
+  },
+  {
+    "query": "What command-surface behavior does Chris expect on Telegram?",
+    "expected_source": "canonical/decisions/chris-expects-telegram-command-availability-to-remain-stable-and-notices.md",
+    "expected_content": "command availability to remain stable",
+    "collection": "all"
+  },
+  {
+    "query": "How does Chris react when Telegram-related commands disappear?",
+    "expected_source": "canonical/decisions/chris-expects-telegram-command-availability-to-remain-stable-and-notices.md",
+    "expected_content": "durable preference for command-surface reliability",
+    "collection": "all"
+  },
+  {
+    "query": "Telegram에서 Claude 답장이 어디로 가야 정상이지?",
+    "expected_source": "canonical/decisions/chris-expects-telegram-routed-claude-replies-to-land-in-the-correct-sess.md",
+    "expected_content": "land in the correct session",
+    "collection": "all"
+  },
+  {
+    "query": "What routing issue does Chris treat as a regression?",
+    "expected_source": "canonical/decisions/chris-expects-telegram-routed-claude-replies-to-land-in-the-correct-sess.md",
+    "expected_content": "routing/session-breakage regression",
+    "collection": "all"
+  },
+  {
+    "query": "How should Telegram-routed Claude replies behave for Chris?",
+    "expected_source": "canonical/decisions/chris-expects-telegram-routed-claude-replies-to-land-in-the-correct-sess.md",
+    "expected_content": "replies visible to him but not to the assistant",
+    "collection": "all"
+  },
+  {
+    "query": "Chris는 현재 어떤 모델 쓰는지 확인하길 원해?",
+    "expected_source": "canonical/decisions/chris-expects-transparency-about-which-model-is-currently-active-and-per.md",
+    "expected_content": "which model is currently active",
+    "collection": "all"
+  },
+  {
+    "query": "What model visibility does Chris expect from assistants?",
+    "expected_source": "canonical/decisions/chris-expects-transparency-about-which-model-is-currently-active-and-per.md",
+    "expected_content": "transparency about which model is currently active",
+    "collection": "all"
+  },
+  {
+    "query": "How often does Chris check the active model directly?",
+    "expected_source": "canonical/decisions/chris-expects-transparency-about-which-model-is-currently-active-and-per.md",
+    "expected_content": "periodically checks it directly",
+    "collection": "all"
+  },
+  {
+    "query": "UI 작업 퀄리티는 Chris 기준으로 어디까지 가야 해?",
+    "expected_source": "canonical/decisions/chris-expects-ui-work-to-be-pushed-to-a-high-quality-near-finished-stan.md",
+    "expected_content": "high-quality, near-finished standard",
+    "collection": "all"
+  },
+  {
+    "query": "What kind of UI improvements does Chris reject?",
+    "expected_source": "canonical/decisions/chris-expects-ui-work-to-be-pushed-to-a-high-quality-near-finished-stan.md",
+    "expected_content": "partial or merely functional improvements",
+    "collection": "all"
+  },
+  {
+    "query": "How polished should design work be for Chris?",
+    "expected_source": "canonical/decisions/chris-expects-ui-work-to-be-pushed-to-a-high-quality-near-finished-stan.md",
+    "expected_content": "durable quality bar preference",
+    "collection": "all"
+  },
+  {
+    "query": "What autonomy does Chris expect during ongoing tasks?",
+    "expected_source": "canonical/decisions/chris-expects-work-to-keep-progressing-even-when-he-is-not-sending-addit.md",
+    "expected_content": "durable autonomy preference",
+    "collection": "all"
+  },
+  {
+    "query": "How should agents behave without new prompts from Chris?",
+    "expected_source": "canonical/decisions/chris-expects-work-to-keep-progressing-even-when-he-is-not-sending-addit.md",
+    "expected_content": "rather than stalling without new prompts",
+    "collection": "all"
+  },
+  {
+    "query": "What model governance decision did Chris make?",
+    "expected_source": "canonical/decisions/chris-explicitly-switched-to-codex54-and-standardized-all-agents-on-co.md",
+    "expected_content": "durable model-governance decision",
+    "collection": "all"
+  },
+  {
+    "query": "Which default model alias did Chris switch to?",
+    "expected_source": "canonical/decisions/chris-explicitly-switched-to-codex54-and-standardized-all-agents-on-co.md",
+    "expected_content": "switched to `codex54`",
+    "collection": "all"
+  },
+  {
+    "query": "What skill-utilization style does Chris want going forward?",
+    "expected_source": "canonical/decisions/chris-explicitly-told-the-assistant-to-use-available-skills-aggressively.md",
+    "expected_content": "proactive skill utilization",
+    "collection": "all"
+  },
+  {
+    "query": "How should assistants treat optional skills for Chris?",
+    "expected_source": "canonical/decisions/chris-explicitly-told-the-assistant-to-use-available-skills-aggressively.md",
+    "expected_content": "durable preference rather than a one-off suggestion",
+    "collection": "all"
+  },
+  {
+    "query": "What kind of review does Chris want for his RAG setup?",
+    "expected_source": "canonical/decisions/chris-explicitly-wanted-a-proactive-review-of-his-openclaw-rag-plus-seco.md",
+    "expected_content": "proactive review",
+    "collection": "all"
+  },
+  {
+    "query": "ACP 업데이트는 어떤 3줄 형식으로 보내야 해?",
+    "expected_source": "canonical/decisions/chris-finalized-an-acp-reporting-convention-where-responses-are-sent-as.md",
+    "expected_content": "three-line package",
+    "collection": "all"
+  },
+  {
+    "query": "What status fields belong in Chris's ACP reporting format?",
+    "expected_source": "canonical/decisions/chris-finalized-an-acp-reporting-convention-where-responses-are-sent-as.md",
+    "expected_content": "DONE/IN_PROGRESS/FAILED/STALLED",
+    "collection": "all"
+  },
+  {
+    "query": "How should ACP responses be formatted for Chris?",
+    "expected_source": "canonical/decisions/chris-finalized-an-acp-reporting-convention-where-responses-are-sent-as.md",
+    "expected_content": "요약, 상태, and 다음 액션",
+    "collection": "all"
+  },
+  {
+    "query": "MCC는 아직 Chris의 active project야?",
+    "expected_source": "canonical/decisions/chris-has-archived-mcc-and-it-should-no-longer-be-treated-as-one-of-his.md",
+    "expected_content": "archived MCC",
+    "collection": "all"
+  },
+  {
+    "query": "What project-priority decision did Chris make about MCC?",
+    "expected_source": "canonical/decisions/chris-has-archived-mcc-and-it-should-no-longer-be-treated-as-one-of-his.md",
+    "expected_content": "no longer be treated as one of his active projects",
+    "collection": "all"
+  },
+  {
+    "query": "OpenClaw skill enabled 상태는 어떤 필드로 매칭돼?",
+    "expected_source": "canonical/decisions/chris-identified-that-openclaw-skill-visibility-enabled-state-in-the-ui.md",
+    "expected_content": "`name` field in `SKILL.md`",
+    "collection": "all"
+  },
+  {
+    "query": "What causes enabled skills to go missing in the UI?",
+    "expected_source": "canonical/decisions/chris-identified-that-openclaw-skill-visibility-enabled-state-in-the-ui.md",
+    "expected_content": "root cause of missing enabled skills",
+    "collection": "all"
+  },
+  {
+    "query": "Do directory or slug names control OpenClaw skill visibility?",
+    "expected_source": "canonical/decisions/chris-identified-that-openclaw-skill-visibility-enabled-state-in-the-ui.md",
+    "expected_content": "not directory or slug names",
+    "collection": "all"
+  },
+  {
+    "query": "What is increasing Chris's context fragmentation pressure?",
+    "expected_source": "canonical/decisions/chris-is-actively-juggling-multiple-architecture-heavy-projects-at-once.md",
+    "expected_content": "context fragmentation pressure",
+    "collection": "all"
+  },
+  {
+    "query": "Which kinds of projects is Chris juggling right now?",
+    "expected_source": "canonical/decisions/chris-is-actively-juggling-multiple-architecture-heavy-projects-at-once.md",
+    "expected_content": "including MCC and brain or knowledge system work",
+    "collection": "all"
+  },
+  {
+    "query": "Chris는 antfarm 같은 서드파티 에이전트 툴 도입에 어떤 태도야?",
+    "expected_source": "canonical/decisions/chris-is-cautious-about-adopting-third-party-agent-tooling-like-antfarm.md",
+    "expected_content": "cautious about adopting third-party agent tooling",
+    "collection": "all"
+  },
+  {
+    "query": "What rollout style does Chris want for new orchestration tooling?",
+    "expected_source": "canonical/decisions/chris-is-cautious-about-adopting-third-party-agent-tooling-like-antfarm.md",
+    "expected_content": "introduced incrementally without risking his existing agent setup",
+    "collection": "all"
+  },
+  {
+    "query": "How should new agent tooling be introduced for Chris?",
+    "expected_source": "canonical/decisions/chris-is-cautious-about-adopting-third-party-agent-tooling-like-antfarm.md",
+    "expected_content": "compatibility-first preference",
+    "collection": "all"
+  },
+  {
+    "query": "When does Chris let the agent decide implementation details?",
+    "expected_source": "canonical/decisions/chris-is-comfortable-letting-the-agent-choose-the-implementation-path-wh.md",
+    "expected_content": "goal is already clear",
+    "collection": "all"
+  },
+  {
+    "query": "How much autonomy does Chris allow on straightforward work?",
+    "expected_source": "canonical/decisions/chris-is-comfortable-letting-the-agent-choose-the-implementation-path-wh.md",
+    "expected_content": "remaining work is straightforward",
+    "collection": "all"
+  },
+  {
+    "query": "로컬 OpenClaw git repo 없어도 Chris는 괜찮다고 봐?",
+    "expected_source": "canonical/decisions/chris-is-comfortable-operating-without-the-local-openclaw-git-repo-conf.md",
+    "expected_content": "without the local OpenClaw Git repo",
+    "collection": "all"
+  },
+  {
+    "query": "What runtime architecture is acceptable without a local source checkout?",
+    "expected_source": "canonical/decisions/chris-is-comfortable-operating-without-the-local-openclaw-git-repo-conf.md",
+    "expected_content": "source checkout and runtime are separate",
+    "collection": "all"
+  },
+  {
+    "query": "What is Chris building instead of just a memory tool?",
+    "expected_source": "canonical/decisions/chris-is-currently-focused-on-building-a-personal-intelligence-system-th.md",
+    "expected_content": "replaces memory and reasoning",
+    "collection": "all"
+  },
+  {
+    "query": "How is Chris structuring his personal intelligence project?",
+    "expected_source": "canonical/decisions/chris-is-currently-focused-on-building-a-personal-intelligence-system-th.md",
+    "expected_content": "layered architecture",
+    "collection": "all"
+  },
+  {
+    "query": "What is driving Chris toward stack unification?",
+    "expected_source": "canonical/decisions/chris-is-running-multiple-architecture-heavy-systems-at-once-which-keep.md",
+    "expected_content": "multiple architecture-heavy systems at once",
+    "collection": "all"
+  },
+  {
+    "query": "What does Chris want instead of more disconnected features?",
+    "expected_source": "canonical/decisions/chris-is-still-juggling-multiple-architecture-heavy-systems-at-once-whi.md",
+    "expected_content": "add more disconnected features",
+    "collection": "all"
+  },
+  {
+    "query": "What was Chris iterating on across multiple projects?",
+    "expected_source": "canonical/decisions/chris-is-tracking-multiple-architecture-heavy-projects-simultaneously-m.md",
+    "expected_content": "implementation contracts",
+    "collection": "all"
+  },
+  {
+    "query": "Which architecture-heavy projects was Chris tracking at once?",
+    "expected_source": "canonical/decisions/chris-is-tracking-multiple-architecture-heavy-projects-simultaneously-m.md",
+    "expected_content": "multiple architecture-heavy projects simultaneously",
+    "collection": "all"
+  },
+  {
+    "query": "What transparency check does Chris like before tasks start?",
+    "expected_source": "canonical/decisions/chris-likes-to-confirm-the-active-model-before-proceeding-with-work-mak.md",
+    "expected_content": "model transparency",
+    "collection": "all"
+  },
+  {
+    "query": "How does Chris verify model state during interactions?",
+    "expected_source": "canonical/decisions/chris-likes-to-confirm-the-active-model-before-proceeding-with-work-mak.md",
+    "expected_content": "recurring preference during interactions",
+    "collection": "all"
+  },
+  {
+    "query": "What stopgap did Chris accept only temporarily?",
+    "expected_source": "canonical/decisions/chris-preferred-a-production-grade-migration-path-over-long-term-compati.md",
+    "expected_content": "symlinks only as a temporary stopgap",
+    "collection": "all"
+  },
+  {
+    "query": "How does Chris want final structure cleanup handled?",
+    "expected_source": "canonical/decisions/chris-preferred-a-production-grade-migration-path-over-long-term-compati.md",
+    "expected_content": "single source of truth",
+    "collection": "all"
+  },
+  {
+    "query": "What remediation order does Chris prefer for Claude pipeline instability?",
+    "expected_source": "canonical/decisions/chris-prefers-addressing-acp-and-claude-pipeline-instability-through-op.md",
+    "expected_content": "before source-code edits",
+    "collection": "all"
+  },
+  {
+    "query": "How should agents stabilize ACP issues when possible?",
+    "expected_source": "canonical/decisions/chris-prefers-addressing-acp-and-claude-pipeline-instability-through-op.md",
+    "expected_content": "durable config-first remediation preference",
+    "collection": "all"
+  },
+  {
+    "query": "Brain site 이슈는 Chris가 어떤 경로로 고치길 원해?",
+    "expected_source": "canonical/decisions/chris-prefers-brain-site-fixes-such-as-system-overview-issues-to-go-th.md",
+    "expected_content": "go through Claude Code",
+    "collection": "all"
+  },
+  {
+    "query": "What reporting style does Chris want during Brain site fixes?",
+    "expected_source": "canonical/decisions/chris-prefers-brain-site-fixes-such-as-system-overview-issues-to-go-th.md",
+    "expected_content": "intermediate progress updates",
+    "collection": "all"
+  },
+  {
+    "query": "How should System Overview fixes be handled for Chris?",
+    "expected_source": "canonical/decisions/chris-prefers-brain-site-fixes-such-as-system-overview-issues-to-go-th.md",
+    "expected_content": "rather than silent background work",
+    "collection": "all"
+  },
+  {
+    "query": "What documentation style does Chris want for agent instructions?",
+    "expected_source": "canonical/decisions/chris-prefers-claude-md-to-stay-concise-and-practical-avoiding-generi.md",
+    "expected_content": "avoiding generic filler",
+    "collection": "all"
+  },
+  {
+    "query": "How should CLAUDE.md express must-follow rules for Chris?",
+    "expected_source": "canonical/decisions/chris-prefers-claude-md-to-stay-concise-and-practical-avoiding-generi.md",
+    "expected_content": "direct file references plus explicit must-follow rules",
+    "collection": "all"
+  },
+  {
+    "query": "memory architecture에서 Chris는 무엇을 먼저 중시해?",
+    "expected_source": "canonical/decisions/chris-prefers-consolidation-first-memory-architecture-work-prioritizing.md",
+    "expected_content": "consolidation-first memory architecture work",
+    "collection": "all"
+  },
+  {
+    "query": "What does Chris prioritize over adding more memory features?",
+    "expected_source": "canonical/decisions/chris-prefers-consolidation-first-memory-architecture-work-prioritizing.md",
+    "expected_content": "source-of-truth clarity and filter correctness",
+    "collection": "all"
+  },
+  {
+    "query": "What should be finalized before coding starts for Chris?",
+    "expected_source": "canonical/decisions/chris-prefers-getting-a-claude-reviewed-plan-before-implementation-and-w.md",
+    "expected_content": "initial design direction",
+    "collection": "all"
+  },
+  {
+    "query": "How does Chris want planning handled before implementation?",
+    "expected_source": "canonical/decisions/chris-prefers-getting-a-claude-reviewed-plan-before-implementation-and-w.md",
+    "expected_content": "through Claude discussion before coding starts",
+    "collection": "all"
+  },
+  {
+    "query": "Claude Code를 언제 쓸지는 Chris가 매번 승인해야 해?",
+    "expected_source": "canonical/decisions/chris-prefers-the-assistant-to-decide-when-to-use-claude-code-without-re.md",
+    "expected_content": "without requiring per-task manual approval",
+    "collection": "all"
+  },
+  {
+    "query": "What delegation rule does Chris want for using Claude Code?",
+    "expected_source": "canonical/decisions/chris-prefers-the-assistant-to-decide-when-to-use-claude-code-without-re.md",
+    "expected_content": "assistant to decide when to use Claude Code",
+    "collection": "all"
+  },
+  {
+    "query": "How much workflow visibility does Chris want if Claude Code is used?",
+    "expected_source": "canonical/decisions/chris-prefers-the-assistant-to-decide-when-to-use-claude-code-without-re.md",
+    "expected_content": "kept informed about the workflow",
+    "collection": "all"
+  },
+  {
+    "query": "What replication approach does Chris prefer for his tuned setup?",
+    "expected_source": "canonical/decisions/chris-prefers-the-fastest-path-for-a-friend-to-replicate-his-fully-optim.md",
+    "expected_content": "copying/migrating his tuned setup",
+    "collection": "all"
+  },
+  {
+    "query": "Should Chris's optimized agent environment be rebuilt from scratch?",
+    "expected_source": "canonical/decisions/chris-prefers-the-fastest-path-for-a-friend-to-replicate-his-fully-optim.md",
+    "expected_content": "rather than rebuilding from scratch",
+    "collection": "all"
+  },
+  {
+    "query": "Chris는 OpenClaw에서 Claude를 어떤 결제 경로로 쓰길 원해?",
+    "expected_source": "canonical/decisions/chris-prefers-using-claude-in-openclaw-through-his-anthropic-subscriptio.md",
+    "expected_content": "through his Anthropic subscription",
+    "collection": "all"
+  },
+  {
+    "query": "What Claude path does Chris want to avoid in OpenClaw?",
+    "expected_source": "canonical/decisions/chris-prefers-using-claude-in-openclaw-through-his-anthropic-subscriptio.md",
+    "expected_content": "separate API-billed Claude path",
+    "collection": "all"
+  },
+  {
+    "query": "What Claude behavior does Chris still want with subscription access?",
+    "expected_source": "canonical/decisions/chris-prefers-using-claude-in-openclaw-through-his-anthropic-subscriptio.md",
+    "expected_content": "tool-enabled, file-modifying behavior",
+    "collection": "all"
+  },
+  {
+    "query": "Mission Control 계획은 실행 전에 Chris가 뭘 먼저 하길 원해?",
+    "expected_source": "canonical/decisions/chris-prefers-validating-a-mission-control-plan-with-claude-before-execu.md",
+    "expected_content": "validating a Mission Control plan with Claude before execution",
+    "collection": "all"
+  },
+  {
+    "query": "How should Mission Control planning be validated for Chris?",
+    "expected_source": "canonical/decisions/chris-prefers-validating-a-mission-control-plan-with-claude-before-execu.md",
+    "expected_content": "informed by web research",
+    "collection": "all"
+  },
+  {
+    "query": "task 응답에서 Chris가 싫어하는 방식이 뭐야?",
+    "expected_source": "canonical/decisions/chris-rejects-acknowledgement-only-task-replies-and-expects-the-original.md",
+    "expected_content": "acknowledgement-only task replies",
+    "collection": "all"
+  },
+  {
+    "query": "What completion behavior does Chris expect in the same turn?",
+    "expected_source": "canonical/decisions/chris-rejects-acknowledgement-only-task-replies-and-expects-the-original.md",
+    "expected_content": "fully completed in the same turn",
+    "collection": "all"
+  },
+  {
+    "query": "cron task는 Chris 기준으로 언제 답변해도 돼?",
+    "expected_source": "canonical/decisions/chris-rejects-progress-only-acknowledgements-for-cron-tasks-and-expects.md",
+    "expected_content": "fully executed before reply",
+    "collection": "all"
+  },
+  {
+    "query": "What kind of cron acknowledgements does Chris reject?",
+    "expected_source": "canonical/decisions/chris-rejects-progress-only-acknowledgements-for-cron-tasks-and-expects.md",
+    "expected_content": "progress-only acknowledgements",
+    "collection": "all"
+  },
+  {
+    "query": "How should agents handle cron tasks when tools help?",
+    "expected_source": "canonical/decisions/chris-rejects-progress-only-acknowledgements-for-cron-tasks-and-expects.md",
+    "expected_content": "using tools and parallel subtasks when useful",
+    "collection": "all"
+  },
+  {
+    "query": "UI가 그대로면 Chris는 어떤 수정을 거부해?",
+    "expected_source": "canonical/decisions/chris-rejects-superficial-ui-fixes-when-the-visible-result-has-not-chang.md",
+    "expected_content": "superficial UI fixes",
+    "collection": "all"
+  },
+  {
+    "query": "What does Chris want before accepting a UI fix?",
+    "expected_source": "canonical/decisions/chris-rejects-superficial-ui-fixes-when-the-visible-result-has-not-chang.md",
+    "expected_content": "root-cause investigation",
+    "collection": "all"
+  },
+  {
+    "query": "How should unchanged visible UI issues be escalated?",
+    "expected_source": "canonical/decisions/chris-rejects-superficial-ui-fixes-when-the-visible-result-has-not-chang.md",
+    "expected_content": "including escalation to Claude",
+    "collection": "all"
+  },
+  {
+    "query": "What information should ingestion focus on for Chris's brain?",
+    "expected_source": "canonical/decisions/chris-requested-a-dedicated-pre-implementation-plan-for-adding-seven-bra.md",
+    "expected_content": "high-signal personal information",
+    "collection": "all"
+  },
+  {
+    "query": "ACP orchestration은 Chris 기준으로 얼마나 deterministic해야 해?",
+    "expected_source": "canonical/decisions/chris-requires-explicit-deterministic-acp-orchestration-including-one.md",
+    "expected_content": "explicit, deterministic ACP orchestration",
+    "collection": "all"
+  },
+  {
+    "query": "What health check style does Chris want for ACP workflows?",
+    "expected_source": "canonical/decisions/chris-requires-explicit-deterministic-acp-orchestration-including-one.md",
+    "expected_content": "one-shot health checks with exact expected outputs",
+    "collection": "all"
+  },
+  {
+    "query": "How should ACP failures be reported for Chris?",
+    "expected_source": "canonical/decisions/chris-requires-explicit-deterministic-acp-orchestration-including-one.md",
+    "expected_content": "raw result or error reporting with runId",
+    "collection": "all"
+  },
+  {
+    "query": "fix 완료는 Chris가 뭘 보고 판단해?",
+    "expected_source": "canonical/decisions/chris-requires-final-verification-of-remediation-through-smoke-tests-plu.md",
+    "expected_content": "smoke tests plus gateway-log confirmation",
+    "collection": "all"
+  },
+  {
+    "query": "What final remediation proof does Chris require?",
+    "expected_source": "canonical/decisions/chris-requires-final-verification-of-remediation-through-smoke-tests-plu.md",
+    "expected_content": "before considering a fix complete",
+    "collection": "all"
+  },
+  {
+    "query": "How should remediation be verified after changes?",
+    "expected_source": "canonical/decisions/chris-requires-final-verification-of-remediation-through-smoke-tests-plu.md",
+    "expected_content": "durable validation preference",
+    "collection": "all"
+  },
+  {
+    "query": "long-running 작업 업데이트는 Chris 기준으로 어떤 형식이야?",
+    "expected_source": "canonical/decisions/chris-requires-long-running-or-async-work-to-use-a-strict-three-line-pro.md",
+    "expected_content": "strict three-line progress protocol",
+    "collection": "all"
+  },
+  {
+    "query": "What three fields belong in Chris's async progress updates?",
+    "expected_source": "canonical/decisions/chris-requires-long-running-or-async-work-to-use-a-strict-three-line-pro.md",
+    "expected_content": "summary, status, and next action",
+    "collection": "all"
+  },
+  {
+    "query": "How should agents handle keep-alives for async work?",
+    "expected_source": "canonical/decisions/chris-requires-long-running-or-async-work-to-use-a-strict-three-line-pro.md",
+    "expected_content": "including keep-alives and explicit DONE completion",
+    "collection": "all"
+  },
+  {
+    "query": "Mission Control에 Chris가 꼭 넣길 원하는 보드가 뭐야?",
+    "expected_source": "canonical/decisions/chris-requires-mission-control-to-include-a-real-time-task-board-with-al.md",
+    "expected_content": "real-time task board",
+    "collection": "all"
+  },
+  {
+    "query": "What must Mission Control show about active work?",
+    "expected_source": "canonical/decisions/chris-requires-mission-control-to-include-a-real-time-task-board-with-al.md",
+    "expected_content": "all active tasks and assignees",
+    "collection": "all"
+  },
+  {
+    "query": "How current should the Mission Control task board stay?",
+    "expected_source": "canonical/decisions/chris-requires-mission-control-to-include-a-real-time-task-board-with-al.md",
+    "expected_content": "kept up to date as work happens",
+    "collection": "all"
+  },
+  {
+    "query": "대시보드 상단에는 cron 정보를 어떻게 보여줘야 해?",
+    "expected_source": "canonical/decisions/chris-requires-the-top-dashboard-area-to-always-show-the-current-cron-jo.md",
+    "expected_content": "always show the current cron jobs",
+    "collection": "all"
+  },
+  {
+    "query": "What should happen when cron entries are edited manually?",
+    "expected_source": "canonical/decisions/chris-requires-the-top-dashboard-area-to-always-show-the-current-cron-jo.md",
+    "expected_content": "auto-refresh when cron entries are added, changed, or manually edited",
+    "collection": "all"
+  },
+  {
+    "query": "What UI consistency rule did Chris set for cron data?",
+    "expected_source": "canonical/decisions/chris-requires-the-top-dashboard-area-to-always-show-the-current-cron-jo.md",
+    "expected_content": "durable UI/data-consistency requirement",
+    "collection": "all"
+  }
+]

@@ -39,33 +39,12 @@ FAILURE_LOG = Path("/Users/chrischo/.openclaw/workspace-jenna/logs/gmail-ingest-
 OPENCLAW_BIN = "/Users/chrischo/.local/bin/openclaw"
 AGENT = "jenna"
 
-_DEDUP_TOKEN_RE = re.compile(r'[a-z0-9_\-]{3,}')
-_dedup_token_cache: dict[str, set[str]] = {}
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "brain_core"))
+from inbox_utils import is_near_duplicate as _is_near_duplicate_shared
 
 
 def _is_near_duplicate(content: str, inbox_dir: Path, window: int = 50, threshold: float = 0.7) -> bool:
-    """Check if content is a near-duplicate of recent raw records."""
-    tokens = set(_DEDUP_TOKEN_RE.findall(content.lower()))
-    if len(tokens) < 5:
-        return False
-    try:
-        recent = sorted(inbox_dir.glob("raw_*.json"), key=lambda f: f.stat().st_mtime, reverse=True)[:window]
-    except Exception:
-        return False
-    for f in recent:
-        fkey = str(f)
-        if fkey in _dedup_token_cache:
-            et = _dedup_token_cache[fkey]
-        else:
-            try:
-                existing = json.loads(f.read_text())
-                et = set(_DEDUP_TOKEN_RE.findall(existing.get("content", "").lower()))
-                _dedup_token_cache[fkey] = et
-            except Exception:
-                continue
-        if et and len(tokens & et) / max(len(tokens | et), 1) > threshold:
-            return True
-    return False
+    return _is_near_duplicate_shared(content, window=window, threshold=threshold, inbox_dir=inbox_dir)
 DISPATCH_TIMEOUT = 240
 SIGNAL_THRESHOLD = 6
 BATCH_SIZE = 50
@@ -218,7 +197,7 @@ def fetch_candidates(days_back: int, lookback: int) -> tuple[list[dict], int]:
         M.select("INBOX")
 
         since_str = (datetime.now() - timedelta(days=days_back)).strftime("%d-%b-%Y")
-        typ, data = M.search(None, f'(SINCE "{since_str}")')
+        typ, data = M.uid('search', None, f'(SINCE "{since_str}")')
         if typ != "OK" or not data or not data[0]:
             return [], last_uid
 
@@ -237,7 +216,7 @@ def fetch_candidates(days_back: int, lookback: int) -> tuple[list[dict], int]:
                 continue
             new_max_uid = max(new_max_uid, uid_int)
 
-            typ, msg_data = M.fetch(uid, "(RFC822)")
+            typ, msg_data = M.uid('fetch', uid, "(RFC822)")
             if typ != "OK" or not msg_data or not msg_data[0]:
                 continue
 
@@ -374,6 +353,10 @@ def main() -> None:
     candidates, new_max_uid = fetch_candidates(args.days_back, args.lookback)
     print(f"  {len(candidates)} candidates after pre-filter")
     if not candidates:
+        if new_max_uid > load_state().get("last_uid", 0):
+            state = load_state()
+            state["last_uid"] = new_max_uid
+            save_state(state)
         print("Nothing to classify.")
         return
 

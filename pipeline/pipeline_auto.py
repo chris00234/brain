@@ -10,14 +10,15 @@ import json
 import re
 import subprocess
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # Code now lives at /server/brain/pipeline/; data is at /server/knowledge/.
 SCRIPTS_DIR = Path(__file__).parent              # /server/brain/pipeline
 sys.path.insert(0, str(SCRIPTS_DIR))
-from common import find_similar_canonical, parse_markdown_frontmatter, write_markdown_frontmatter, slugify  # noqa: E402
+from common import find_similar_canonical, parse_markdown_frontmatter, write_markdown_frontmatter, slugify, utc_now  # noqa: E402
 ROOT = Path("/Users/chrischo/server/knowledge")  # data tree
+REVIEW_QUEUE_DIR = ROOT / "review_queue"
 AGENTS_DIR = Path("/Users/chrischo/.openclaw")
 STATE_FILE = ROOT / ".pipeline_state.json"       # state tracks data, so lives with data
 DIGEST_FILE = ROOT / "reports" / "weekly-digest.md"
@@ -26,7 +27,7 @@ try:
     _sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "brain_core"))
     from config import PYTHON
 except ImportError:
-    PYTHON = "/opt/homebrew/bin/python3"
+    PYTHON = "/Users/chrischo/server/brain/.venv/bin/python"
 
 
 def load_state():
@@ -175,10 +176,8 @@ def main():
     distill_created = distill_result.get("created_count", 0)
     print(f"  Created {distill_created} distilled notes")
 
-    if not new_entries and distill_created == 0:
-        print("  No new content from any source. Pipeline complete.")
-        save_state(state)
-        return
+    # Always proceed to propose/score/promote — they're idempotent.
+    # Prior early-exit here dropped pending distilled notes that had no proposals yet.
 
     print("\n[4/6] Batch proposing...")
     propose_result = run_script("batch_propose.py", [], args.dry_run)
@@ -221,7 +220,7 @@ def main():
                 if existing and existing != target:
                     ex_meta, ex_body = parse_markdown_frontmatter(existing)
                     ex_meta["sources"] = list(set(ex_meta.get("sources", []) + metadata.get("sources", [])))
-                    ex_meta["updated_at"] = metadata.get("updated_at", "")
+                    ex_meta["updated_at"] = utc_now()
                     if len(body) > len(ex_body):
                         ex_body = body
                     write_markdown_frontmatter(existing, ex_meta, ex_body)
@@ -242,9 +241,32 @@ def main():
             else:
                 rejected.append(item)
         else:
+            # Held for human review — write to review_queue/ with pending status
+            if not args.dry_run and proposal_path.exists():
+                REVIEW_QUEUE_DIR.mkdir(parents=True, exist_ok=True)
+                metadata, body = parse_markdown_frontmatter(proposal_path)
+                metadata["review_status"] = "pending"
+                metadata["scored_at"] = utc_now()
+                metadata["pipeline_score"] = score
+                file_name = proposal_path.name
+                target = REVIEW_QUEUE_DIR / file_name
+                write_markdown_frontmatter(target, metadata, body)
+                proposal_path.unlink()
             held.append(item)
 
+    # Count total pending in review queue (includes prior runs)
+    pending_review = 0
+    if REVIEW_QUEUE_DIR.exists():
+        for rq_file in REVIEW_QUEUE_DIR.glob("*.md"):
+            try:
+                rq_meta, _ = parse_markdown_frontmatter(rq_file)
+                if rq_meta.get("review_status") == "pending":
+                    pending_review += 1
+            except Exception:
+                continue
+
     print(f"  Promoted: {len(promoted)} | Held for review: {len(held)} | Rejected: {len(rejected)}")
+    print(f"  Review queue: {pending_review} pending")
 
     print("\n[6/6] Writing digest...")
     canonical_after = len(list((ROOT / "canonical").rglob("*.md")))
@@ -255,6 +277,7 @@ def main():
         f"**Scanned:** {len(new_entries)} new entries from agent learnings/memory",
         f"**Ingested:** {ingested} | **Distilled:** {distill_created} | **Proposed:** {propose_created}",
         f"**Canonical notes:** {canonical_before} -> {canonical_after}",
+        f"**Review queue:** {pending_review} pending",
         "",
         "## Promoted to Canonical",
     ]
@@ -290,11 +313,11 @@ def main():
         inbox = ROOT / "raw" / "inbox"
         orphaned = ROOT / "raw" / "orphaned"
         orphaned.mkdir(parents=True, exist_ok=True)
-        cutoff = datetime.now() - timedelta(days=30)
+        cutoff = datetime.now(timezone.utc) - timedelta(days=30)
         cleaned = 0
         for f in inbox.glob("*.json"):
             try:
-                if datetime.fromtimestamp(f.stat().st_mtime) < cutoff:
+                if datetime.fromtimestamp(f.stat().st_mtime, tz=timezone.utc) < cutoff:
                     dest = orphaned / f.name
                     # If a file of the same name already exists in orphaned,
                     # append an epoch suffix so we don't overwrite prior quarantines.
@@ -318,6 +341,7 @@ def main():
             "promoted": len(promoted),
             "held": len(held),
             "rejected": len(rejected),
+            "pending_review": pending_review,
             "canonical_before": canonical_before,
             "canonical_after": canonical_after,
             "promoted_items": [{"domain": i.get("domain"), "title": i.get("title"), "score": i.get("score")} for i in promoted],
@@ -328,6 +352,25 @@ def main():
             f.write(json.dumps(trace) + "\n")
 
     save_state(state)
+
+    # Chain reindex if anything changed so new canonical notes become searchable
+    # immediately (without waiting for the next scheduled reindex).
+    if not args.dry_run and (distill_created or promoted):
+        import os
+        secret_file = Path.home() / ".openclaw/credentials/.personal_webhook_secret"
+        if secret_file.exists():
+            try:
+                import urllib.request
+                req = urllib.request.Request(
+                    "http://127.0.0.1:8791/jobs/reindex",
+                    method="POST",
+                    headers={"Authorization": f"Bearer {secret_file.read_text().strip()}"},
+                )
+                urllib.request.urlopen(req, timeout=5).read()
+                print("  Triggered reindex (async).")
+            except Exception as e:
+                print(f"  WARN: reindex trigger failed: {e}")
+
     print("\n" + "=" * 60)
     print("Pipeline complete.")
     print("=" * 60)

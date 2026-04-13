@@ -1,4 +1,4 @@
-#!/opt/homebrew/bin/python3
+#!/Users/chrischo/server/brain/.venv/bin/python
 """Monthly backup verification smoke test.
 
 Downloads the latest chroma tar + sha256 from MinIO, verifies the checksum,
@@ -23,7 +23,7 @@ BRAIN_ROOT = Path("/Users/chrischo/server/brain")
 OPENCLAW_BIN = "/Users/chrischo/.local/bin/openclaw"
 MINIO_BUCKET = "rag-backups"
 CHROMA_PREFIX = "chroma-backup-"
-MIN_COLLECTIONS = 5  # expected minimum — we have ~13 collections in prod
+MIN_COLLECTIONS = 10  # expected minimum — we have ~15 collections in prod (2026-04-12)
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))

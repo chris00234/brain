@@ -91,6 +91,19 @@ CREATE TABLE IF NOT EXISTS accuracy_tracker (
     override_count INTEGER DEFAULT 0,
     last_updated TEXT
 );
+
+CREATE TABLE IF NOT EXISTS procedures (
+    id TEXT PRIMARY KEY,
+    task_type TEXT NOT NULL,
+    title TEXT NOT NULL,
+    steps TEXT NOT NULL,
+    preconditions TEXT DEFAULT '',
+    tools TEXT DEFAULT '[]',
+    success_count INTEGER DEFAULT 1,
+    last_used TEXT,
+    created_at TEXT NOT NULL,
+    source TEXT DEFAULT 'extraction'
+);
 """
 
 
@@ -131,6 +144,7 @@ class TaskQueue:
             CREATE INDEX IF NOT EXISTS idx_outcomes_domain ON outcomes(domain);
             CREATE INDEX IF NOT EXISTS idx_outcomes_task_id ON outcomes(task_id);
             CREATE INDEX IF NOT EXISTS idx_outcomes_created_at ON outcomes(created_at);
+            CREATE INDEX IF NOT EXISTS idx_procedures_task_type ON procedures(task_type);
         """)
         conn.commit()
 
@@ -440,8 +454,31 @@ class TaskQueue:
         ).fetchall()
         approved = []
         escalation_needed = []
+        # Phase 5 autonomy gate
+        try:
+            from autonomy import authorize as _autonomy_authorize
+        except Exception:
+            _autonomy_authorize = None  # type: ignore[assignment]
+
         for row in rows:
             task = self._row_to_dict(row)
+            # Phase 5: gate ALL auto-approve via autonomy.authorize("task.approve")
+            if _autonomy_authorize is not None:
+                gate = _autonomy_authorize("task.approve", context={"task_id": task["id"]})
+                if not gate.allowed:
+                    log.info(
+                        "autonomy gate blocked task.approve for %s: %s",
+                        task["id"], gate.reason,
+                    )
+                    escalation_needed.append(task)
+                    continue
+                if gate.requires_ack:
+                    log.debug(
+                        "autonomy L1 — task %s queued for human approval",
+                        task["id"],
+                    )
+                    escalation_needed.append(task)
+                    continue
             if autopilot.should_auto_approve(task["confidence"]):
                 try:
                     updated = self.approve_task(task["id"], by="autopilot")
@@ -538,12 +575,36 @@ class TaskQueue:
 
         from openclaw_dispatch import dispatch
 
+        # Phase 5 autonomy gate
+        try:
+            from autonomy import authorize as _autonomy_authorize
+        except Exception:
+            _autonomy_authorize = None  # type: ignore[assignment]
+
+        MAX_DISPATCH_PER_TICK = 5
+        dispatched = 0
         results = []
         for task in ready:
+            if dispatched >= MAX_DISPATCH_PER_TICK:
+                break
             tid = task["id"]
             agent = task.get("assigned_agent", "jenna")
             title = task.get("title", "")
             desc = task.get("description", "")
+
+            # Phase 5: gate dispatch via autonomy.authorize("task.dispatch")
+            if _autonomy_authorize is not None:
+                gate = _autonomy_authorize("task.dispatch", context={"task_id": tid, "agent": agent})
+                if not gate.allowed:
+                    log.info(
+                        "autonomy gate blocked task.dispatch for %s: %s",
+                        tid, gate.reason,
+                    )
+                    continue
+                if gate.requires_ack:
+                    # L1: leave in approved state, surface to escalation queue
+                    log.debug("autonomy L1 — task %s pending human ack", tid)
+                    continue
 
             # Start the task
             try:
@@ -614,6 +675,7 @@ class TaskQueue:
                 log.warning("outcome recording failed for %s", tid)
 
             results.append(updated)
+            dispatched += 1
 
         return results
 
@@ -813,7 +875,7 @@ class TaskQueue:
                                            "created_at": self._now()}]})
                         log.info("extracted heuristic for task %s: %s", task["id"], heuristic[:80])
         except Exception as e:
-            log.debug("heuristic extraction failed for %s: %s", task.get("id"), e)
+            log.warning("heuristic extraction failed for %s: %s", task.get("id"), e)
 
     def _get_relevant_heuristics(self, task_description: str, limit: int = 5) -> tuple[str, list[str]]:
         """Retrieve past heuristics relevant to this task (Reflexion pattern).
@@ -840,6 +902,93 @@ class TaskQueue:
             return "\n".join(f"- {d}" for d in docs if d), retrieved_ids
         except Exception:
             return "", []
+
+    # ── Procedural memory ─────────────────────────────────────
+
+    def _store_procedure(
+        self,
+        task_type: str,
+        title: str,
+        steps: list[str],
+        preconditions: str = "",
+        tools: list | None = None,
+        source: str = "extraction",
+    ) -> str:
+        """Store or deduplicate a procedure. Returns procedure ID."""
+        conn = self._conn()
+        now = self._now()
+        step_tokens = set(" ".join(steps).lower().split())
+
+        # Check existing procedures with same task_type for dedup
+        rows = conn.execute(
+            "SELECT id, steps FROM procedures WHERE task_type = ?", (task_type,)
+        ).fetchall()
+        for row in rows:
+            try:
+                existing_steps = json.loads(row["steps"])
+            except (json.JSONDecodeError, TypeError):
+                continue
+            existing_tokens = set(" ".join(existing_steps).lower().split())
+            union = step_tokens | existing_tokens
+            if not union:
+                continue
+            jaccard = len(step_tokens & existing_tokens) / len(union)
+            if jaccard > 0.70:
+                conn.execute(
+                    "UPDATE procedures SET success_count = success_count + 1, last_used = ? WHERE id = ?",
+                    (now, row["id"]),
+                )
+                conn.commit()
+                log.debug("deduped procedure %s (jaccard=%.2f)", row["id"], jaccard)
+                return row["id"]
+
+        # Insert new procedure
+        proc_id = self._gen_id("proc")
+        conn.execute(
+            """INSERT INTO procedures
+               (id, task_type, title, steps, preconditions, tools, success_count,
+                last_used, created_at, source)
+               VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)""",
+            (
+                proc_id, task_type, title, json.dumps(steps),
+                preconditions, json.dumps(tools or []),
+                now, now, source,
+            ),
+        )
+        conn.commit()
+        log.info("stored procedure %s: %s (%d steps)", proc_id, task_type, len(steps))
+        return proc_id
+
+    def get_procedures(
+        self, task_type: str | None = None, source: str | None = None, limit: int = 10,
+    ) -> list[dict]:
+        """Retrieve procedures, ordered by success_count DESC, last_used DESC."""
+        clauses: list[str] = []
+        params: list = []
+        if task_type:
+            clauses.append("task_type = ?")
+            params.append(task_type)
+        if source:
+            clauses.append("source = ?")
+            params.append(source)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        params.append(limit)
+        conn = self._conn()
+        rows = conn.execute(
+            f"SELECT * FROM procedures{where} ORDER BY success_count DESC, last_used DESC LIMIT ?",
+            params,
+        ).fetchall()
+        results = []
+        for row in rows:
+            d = dict(row)
+            for key in ("steps", "tools"):
+                if key in d and isinstance(d[key], str):
+                    try:
+                        d[key] = json.loads(d[key])
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+            results.append(d)
+        return results
 
     def _extract_procedure(self, task: dict, result_text: str, dispatch_fn) -> None:
         """CoALA/Voyager pattern: extract reusable multi-step procedures from successful tasks."""
@@ -885,8 +1034,20 @@ class TaskQueue:
                                        "source": "voyager_extraction",
                                        "created_at": self._now()}]})
                     log.info("extracted procedure for task %s (%d steps)", task["id"], len(steps))
+            # Structured storage for typed retrieval and dedup
+            try:
+                self._store_procedure(
+                    task_type=data.get("task_type", title),
+                    title=title,
+                    steps=steps,
+                    preconditions=data.get("preconditions", ""),
+                    tools=data.get("tools_used", []),
+                    source="extraction",
+                )
+            except Exception as e:
+                log.warning("procedure store failed: %s", e)
         except Exception as e:
-            log.debug("procedure extraction failed for %s: %s", task.get("id"), e)
+            log.warning("procedure extraction failed for %s: %s", task.get("id"), e)
 
     def suggest_delegation_learned(self, task_description: str) -> dict | None:
         """Learned routing: find most similar past successful task, route to same agent.

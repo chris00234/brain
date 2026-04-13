@@ -267,6 +267,17 @@ def check_proactive_triggers(insights: list) -> list[dict]:
             if not _check_cooldown(trigger):
                 continue
 
+            # Phase 5 autonomy gate
+            try:
+                from autonomy import authorize as _autonomy_authorize
+
+                kind = f"trigger.fire.{trigger.get('name', 'unknown')}"
+                gate = _autonomy_authorize(kind, context={"trigger_id": trigger.get("id")})
+                if not gate.allowed:
+                    continue
+            except Exception:
+                pass
+
             context = {"summary": summary, "category": cat, "severity": sev}
             task = _fire_trigger(trigger, context)
             created.append(task)

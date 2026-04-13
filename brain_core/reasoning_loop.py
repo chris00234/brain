@@ -137,6 +137,21 @@ def run_reasoning(question: str, thread_id: str | None = None, max_hops: int = M
     Re-searches for the same question or variant within a hop sequence hit the
     in-memory + SQLite embedding cache — no explicit plumbing needed here.
     """
+    # Phase 5 autonomy gate: reasoning_loop is L2 by default
+    try:
+        from autonomy import authorize as _autonomy_authorize
+
+        gate = _autonomy_authorize("reasoning.multihop", context={"question_preview": question[:120]})
+        if not gate.allowed:
+            return {
+                "thread_id": thread_id or "blocked",
+                "blocked": True,
+                "reason": gate.reason,
+                "level": gate.level,
+            }
+    except Exception:
+        pass
+
     if thread_id is None:
         thread_id = f"reason_{uuid.uuid4().hex[:12]}"
 

@@ -66,7 +66,7 @@ def log_failure(reason: str) -> None:
     try:
         FAILURE_LOG.parent.mkdir(parents=True, exist_ok=True)
         with FAILURE_LOG.open("a") as f:
-            f.write(json.dumps({"timestamp": datetime.now().isoformat(), "reason": reason[:500]}) + "\n")
+            f.write(json.dumps({"timestamp": datetime.now(timezone.utc).isoformat(), "reason": reason[:500]}) + "\n")
     except Exception:
         pass
 
@@ -86,7 +86,8 @@ def query_day(target_date: str) -> list[dict]:
     results: list[dict] = []
 
     start_dt, end_dt = _temporal.parse_range(since, until)
-    where = _temporal.to_chroma_where(start_dt, end_dt) if (start_dt or end_dt) else None
+    # ChromaDB 1.4.1 rejects string operands in $gte/$lt; filter Python-side.
+    where = None
 
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -94,7 +95,7 @@ def query_day(target_date: str) -> list[dict]:
         collections_arg = [collection] if collection else None
         try:
             return search_unified.search_all(
-                query_text, 10,
+                query_text, 30,  # widened from 10 to compensate for post-filter
                 where=where,
                 collections=collections_arg,
                 original_query=query_text,
@@ -109,6 +110,9 @@ def query_day(target_date: str) -> list[dict]:
         futures = [executor.submit(_run_query, qt, col) for qt, col in DAY_QUERIES]
         for fut in as_completed(futures):
             all_items.extend(fut.result())
+
+    # Python-side temporal filter after fanout (ChromaDB 1.4.1 bug)
+    all_items = _temporal.filter_by_created_at(all_items, start_dt, end_dt)
 
     for item in all_items:
         key = item.get("path", "") + ":" + item.get("title", "")
@@ -268,7 +272,7 @@ def main() -> None:
                         help="Re-run even if narrative already exists for this date")
     args = parser.parse_args()
 
-    target_date = args.date or datetime.now().strftime("%Y-%m-%d")
+    target_date = args.date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
     print(f"Daily synthesis for {target_date}")
 
     existing = DISTILLED_DIR / f"{target_date}.md"

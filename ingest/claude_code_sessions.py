@@ -30,6 +30,10 @@ PROJECTS_DIR = Path.home() / '.claude/projects'
 INBOX_DIR = Path('/Users/chrischo/server/knowledge/raw/inbox')
 STATE_FILE = Path('/Users/chrischo/server/brain/logs/claude-code-sessions-state.json')
 FAILURE_LOG = Path('/Users/chrischo/server/brain/logs/claude-code-sessions-failures.jsonl')
+DLQ_FILE = Path('/Users/chrischo/server/brain/logs/claude-code-sessions-dlq.jsonl')
+DEAD_FILE = Path('/Users/chrischo/server/brain/logs/claude-code-sessions-dead.jsonl')
+MAX_DLQ_ATTEMPTS = 5
+MAX_DLQ_ENTRIES = 10000
 
 OPENCLAW_BIN = '/Users/chrischo/.local/bin/openclaw'
 DISPATCH_AGENT = 'jenna'
@@ -70,6 +74,28 @@ def log_failure(reason: str) -> None:
             f.write(json.dumps({'timestamp': datetime.now().isoformat(), 'reason': reason[:500]}) + '\n')
     except Exception:
         pass
+
+
+def queue_for_retry(project: str, session_id: str, session_date: str,
+                    batch_idx: int, groups: list[dict], error: str,
+                    attempt: int = 1) -> None:
+    """Append a failed batch to the DLQ with full payload for later retry."""
+    try:
+        DLQ_FILE.parent.mkdir(parents=True, exist_ok=True)
+        entry = {
+            'ts': datetime.now().isoformat(),
+            'project': project,
+            'session_id': session_id,
+            'session_date': session_date,
+            'batch_idx': batch_idx,
+            'groups': groups,
+            'error': error[:500],
+            'attempt': attempt,
+        }
+        with DLQ_FILE.open('a') as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + '\n')
+    except Exception as e:
+        log_failure(f'DLQ write failed: {e}')
 
 
 # ── Project Name Extraction ─────────────────────────────
@@ -280,6 +306,90 @@ def write_record(project: str, session_id: str, session_date: str,
     return out
 
 
+# ── DLQ Retry ───────────────────────────────────────────
+def process_dlq() -> tuple[int, int, int]:
+    """Retry DLQ entries. Returns (succeeded, requeued, dead)."""
+    if not DLQ_FILE.exists():
+        return 0, 0, 0
+
+    try:
+        lines = DLQ_FILE.read_text().splitlines()
+    except Exception as e:
+        log_failure(f'DLQ read failed: {e}')
+        return 0, 0, 0
+
+    succeeded = 0
+    requeued_entries: list[dict] = []
+    dead_entries: list[dict] = []
+
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        project = entry.get('project', '')
+        session_id = entry.get('session_id', '')
+        session_date = entry.get('session_date', '')
+        groups = entry.get('groups', [])
+        attempt = int(entry.get('attempt', 1))
+
+        if not groups or not project:
+            continue
+
+        prompt = build_distillation_prompt(project, groups)
+        result = dispatch_distillation(prompt)
+
+        if result:
+            kept = result.get('keep', [])
+            for item in kept:
+                idx = item.get('index', 0) - 1
+                if 0 <= idx < len(groups):
+                    write_record(project, session_id, session_date, item, groups[idx])
+            succeeded += 1
+            continue
+
+        next_attempt = attempt + 1
+        if next_attempt > MAX_DLQ_ATTEMPTS:
+            entry['attempt'] = next_attempt
+            entry['dead_ts'] = datetime.now().isoformat()
+            dead_entries.append(entry)
+        else:
+            entry['attempt'] = next_attempt
+            entry['last_retry_ts'] = datetime.now().isoformat()
+            requeued_entries.append(entry)
+
+    # Enforce size cap — drop oldest if over limit
+    if len(requeued_entries) > MAX_DLQ_ENTRIES:
+        dropped = len(requeued_entries) - MAX_DLQ_ENTRIES
+        requeued_entries = requeued_entries[-MAX_DLQ_ENTRIES:]
+        log_failure(f'DLQ over cap — dropped {dropped} oldest entries')
+
+    try:
+        if requeued_entries:
+            tmp = DLQ_FILE.with_suffix('.jsonl.tmp')
+            tmp.write_text('\n'.join(json.dumps(e, ensure_ascii=False) for e in requeued_entries) + '\n')
+            tmp.replace(DLQ_FILE)
+        else:
+            DLQ_FILE.unlink(missing_ok=True)
+    except Exception as e:
+        log_failure(f'DLQ rewrite failed: {e}')
+
+    if dead_entries:
+        try:
+            DEAD_FILE.parent.mkdir(parents=True, exist_ok=True)
+            with DEAD_FILE.open('a') as f:
+                for e in dead_entries:
+                    f.write(json.dumps(e, ensure_ascii=False) + '\n')
+        except Exception as e:
+            log_failure(f'DLQ dead write failed: {e}')
+
+    return succeeded, len(requeued_entries), len(dead_entries)
+
+
 # ── Main ────────────────────────────────────────────────
 def main() -> None:
     parser = argparse.ArgumentParser(description='Claude Code session ingest via Jenna distillation')
@@ -292,6 +402,11 @@ def main() -> None:
     total_segments = 0
 
     print(f'Claude Code session ingest — scanning {PROJECTS_DIR}')
+
+    if not args.dry_run:
+        dlq_s, dlq_r, dlq_d = process_dlq()
+        if dlq_s or dlq_r or dlq_d:
+            print(f'DLQ: {dlq_s} succeeded, {dlq_r} requeued, {dlq_d} dead')
 
     for proj_dir in sorted(PROJECTS_DIR.iterdir()):
         if not proj_dir.is_dir():
@@ -335,6 +450,7 @@ def main() -> None:
 
             # Dispatch in batches
             for i in range(0, len(groups), BATCH_SIZE):
+                batch_idx = i // BATCH_SIZE + 1
                 batch = groups[i:i + BATCH_SIZE]
                 prompt = build_distillation_prompt(project, batch)
                 result = dispatch_distillation(prompt)
@@ -344,11 +460,19 @@ def main() -> None:
                     result = dispatch_distillation(prompt)
 
                 if not result:
-                    print(f'    Batch {i // BATCH_SIZE + 1}: DISPATCH FAILED')
+                    print(f'    Batch {batch_idx}: DISPATCH FAILED — queued to DLQ')
+                    queue_for_retry(
+                        project=project,
+                        session_id=session_id,
+                        session_date=session_date,
+                        batch_idx=batch_idx,
+                        groups=batch,
+                        error='dispatch failed after 2 attempts',
+                    )
                     continue
 
                 kept = result.get('keep', [])
-                print(f'    Batch {i // BATCH_SIZE + 1}: {len(kept)}/{len(batch)} kept')
+                print(f'    Batch {batch_idx}: {len(kept)}/{len(batch)} kept')
 
                 for item in kept:
                     idx = item.get('index', 0) - 1

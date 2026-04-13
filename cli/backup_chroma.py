@@ -1,4 +1,4 @@
-#!/opt/homebrew/bin/python3
+#!/Users/chrischo/server/brain/.venv/bin/python
 """Nightly backup to MinIO — ChromaDB + raw/inbox + canonical + distilled.
 
 Critical: raw/inbox is the source of truth for everything ingested between

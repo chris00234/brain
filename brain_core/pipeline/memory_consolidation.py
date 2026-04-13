@@ -3,12 +3,12 @@
 
 Phase 1D: Three-tier memory (episodic → semantic → obsolete).
 
-Rules:
-  episodic → semantic:  age ≥ 7 days AND utility_score ≥ 0.3
-  episodic → obsolete:  age ≥ 14 days AND utility_score < 0.3
+Rules (calibrated 2026-04-11):
+  episodic → semantic:  age ≥ 3 days AND utility_score ≥ 0.3
+  episodic → obsolete:  age ≥ 7 days AND utility_score < 0.2
   semantic → obsolete:  age ≥ 180 days AND utility_score < 0.1
 
-Utility scores come from Neo4j MemoryAccess.utility_score (MemRL pattern).
+Utility: Neo4j MemoryAccess.utility_score, with access_count fallback from ChromaDB.
 Runs nightly at 3:45am.
 """
 from __future__ import annotations
@@ -102,12 +102,20 @@ def consolidate() -> dict:
         batch = ids[i:i + 500]
         utility.update(_utility_scores(batch))
 
+    # Enrich utility with access_count fallback from ChromaDB metadata
+    for mid, meta in zip(ids, metas):
+        meta = meta or {}
+        access_count = int(meta.get("access_count") or 0)
+        if mid not in utility or utility[mid] == 0.5:  # 0.5 = Neo4j fallback
+            utility[mid] = min(1.0, 0.3 + (access_count * 0.1))
+
     # Collect updates
     updates_batch: list[tuple[str, dict]] = []
 
+    print(f"[consolidate] scanning {len(ids)} memories")
     for mid, meta in zip(ids, metas):
         meta = meta or {}
-        current_class = meta.get("memory_class", "episodic")
+        current_class = meta.get("memory_class") or "episodic"
         if current_class == "obsolete":
             continue  # already terminal
 
@@ -115,23 +123,33 @@ def consolidate() -> dict:
         if not created_at:
             continue
         age_days = (now - created_at).days
-        u = utility.get(mid, 0.5)
+        u = utility.get(mid, 0.3)
+        access_count = int(meta.get("access_count") or 0)
 
         new_class = None
+        trust_score = None
         if current_class == "episodic":
-            if age_days >= 7 and u >= 0.3:
+            if age_days >= 3 and u >= 0.3:
                 new_class = "semantic"
+                old_trust = float(meta.get("trust_score") or 0.5)
+                trust_score = min(1.0, old_trust + 0.1)
                 promoted += 1
-            elif age_days >= 14 and u < 0.3:
+            elif age_days >= 7 and u < 0.2:
                 new_class = "obsolete"
+                trust_score = 0.2
                 demoted_episodic += 1
         elif current_class == "semantic":
             if age_days >= 180 and u < 0.1:
                 new_class = "obsolete"
+                trust_score = 0.2
                 demoted_semantic += 1
 
         if new_class:
-            updates_batch.append((mid, {"memory_class": new_class}))
+            update_meta = {"memory_class": new_class}
+            if trust_score is not None:
+                update_meta["trust_score"] = str(trust_score)
+            print(f"  {mid[:30]} age={age_days}d utility={u:.2f} access={access_count} {current_class}->{new_class}")
+            updates_batch.append((mid, update_meta))
             if len(updates_batch) >= BATCH_SIZE:
                 _apply_updates(sem_col_id, updates_batch)
                 updates_batch = []

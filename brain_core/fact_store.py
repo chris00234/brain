@@ -78,7 +78,28 @@ def _ensure_schema():
 
 @contextlib.contextmanager
 def _conn_ctx():
-    """Short-lived connection — avoids thread-local leaks in worker pools."""
+    """Short-lived connection with IMMEDIATE transaction for read-then-write atomicity."""
+    _ensure_schema()
+    conn = sqlite3.connect(str(DB_PATH), isolation_level=None)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.row_factory = sqlite3.Row
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        yield conn
+        # Commit if caller hasn't already committed/rolled back
+        if conn.in_transaction:
+            conn.execute("COMMIT")
+    except Exception:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.close()
+
+
+@contextlib.contextmanager
+def _conn_read():
+    """Read-only connection — no IMMEDIATE lock needed."""
     _ensure_schema()
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
@@ -134,7 +155,7 @@ def store_fact(
                     "WHERE id = ?",
                     (confidence, observed_at or now, now, source, ex["id"]),
                 )
-                conn.commit()
+                conn.execute("COMMIT")
                 return {"status": "updated", "id": ex["id"], "action": "confidence_bump"}
 
         supersede_ids = []
@@ -156,7 +177,7 @@ def store_fact(
                      valid_from or now, now, observed_at or now,
                      source, source_type, confidence, ex["id"], now, now),
                 )
-                conn.commit()
+                conn.execute("COMMIT")
                 return {"status": "superseded_by_existing", "id": fact_id_low}
 
         try:
@@ -179,9 +200,9 @@ def store_fact(
                     ",".join(supersede_ids), now, now,
                 ),
             )
-            conn.commit()
+            conn.execute("COMMIT")
         except sqlite3.IntegrityError:
-            conn.rollback()
+            conn.execute("ROLLBACK")
             return {"status": "duplicate", "action": "skipped"}
 
     # Audit trail
@@ -219,7 +240,7 @@ def query_facts(
     if active_only:
         clauses.append("status = 'active'")
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-    with _conn_ctx() as conn:
+    with _conn_read() as conn:
         rows = conn.execute(
             f"SELECT * FROM facts {where} ORDER BY confidence DESC, updated_at DESC LIMIT ?",
             params + [limit],
@@ -239,7 +260,7 @@ def get_fact_history(entity: str, attribute: str) -> list[dict]:
 
 def stats() -> dict:
     """Return fact store summary stats."""
-    with _conn_ctx() as conn:
+    with _conn_read() as conn:
         total = conn.execute("SELECT COUNT(*) FROM facts").fetchone()[0]
         active = conn.execute("SELECT COUNT(*) FROM facts WHERE status = 'active'").fetchone()[0]
         entities = conn.execute("SELECT COUNT(DISTINCT entity) FROM facts").fetchone()[0]

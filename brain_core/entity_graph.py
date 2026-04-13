@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS entity_relations (
     created_at TEXT NOT NULL,
     source_memory_id TEXT
 );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_rel_unique ON entity_relations(source_entity, relationship, target_entity);
 CREATE INDEX IF NOT EXISTS idx_entity_name ON entities(name);
 CREATE INDEX IF NOT EXISTS idx_rel_source ON entity_relations(source_entity);
 CREATE INDEX IF NOT EXISTS idx_rel_target ON entity_relations(target_entity);
@@ -71,7 +72,66 @@ def _init_db() -> None:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(str(DB_PATH)) as conn:
         conn.execute("PRAGMA journal_mode=WAL")
-        conn.executescript(_SCHEMA)
+        # Create base tables first (no UNIQUE index yet)
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS entities (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                entity_type TEXT DEFAULT 'concept',
+                first_seen_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                mention_count INTEGER DEFAULT 1
+            );
+            CREATE TABLE IF NOT EXISTS entity_relations (
+                id TEXT PRIMARY KEY,
+                source_entity TEXT NOT NULL REFERENCES entities(id),
+                relationship TEXT NOT NULL,
+                target_entity TEXT NOT NULL REFERENCES entities(id),
+                confidence REAL DEFAULT 0.5,
+                created_at TEXT NOT NULL,
+                source_memory_id TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_entity_name ON entities(name);
+            CREATE INDEX IF NOT EXISTS idx_rel_source ON entity_relations(source_entity);
+            CREATE INDEX IF NOT EXISTS idx_rel_target ON entity_relations(target_entity);
+            CREATE TABLE IF NOT EXISTS memory_access (
+                memory_id TEXT PRIMARY KEY,
+                access_count INTEGER DEFAULT 0,
+                last_accessed_at TEXT NOT NULL,
+                first_accessed_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_memory_access_last ON memory_access(last_accessed_at);
+            """
+        )
+        # Dedup entity_relations before creating the UNIQUE index. Legacy rows
+        # were inserted without the uniqueness guarantee; delete everything but
+        # the highest-confidence / latest row per (source, rel, target).
+        # Bug fix 2026-04-12: every _init_db call was failing UNIQUE constraint
+        # creation because the data had duplicates.
+        try:
+            conn.execute(
+                """
+                DELETE FROM entity_relations
+                WHERE id NOT IN (
+                    SELECT id FROM (
+                        SELECT id,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY source_entity, relationship, target_entity
+                                   ORDER BY confidence DESC, created_at DESC, id DESC
+                               ) AS rn
+                        FROM entity_relations
+                    )
+                    WHERE rn = 1
+                )
+                """
+            )
+        except sqlite3.Error:
+            pass
+        # Now safe to create the UNIQUE index
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_rel_unique ON entity_relations(source_entity, relationship, target_entity)"
+        )
 
 
 try:
@@ -338,7 +398,9 @@ def _neo4j_store_entities(entities: list, relations: list, now: str, memory_id: 
         rid = f"rel_{uuid.uuid4().hex[:12]}"
         # Hebbian learning: saturating weight update — neurons that fire together wire together
         run_write(
-            "MATCH (s:Entity {name: $src}), (t:Entity {name: $tgt}) "
+            # Use separate MATCH clauses to avoid cartesian product warning.
+            "MATCH (s:Entity {name: $src}) "
+            "MATCH (t:Entity {name: $tgt}) "
             "WHERE s <> t "
             "MERGE (s)-[r:RELATES_TO {relationship: $rel_type}]->(t) "
             "ON CREATE SET r.id = $rid, r.weight = 0.1, r.co_occurrence_count = 1, "
@@ -467,6 +529,21 @@ def reinforce_memory(memory_id: str, success: bool) -> None:
     Also updates ChromaDB metadata trust_score on the semantic_memory record so the
     search ranker (Phase 1E) can use it.
     """
+    # Phase 3+4 atoms truth layer + SM-2 spaced repetition.
+    # SM-2 quality mapping: success=True → 4, False → 1.
+    # Best-effort, no-op if BRAIN_ATOMS_ENABLED is false.
+    try:
+        from sm2 import apply_quality
+
+        apply_quality(memory_id, quality=4 if success else 1)
+    except Exception:
+        try:
+            from atoms_store import reinforce as atoms_reinforce
+
+            atoms_reinforce(memory_id, success=success)
+        except Exception:
+            pass
+
     delta = 0.1 if success else -0.05
     if _use_neo4j():
         try:
@@ -559,7 +636,7 @@ def _sqlite_store_entities(entities: list, relations: list, now: str, memory_id:
             if not src_id or not tgt_id or src_id == tgt_id:
                 continue
             rid = f"rel_{uuid.uuid4().hex[:12]}"
-            conn.execute("INSERT INTO entity_relations (id, source_entity, relationship, target_entity, confidence, created_at, source_memory_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            conn.execute("INSERT OR IGNORE INTO entity_relations (id, source_entity, relationship, target_entity, confidence, created_at, source_memory_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
                          (rid, src_id, relationship, tgt_id, 0.5, now, memory_id))
         conn.commit()
         return created

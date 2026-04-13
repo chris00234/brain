@@ -17,7 +17,7 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
 export LANG="en_US.UTF-8"
 export LC_ALL="en_US.UTF-8"
 
-PYTHON="/opt/homebrew/bin/python3"
+PYTHON="${BRAIN_PYTHON:-/Users/chrischo/server/brain/.venv/bin/python}"
 SCRIPT="/Users/chrischo/server/brain/ingest/personal.py"
 
 exec "$PYTHON" "$SCRIPT" "$@"

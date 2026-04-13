@@ -112,6 +112,30 @@ def main() -> int:
     except Exception:
         pass
 
+    # Phase 3 atoms-truth-layer mirror: project canonical note as a tier='core' atom.
+    # Best-effort, gated by BRAIN_ATOMS_ENABLED.
+    try:
+        from atoms_store import upsert_atom
+        title = metadata.get("title", "") or canonical_id
+        body_preview = body.strip()[:500]
+        text = (title + "\n" + body_preview)[:2000]
+        upsert_atom(
+            text=text,
+            chroma_id=f"canonical:{canonical_id}",
+            kind="decision" if metadata.get("domain") == "decisions" else "fact",
+            confidence=float(metadata.get("confidence", 0.8) or 0.8),
+            tier="core",
+            canonical=True,
+            version_of=canonical_id,
+            distilled_by="canonical",
+            collection_hint="canonical",
+            valid_from=metadata.get("valid_from"),
+            valid_until=metadata.get("valid_to"),
+            provenance={"path": str(target), "owner": args.owner, "scope": args.scope},
+        )
+    except Exception:
+        pass
+
     audit_payload = {
         "timestamp": utc_now(),
         "action": "promote_canonical",

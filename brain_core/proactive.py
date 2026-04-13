@@ -9,9 +9,11 @@ All checks are lightweight — no LLM calls except for urgent Telegram alerts.
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import logging
+import os
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
@@ -111,11 +113,18 @@ def _read_insights() -> list[ProactiveInsight]:
 
 def _write_insights(insights: list[ProactiveInsight]) -> None:
     INSIGHTS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    tmp = INSIGHTS_FILE.with_suffix(".tmp")
-    with tmp.open("w") as f:
-        for ins in insights:
-            f.write(json.dumps(ins.to_dict()) + "\n")
-    tmp.replace(INSIGHTS_FILE)
+    lock_path = INSIGHTS_FILE.with_suffix(".lock")
+    lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
+    fcntl.flock(lock_fd, fcntl.LOCK_EX)
+    try:
+        tmp = INSIGHTS_FILE.with_suffix(".tmp")
+        with tmp.open("w") as f:
+            for ins in insights:
+                f.write(json.dumps(ins.to_dict()) + "\n")
+        tmp.replace(INSIGHTS_FILE)
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
 
 
 # ── Check functions ──────────────────────────────────────
@@ -124,7 +133,7 @@ def check_schedule_gaps() -> list[ProactiveInsight]:
     """Search calendar for events in next 48h, flag those with no prep materials."""
     insights = []
     try:
-        col_id = _get_collection_id("personal") or _get_collection_id("calendar")
+        col_id = _get_collection_id("personal")
         if not col_id:
             return []
 
@@ -242,22 +251,27 @@ def check_decision_contradictions() -> list[ProactiveInsight]:
             return insights
 
         cutoff_iso = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat(timespec="seconds")
+        # ChromaDB 1.4.1 rejects string operands in $gte/$lt — fetch unfiltered
+        # and post-filter by created_at in Python. We cap at 500 to avoid
+        # scanning unbounded collections.
         resp = chroma_api(
             "POST",
             f"/api/v2/tenants/default_tenant/databases/default_database/collections/{mem_col_id}/get",
             {
-                "limit": 50,
+                "limit": 500,
                 "include": ["documents", "metadatas"],
-                "where": {"created_at": {"$gte": cutoff_iso}},
             },
         )
-        recent_docs = resp.get("documents", [])
-        recent_metas = resp.get("metadatas", [])
+        all_docs = resp.get("documents", [])
+        all_metas = resp.get("metadatas", [])
 
-        # Flag any that have contradiction_score in metadata
-        for doc, meta in zip(recent_docs, recent_metas):
+        # Flag any that have contradiction_score in metadata AND are recent
+        for doc, meta in zip(all_docs, all_metas):
             if not doc or not meta:
                 continue
+            created_at = (meta.get("created_at") or "").replace("+00:00", "Z")
+            if created_at and created_at < cutoff_iso.replace("+00:00", "Z"):
+                continue  # older than cutoff
             c_score = meta.get("contradiction_score")
             if c_score and float(c_score) > 0.7:
                 c_id = _make_id("new_contradiction", doc[:100])
@@ -660,15 +674,26 @@ def get_current_insights(
 
 def dismiss_insight(insight_id: str) -> bool:
     """Mark insight as acted_on in JSONL store. Returns True if found and updated."""
-    insights = _read_insights()
-    found = False
-    for ins in insights:
-        if ins.id == insight_id:
-            ins.acted_on = True
-            found = True
-            break
-    if found:
-        _write_insights(insights)
+    lock_path = INSIGHTS_FILE.with_suffix(".lock")
+    lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
+    fcntl.flock(lock_fd, fcntl.LOCK_EX)
+    try:
+        insights = _read_insights()
+        found = False
+        for ins in insights:
+            if ins.id == insight_id:
+                ins.acted_on = True
+                found = True
+                break
+        if found:
+            tmp = INSIGHTS_FILE.with_suffix(".tmp")
+            with tmp.open("w") as f:
+                for ins in insights:
+                    f.write(json.dumps(ins.to_dict()) + "\n")
+            tmp.replace(INSIGHTS_FILE)
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
     return found
 
 

@@ -26,6 +26,10 @@ AGENTS_DIR = Path.home() / '.openclaw/agents'
 INBOX_DIR = Path('/Users/chrischo/server/knowledge/raw/inbox')
 STATE_FILE = Path('/Users/chrischo/server/brain/logs/openclaw-sessions-state.json')
 FAILURE_LOG = Path('/Users/chrischo/server/brain/logs/openclaw-sessions-failures.jsonl')
+DLQ_FILE = Path('/Users/chrischo/server/brain/logs/openclaw-sessions-dlq.jsonl')
+DEAD_FILE = Path('/Users/chrischo/server/brain/logs/openclaw-sessions-dead.jsonl')
+MAX_DLQ_ATTEMPTS = 5
+MAX_DLQ_ENTRIES = 10000
 
 OPENCLAW_BIN = '/Users/chrischo/.local/bin/openclaw'
 DISPATCH_AGENT = 'jenna'
@@ -35,6 +39,14 @@ BATCH_SIZE = 8  # exchanges per dispatch (keep prompt short for quality)
 ACTIVE_AGENTS = {'jenna', 'liz', 'ellie', 'sage', 'market', 'claude'}
 MIN_TEXT_LEN = 50
 MAX_EXCHANGE_CHARS = 2000  # cap per exchange before batching
+
+# Prefixes of prompts that OTHER ingest scripts dispatch to agents (Jenna mostly).
+# Skip these so the ingest doesn't re-distill its own meta-work (feedback loop).
+META_INGEST_PREFIXES = (
+    'You are Jenna. Review these',
+    'You are Sage. Review these',
+    'You are Ellie. Review these',
+)
 
 
 # ── State (safe_state if available) ─────────────────────
@@ -65,6 +77,28 @@ def log_failure(reason: str) -> None:
             f.write(json.dumps({'timestamp': datetime.now().isoformat(), 'reason': reason[:500]}) + '\n')
     except Exception:
         pass
+
+
+def queue_for_retry(agent: str, session_id: str, session_date: str,
+                    batch_idx: int, exchanges: list[dict], error: str,
+                    attempt: int = 1) -> None:
+    """Append a failed batch to the DLQ with full payload for later retry."""
+    try:
+        DLQ_FILE.parent.mkdir(parents=True, exist_ok=True)
+        entry = {
+            'ts': datetime.now().isoformat(),
+            'agent': agent,
+            'session_id': session_id,
+            'session_date': session_date,
+            'batch_idx': batch_idx,
+            'exchanges': exchanges,
+            'error': error[:500],
+            'attempt': attempt,
+        }
+        with DLQ_FILE.open('a') as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + '\n')
+    except Exception as e:
+        log_failure(f'DLQ write failed: {e}')
 
 
 # ── JSONL Parsing ───────────────────────────────────────
@@ -116,6 +150,18 @@ def parse_session(path: Path, offset: int = 0) -> tuple[list[dict], int, str]:
     if offset >= new_offset:
         return [], offset, ''
 
+    # session metadata only lives on line 0; read it even when resuming from a saved offset
+    if offset > 0:
+        first_nl = data.find(b'\n')
+        if first_nl > 0:
+            try:
+                first = json.loads(data[:first_nl].decode('utf-8', errors='replace'))
+                if first.get('type') == 'session':
+                    ts = first.get('timestamp', '')
+                    session_date = ts[:10] if ts else ''
+            except Exception:
+                pass
+
     lines = data[offset:].decode('utf-8', errors='replace').splitlines()
     pending_user = None
 
@@ -145,6 +191,9 @@ def parse_session(path: Path, offset: int = 0) -> tuple[list[dict], int, str]:
 
         if role == 'user':
             text = extract_user_text(content)
+            if text.startswith(META_INGEST_PREFIXES):
+                pending_user = None  # meta-ingest prompt — drop this exchange entirely
+                continue
             if len(text) >= MIN_TEXT_LEN:
                 pending_user = {
                     'text': text[:MAX_EXCHANGE_CHARS],
@@ -257,6 +306,90 @@ def write_record(agent_name: str, session_id: str, session_date: str,
     return out
 
 
+# ── DLQ Retry ───────────────────────────────────────────
+def process_dlq() -> tuple[int, int, int]:
+    """Retry DLQ entries. Returns (succeeded, requeued, dead)."""
+    if not DLQ_FILE.exists():
+        return 0, 0, 0
+
+    try:
+        lines = DLQ_FILE.read_text().splitlines()
+    except Exception as e:
+        log_failure(f'DLQ read failed: {e}')
+        return 0, 0, 0
+
+    succeeded = 0
+    requeued_entries: list[dict] = []
+    dead_entries: list[dict] = []
+
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        agent = entry.get('agent', '')
+        session_id = entry.get('session_id', '')
+        session_date = entry.get('session_date', '')
+        exchanges = entry.get('exchanges', [])
+        attempt = int(entry.get('attempt', 1))
+
+        if not exchanges or not agent:
+            continue
+
+        prompt = build_distillation_prompt(agent, exchanges)
+        result = dispatch_distillation(prompt)
+
+        if result:
+            kept = result.get('keep', [])
+            for item in kept:
+                idx = item.get('index', 0) - 1
+                if 0 <= idx < len(exchanges):
+                    write_record(agent, session_id, session_date, item, exchanges[idx])
+            succeeded += 1
+            continue
+
+        next_attempt = attempt + 1
+        if next_attempt > MAX_DLQ_ATTEMPTS:
+            entry['attempt'] = next_attempt
+            entry['dead_ts'] = datetime.now().isoformat()
+            dead_entries.append(entry)
+        else:
+            entry['attempt'] = next_attempt
+            entry['last_retry_ts'] = datetime.now().isoformat()
+            requeued_entries.append(entry)
+
+    # Enforce size cap — drop oldest if over limit
+    if len(requeued_entries) > MAX_DLQ_ENTRIES:
+        dropped = len(requeued_entries) - MAX_DLQ_ENTRIES
+        requeued_entries = requeued_entries[-MAX_DLQ_ENTRIES:]
+        log_failure(f'DLQ over cap — dropped {dropped} oldest entries')
+
+    try:
+        if requeued_entries:
+            tmp = DLQ_FILE.with_suffix('.jsonl.tmp')
+            tmp.write_text('\n'.join(json.dumps(e, ensure_ascii=False) for e in requeued_entries) + '\n')
+            tmp.replace(DLQ_FILE)
+        else:
+            DLQ_FILE.unlink(missing_ok=True)
+    except Exception as e:
+        log_failure(f'DLQ rewrite failed: {e}')
+
+    if dead_entries:
+        try:
+            DEAD_FILE.parent.mkdir(parents=True, exist_ok=True)
+            with DEAD_FILE.open('a') as f:
+                for e in dead_entries:
+                    f.write(json.dumps(e, ensure_ascii=False) + '\n')
+        except Exception as e:
+            log_failure(f'DLQ dead write failed: {e}')
+
+    return succeeded, len(requeued_entries), len(dead_entries)
+
+
 # ── Main ────────────────────────────────────────────────
 def main() -> None:
     parser = argparse.ArgumentParser(description='OpenClaw session ingest via Jenna distillation')
@@ -272,6 +405,11 @@ def main() -> None:
     total_exchanges = 0
 
     print(f'OpenClaw session ingest — agents={agents}')
+
+    if not args.dry_run:
+        dlq_s, dlq_r, dlq_d = process_dlq()
+        if dlq_s or dlq_r or dlq_d:
+            print(f'DLQ: {dlq_s} succeeded, {dlq_r} requeued, {dlq_d} dead')
 
     for agent_name in agents:
         sessions_dir = AGENTS_DIR / agent_name / 'sessions'
@@ -313,6 +451,7 @@ def main() -> None:
 
             # Dispatch in batches
             for i in range(0, len(exchanges), BATCH_SIZE):
+                batch_idx = i // BATCH_SIZE + 1
                 batch = exchanges[i:i + BATCH_SIZE]
                 prompt = build_distillation_prompt(agent_name, batch)
                 result = dispatch_distillation(prompt)
@@ -322,11 +461,19 @@ def main() -> None:
                     result = dispatch_distillation(prompt)
 
                 if not result:
-                    print(f'    Batch {i // BATCH_SIZE + 1}: DISPATCH FAILED')
+                    print(f'    Batch {batch_idx}: DISPATCH FAILED — queued to DLQ')
+                    queue_for_retry(
+                        agent=agent_name,
+                        session_id=session_id,
+                        session_date=session_date,
+                        batch_idx=batch_idx,
+                        exchanges=batch,
+                        error='dispatch failed after 2 attempts',
+                    )
                     continue
 
                 kept = result.get('keep', [])
-                print(f'    Batch {i // BATCH_SIZE + 1}: {len(kept)}/{len(batch)} kept')
+                print(f'    Batch {batch_idx}: {len(kept)}/{len(batch)} kept')
 
                 for item in kept:
                     idx = item.get('index', 0) - 1  # 1-indexed in prompt

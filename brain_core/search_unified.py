@@ -28,7 +28,7 @@ atexit.register(_search_bg_pool.shutdown, wait=False)  # Neo4j writes are best-e
 atexit.register(_search_fanout_pool.shutdown, wait=False)
 import time
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 
 # Local module — same dir
 sys.path.insert(0, str(Path(__file__).parent))
@@ -73,11 +73,6 @@ SOURCE_TRUST = {
     "context": 0.75,
     "graph": 0.5,
     "obsidian": 0.6,
-    # Legacy (kept for backward compat with old docs)
-    "calendar": 0.9,
-    "tasks": 0.9,
-    "notes": 0.85,
-    "messages": 0.7,
 }
 
 try:
@@ -164,13 +159,14 @@ def search_rag(query, limit, where=None, collections=None):
 
     if _RAG_IN_PROCESS:
         try:
-            return _rag_search.hybrid_search(query, cols, limit, use_keyword=True, where=where)
+            return _rag_search.hybrid_search(query, cols, limit, use_keyword=True, where=where, deduplicate=False)
         except Exception:
             return []
 
-    # Fallback: subprocess (legacy path)
+    # Fallback: subprocess (legacy path). Use the running Python (sys.executable)
+    # so dependency resolution matches the parent — brain_server's venv Python.
     collection_arg = ",".join(cols)
-    cmd = ['/opt/homebrew/bin/python3', str(RAG_SEARCH),
+    cmd = [sys.executable, str(RAG_SEARCH),
            query, '-c', collection_arg, '-n', str(limit), '--json']
     if where:
         cmd.extend(['--where', json.dumps(where)])
@@ -198,8 +194,8 @@ def search_canonical(query, limit, domain=None):
         except Exception:
             return []
 
-    # Fallback: subprocess (legacy path)
-    cmd = ['/opt/homebrew/bin/python3', str(KNOWLEDGE_SEARCH),
+    # Fallback: subprocess (legacy path). Use sys.executable to match parent venv.
+    cmd = [sys.executable, str(KNOWLEDGE_SEARCH),
            query, '--limit', str(limit), '--include-rag', '--rag-limit', '0', '--json']
     if domain:
         cmd.extend(['--domain', domain])
@@ -343,6 +339,88 @@ def deduplicate(results, max_jaccard_window: int = 80):
             seen_hashes.add(content_hash)
             seen_tokens.append(content_toks)
     return unique
+
+
+_GRAPH_BOOST_FACTOR = 1.15
+_GRAPH_BOOST_TIMEOUT_S = 0.05  # 50ms — skip if Neo4j is slow
+
+
+def _graph_entity_boost(query: str, results: list[dict]) -> set[str]:
+    """Boost results connected to entities mentioned in the query via Neo4j graph.
+
+    1. Tokenize query, find matching Entity nodes (case-insensitive).
+    2. Walk 2 hops from matched entities to collect source_memory_ids on edges.
+    3. Multiply score by _GRAPH_BOOST_FACTOR for results whose id matches.
+
+    Returns set of boosted result IDs (empty if no entities matched or Neo4j down).
+    """
+    if not query or not results:
+        return set()
+    try:
+        from entity_graph import _use_neo4j
+        if not _use_neo4j():
+            return set()
+        from neo4j_client import run_query as _rq
+    except Exception:
+        return set()
+
+    # Step 1: find entities mentioned in the query.
+    # Use a single Cypher call that checks each entity name against the query.
+    query_lower = query.lower()
+    try:
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+            fut = ex.submit(
+                _rq,
+                "MATCH (e:Entity) "
+                "WHERE size(e.name) >= 2 AND toLower($q) CONTAINS toLower(e.name) "
+                "RETURN e.name AS name LIMIT 10",
+                {"q": query_lower},
+            )
+            matched = fut.result(timeout=_GRAPH_BOOST_TIMEOUT_S)
+    except Exception:
+        return set()
+
+    if not matched:
+        return set()
+
+    entity_names = [m["name"] for m in matched]
+
+    # Step 2: walk 2 hops from matched entities, collect source_memory_ids from edges.
+    try:
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+            fut = ex.submit(
+                _rq,
+                "MATCH (seed:Entity) WHERE seed.name IN $names "
+                "MATCH (seed)-[r1:RELATES_TO]-(hop1) "
+                "OPTIONAL MATCH (hop1)-[r2:RELATES_TO]-(hop2) WHERE hop2 <> seed "
+                "WITH collect(DISTINCT r1.source_memory_id) + collect(DISTINCT r2.source_memory_id) AS mids "
+                "UNWIND mids AS mid "
+                "WHERE mid IS NOT NULL AND mid <> '' "
+                "RETURN collect(DISTINCT mid) AS memory_ids",
+                {"names": entity_names},
+            )
+            rows = fut.result(timeout=_GRAPH_BOOST_TIMEOUT_S)
+    except Exception:
+        return set()
+
+    if not rows or not rows[0].get("memory_ids"):
+        return set()
+
+    connected_ids = set(rows[0]["memory_ids"])
+
+    # Step 3: boost matching results.
+    boosted = set()
+    for r in results:
+        rid = r.get("id") or ""
+        if rid and rid in connected_ids:
+            r["score"] = r.get("score", 0) * _GRAPH_BOOST_FACTOR
+            r.setdefault("metadata", {})["graph_boost"] = True
+            r.setdefault("_debug", {})["graph_boost"] = True
+            r.setdefault("_debug", {})["graph_entities"] = entity_names
+            boosted.add(rid)
+    return boosted
 
 
 _RELATIONAL_PATTERNS = re.compile(
@@ -544,7 +622,48 @@ def search_all(query, limit=5, sources=None, domain=None, original_query=None,
                 local_where = {"$and": [local_where, type_clause]}
             else:
                 local_where = type_clause
+        else:
+            # Default exclusion: raw agent/session dumps are ingested for history
+            # but flood the vector space with query-like language that crowds out
+            # canonical answers. Exclude them by default; callers who want them
+            # can pass source_type explicitly.
+            _raw_exclude = {"type": {"$nin": [
+                "raw-openclaw_session", "raw-claude_code_session",
+                "raw-browser", "raw-git_activity", "raw-screen_time",
+            ]}}
+            if local_where:
+                local_where = {"$and": [local_where, _raw_exclude]}
+            else:
+                local_where = _raw_exclude
         raw_results = search_rag(query, limit * 2, where=local_where or None, collections=collections)
+
+        # Phase 6: atoms-truth-layer batch lookup (BRAIN_ATOMS_READ).
+        # Build chroma_id → atoms-row map in ONE SQL prepared statement so the
+        # filter loop below stays O(N) without per-row sqlite open/close.
+        atoms_meta_map: dict[str, dict] = {}
+        try:
+            from config import BRAIN_ATOMS_READ
+
+            if BRAIN_ATOMS_READ and raw_results:
+                from atoms_store import _conn
+
+                sm_ids = [
+                    r["id"]
+                    for r in raw_results
+                    if isinstance(r, dict) and r.get("collection") == "semantic_memory" and r.get("id")
+                ]
+                if sm_ids:
+                    placeholders = ",".join("?" for _ in sm_ids)
+                    with _conn() as _c:
+                        rows = _c.execute(
+                            f"SELECT chroma_id, tier, superseded_by, valid_from, valid_until "
+                            f"FROM atoms WHERE chroma_id IN ({placeholders})",
+                            sm_ids,
+                        ).fetchall()
+                    atoms_meta_map = {row["chroma_id"]: dict(row) for row in rows}
+        except Exception:
+            atoms_meta_map = {}
+
         # Phase 1B/1C/1D: filter only applies to semantic_memory collection
         # (other collections don't have supersession/temporal/tier metadata).
         filtered = []
@@ -556,19 +675,25 @@ def search_all(query, limit=5, sources=None, domain=None, original_query=None,
             r_meta = r.get("metadata") or {}
             # Only gate semantic_memory results with lifecycle filters
             if r_coll == "semantic_memory":
-                if not include_history and r_meta.get("superseded_by"):
+                # Phase 6: prefer atoms truth layer for tier/supersession when
+                # BRAIN_ATOMS_READ is on and we have a row for this chroma_id.
+                atom_row = atoms_meta_map.get(r.get("id") or "")
+                tier_meta = (atom_row or {}).get("tier") or r_meta.get("memory_class")
+                superseded = (atom_row or {}).get("superseded_by") or r_meta.get("superseded_by")
+                vf_meta = ((atom_row or {}).get("valid_from") or r_meta.get("valid_from") or "")[:10]
+                vu_meta = ((atom_row or {}).get("valid_until") or r_meta.get("valid_until") or "")[:10]
+
+                if not include_history and superseded:
                     continue
-                if not include_obsolete and r_meta.get("memory_class") == "obsolete":
+                if not include_obsolete and tier_meta == "obsolete":
                     continue
                 # Phase 1C: temporal validity window — compare date portion only
                 # to handle ISO timestamps vs date-string as_of cleanly.
                 if as_of:
                     as_of_date = as_of[:10]
-                    vf = (r_meta.get("valid_from", "") or "")[:10]
-                    vu = (r_meta.get("valid_until", "") or "")[:10]
-                    if vf and vf > as_of_date:
+                    if vf_meta and vf_meta > as_of_date:
                         continue
-                    if vu and vu <= as_of_date:
+                    if vu_meta and vu_meta <= as_of_date:
                         continue
             filtered.append(r)
         res = [normalize_rag_result(r) for r in filtered]
@@ -704,7 +829,7 @@ def search_all(query, limit=5, sources=None, domain=None, original_query=None,
     # makes the final score scale undefined.
     try:
         from rerank import rerank as _rerank
-        unique = _rerank(relevance_query, unique, top_k=limit * 2)
+        unique = _rerank(relevance_query, unique, top_k=limit * 10)
         for r in unique:
             raw = r.get("rerank_score", r.get("score", 0))
             try:
@@ -715,12 +840,7 @@ def search_all(query, limit=5, sources=None, domain=None, original_query=None,
     except ImportError:
         pass
 
-    # Phase C1: Cross-encoder rerank (feature-flagged, fallback-safe)
-    try:
-        from cross_encoder_rerank import rerank_with_cross_encoder
-        unique = rerank_with_cross_encoder(relevance_query, unique, top_k=min(limit * 2, 20))
-    except Exception:
-        pass
+    # Cross-encoder rerank runs in server.py recall_v2 handler (post-RRF).
 
     # Round 10 A1 (Wave 1.5b): spreading activation via Personalized PageRank.
     # Now applied AFTER cross-encoder rerank, with two safety conditions:
@@ -840,22 +960,46 @@ def search_all(query, limit=5, sources=None, domain=None, original_query=None,
     except ImportError:
         pass
 
-    # Graph-aware boost: only for relational queries (intent-triggered).
-    # Avoids the extra Neo4j round-trip on non-relational queries.
-    if _intent_boost.get("graph", 1.0) > 1.0:
+    # Preference recency boost: for semantic_memory preferences, newer ones
+    # get a significant boost to prevent stale preferences from dominating
+    # via accumulated access_count reinforcement.
+    now_utc = datetime.now(timezone.utc)
+    for r in unique:
+        collection = r.get("collection", "")
+        if collection != "semantic_memory":
+            continue
+        meta = r.get("metadata") or {}
+        if meta.get("category") != "preference":
+            continue
+        created_at_raw = meta.get("created_at") or meta.get("updated_at")
+        if not created_at_raw:
+            continue
         try:
-            from entity_graph import expand_with_entities
-            query_entities = set(e.lower() for e in expand_with_entities(relevance_query, limit=5))
-            if query_entities:
-                for r in unique:
-                    result_text = (r.get("content", "") + " " + r.get("title", ""))[:200].lower()
-                    overlap = sum(1 for e in query_entities if e in result_text)
-                    if overlap > 0:
-                        boost = min(1.1, 1.0 + overlap * 0.03)
-                        r["score"] = r.get("score", 0) * boost
-                unique.sort(key=lambda x: x.get("score", 0), reverse=True)
-        except Exception:
-            pass
+            ts = created_at_raw.replace("Z", "+00:00")
+            created_dt = datetime.fromisoformat(ts)
+            if created_dt.tzinfo is None:
+                created_dt = created_dt.replace(tzinfo=timezone.utc)
+            age_days = max(0, (now_utc - created_dt).total_seconds() / 86400)
+            # 30-day half-life recency curve: a preference from today gets 1.0,
+            # from 30 days ago gets 0.5, from 90 days ago gets 0.125
+            recency = 0.5 ** (age_days / 30)
+            # Blend: 60% original score + 40% recency-weighted score
+            # This ensures a fresh preference strongly outranks a stale one
+            # while still respecting relevance (can't boost an irrelevant result)
+            r["score"] = round(r["score"] * (0.6 + 0.4 * recency), 2)
+        except (ValueError, TypeError):
+            continue
+
+    # Graph-aware boost: find entities mentioned in query, look up connected
+    # memory_ids via Neo4j 2-hop traversal, boost results whose IDs match.
+    # Guarded by a 50ms timeout so Neo4j latency never blocks search.
+    try:
+        graph_boosted_ids = _graph_entity_boost(relevance_query, unique)
+        if graph_boosted_ids:
+            source_timing["graph_boost_count"] = len(graph_boosted_ids)
+            unique.sort(key=lambda x: x.get("score", 0), reverse=True)
+    except Exception:
+        pass
 
     # Round 10 B2 (Wave 2): Episodic peer cross-promotion.
     # When a top-N result has peer memories from the same temporal episode
@@ -1075,7 +1219,9 @@ def search_all(query, limit=5, sources=None, domain=None, original_query=None,
                         if a != b and pairs_done < 3:
                             from datetime import datetime as _dt, timezone as _tz
                             _rw(
-                                "MATCH (s:Entity {name: $a}), (t:Entity {name: $b}) "
+                                # Use separate MATCH clauses to avoid cartesian product warning.
+                                "MATCH (s:Entity {name: $a}) "
+                                "MATCH (t:Entity {name: $b}) "
                                 "MERGE (s)-[r:RELATES_TO {relationship: 'co_retrieved'}]->(t) "
                                 "ON CREATE SET r.weight = 0.05, r.co_occurrence_count = 1, r.created_at = $now "
                                 "ON MATCH SET r.co_occurrence_count = r.co_occurrence_count + 1, "
@@ -1136,23 +1282,29 @@ def main():
 
     sources = [s.strip() for s in args.source.split(",")]
 
-    # Build temporal where clause
+    # Temporal range is applied Python-side after retrieval because ChromaDB 1.4.1
+    # rejects string operands in $gte/$lt and our created_at metadata is ISO strings.
     start_dt, end_dt = temporal.parse_range(args.since, args.until)
-    where = temporal.to_chroma_where(start_dt, end_dt) if (start_dt or end_dt) else None
+    where = None
 
     collections = [args.collection] if args.collection else None
 
     _, adjacency = load_ontology()
     expanded_query = expand_with_ontology(args.query, adjacency)
 
+    search_limit = args.limit * 3 if (start_dt or end_dt) else args.limit
     payload = search_all(
-        expanded_query, args.limit, sources, args.domain,
+        expanded_query, search_limit, sources, args.domain,
         original_query=args.query,
         where=where,
         collections=collections,
         entity=args.entity,
         explain=args.explain,
     )
+    if (start_dt or end_dt) and isinstance(payload, dict):
+        payload["results"] = temporal.filter_by_created_at(
+            payload.get("results", []), start_dt, end_dt
+        )[:args.limit]
     payload["original_query"] = args.query
     if expanded_query != args.query:
         payload["expanded_query"] = expanded_query

@@ -159,8 +159,9 @@ def get_lora_embeddings_batch(texts: list[str], adapter_path: str, prefix: str =
 def unload():
     """Release the model from memory (for testing or switching adapters)."""
     global _base_model, _active_adapter
-    _base_model = None
-    _active_adapter = None
+    with _lock:
+        _base_model = None
+        _active_adapter = None
 
 
 if __name__ == "__main__":

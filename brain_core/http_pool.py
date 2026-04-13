@@ -78,7 +78,12 @@ def http_json(method: str, url: str, payload=None, timeout: int = 60):
             err_body = json.loads(raw) if raw else {}
         except (json.JSONDecodeError, ValueError):
             err_body = {}
-        err_msg = err_body.get("error") or err_body.get("detail") or err_body.get("message") or f"status {resp.status}"
+        raw_err = err_body.get("error")
+        raw_msg = err_body.get("message") or err_body.get("detail")
+        if raw_err and raw_msg and isinstance(raw_err, str) and raw_err.endswith("Error"):
+            err_msg = f"{raw_err}: {raw_msg}"
+        else:
+            err_msg = raw_msg or raw_err or f"status {resp.status}"
         raise ChromaAPIError(resp.status, err_msg, path[:80])
     if not raw:
         return {}

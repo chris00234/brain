@@ -31,6 +31,10 @@ _FTS5_SPECIAL = re.compile(r'["\(\)\*\^\:]')
 def _get_conn():
     conn = sqlite3.connect(str(FTS_DB))
     conn.row_factory = sqlite3.Row
+    # Disable Python's implicit-transaction mode so explicit BEGIN/COMMIT works.
+    # Without this, `conn.execute("BEGIN")` after any DML raises
+    # "cannot start a transaction within a transaction". Bug fix 2026-04-12.
+    conn.isolation_level = None
     conn.execute("PRAGMA journal_mode=WAL")
     return conn
 

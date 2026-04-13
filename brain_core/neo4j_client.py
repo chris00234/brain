@@ -42,16 +42,20 @@ def get_driver():
 
 
 def run_query(cypher: str, params: dict[str, Any] | None = None) -> list[dict]:
-    """Execute a Cypher query, return list of record dicts."""
-    with get_driver().session() as session:
-        result = session.run(cypher, params or {})
+    """Execute a read Cypher query, return list of record dicts."""
+    def _work(tx):
+        result = tx.run(cypher, params or {})
         return [dict(record) for record in result]
+    with get_driver().session() as session:
+        return session.execute_read(_work)
 
 
 def run_write(cypher: str, params: dict[str, Any] | None = None) -> None:
     """Execute a write Cypher query (no return needed)."""
+    def _work(tx):
+        tx.run(cypher, params or {}).consume()
     with get_driver().session() as session:
-        session.run(cypher, params or {})
+        session.execute_write(_work)
 
 
 def is_healthy() -> bool:
@@ -61,12 +65,15 @@ def is_healthy() -> bool:
         get_driver().verify_connectivity()
         return True
     except Exception:
-        try:
-            if _driver:
-                _driver.close()
-        except Exception:
-            pass
-        _driver = None
+        old_driver = None
+        with _driver_lock:
+            old_driver = _driver
+            _driver = None
+        if old_driver:
+            try:
+                old_driver.close()
+            except Exception:
+                pass
         return False
 
 

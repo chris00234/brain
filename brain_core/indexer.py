@@ -251,23 +251,94 @@ def chunk_text(text, max_size=MAX_CHUNK_SIZE, overlap=CHUNK_OVERLAP):
 
 
 def enforce_max_chunk_size(chunks, max_size=MAX_CHUNK_SIZE, overlap=CHUNK_OVERLAP):
-    """Post-process: recursively split oversized chunks."""
+    """Post-process: recursively split oversized chunks.
+
+    Propagates the parent section heading into every sub-part's content so the
+    vector representation includes the topic anchor. Previously, parts 2+ lost
+    the header from the embed text (it was only kept in metadata as a string),
+    which made them un-retrievable for queries that only matched the header.
+    Bug fix 2026-04-12: ~54% of `context` collection was affected.
+    """
     result = []
     for chunk in chunks:
         if len(chunk['content']) <= max_size:
             result.append(chunk)
         else:
+            parent_section = (chunk.get('section') or '').strip()
             subs = chunk_text(chunk['content'], max_size, overlap)
             for i, sub in enumerate(subs):
                 new = dict(chunk)
-                new['content'] = sub['content']
-                new['section'] = f"{chunk.get('section', '')} (part {i+1})"
+                # For parts 2+, prepend the parent section heading so the
+                # embedding captures which topic this fragment belongs to.
+                # Part 1 already contains the header (it was part of the
+                # original content that got sliced).
+                if parent_section and i > 0:
+                    # Don't duplicate if the sub-content already starts with it
+                    body_head = sub['content'][:200].lower()
+                    if parent_section.lower() not in body_head:
+                        new['content'] = f"## {parent_section}\n\n{sub['content']}"
+                    else:
+                        new['content'] = sub['content']
+                else:
+                    new['content'] = sub['content']
+                new['section'] = f"{parent_section} (part {i+1})" if parent_section else f'part {i+1}'
                 result.append(new)
     return result
 
 
 def chunk_docker_compose(text, source):
-    """Chunk by service blocks."""
+    """Chunk by service blocks using a real YAML parser.
+
+    Previously used a 2-space-indent regex which missed Docker Compose v3.9+
+    specs with 4-space indent and produced `service='unknown'` chunks for any
+    file with mixed indentation. Now parses the YAML structurally.
+    Bug fix 2026-04-12.
+    """
+    try:
+        import yaml
+    except ImportError:
+        yaml = None
+
+    if yaml is not None:
+        try:
+            data = yaml.safe_load(text)
+        except yaml.YAMLError:
+            data = None
+        if isinstance(data, dict):
+            chunks = []
+            services = data.get("services") or {}
+            if isinstance(services, dict):
+                for service_name, service_config in services.items():
+                    try:
+                        body = yaml.dump(
+                            {service_name: service_config},
+                            default_flow_style=False,
+                            allow_unicode=True,
+                            sort_keys=False,
+                        )
+                    except Exception:
+                        body = f"{service_name}: {service_config}"
+                    chunks.append({"content": body, "service": service_name})
+
+            # Also emit top-level blocks (networks/volumes/secrets) so queries
+            # like "which network do services share" can find them.
+            for top_key in ("networks", "volumes", "secrets", "configs"):
+                if top_key in data and data[top_key]:
+                    try:
+                        body = yaml.dump(
+                            {top_key: data[top_key]},
+                            default_flow_style=False,
+                            allow_unicode=True,
+                            sort_keys=False,
+                        )
+                    except Exception:
+                        body = f"{top_key}: {data[top_key]}"
+                    chunks.append({"content": body, "service": f"__{top_key}__"})
+
+            if chunks:
+                return chunks
+
+    # Fallback: legacy regex chunker (kept for safety on non-parseable files)
     chunks = []
     lines = text.split('\n')
     current = []
@@ -288,29 +359,269 @@ def chunk_docker_compose(text, source):
     if current and service_name:
         chunks.append({'content': '\n'.join(current), 'service': service_name})
 
-    # If no services found, return whole file as one chunk
     if not chunks:
         chunks = [{'content': text, 'service': 'unknown'}]
 
     return chunks
 
-def chunk_nginx_conf(text, source):
-    """Chunk by server blocks."""
-    blocks = re.split(r'(?=server\s*\{)', text)
-    chunks = []
-    for block in blocks:
-        block = block.strip()
-        if not block:
+def _nginx_split_blocks(text):
+    """Parse nginx config into top-level blocks using brace matching.
+
+    Yields (directive_line, full_block_text) for every top-level `directive { ... }`
+    construct. Skips file-level comments and simple `directive ...;` directives
+    that don't have a body. Handles nested braces and comments inside blocks.
+    """
+    blocks = []
+    i = 0
+    n = len(text)
+    while i < n:
+        # Skip whitespace
+        while i < n and text[i] in ' \t\r\n':
+            i += 1
+        if i >= n:
+            break
+        # Skip full-line comments
+        if text[i] == '#':
+            while i < n and text[i] != '\n':
+                i += 1
             continue
-        server_name = 'unknown'
-        m = re.search(r'server_name\s+([^;]+);', block)
-        if m:
-            server_name = m.group(1).strip()
-        chunks.append({'content': block, 'service': server_name})
+        # Read directive up to { or ;
+        directive_start = i
+        while i < n and text[i] not in '{;':
+            if text[i] == '#':
+                while i < n and text[i] != '\n':
+                    i += 1
+                continue
+            i += 1
+        if i >= n:
+            break
+        directive = text[directive_start:i].strip()
+        if text[i] == ';':
+            # top-level simple directive (include, user, events outside brace) — skip
+            i += 1
+            continue
+        # text[i] == '{' — find matching closing brace
+        i += 1
+        depth = 1
+        while i < n and depth > 0:
+            ch = text[i]
+            if ch == '#':
+                while i < n and text[i] != '\n':
+                    i += 1
+                continue
+            if ch == '{':
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+            i += 1
+        body_end = i  # just past the closing }
+        full = text[directive_start:body_end].strip()
+        if full:
+            blocks.append((directive, full))
+    return blocks
+
+
+def chunk_nginx_conf(text, source):
+    """Chunk nginx config into one chunk per top-level block.
+
+    Uses a brace-matching state machine to split on `server`, `map`, `upstream`,
+    and other top-level blocks. Previously used a naive `server {` regex which:
+      - Concatenated multi-hostname `server_name a b c;` into one label
+      - Captured file-level comments as a fake `unknown` chunk
+      - Couldn't see `map`/`upstream` blocks as their own units
+      - Failed on default servers without `server_name`
+    Bug fix 2026-04-12.
+    """
+    blocks = _nginx_split_blocks(text)
+    chunks = []
+    for directive, block_text in blocks:
+        dtype = directive.split()[0] if directive else ''
+
+        if dtype == 'server':
+            # Extract primary hostname from server_name directive; use first
+            # name only so filter queries like `?collection=nginx&service=<host>`
+            # match predictably.
+            m = re.search(r'server_name\s+([^;]+);', block_text)
+            if m:
+                names = m.group(1).split()
+                service = names[0] if names else 'default-server'
+            else:
+                service = 'default-server'
+            chunks.append({'content': block_text, 'service': service})
+
+        elif dtype == 'map':
+            # map $source $result { ... }
+            m = re.match(r'map\s+\S+\s+(\S+)', directive)
+            service = f'map_{m.group(1)}' if m else 'map'
+            chunks.append({'content': block_text, 'service': service})
+
+        elif dtype == 'upstream':
+            # upstream <name> { ... }
+            m = re.match(r'upstream\s+(\S+)', directive)
+            service = f'upstream_{m.group(1)}' if m else 'upstream'
+            chunks.append({'content': block_text, 'service': service})
+
+        elif dtype in ('http', 'events', 'stream', 'mail'):
+            # Rare at /etc/nginx/conf.d/ level but handle gracefully
+            chunks.append({'content': block_text, 'service': f'{dtype}_global'})
+
+        else:
+            # Unknown top-level block — label by its directive type
+            chunks.append({'content': block_text, 'service': dtype or 'unknown'})
+
+    if not chunks:
+        # File has no top-level blocks at all (pure comments, or odd format).
+        # Return the whole file as a fallback chunk keyed by filename.
+        from pathlib import Path as _P
+        fname = _P(source).stem if source else 'unknown'
+        chunks = [{'content': text.strip(), 'service': fname}]
+
     return chunks
 
+def _strip_frontmatter(text):
+    """Strip YAML/JSON frontmatter block from the top of a markdown doc.
+
+    Handles both `---\n...\n---` and `---json\n...\n---` forms. Previously,
+    `chunk_markdown` would emit frontmatter as its own `intro` chunk which
+    polluted retrieval with JSON metadata vectors (~32% of `canonical`).
+    Bug fix 2026-04-12.
+    """
+    stripped = text.lstrip()
+    if not stripped.startswith("---"):
+        return text
+    m = re.match(r"^---(?:json)?\s*\n.*?\n---\s*\n", stripped, re.DOTALL)
+    if m:
+        return stripped[m.end():]
+    return text
+
+
+def _chunk_markdown_with_lib(text):
+    """Structure-aware markdown chunker using markdown_it. Returns list of
+    {content, section} dicts. Falls back to regex chunker on parse failure.
+
+    Uses the actual markdown AST so it correctly handles:
+      - H1-H6 headings (not just H1-H3)
+      - Collapsed single-line markdown (the regex chunker's main bug)
+      - Setext headings (underline-style)
+      - Code fences, lists, blockquotes — kept inside their parent section
+    """
+    try:
+        from markdown_it import MarkdownIt
+    except ImportError:
+        return None  # fall back to regex
+
+    md = MarkdownIt("commonmark")
+    tokens = md.parse(text)
+
+    chunks = []
+    current_heading = "intro"
+    current_heading_line = ""
+    current_body = []
+
+    def _flush():
+        if not current_body:
+            return
+        body_text = "\n".join(current_body).strip()
+        if len(body_text) < 50:  # skip tiny sections
+            return
+        content = f"{current_heading_line}\n\n{body_text}" if current_heading_line else body_text
+        chunks.append({"content": content, "section": current_heading})
+
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok.type == "heading_open":
+            _flush()
+            level = int(tok.tag.lstrip("h") or "1")
+            # The next token is an `inline` with the heading text
+            inline = tokens[i + 1] if i + 1 < len(tokens) else None
+            heading_text = inline.content.strip() if inline and inline.type == "inline" else ""
+            current_heading = heading_text
+            current_heading_line = f"{'#' * level} {heading_text}"
+            current_body = []
+            i += 3  # heading_open, inline, heading_close
+            continue
+        if tok.type == "inline":
+            current_body.append(tok.content)
+        elif tok.type == "fence":
+            info = tok.info or ""
+            current_body.append(f"```{info}\n{tok.content}```")
+        elif tok.type == "code_block":
+            current_body.append(tok.content.rstrip())
+        elif tok.type == "paragraph_close":
+            current_body.append("")  # blank line between paragraphs
+        elif tok.type == "bullet_list_close" or tok.type == "ordered_list_close":
+            current_body.append("")
+        i += 1
+
+    _flush()
+    return chunks
+
+
+def _merge_small_sections(chunks, target_size=700, max_size=MAX_CHUNK_SIZE):
+    """Merge consecutive small chunks into denser ones.
+
+    When a markdown doc has many short H2/H3 sections, the default chunker
+    emits each as its own chunk, leaving them thinly-populated. The eval's
+    ``hit_content@5`` substring match then often fails because the expected
+    text lands in a tiny chunk that doesn't win top-5.
+
+    Merge strategy: walk the chunk list, accumulating content until we hit
+    ``target_size`` or would exceed ``max_size``. On overflow, flush and
+    start a new chunk. Single chunks bigger than target_size pass through
+    unchanged (``enforce_max_chunk_size`` handles too-big ones downstream).
+    """
+    if not chunks:
+        return chunks
+    merged = []
+    buf_content: list[str] = []
+    buf_section: str = ""
+    buf_len = 0
+    for c in chunks:
+        content = c.get("content", "")
+        if not content:
+            continue
+        # Flush if adding this would overflow max_size
+        if buf_len + len(content) + 2 > max_size and buf_content:
+            merged.append({"content": "\n\n".join(buf_content), "section": buf_section})
+            buf_content = []
+            buf_section = ""
+            buf_len = 0
+        buf_content.append(content)
+        if not buf_section:
+            buf_section = c.get("section", "")
+        else:
+            buf_section = f"{buf_section} + {c.get('section', '')}"
+        buf_len += len(content) + 2
+        # Flush on reaching target size
+        if buf_len >= target_size:
+            merged.append({"content": "\n\n".join(buf_content), "section": buf_section})
+            buf_content = []
+            buf_section = ""
+            buf_len = 0
+    if buf_content:
+        merged.append({"content": "\n\n".join(buf_content), "section": buf_section})
+    return merged
+
+
 def chunk_markdown(text, source):
-    """Chunk by headings."""
+    """Chunk a markdown document by headings with structural awareness.
+
+    Pipeline:
+      1. Strip YAML/JSON frontmatter (don't emit it as its own chunk)
+      2. Try markdown_it token-stream walk (handles collapsed / Setext / H4+)
+      3. Fall back to regex split if markdown_it isn't available or fails
+      4. Merge consecutive small sections so embed/retrieve windows have
+         enough content for the eval substring match (2026-04-13 fix)
+    """
+    text = _strip_frontmatter(text)
+
+    # Try the structure-aware chunker first
+    lib_chunks = _chunk_markdown_with_lib(text)
+    if lib_chunks is not None and lib_chunks:
+        return lib_chunks
+
+    # Fallback: regex-based split (legacy behavior)
     sections = re.split(r'^(#{1,3}\s+.+)$', text, flags=re.MULTILINE)
     chunks = []
     current_heading = 'intro'

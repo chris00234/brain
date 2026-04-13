@@ -6,6 +6,7 @@ Uses fcntl.flock for advisory locking + atomic rename for crash safety.
 import fcntl
 import json
 import os
+import random
 from pathlib import Path
 
 
@@ -15,12 +16,12 @@ def _lock_path(path: Path) -> Path:
 
 
 def load_state(path: Path) -> dict:
-    if not path.exists():
-        return {}
     lock = _lock_path(path)
     lock_fd = os.open(str(lock), os.O_CREAT | os.O_RDONLY, 0o644)
     fcntl.flock(lock_fd, fcntl.LOCK_SH)
     try:
+        if not path.exists():
+            return {}
         with open(path, "r") as f:
             return json.loads(f.read())
     except (json.JSONDecodeError, FileNotFoundError):
@@ -48,8 +49,8 @@ def save_state(path: Path, state: dict) -> None:
 
 
 def atomic_write_text(path: Path, content: str) -> None:
-    """Atomic file write: write to .tmp, fsync, then rename."""
-    tmp = path.with_suffix(".tmp")
+    """Atomic file write: write to unique .tmp, fsync, then rename."""
+    tmp = path.parent / f"{path.name}.tmp.{os.getpid()}.{random.randint(0, 9999)}"
     fd = tmp.open("w", encoding="utf-8")
     try:
         fd.write(content)

@@ -19,8 +19,23 @@ Operation = Literal["ADD", "UPDATE", "DELETE", "NOOP"]
 DUPLICATE_COSINE = 0.05       # near-exact match → NOOP
 UPDATE_COSINE = 0.15          # semantic similarity → potential UPDATE
 TOKEN_OVERLAP_MAX = 0.7       # below this + high semantic sim → refinement (UPDATE)
+PREFERENCE_UPDATE_COSINE = 0.40  # preferences about similar topics (vs 0.15 default)
 
 _WORD_RE = re.compile(r"[a-z0-9_\-]{3,}")
+
+_PREF_VERB_RE = re.compile(
+    r'\b(?:prefer|like|use|uses|using|switch(?:ed)?\s+to|chose|moved?\s+to|adopted|favor|favou?rs?)\s+(.+?)(?:\s+(?:for|over|instead|because|when|but|$))',
+    re.IGNORECASE,
+)
+
+
+def _extract_preference_subject(text: str) -> set[str]:
+    """Extract the object of preference verbs for topic matching."""
+    subjects = set()
+    for m in _PREF_VERB_RE.finditer(text):
+        raw = m.group(1).strip().lower()
+        subjects.update(w for w in _WORD_RE.findall(raw) if len(w) > 2)
+    return subjects
 
 
 def _tokenize(text: str) -> set[str]:
@@ -39,6 +54,7 @@ def classify_operation(
     new_embedding: list[float],
     new_confidence: float,
     sem_col_id: str,
+    category: str = "",
     chroma_url: str = "http://127.0.0.1:8000",
 ) -> tuple[Operation, Optional[str], dict]:
     """Classify a new memory against existing ones.
@@ -48,19 +64,25 @@ def classify_operation(
 
     Diagnostics dict contains: top_distance, top_overlap, top_confidence, reason
     """
+    is_pref = category == "preference"
+
     if not new_embedding:
         return ("ADD", None, {"reason": "no embedding available"})
 
-    # Query top 3 similar memories
+    # Query top similar memories (more candidates for preferences)
+    query_payload: dict = {
+        "query_embeddings": [new_embedding],
+        "n_results": 5 if is_pref else 3,
+        "include": ["documents", "metadatas", "distances"],
+    }
+    if is_pref:
+        query_payload["where"] = {"category": "preference"}
+
     try:
         resp = http_json(
             "POST",
             f"{chroma_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col_id}/query",
-            payload={
-                "query_embeddings": [new_embedding],
-                "n_results": 3,
-                "include": ["documents", "metadatas", "distances"],
-            },
+            payload=query_payload,
             timeout=15,
         )
     except Exception as e:
@@ -98,8 +120,21 @@ def classify_operation(
             "rank_used": rank,
         }
 
-        # Exact duplicate — very close + same-or-higher existing confidence
+        # Exact duplicate — very close + same-or-higher existing confidence.
+        # For preferences: structurally identical sentences with DIFFERENT subjects
+        # ("prefers React" vs "prefers Vue") have near-zero cosine distance but
+        # represent a preference CHANGE, not a duplicate. Check subject overlap.
         if cand_dist < DUPLICATE_COSINE and cand_conf >= new_confidence:
+            if is_pref:
+                new_subj = _extract_preference_subject(new_content)
+                old_subj = _extract_preference_subject(cand_doc)
+                if new_subj and old_subj and not (new_subj & old_subj):
+                    # Subjects differ — this is a preference change, not a duplicate
+                    return (
+                        "UPDATE",
+                        cand_id,
+                        {**diagnostics, "reason": "preference subject changed"},
+                    )
             return ("NOOP", None, {**diagnostics, "reason": "near-exact duplicate"})
 
         # Near-duplicate — may be refinement (UPDATE) or new territory (ADD)
@@ -120,6 +155,20 @@ def classify_operation(
             # High token overlap + close embedding + lower confidence = NOOP
             if overlap >= TOKEN_OVERLAP_MAX and new_confidence <= cand_conf:
                 return ("NOOP", None, {**diagnostics, "reason": "lexical duplicate"})
+
+        # Preference-specific: relaxed cosine + subject overlap
+        if is_pref and cand_dist < PREFERENCE_UPDATE_COSINE:
+            new_subj = _extract_preference_subject(new_content)
+            old_subj = _extract_preference_subject(cand_doc)
+            subj_overlap = len(new_subj & old_subj) / max(len(new_subj | old_subj), 1)
+            diagnostics["subj_overlap"] = round(subj_overlap, 3)
+
+            if subj_overlap > 0 or cand_dist < UPDATE_COSINE:
+                return (
+                    "UPDATE",
+                    cand_id,
+                    {**diagnostics, "reason": "preference topic match"},
+                )
 
         # This candidate wasn't close enough — since results are distance-sorted,
         # later candidates are even farther away. Break out to ADD.

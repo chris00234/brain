@@ -15,6 +15,8 @@ log = logging.getLogger("brain.agent_prefs")
 
 PREFS_DB = Path("/Users/chrischo/server/brain/logs/autonomy.db")
 
+_schema_initialized = False
+
 
 def _conn():
     PREFS_DB.parent.mkdir(parents=True, exist_ok=True)
@@ -24,6 +26,9 @@ def _conn():
 
 
 def ensure_schema():
+    global _schema_initialized
+    if _schema_initialized:
+        return
     conn = _conn()
     try:
         conn.execute("""
@@ -38,6 +43,7 @@ def ensure_schema():
             )
         """)
         conn.commit()
+        _schema_initialized = True
     finally:
         conn.close()
 

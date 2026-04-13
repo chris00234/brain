@@ -79,6 +79,11 @@ JOB_REGISTRY: dict[str, list[str]] = {
     "ghost_blog_ingest":  [_py, f"{_bd}/ingest/ghost_blog.py"],
     # New data source ingest (agent-distilled)
     "openclaw_sessions_ingest":  [_py, f"{_bd}/ingest/openclaw_sessions.py"],
+    "openclaw_sessions_ingest_market": [_py, f"{_bd}/ingest/openclaw_sessions.py", "--agents", "market", "--max-sessions", "20"],
+    "openclaw_sessions_ingest_jenna":  [_py, f"{_bd}/ingest/openclaw_sessions.py", "--agents", "jenna",  "--max-sessions", "20"],
+    "openclaw_sessions_ingest_liz":    [_py, f"{_bd}/ingest/openclaw_sessions.py", "--agents", "liz",    "--max-sessions", "20"],
+    "openclaw_sessions_ingest_ellie":  [_py, f"{_bd}/ingest/openclaw_sessions.py", "--agents", "ellie",  "--max-sessions", "20"],
+    "openclaw_sessions_ingest_sage":   [_py, f"{_bd}/ingest/openclaw_sessions.py", "--agents", "sage",   "--max-sessions", "20"],
     "claude_code_sessions_ingest": [_py, f"{_bd}/ingest/claude_code_sessions.py"],
     "git_activity_ingest":       [_py, f"{_bd}/ingest/git_activity.py"],
     "screen_time_ingest":        [_py, f"{_bd}/ingest/screen_time.py"],
@@ -94,7 +99,17 @@ JOB_REGISTRY: dict[str, list[str]] = {
     # Maintenance
     "memory_lifecycle":   [_py, f"{_bd}/brain_core/memory_lifecycle.py"],
     "canonical_pipeline": [_py, f"{_bd}/pipeline/pipeline_auto.py"],
-    "eval_run":           [_py, f"{_bd}/cli/eval_gate.py"],
+    # Two-track eval (incident 2026-04-13): stable=strict gate+heal, extended=trend only.
+    # `eval_run` aliases to the stable track so legacy scheduled triggers keep working.
+    "eval_run":           [_py, f"{_bd}/cli/eval_gate.py", "--eval-set", f"{_bd}/cli/eval_set_stable.json", "--baseline", f"{_bd}/cli/eval_baseline_stable.json", "--track", "stable"],
+    "eval_run_stable":    [_py, f"{_bd}/cli/eval_gate.py", "--eval-set", f"{_bd}/cli/eval_set_stable.json", "--baseline", f"{_bd}/cli/eval_baseline_stable.json", "--track", "stable"],
+    "eval_run_extended":  [_py, f"{_bd}/cli/eval_gate.py", "--eval-set", f"{_bd}/cli/eval_set_extended.json", "--baseline", f"{_bd}/cli/eval_baseline_extended.json", "--track", "extended", "--no-heal", "--threshold", "10"],
+    "eval_run_full":      [_py, f"{_bd}/cli/eval_gate.py", "--track", "full", "--no-heal", "--threshold", "10"],
+    # Phase 4: SM-2 nightly review scheduler — seeds null next_review_at + obsoletes stale atoms
+    "sm2_nightly":        [_py, "-c", f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from sm2 import nightly_pass; import json; print(json.dumps(nightly_pass()))"],
+    # Phase 7: closed-loop self-learning jobs
+    "autonomy_proposer":  [_py, "-c", f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from autonomy_proposer import run; import json; print(json.dumps(run()))"],
+    "lora_ab_gate":       [_py, f"{_bd}/cli/lora_ab_gate.py"],
     "reindex":            ["/bin/zsh", f"{_bd}/cli/reindex.sh"],
     # Maintenance
     "log_rotation":       [_py, f"{_bd}/brain_core/maintenance.py", "all_cleanup"],
@@ -106,6 +121,7 @@ JOB_REGISTRY: dict[str, list[str]] = {
     "lint_memory":          [_py, f"{_bd}/pipeline/lint_memory.py"],
     "near_dedup":         [_py, "-c", f"import sys; sys.path.insert(0,'{_bd}/brain_core'); from memory_lifecycle import dedup_semantic_near_duplicates; import json; print(json.dumps(dedup_semantic_near_duplicates()))"],
     "auto_resolve_contradictions": [_py, "-c", f"import sys; sys.path.insert(0,'{_bd}/brain_core'); from memory_lifecycle import auto_resolve_stale_contradictions; import json; print(json.dumps(auto_resolve_stale_contradictions()))"],
+    "supersession_chain_cleanup": [_py, "-c", f"import sys; sys.path.insert(0,'{_bd}/brain_core'); from memory_lifecycle import cleanup_supersession_chains; import json; print(json.dumps(cleanup_supersession_chains()))"],
     "feedback_aggregate": [_py, f"{_bd}/brain_core/feedback_aggregator.py"],
     "entity_resolution":  [_py, f"{_bd}/pipeline/entity_resolution.py", "--apply"],
     "neo4j_backup":       [_py, f"{_bd}/cli/backup_neo4j.py"],
@@ -134,10 +150,16 @@ JOB_REGISTRY: dict[str, list[str]] = {
     "episode_binder":      [_py, f"{_bd}/brain_core/pipeline/episode_binder.py"],
     # Round 10 Wave 3 — synaptic pruning of atrophied memories (MemoryBank)
     "memory_pruning":      [_py, "-c", f"import sys; sys.path.insert(0,'{_bd}/brain_core'); from memory_lifecycle import prune_atrophied_memories; import json; print(json.dumps(prune_atrophied_memories(dry_run=True)))"],
+    "memory_pruning_active": [_py, "-c", f"import sys; sys.path.insert(0,'{_bd}/brain_core'); from memory_lifecycle import prune_atrophied_memories; import json; print(json.dumps(prune_atrophied_memories(dry_run=False, max_age_days=120, compress_with_gist=True)))"],
+    "stale_superseded_cleanup": [_py, "-c", f"import sys; sys.path.insert(0,'{_bd}/brain_core'); from memory_lifecycle import cleanup_stale_superseded; import json; print(json.dumps(cleanup_stale_superseded()))"],
     # LoRA fine-tuning — manual trigger only, behind BRAIN_FINETUNE_ENABLED flag.
     # Must run in the brain venv since sentence-transformers/peft/torch are only
     # installed there, not in the system Python.
     "embed_finetune":     [f"{_bd}/.venv/bin/python3", f"{_bd}/cli/brain_finetune.py"],
+    # Infra validation + health reports
+    "infra_validation":     [_py, f"{_bd}/brain_core/maintenance.py", "validate_infra"],
+    "memory_health_report": [_py, "-c", f"import sys; sys.path.insert(0,'{_bd}/brain_core'); from memory_lifecycle import memory_health_report; import json; print(json.dumps(memory_health_report()))"],
+    "content_quality_slo":  [_py, "-c", f"import sys; sys.path.insert(0,'{_bd}/brain_core'); from slo_monitor import check_content_quality; import json; print(json.dumps(check_content_quality()))"],
 }
 
 _running_jobs: dict[str, subprocess.Popen] = {}
@@ -260,6 +282,10 @@ class SearchFeedbackRequest(BaseModel):
     # Pre-2026-04 entries lack this field and are treated as agent="system"
     # by feedback_aggregator.
     agent: str = Field(default="system", max_length=32)
+    # Phase 7: eval auto-growth signal. When wrong_answer=true and `expected`
+    # is set, the query is appended to eval_proposals for weekly review.
+    wrong_answer: bool = Field(default=False)
+    expected: str = Field(default="", max_length=2000)
 
 
 class ThinkRequest(BaseModel):
@@ -598,6 +624,12 @@ def _prewarm_caches() -> None:
         "conventional commits git",
     ]
 
+    try:
+        from boot_context import _predictive_queries
+        PREWARM_QUERIES.extend(_predictive_queries("claude"))
+    except Exception:
+        pass
+
     def _warm():
         # Warm the embedding cache (fast, ~50ms each) + collections cache.
         # HyDE warm-up is skipped — each Jenna dispatch takes 10-15s and would
@@ -654,6 +686,23 @@ async def lifespan(app: FastAPI):
     global _cached_secret
     _cached_secret = _load_secret()
     _prewarm_caches()
+    # Warm the real cross-encoder (BGE-reranker-base) if enabled so the first
+    # /recall/v2 call doesn't eat the 2-5s cold model load. Runs in a background
+    # thread so startup doesn't block on model download.
+    try:
+        from brain_core import config as _brain_config
+        if getattr(_brain_config, "BRAIN_CROSS_ENCODER_ENABLED", False):
+            import threading
+            def _warm_ce():
+                try:
+                    from brain_core.cross_encoder_model import warmup as _ce_warmup
+                    ok = _ce_warmup()
+                    log.info("cross_encoder_warmup", ok=ok)
+                except Exception as _e:
+                    log.warning("cross_encoder_warmup_failed", error=str(_e))
+            threading.Thread(target=_warm_ce, daemon=True).start()
+    except Exception:
+        pass
     _metrics_buf.load_from_sqlite(str(BRAIN_DIR / "logs" / "metrics_history.db"))
     yield
     _metrics_buf.persist_to_sqlite(str(BRAIN_DIR / "logs" / "metrics_history.db"))
@@ -836,11 +885,14 @@ def recall(
             return cached
 
     start_dt, end_dt = temporal.parse_range(since, until)
-    where = temporal.to_chroma_where(start_dt, end_dt) if (start_dt or end_dt) else None
+    # ChromaDB 1.4.1 rejects string operands in $gte/$lt; filter Python-side instead.
+    where = None
     collections_arg = [collection] if collection else None
+    # Widen n when a temporal filter will post-drop rows so we still return ~n.
+    search_n = n * 3 if (start_dt or end_dt) else n
 
     payload = search_unified.search_all(
-        q, n, sources=["rag", "canonical", "obsidian"],
+        q, search_n, sources=["rag", "canonical", "obsidian"],
         domain=domain, original_query=q, where=where,
         collections=collections_arg, entity=entity, explain=False,
         source_type=source_type,
@@ -848,27 +900,17 @@ def recall(
         include_obsolete=include_obsolete,
         as_of=as_of,
     )
+    if (start_dt or end_dt) and isinstance(payload, dict):
+        payload["results"] = temporal.filter_by_created_at(
+            payload.get("results", []), start_dt, end_dt
+        )[:n]
     if _filter_free:
         _recall_emb_cache_put(q, payload)
 
-    # Round 9 B2: log low-quality recalls for the gap detector. Only log when
-    # the user actually wanted unfiltered results — filtered queries with no
-    # hits are usually intentional, not knowledge gaps.
-    try:
-        results_list = payload.get("results", []) if isinstance(payload, dict) else []
-        max_score = max((float(r.get("score", 0)) for r in results_list), default=0.0)
-        if _filter_free and (len(results_list) == 0 or max_score < 5.0):
-            gap_log = BRAIN_DIR / "logs" / "recall-gaps.jsonl"
-            gap_log.parent.mkdir(parents=True, exist_ok=True)
-            with gap_log.open("a") as f:
-                f.write(json.dumps({
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "query": q[:500],
-                    "n_results": len(results_list),
-                    "max_score": round(max_score, 2),
-                }) + "\n")
-    except Exception:
-        pass
+    # Gap logging moved to /recall/v2 handler (2026-04-12): v2 is the hot path
+    # (2400+ requests/day vs v1's ~1800, most of v1 are test-harness) and the
+    # v1 threshold of max_score<5.0 never fired in practice — scores are clipped
+    # to [0,100] with typical relevant hits at 30-80.
 
     # Round 10 C1: reinforce-on-access (MemoryBank). Fire-and-forget so we
     # don't add latency to /recall. Only reinforces semantic_memory hits in
@@ -983,8 +1025,66 @@ def _recall_emb_cache_put(query: str, response: dict) -> None:
 
 
 # ── Routes: recall v2 (HyDE + expand + rerank + time-decay + RRF) ──
+_auto_feedback_count = 0
+_auto_feedback_hour = 0  # hour (unix ts // 3600) of last reset
+_AUTO_FEEDBACK_MAX_PER_HOUR = 100
+
+
+def _record_auto_feedback(query: str, results: list[dict], agent: str) -> None:
+    """Write served-result feedback events to search-feedback.jsonl. Rate-limited."""
+    global _auto_feedback_count, _auto_feedback_hour
+    now = datetime.now(timezone.utc)
+    current_hour = int(now.timestamp()) // 3600
+    if current_hour != _auto_feedback_hour:
+        _auto_feedback_count = 0
+        _auto_feedback_hour = current_hour
+    if _auto_feedback_count >= _AUTO_FEEDBACK_MAX_PER_HOUR:
+        return
+    feedback_log = BRAIN_DIR / "logs" / "search-feedback.jsonl"
+    feedback_log.parent.mkdir(parents=True, exist_ok=True)
+    ts = now.isoformat()
+    lines: list[str] = []
+    sem_ids: list[str] = []
+    for r in results:
+        if not isinstance(r, dict):
+            continue
+        rid = r.get("id") or r.get("path") or (r.get("metadata") or {}).get("id") or ""
+        col = r.get("collection") or ""
+        is_sem = col == "semantic_memory" or "semantic" in col
+        lines.append(json.dumps({
+            "query": query[:500],
+            "result_id": rid,
+            "result_source": col,
+            "score": 0.7 if is_sem else None,
+            "served": True,
+            "timestamp": ts,
+            "agent": agent,
+        }))
+        if is_sem and rid:
+            sem_ids.append(rid)
+    if not lines:
+        return
+    budget = _AUTO_FEEDBACK_MAX_PER_HOUR - _auto_feedback_count
+    lines = lines[:budget]
+    try:
+        with feedback_log.open("a") as f:
+            f.write("\n".join(lines) + "\n")
+        _auto_feedback_count += len(lines)
+    except Exception:
+        pass
+    # Reinforce semantic_memory hits (same as /recall v1 does)
+    if sem_ids:
+        try:
+            from brain_core.memory_lifecycle import reinforce_on_access
+            from brain_core.search_unified import _search_bg_pool
+            _search_bg_pool.submit(reinforce_on_access, sem_ids[:5])
+        except Exception:
+            pass
+
+
 @app.get("/recall/v2", response_model=RecallV2Response, tags=["recall"], dependencies=[Depends(verify_bearer)])
 def recall_v2(
+    request: Request,
     q: str,
     n: int = Query(default=10, ge=1, le=50),
     hyde: bool = False,
@@ -1000,6 +1100,7 @@ def recall_v2(
     include_history: bool = Query(default=False),
     include_obsolete: bool = Query(default=False),
     as_of: str | None = Query(default=None, max_length=20),
+    background: BackgroundTasks = None,
 ) -> RecallV2Response:
     """Enhanced recall with HyDE, query expansion, reranking, time decay.
 
@@ -1025,8 +1126,11 @@ def recall_v2(
     timing: dict[str, Any] = {}
 
     start_dt, end_dt = temporal.parse_range(since, until)
-    where = temporal.to_chroma_where(start_dt, end_dt) if (start_dt or end_dt) else None
+    # ChromaDB 1.4.1 rejects string operands in $gte/$lt; filter Python-side instead.
+    where = None
     collections_arg = [collection] if collection else None
+    # Widen inner-search n when a temporal filter will post-drop rows.
+    search_n_mult = 3 if (start_dt or end_dt) else 2
 
     hypothetical: str | None = None
     variants: list[str] = [q]
@@ -1046,7 +1150,7 @@ def recall_v2(
     from concurrent.futures import ThreadPoolExecutor as _VariantPool, as_completed as _as_completed
     def _run_variant(v_query):
         return search_unified.search_all(
-            v_query, n * 2,
+            v_query, n * search_n_mult,
             sources=["rag", "canonical", "obsidian"],
             domain=domain,
             original_query=q,
@@ -1090,7 +1194,7 @@ def recall_v2(
             hypothetical = _hyde.generate_hypothetical(q)
             if hypothetical:
                 hyde_payload = search_unified.search_all(
-                    hypothetical, n * 2,
+                    hypothetical, n * search_n_mult,
                     sources=["rag", "canonical", "obsidian"],
                     domain=domain,
                     original_query=q,
@@ -1107,6 +1211,15 @@ def recall_v2(
         except Exception:
             pass
         timing["hyde_ms"] = int((time.time() - t_hyde) * 1000)
+
+    # ChromaDB 1.4.1 can't range-filter string datetime fields, so apply the
+    # temporal filter Python-side to each payload's results before RRF.
+    if start_dt or end_dt:
+        for p in all_payloads:
+            if isinstance(p, dict) and p.get("results"):
+                p["results"] = temporal.filter_by_created_at(
+                    p["results"], start_dt, end_dt
+                )
 
     # Merge all result lists via RRF.
     result_lists = [p.get("results", []) for p in all_payloads if p.get("results")]
@@ -1130,14 +1243,40 @@ def recall_v2(
     fused = _rrf.rrf_fuse(result_lists, id_key="path")
     timing["rrf_ms"] = int((time.time() - t_rrf) * 1000)
 
-    # Apply rerank FIRST (token overlap — adjusts scores based on query-term match).
+    # Two-stage rerank (2026-04-12):
+    # 1. Token-overlap rerank.py — applies trust_boost (1.4x canonical), title
+    #    overlap, source boost. Cheap, semantically naive but preserves the
+    #    canonical-as-truth-layer principle.
+    # 2. BGE-reranker-base cross-encoder — refines ordering with real semantic
+    #    scoring. Blends with stage-1 output so trust boosts carry through.
+    # When BRAIN_CROSS_ENCODER_ENABLED=false, only stage 1 runs.
     if rerank:
         t_rerank = time.time()
+        # Stage 1: token-overlap + trust/source boosts
         fused = _rerank.rerank(q, fused, top_k=None)
-        # Use rerank_score as the base for subsequent decay.
         for r in fused:
             r["score"] = r.get("rerank_score", r.get("score", 0))
         timing["rerank_ms"] = int((time.time() - t_rerank) * 1000)
+
+        # Stage 2: real cross-encoder refinement on the top window
+        ce_enabled = False
+        try:
+            from brain_core import config as _brain_config
+            ce_enabled = bool(getattr(_brain_config, "BRAIN_CROSS_ENCODER_ENABLED", False))
+        except Exception:
+            ce_enabled = False
+
+        if ce_enabled:
+            t_ce = time.time()
+            try:
+                from brain_core.cross_encoder_rerank import rerank_with_cross_encoder
+                # Only rerank the top window — tail stays ordered by stage 1.
+                # cross_encoder_rerank overwrites `score` with a blend of the
+                # stage-1 score (which already includes trust_boost) and CE signal.
+                fused = rerank_with_cross_encoder(q, fused, top_k=50)
+                timing["cross_encoder_ms"] = int((time.time() - t_ce) * 1000)
+            except Exception as _ce_err:
+                log.warning("cross-encoder rerank failed, stage-1 result stands: %s", _ce_err)
 
     # Apply time decay AFTER rerank so freshness actually affects the final ordering.
     # Decay multiplies into `score`, which is now either the raw RRF score (no rerank)
@@ -1148,6 +1287,45 @@ def recall_v2(
         timing["decay_ms"] = int((time.time() - t_decay) * 1000)
 
     fused.sort(key=lambda r: r.get("score", 0), reverse=True)
+
+    # Content enrichment pass: for file-backed top-N results, replace the
+    # per-chunk content snippet with a longer excerpt read directly from the
+    # source file. Retrieval ranking already happened; this just gives the
+    # caller (and downstream UIs / eval tools) richer context for the same
+    # document without disturbing rank order or latency-critical paths.
+    t_enrich = time.time()
+    _seen_paths: set[str] = set()
+    _max_file_bytes = 4000  # cap per result so responses stay compact
+    _enrichable_types = {"canonical-note", "distilled-note", "obsidian-note",
+                         "agent-config", "learning", "docker-compose", "nginx-conf"}
+    for _r in fused[:n]:
+        _path = _r.get("path", "")
+        if not _path or _path in _seen_paths:
+            continue
+        _rtype = (_r.get("type") or (_r.get("metadata") or {}).get("type") or "")
+        if _rtype not in _enrichable_types:
+            continue
+        try:
+            _p = Path(_path)
+            if not _p.is_file():
+                continue
+            _txt = _p.read_text(errors="ignore")
+        except Exception:
+            continue
+        # Prefer a window centered on the matched chunk's text to stay local
+        # to what ranked, not a generic file head. Fall back to file head
+        # if the chunk isn't found in the file anymore (stale chunks, edits).
+        _chunk = _r.get("content") or ""
+        _anchor = _chunk[:120] if _chunk else ""
+        if _anchor and _anchor in _txt:
+            _idx = _txt.index(_anchor)
+            _start = max(0, _idx - 500)
+            _end = min(len(_txt), _idx + _max_file_bytes - 500)
+            _r["content"] = _txt[_start:_end]
+        else:
+            _r["content"] = _txt[:_max_file_bytes]
+        _seen_paths.add(_path)
+    timing["enrich_ms"] = int((time.time() - t_enrich) * 1000)
 
     total_candidates = sum(p.get("total_candidates", 0) for p in all_payloads)
     timing["total_ms"] = int((time.time() - t_start) * 1000)
@@ -1169,6 +1347,59 @@ def recall_v2(
         timing=timing,
     )
     _recall_cache_put(cache_key, response)
+
+    # Gap logging: record queries where cross-encoder relevance is flat,
+    # meaning the brain has nothing semantically close. The CE score is the
+    # only signal that reflects real semantic match — blended `score` is
+    # dominated by RRF ranks which always have a top-N winner even for
+    # gibberish queries.
+    #
+    # Heuristic: log when max CE score < 0.52 (model is at the sigmoid midpoint,
+    # indicating "I have no opinion"). Good queries see CE scores 0.55-0.75.
+    # Only log unfiltered queries — filtered queries with no hits are usually
+    # intentional.
+    # Moved from /recall v1 on 2026-04-12; v1's max_score<5.0 threshold never fired.
+    try:
+        filter_free = not (collection or domain or entity or source_type or since or until or as_of
+                           or include_history or include_obsolete)
+        if filter_free:
+            results_list = fused[:n]
+            ce_scores = [float(r.get("cross_encoder_score", 0)) for r in results_list if r.get("cross_encoder_score") is not None]
+            max_ce = max(ce_scores, default=0.0)
+            # Fall back to blended score threshold if CE wasn't run (flag off)
+            max_score = max((float(r.get("score", 0)) for r in results_list), default=0.0)
+            is_gap = (
+                len(results_list) == 0
+                or (ce_scores and max_ce < 0.52)
+                or (not ce_scores and max_score < 30.0)
+            )
+            if is_gap:
+                gap_log = BRAIN_DIR / "logs" / "recall-gaps.jsonl"
+                gap_log.parent.mkdir(parents=True, exist_ok=True)
+                with gap_log.open("a") as gf:
+                    gf.write(json.dumps({
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "query": q[:500],
+                        "n_results": len(results_list),
+                        "max_score": round(max_score, 2),
+                        "max_ce_score": round(max_ce, 4) if ce_scores else None,
+                        "endpoint": "/recall/v2",
+                    }) + "\n")
+    except Exception:
+        pass
+
+    # Auto-record search feedback for served results (fire-and-forget).
+    agent = request.headers.get("x-agent") or "unknown"
+    if background is not None:
+        background.add_task(_record_auto_feedback, q, fused[:n], agent)
+    else:
+        # Fallback: fire-and-forget via thread pool
+        try:
+            from brain_core.search_unified import _search_bg_pool
+            _search_bg_pool.submit(_record_auto_feedback, q, fused[:n], agent)
+        except Exception:
+            pass
+
     return response
 
 
@@ -1198,7 +1429,22 @@ def search_feedback(req: SearchFeedbackRequest):
         except Exception:
             pass
 
-    return {"status": "recorded"}
+    # Phase 7: eval auto-growth signal
+    proposal_id: str | None = None
+    if req.wrong_answer and req.expected:
+        try:
+            from eval_proposals import insert_proposal
+
+            proposal_id = insert_proposal(
+                query=req.query,
+                expected=req.expected,
+                source_event="recall_feedback",
+                confidence=0.7,
+            )
+        except Exception:
+            pass
+
+    return {"status": "recorded", "eval_proposal_id": proposal_id}
 
 
 # ── Routes: /brain/reason/multihop — LangGraph-style multi-hop reasoning ──
@@ -1402,6 +1648,12 @@ def boot_ctx(agent: Annotated[str, PathParam()], n: int = 3) -> dict:
     return {"agent": agent, "sections": sections}
 
 
+@app.post("/boot-context/flush", tags=["recall"], dependencies=[Depends(verify_bearer)])
+def boot_ctx_flush() -> dict:
+    boot_context.flush_cache()
+    return {"status": "ok", "message": "boot context cache flushed"}
+
+
 # ── Routes: synthesis read ──────────────────────────────
 # Validation patterns for synthesis target params. These prevent path
 # traversal: the target is interpolated into a file path, so any "..", "/",
@@ -1539,6 +1791,12 @@ def _wait_for_job(job_name: str, proc: subprocess.Popen, stderr_path: Path) -> N
     if exit_code == 0 and "backup" in job_name:
         _metrics_buf.record_backup_result(True)
 
+    if exit_code == 0 and job_name == "profile_regen":
+        try:
+            boot_context.flush_cache()
+        except Exception:
+            pass
+
     if exit_code != 0 and job_name in _CRITICAL_JOBS:
         try:
             _openclaw_dispatch(
@@ -1549,6 +1807,12 @@ def _wait_for_job(job_name: str, proc: subprocess.Popen, stderr_path: Path) -> N
             )
         except Exception:
             pass
+
+    # Record completion time in scheduler history
+    pending = brain_scheduler._pending_completions.pop(job_name, None)
+    if pending:
+        start_ts, row_id = pending
+        brain_scheduler.record_completion(job_name, row_id, start_ts, error_msg)
 
     with _running_jobs_lock:
         _running_jobs.pop(job_name, None)
@@ -1618,7 +1882,6 @@ def _run_learn_pipeline(transcript: str, source: str, agent: str) -> None:
 
 # ── Routes: memory CRUD ─────────────────────────────────
 def _memory_collection_id() -> str | None:
-    learn._ensure_collection if False else None  # noqa: avoid mypy warning
     _ensure_collection(learn.SEMANTIC_COLLECTION)
     return _get_col_id(learn.SEMANTIC_COLLECTION)
 
@@ -1685,8 +1948,10 @@ def list_memory(
         if agent:
             where["agent"] = agent
 
-        # ChromaDB GET doesn't support ordering. Fetch all matching entries,
-        # sort by created_at descending (newest first), then paginate.
+        # ChromaDB GET doesn't support ordering. Fetch up to 500 matching entries,
+        # sort by created_at descending (newest first), then paginate in-memory.
+        # NOTE: 500-entry fetch cap is a performance trade-off — keeps Chroma
+        # response times under ~300ms. Pagination beyond 500 returns stale results.
         fetch_body: dict[str, Any] = {
             "limit": min(limit * 3, 500),
             "include": ["documents", "metadatas"],
@@ -1694,14 +1959,18 @@ def list_memory(
         if where:
             fetch_body["where"] = where if len(where) == 1 else {"$and": [{k: v} for k, v in where.items()]}
 
+        _col_base = f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}"
         try:
-            res = _chroma_api(
-                "POST",
-                f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/get",
-                fetch_body,
-            )
+            res = _chroma_api("POST", f"{_col_base}/get", fetch_body)
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"chroma get failed: {e}")
+
+        # Get real total count from ChromaDB (not just len of capped fetch)
+        try:
+            real_count = _chroma_api("GET", f"{_col_base}/count")
+            total = int(real_count) if isinstance(real_count, (int, str)) else 0
+        except Exception:
+            total = 0
 
         ids = res.get("ids") or []
         docs = res.get("documents") or []
@@ -1716,8 +1985,6 @@ def list_memory(
             key=lambda e: e.metadata.get("created_at") or e.metadata.get("updated_at") or "",
             reverse=True,
         )
-
-        total = len(all_entries)
         safe_limit = min(max(limit, 1), 200)
         safe_offset = max(offset, 0)
         page_entries = all_entries[safe_offset : safe_offset + safe_limit]
@@ -1769,13 +2036,18 @@ def list_contradictions(limit: int = 50) -> ContradictionListResponse:
         new_content = ""
         old_content = ""
         if doc:
-            for line in doc.split("\n", 1):
+            current_section = None
+            for line in doc.split("\n"):
                 if line.startswith("NEW: "):
+                    current_section = "new"
                     new_content = line[5:]
                 elif line.startswith("OLD: "):
+                    current_section = "old"
                     old_content = line[5:]
-            if not old_content and "\nOLD: " in doc:
-                old_content = doc.split("\nOLD: ", 1)[1]
+                elif current_section == "new":
+                    new_content += "\n" + line
+                elif current_section == "old":
+                    old_content += "\n" + line
         entries.append(ContradictionEntry(
             id=i,
             new_content=new_content,
@@ -1796,21 +2068,27 @@ def export_memory() -> list[dict]:
     col_id = _memory_collection_id()
     if not col_id:
         raise HTTPException(status_code=503, detail="semantic_memory collection unavailable")
+    _col_base = f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}"
+    page_size = 2000
+    all_results: list[dict] = []
+    offset = 0
     try:
-        res = _chroma_api(
-            "POST",
-            f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/get",
-            {"limit": 2000, "include": ["documents", "metadatas"]},
-        )
+        while True:
+            res = _chroma_api("POST", f"{_col_base}/get", {
+                "limit": page_size, "offset": offset,
+                "include": ["documents", "metadatas"],
+            })
+            ids = res.get("ids") or []
+            docs = res.get("documents") or []
+            metas = res.get("metadatas") or []
+            for i, d, m in zip(ids, docs, metas):
+                all_results.append({"id": i, "content": d or "", "metadata": m or {}})
+            if len(ids) < page_size:
+                break
+            offset += page_size
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"chroma get failed: {e}")
-    ids = res.get("ids") or []
-    docs = res.get("documents") or []
-    metas = res.get("metadatas") or []
-    return [
-        {"id": i, "content": d or "", "metadata": m or {}}
-        for i, d, m in zip(ids, docs, metas)
-    ]
+    return all_results
 
 
 @app.get("/memory/{mem_id}", response_model=MemoryEntry, tags=["memory"], dependencies=[Depends(verify_bearer)])
@@ -1855,7 +2133,8 @@ def create_memory(req: MemoryCreateRequest) -> MemoryEntry:
         from memory_operations import classify_operation, should_delete_by_content  # noqa: E402
         # Always run classify_operation to find a target (for DELETE/UPDATE/NOOP)
         op, target_id, _diag = classify_operation(
-            req.content, embedding, req.confidence, col_id
+            req.content, embedding, req.confidence, col_id,
+            category=req.category,
         )
         supersede_target = target_id
         # DELETE takes precedence over UPDATE when explicit invalidation phrase present
@@ -1955,6 +2234,39 @@ def create_memory(req: MemoryCreateRequest) -> MemoryEntry:
         hooks.fire("on_memory_stored", mem_id=mem_id, category=req.category, operation=operation)
     except Exception:
         pass
+
+    # Phase 3 atoms-truth-layer mirror + Phase 6 30-word discipline.
+    # Best-effort, gated by BRAIN_ATOMS_ENABLED.
+    try:
+        from atoms_gate import enforce as _atoms_enforce
+        from atoms_store import mark_superseded, upsert_atom
+
+        atom_text, atom_status, atom_quality = _atoms_enforce(
+            req.content[:2000],
+            allow_redistill=False,  # POST /memory is sync — don't block on Jenna here
+        )
+        upsert_atom(
+            text=atom_text,
+            chroma_id=mem_id,
+            kind=req.category or "fact",
+            confidence=req.confidence,
+            tier="episodic",
+            distilled_by="manual",
+            collection_hint="semantic_memory",
+            quality_score=atom_quality,
+            valid_from=now_iso,
+            provenance={
+                "agent": req.agent,
+                "source": req.source,
+                "operation": operation,
+                "atoms_gate_status": atom_status,
+            },
+        )
+        if operation == "UPDATE" and supersede_target:
+            mark_superseded(supersede_target, mem_id)
+    except Exception:
+        pass
+
     response_meta = dict(metadata)
     response_meta["operation"] = operation
     return MemoryEntry(id=mem_id, content=req.content, metadata=response_meta)
@@ -1997,7 +2309,7 @@ def create_memory_batch(req: MemoryBatchRequest) -> dict:
         operation = "ADD"
         supersede_target = None
         try:
-            op, target_id, _diag = classify_operation(mem_req.content, embedding, mem_req.confidence, col_id)
+            op, target_id, _diag = classify_operation(mem_req.content, embedding, mem_req.confidence, col_id, category=mem_req.category)
             supersede_target = target_id
             if should_delete_by_content(mem_req.content):
                 operation = "DELETE"
@@ -2744,7 +3056,8 @@ class AgentMessageRequest(BaseModel):
     parent_task_id: str | None = None
 
 
-@app.post("/brain/message", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
+# Deprecated: use POST /brain/messages instead
+@app.post("/brain/message", tags=["autonomy"], dependencies=[Depends(verify_bearer)], include_in_schema=False)
 def send_message(req: AgentMessageRequest) -> dict:
     try:
         from brain_core.agent_messenger import send_message
@@ -3104,6 +3417,133 @@ def audit_list(type: str | None = None, since: str | None = None, pending: bool 
         raise HTTPException(status_code=500, detail=str(e)[:200])
 
 
+# ── Phase 5: L0–L3 autonomy gate ────────────────────────────────────────
+@app.get("/brain/autonomy", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
+def autonomy_list() -> dict:
+    """Return the merged level table (defaults overlaid with brain_config overrides)."""
+    try:
+        from autonomy import list_levels
+
+        return {"levels": list_levels()}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)[:200])
+
+
+@app.get("/brain/autonomy/{kind:path}", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
+def autonomy_get(kind: str) -> dict:
+    try:
+        from autonomy import list_levels
+
+        levels = list_levels()
+        return {"kind": kind, "level": levels.get(kind, "L1")}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)[:200])
+
+
+@app.post("/brain/autonomy/{kind:path}", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
+def autonomy_set(kind: str, payload: dict) -> dict:
+    """Override a level. payload = {"level": "L2", "updated_by": "chris"}."""
+    level = payload.get("level")
+    if level not in ("L0", "L1", "L2", "L3"):
+        raise HTTPException(status_code=400, detail="level must be L0|L1|L2|L3")
+    try:
+        from autonomy import set_level
+
+        set_level(kind, level, updated_by=payload.get("updated_by", "api"))
+        return {"status": "set", "kind": kind, "level": level}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)[:200])
+
+
+@app.get("/brain/policy/preview", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
+def autonomy_preview(kind: str, now: str | None = None) -> dict:
+    """Dry-run the gate for a kind at a specific timestamp (ISO8601). For debugging."""
+    try:
+        from autonomy import authorize
+
+        when = None
+        if now:
+            from datetime import datetime as _dt
+            from zoneinfo import ZoneInfo as _zi
+
+            when = _dt.fromisoformat(now.replace("Z", "+00:00"))
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=_zi("UTC"))
+        decision = authorize(kind, now=when)
+        return decision.to_dict()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)[:200])
+
+
+@app.get("/brain/breakers", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
+def breakers_list() -> dict:
+    try:
+        from breakers import list_all
+
+        return {
+            "breakers": [
+                {
+                    "kind": b.kind,
+                    "state": b.state,
+                    "failures": b.failures,
+                    "trip_count": b.trip_count,
+                    "reset_after_s": b.reset_after_s,
+                    "remaining_cooldown_s": round(b.remaining_cooldown_s, 1),
+                    "reason": b.reason,
+                    "opened_at": b.opened_at,
+                    "last_failure_at": b.last_failure_at,
+                    "last_action_at": b.last_action_at,
+                }
+                for b in list_all()
+            ]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)[:200])
+
+
+@app.post("/brain/breakers/{kind:path}/reset", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
+def breakers_reset(kind: str) -> dict:
+    try:
+        from breakers import reset
+
+        snap = reset(kind)
+        return {"status": "reset", "kind": snap.kind, "state": snap.state}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)[:200])
+
+
+# ── Phase 4: SM-2 spaced repetition review ──────────────────────────────
+@app.get("/brain/review", tags=["atoms"], dependencies=[Depends(verify_bearer)])
+def brain_review(limit: int = 20, tier: str | None = None) -> dict:
+    """List atoms whose next_review_at has passed and need a quality grade."""
+    try:
+        from sm2 import review_due
+
+        items = review_due(limit=limit, tier=tier)
+        return {"items": items, "count": len(items)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)[:200])
+
+
+@app.post("/brain/review/{chroma_id:path}", tags=["atoms"], dependencies=[Depends(verify_bearer)])
+def brain_review_grade(chroma_id: str, payload: dict) -> dict:
+    """Grade an atom 0..5 (SM-2 quality). Updates SM-2 state + may promote tier."""
+    quality = payload.get("quality")
+    if quality is None or not isinstance(quality, int) or not 0 <= quality <= 5:
+        raise HTTPException(status_code=400, detail="quality must be int 0..5")
+    try:
+        from sm2 import apply_quality
+
+        result = apply_quality(chroma_id, quality=quality)
+        if result is None:
+            raise HTTPException(status_code=404, detail="atom not found or atoms disabled")
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)[:200])
+
+
 @app.get("/brain/audit/stats", tags=["audit"], dependencies=[Depends(verify_bearer)])
 def audit_stats_endpoint() -> dict:
     try:
@@ -3310,6 +3750,31 @@ def timetravel(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/brain/changes", tags=["brain"], dependencies=[Depends(verify_bearer)])
+def knowledge_changes(
+    since: str = Query(default="7d", description="Start of range (e.g. '7d', 'last week', '2026-04-01')"),
+    until: str = Query(default="now", description="End of range"),
+) -> dict:
+    try:
+        import temporal_reasoning
+        return temporal_reasoning.knowledge_diff(since, until)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"temporal diff failed: {e}")
+
+
+@app.get("/brain/evolution", tags=["brain"], dependencies=[Depends(verify_bearer)])
+def preference_evolution(
+    topic: str = Query(..., min_length=2, max_length=200, description="Topic to trace (e.g. 'frontend framework')"),
+    limit: int = Query(default=20, ge=1, le=100),
+) -> dict:
+    try:
+        import temporal_reasoning
+        timeline = temporal_reasoning.preference_evolution(topic, limit=limit)
+        return {"topic": topic, "timeline": timeline, "count": len(timeline)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"evolution query failed: {e}")
 
 
 # ── Phase E1: Session context API ──
@@ -3585,6 +4050,20 @@ def brain_outcomes(domain: str | None = None, limit: int = 50, offset: int = 0) 
         raise HTTPException(status_code=500, detail=str(e)[:200])
 
 
+@app.get("/brain/procedures", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
+def list_procedures(
+    task_type: str | None = Query(default=None, description="Filter by task type (e.g. 'deploy', 'git_workflow')"),
+    source: str | None = Query(default=None, description="Filter by source (extraction, shell, manual)"),
+    limit: int = Query(default=10, ge=1, le=50),
+) -> dict:
+    try:
+        from brain_core.task_queue import task_queue
+        procedures = task_queue.get_procedures(task_type=task_type, source=source, limit=limit)
+        return {"procedures": procedures, "total": len(procedures)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"procedure query failed: {e}")
+
+
 # ── Routes: observability ────────────────────────────────
 @app.get("/brain/health", tags=["liveness"], dependencies=[Depends(verify_bearer)])
 def brain_health() -> dict:
@@ -3610,13 +4089,12 @@ def brain_health() -> dict:
         services["ollama"] = "down"
         alerts.append("Ollama unreachable")
 
-    # Probe MinIO
-    try:
-        urllib.request.urlopen("http://192.168.97.5:9000/minio/health/live", timeout=3)
-        services["minio"] = "up"
-    except Exception:
-        services["minio"] = "down"
-        alerts.append("MinIO unreachable")
+    # MinIO health check removed (Brain v2 production hardening, 2026-04-13):
+    # brain has no direct MinIO dependency. ChromaDB backups are handled by the
+    # independent `ai.openclaw.chroma-backup` launchd plist via mc/aws-cli, not
+    # via the brain process. The previous probe pegged a stale OrbStack IP and
+    # caused permanent /brain/health=degraded false positive. Container health
+    # is verified by docker-compose healthcheck inside the container itself.
 
     # Probe Neo4j
     try:

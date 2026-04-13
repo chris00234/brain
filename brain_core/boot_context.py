@@ -12,8 +12,9 @@ import json
 import subprocess
 import sys
 import argparse
+import time
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 
 AGENT_QUERIES = {
@@ -66,7 +67,7 @@ DEFAULT_QUERIES = [
 ]
 
 try:
-    from config import BRAIN_LOGS_DIR, KNOWLEDGE_DIR, OPENCLAW_DIR
+    from config import BRAIN_LOGS_DIR, KNOWLEDGE_DIR, OPENCLAW_DIR, INBOX_DIR
     BOOT_LOG = BRAIN_LOGS_DIR / 'boot-context-log.jsonl'
     CHRIS_IDENTITY = KNOWLEDGE_DIR / 'canonical' / 'chris' / '_identity.md'
     CHRIS_STATE = KNOWLEDGE_DIR / 'canonical' / 'chris' / '_state.md'
@@ -75,21 +76,151 @@ except ImportError:
     CHRIS_IDENTITY = Path('/Users/chrischo/server/knowledge/canonical/chris/_identity.md')
     CHRIS_STATE = Path('/Users/chrischo/server/knowledge/canonical/chris/_state.md')
     OPENCLAW_DIR = Path('/Users/chrischo/.openclaw')
+    INBOX_DIR = Path('/Users/chrischo/server/knowledge/raw/inbox')
 
 
-sys.path.insert(0, str(Path(__file__).parent))
-try:
-    import search_unified as _search_mod
-except ImportError:
-    _search_mod = None
+# ---------------------------------------------------------------------------
+# Block cache — avoids re-fetching static content every session
+# ---------------------------------------------------------------------------
+_block_cache: dict[str, tuple[float, str]] = {}  # key -> (timestamp, content)
+STATIC_TTL = 7 * 24 * 3600   # 7 days — static blocks (identity, state)
+DYNAMIC_TTL = 300             # 5 min — dynamic blocks (scratch, memories, alerts, messages, focus, search)
+
+
+def _cache_get(key: str, ttl: float) -> str | None:
+    """Return cached content if fresh, else None."""
+    entry = _block_cache.get(key)
+    if entry is None:
+        return None
+    ts, content = entry
+    if time.monotonic() - ts > ttl:
+        return None
+    return content
+
+
+def _cache_set(key: str, content: str) -> None:
+    _block_cache[key] = (time.monotonic(), content)
+
+
+def flush_cache() -> None:
+    """Clear all cached blocks. Call after profile_regen or manual invalidation."""
+    _block_cache.clear()
+
+
+def _predictive_queries(agent: str) -> list[str]:
+    """Generate 3-5 adaptive queries based on temporal patterns, calendar, and recent sessions."""
+    queries: list[str] = []
+
+    # Step 1 — Focus aggregate signal (<1ms, just file reads)
+    try:
+        agg_path = BRAIN_LOGS_DIR / "focus-aggregate.jsonl"
+        if agg_path.exists():
+            now = datetime.now()
+            dow_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+            current_dow = dow_names[now.weekday()]
+            current_hour = now.hour
+            # Parse dow_hour_rollup rows for current day-of-week
+            best: list[tuple[int, int]] = []  # (commit_count, hour)
+            for line in agg_path.read_text().splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    row = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if row.get("kind") != "dow_hour_rollup" or row.get("dow") != current_dow:
+                    continue
+                hour = row.get("hour", -1)
+                if abs(hour - current_hour) <= 2:
+                    best.append((row.get("commit_count_total", 0), hour))
+            best.sort(reverse=True)
+            if best and best[0][0] >= 2:
+                period = "afternoon" if current_hour >= 12 else "morning"
+                queries.append(f"active development work {current_dow} {period}")
+            if len(best) >= 2:
+                queries.append("recent code changes and commits")
+    except Exception:
+        pass
+
+    # Step 2 — Calendar lookahead (<10ms)
+    try:
+        from indexer import chroma_api, _get_collection_id
+        col_id = _get_collection_id("personal") or _get_collection_id("calendar")
+        if col_id:
+            resp = chroma_api(
+                "POST",
+                f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/get",
+                {"limit": 50, "include": ["documents", "metadatas"]},
+            )
+            docs = resp.get("documents", [])
+            metas = resp.get("metadatas", [])
+            now_utc = datetime.now(timezone.utc)
+            cutoff = now_utc + timedelta(hours=4)
+            cal_count = 0
+            for doc, meta in zip(docs, metas):
+                if cal_count >= 2:
+                    break
+                if not meta:
+                    continue
+                date_str = meta.get("date") or meta.get("start_date") or meta.get("timestamp") or ""
+                if not date_str:
+                    continue
+                try:
+                    event_dt = datetime.fromisoformat(date_str)
+                    if event_dt.tzinfo is None:
+                        event_dt = event_dt.replace(tzinfo=timezone.utc)
+                    if not (now_utc <= event_dt <= cutoff):
+                        continue
+                except Exception:
+                    continue
+                title = meta.get("title") or meta.get("subject") or (doc[:80] if doc else "")
+                if title:
+                    queries.append(f"{title.strip()[:60]} preparation context")
+                    cal_count += 1
+    except Exception:
+        pass
+
+    # Step 3 — Session continuation (<5ms)
+    try:
+        from working_memory import get_session_summaries
+        summaries = get_session_summaries(limit=3)
+        if summaries:
+            content = summaries[0].get("content", "")
+            # First sentence or first 100 chars
+            topic = content.split(".")[0][:100].strip() if content else ""
+            if topic:
+                queries.append(f"{topic} next steps")
+    except Exception:
+        pass
+
+    return queries[:5]
+
+
+_search_mod = None
+
+
+def _load_search_mod():
+    global _search_mod
+    if _search_mod is not None:
+        return _search_mod
+    _parent = str(Path(__file__).parent)
+    if _parent not in sys.path:
+        sys.path.insert(0, _parent)
+    try:
+        import search_unified
+        _search_mod = search_unified
+    except ImportError:
+        pass
+    return _search_mod
 
 
 def search(query, limit=3):
     """In-process search via search_unified (no subprocess overhead)."""
-    if _search_mod is None:
+    mod = _load_search_mod()
+    if mod is None:
         return []
     try:
-        payload = _search_mod.search_all(query, limit)
+        payload = mod.search_all(query, limit)
         return payload.get("results", [])
     except Exception as e:
         import logging
@@ -98,11 +229,17 @@ def search(query, limit=3):
 
 
 def get_scratch_context(agent_name):
+    key = f"scratch:{agent_name}"
+    cached = _cache_get(key, DYNAMIC_TTL)
+    if cached is not None:
+        return cached
     scratch = OPENCLAW_DIR / f'workspace-{agent_name}' / 'SCRATCH.md'
     if scratch.exists():
         content = scratch.read_text().strip()
         if content and len(content) > 50:
-            return content[:500]
+            result = content[:500]
+            _cache_set(key, result)
+            return result
     return None
 
 
@@ -124,12 +261,24 @@ def _read_stripped_body(path: Path):
 
 def get_chris_identity():
     """Immutable Chris identity — name, location, hard rules, values. Loaded every boot."""
-    return _read_stripped_body(CHRIS_IDENTITY)
+    cached = _cache_get("chris_identity", STATIC_TTL)
+    if cached is not None:
+        return cached
+    content = _read_stripped_body(CHRIS_IDENTITY)
+    if content:
+        _cache_set("chris_identity", content)
+    return content
 
 
 def get_chris_state():
     """Mutable Chris state — projects, tools, focus, recent signals. Regenerated weekly."""
-    return _read_stripped_body(CHRIS_STATE)
+    cached = _cache_get("chris_state", STATIC_TTL)
+    if cached is not None:
+        return cached
+    content = _read_stripped_body(CHRIS_STATE)
+    if content:
+        _cache_set("chris_state", content)
+    return content
 
 
 def _recency_score(created_at: str) -> float:
@@ -158,6 +307,10 @@ def get_agent_memories(agent_name, limit=5):
     Ranks entries by (utility_score * 0.6 + recency * 0.4) where utility comes
     from Neo4j MemoryAccess nodes (MemRL-style usefulness tracking).
     """
+    key = f"memories:{agent_name}:{limit}"
+    cached = _cache_get(key, DYNAMIC_TTL)
+    if cached is not None:
+        return cached
     try:
         from indexer import chroma_api, _get_collection_id
         col_id = _get_collection_id("semantic_memory")
@@ -211,37 +364,115 @@ def get_agent_memories(agent_name, limit=5):
             cat = e["meta"].get("category", "")
             date = e["created_at"][:10]
             lines.append(f"[{date} {cat}] {e['doc']}")
-        return "\n".join(lines)
+        result = "\n".join(lines)
+        if result:
+            _cache_set(key, result)
+        return result
     except Exception:
         return ""
 
 
+def get_recent_openclaw_distillations(hours: int = 24, limit: int = 5) -> list[dict]:
+    """Return the most recent distilled OpenClaw session records from raw/inbox.
+
+    Skips claude agent (has its own ingest path). Sorted by record timestamp desc.
+    """
+    from inbox_utils import get_recent_inbox_records
+    records = [
+        r for r in get_recent_inbox_records(prefix='raw_oc_', hours=hours, parse=True)
+        if not r.get('source_ref', '').startswith('openclaw:claude:')
+    ]
+    records.sort(key=lambda r: r.get('timestamp', ''), reverse=True)
+    return records[:limit]
+
+
 def build_boot_context(agent_name, limit=3):
-    queries = AGENT_QUERIES.get(agent_name, DEFAULT_QUERIES)
+    queries = list(AGENT_QUERIES.get(agent_name, DEFAULT_QUERIES))
+    try:
+        queries.extend(_predictive_queries(agent_name))
+    except Exception:
+        pass
     sections = []
     seen_sources = set()
 
     # Working memory — current focus, goals, blocked items
+    wm_cached = _cache_get(f"working_memory:{agent_name}", DYNAMIC_TTL)
+    if wm_cached is not None:
+        sections.append({"section": "Current Focus", "content": wm_cached, "source": "brain/working_memory"})
+    else:
+        try:
+            from working_memory import get_working_context
+            ctx = get_working_context()
+            focus_lines = []
+            for g in ctx.get("active_goals", [])[:3]:
+                focus_lines.append(f"- GOAL: {g['title']} ({g['progress_pct']}% done)")
+            for b in ctx.get("blocked", [])[:2]:
+                focus_lines.append(f"- BLOCKED: {b['title']} (waiting on {b['blocked_by']})")
+            for n in ctx.get("next_up", [])[:2]:
+                focus_lines.append(f"- NEXT: {n['title']} -> {n['agent']}")
+            for f_item in ctx.get("manual_focus", [])[:2]:
+                focus_lines.append(f"- FOCUS: {f_item['content']}")
+            if focus_lines:
+                content = "\n".join(focus_lines)
+                _cache_set(f"working_memory:{agent_name}", content)
+                sections.append({"section": "Current Focus", "content": content, "source": "brain/working_memory"})
+        except Exception:
+            pass
+
+    # Recent session summaries — "what Chris was working on"
     try:
-        from working_memory import get_working_context
-        ctx = get_working_context()
-        focus_lines = []
-        for g in ctx.get("active_goals", [])[:3]:
-            focus_lines.append(f"- GOAL: {g['title']} ({g['progress_pct']}% done)")
-        for b in ctx.get("blocked", [])[:2]:
-            focus_lines.append(f"- BLOCKED: {b['title']} (waiting on {b['blocked_by']})")
-        for n in ctx.get("next_up", [])[:2]:
-            focus_lines.append(f"- NEXT: {n['title']} -> {n['agent']}")
-        for f_item in ctx.get("manual_focus", [])[:2]:
-            focus_lines.append(f"- FOCUS: {f_item['content']}")
-        if focus_lines:
+        from working_memory import get_session_summaries
+        summaries = get_session_summaries(limit=5)
+        if summaries:
+            session_lines = []
+            for s in summaries:
+                ts = s.get("created_at", "")[:16].replace("T", " ")
+                agent_tag = s.get("agent") or "claude"
+                session_lines.append(f"- [{ts} {agent_tag}] {s['content']}")
             sections.append({
-                "section": "Current Focus",
-                "content": "\n".join(focus_lines),
-                "source": "brain/working_memory",
+                "section": "Recent Sessions",
+                "content": "\n".join(session_lines),
+                "source": "brain/session_summaries",
             })
     except Exception:
         pass
+
+    # Recent OpenClaw agent conversations (last 24h) — cached 5min
+    oc_cached = _cache_get("openclaw_recent_24h", DYNAMIC_TTL)
+    if oc_cached is not None:
+        sections.append({
+            "section": "Recent Agent Conversations (24h)",
+            "content": oc_cached,
+            "source": "raw/inbox/openclaw",
+        })
+    else:
+        try:
+            recent_oc = get_recent_openclaw_distillations(hours=24, limit=5)
+            if recent_oc:
+                lines = []
+                for rec in recent_oc:
+                    ts = rec.get('timestamp', '')[:16].replace('T', ' ')
+                    src_ref = rec.get('source_ref', '')
+                    oc_agent = src_ref.split(':')[1] if src_ref.startswith('openclaw:') else 'unknown'
+                    body = rec.get('content', '')
+                    summary = ''
+                    for bl in body.split('\n'):
+                        bl = bl.strip()
+                        if bl and not bl.startswith('OpenClaw ') and not bl.startswith('Signal:') and not bl.startswith('Context '):
+                            summary = bl
+                            break
+                    if not summary:
+                        summary = body[:200]
+                    lines.append(f"- [{ts} {oc_agent}] {summary[:300]}")
+                content = "\n".join(lines)
+                _cache_set("openclaw_recent_24h", content)
+                sections.append({
+                    "section": "Recent Agent Conversations (24h)",
+                    "content": content,
+                    "source": "raw/inbox/openclaw",
+                })
+        except Exception:
+            pass
 
     # Chris identity (immutable core) + state (mutable snapshot)
     identity = get_chris_identity()
@@ -277,66 +508,102 @@ def build_boot_context(agent_name, limit=3):
             "source": "semantic_memory",
         })
 
-    # Proactive alerts — things the brain noticed that agents should know
+    # Phase 6: Atoms due for review (SM-2 spaced repetition signal).
+    # Surfaces top-3 atoms whose next_review_at has passed so the agent gets
+    # a chance to reinforce/correct them in-session.
     try:
-        from proactive import get_current_insights
-        insights = get_current_insights(max_age_hours=12)
-        active = [i for i in insights if not i.acted_on][:3]
-        if active:
-            alert_lines = [f"[{i.severity.upper()}] {i.summary}" for i in active]
+        from sm2 import review_due
+
+        due = review_due(limit=3)
+        if due:
+            lines = []
+            for d in due:
+                preview = (d.get("text") or "")[:140].replace("\n", " ")
+                lines.append(f"- [{d.get('tier')}] {preview}")
             sections.append({
-                "section": "Proactive Alerts",
-                "content": "\n".join(alert_lines),
-                "source": "brain/proactive",
+                "section": "Atoms due for review (SM-2)",
+                "content": "\n".join(lines),
+                "source": "brain/atoms",
             })
     except Exception:
         pass
+
+    # Proactive alerts — things the brain noticed that agents should know
+    alerts_cached = _cache_get("proactive_alerts", DYNAMIC_TTL)
+    if alerts_cached is not None:
+        sections.append({"section": "Proactive Alerts", "content": alerts_cached, "source": "brain/proactive"})
+    else:
+        try:
+            from proactive import get_current_insights
+            insights = get_current_insights(max_age_hours=12)
+            active = [i for i in insights if not i.acted_on][:3]
+            if active:
+                content = "\n".join(f"[{i.severity.upper()}] {i.summary}" for i in active)
+                _cache_set("proactive_alerts", content)
+                sections.append({"section": "Proactive Alerts", "content": content, "source": "brain/proactive"})
+        except Exception:
+            pass
 
     # Pending messages for this agent
-    try:
-        from agent_messenger import get_pending_messages
-        msgs = get_pending_messages(agent_name, limit=5)
-        if msgs:
-            msg_lines = [f"[{m['from_agent']}] {m['content'][:200]}" for m in msgs]
-            sections.append({
-                "section": f"Pending Messages for {agent_name}",
-                "content": "\n".join(msg_lines),
-                "source": "brain/messages",
-            })
-    except Exception:
-        pass
+    msgs_cached = _cache_get(f"messages:{agent_name}", DYNAMIC_TTL)
+    if msgs_cached is not None:
+        sections.append({"section": f"Pending Messages for {agent_name}", "content": msgs_cached, "source": "brain/messages"})
+    else:
+        try:
+            from agent_messenger import get_pending_messages
+            msgs = get_pending_messages(agent_name, limit=5)
+            if msgs:
+                content = "\n".join(f"[{m['from_agent']}] {m['content'][:200]}" for m in msgs)
+                _cache_set(f"messages:{agent_name}", content)
+                sections.append({"section": f"Pending Messages for {agent_name}", "content": content, "source": "brain/messages"})
+        except Exception:
+            pass
 
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-    query_results = {}
-    with ThreadPoolExecutor(max_workers=3) as executor:
-        future_to_query = {executor.submit(search, q, limit): q for q in queries}
-        for fut in as_completed(future_to_query):
-            try:
-                query_results[future_to_query[fut]] = fut.result()
-            except Exception:
-                query_results[future_to_query[fut]] = []
+    search_key = f"search:{agent_name}:{limit}"
+    search_cached = _cache_get(search_key, DYNAMIC_TTL)
+    if search_cached is not None:
+        try:
+            for s in json.loads(search_cached):
+                sections.append(s)
+        except Exception:
+            pass  # corrupted cache — fall through to fresh fetch
+    else:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        query_results = {}
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            future_to_query = {executor.submit(search, q, limit): q for q in queries}
+            for fut in as_completed(future_to_query):
+                try:
+                    query_results[future_to_query[fut]] = fut.result()
+                except Exception:
+                    query_results[future_to_query[fut]] = []
 
-    for query in queries:
-        for r in query_results.get(query, []):
-            if r.get('score', 0) < 40:
-                continue
-            source_key = r.get('path', r.get('title', ''))[:60]
-            if source_key in seen_sources:
-                continue
-            seen_sources.add(source_key)
+        search_sections = []
+        for query in queries:
+            for r in query_results.get(query, []):
+                if r.get('score', 0) < 40:
+                    continue
+                source_key = r.get('path', r.get('title', ''))[:60]
+                if source_key in seen_sources:
+                    continue
+                seen_sources.add(source_key)
 
-            content = r.get('content', '').strip()
-            if len(content) > 800:
-                content = content[:800] + "..."
+                content = r.get('content', '').strip()
+                if len(content) > 800:
+                    content = content[:800] + "..."
 
-            sections.append({
-                "section": f"{r.get('collection', 'unknown')}:{r.get('source_type', 'unknown')}",
-                "content": content,
-                "source": r.get('title', r.get('path', '')).replace(str(Path.home()) + '/', '~/'),
-                "score": r.get('score', 0),
-            })
+                search_sections.append({
+                    "section": f"{r.get('collection', 'unknown')}:{r.get('source_type', 'unknown')}",
+                    "content": content,
+                    "source": r.get('title', r.get('path', '')).replace(str(Path.home()) + '/', '~/'),
+                    "score": r.get('score', 0),
+                })
 
-    return sections[:14]
+        if search_sections:
+            _cache_set(search_key, json.dumps(search_sections, ensure_ascii=False))
+        sections.extend(search_sections)
+
+    return sections[:15]
 
 
 def log_boot(agent_name, queries, sections):
@@ -344,7 +611,7 @@ def log_boot(agent_name, queries, sections):
         BOOT_LOG.parent.mkdir(parents=True, exist_ok=True)
         scores = [s.get('score', 0) for s in sections if 'score' in s]
         entry = {
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "agent": agent_name,
             "queries": queries,
             "results_count": len(sections),
@@ -360,7 +627,7 @@ def log_boot(agent_name, queries, sections):
 
 def format_boot_context(agent_name, sections):
     lines = []
-    lines.append(f"[Unified Boot Context] Agent: {agent_name} | {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    lines.append(f"[Unified Boot Context] Agent: {agent_name} | {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC")
     lines.append(f"Loaded {len(sections)} context blocks (sources: rag, canonical, obsidian)")
     lines.append("")
 

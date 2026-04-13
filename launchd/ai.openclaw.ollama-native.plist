@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>ai.openclaw.ollama-native</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/ollama</string>
+    <string>serve</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>OLLAMA_HOST</key>
+    <string>127.0.0.1:11434</string>
+    <key>OLLAMA_NUM_PARALLEL</key>
+    <string>4</string>
+    <key>OLLAMA_MAX_LOADED_MODELS</key>
+    <string>1</string>
+    <key>OLLAMA_KEEP_ALIVE</key>
+    <string>5m</string>
+    <key>HOME</key>
+    <string>/Users/chrischo</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/Users/chrischo/server/brain/logs/ollama-native.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/chrischo/server/brain/logs/ollama-native.err.log</string>
+</dict>
+</plist>

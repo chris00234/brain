@@ -29,7 +29,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # Reuse helpers from brain_core.indexer (single source of truth).
@@ -62,7 +62,7 @@ def _log_failure(adapter: str, error: str) -> None:
     try:
         FAILURE_LOG.parent.mkdir(parents=True, exist_ok=True)
         entry = {
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "adapter": adapter,
             "error": str(error)[:500],
         }
@@ -74,7 +74,7 @@ def _log_failure(adapter: str, error: str) -> None:
 MIN_NOTE_LEN = 50
 MIN_MESSAGE_LEN = 4  # Korean text is info-dense at shorter char counts
 MAX_GROUP_PARTICIPANTS = 10
-MAX_CHUNK_CHARS = 1500
+MAX_CHUNK_CHARS = 1000
 MAX_REMINDER_LEN = 5  # title-only is fine, just skip empty
 
 # Extra PII regexes for personal data (in addition to indexer.filter_secrets)
@@ -113,21 +113,32 @@ except ImportError:
 
 
 # ── Custom add_documents (carries personal metadata) ────
-def add_personal_documents(collection_name, docs, skip_stale_cleanup=False):
-    """Like indexer.add_documents but uses personal metadata fields."""
+def add_personal_documents(collection_name, docs, skip_stale_cleanup=True):
+    """Upsert docs into the shared 'personal' collection; returns the set of upserted IDs.
+
+    Stale cleanup is intentionally NOT run here — `personal` is a multi-adapter
+    rollup (notes + messages + calendar + reminders), so cleaning up after any
+    single adapter would delete the other adapters' data. Call
+    `_run_personal_stale_cleanup(all_upserted_ids)` once from main() AFTER every
+    adapter has completed successfully. (Bug fix 2026-04-12.)
+
+    The `skip_stale_cleanup` parameter is kept for call-site compatibility but
+    is now always effectively True.
+    """
     if not docs:
-        return 0
+        return set()
 
     col_id = _get_collection_id(collection_name)
     if not col_id:
         print(f"    ERROR: Collection '{collection_name}' not found")
-        return 0
+        return set()
 
     ids = []
     embeddings = []
     documents = []
     metadatas = []
 
+    is_tty = sys.stdout.isatty()
     for i, doc in enumerate(docs):
         content = filter_pii(doc['content'])
         if content is None:
@@ -158,7 +169,12 @@ def add_personal_documents(collection_name, docs, skip_stale_cleanup=False):
         id_seed = doc.get('stable_id') or f"{source}:{content}"
         doc_id = f"{collection_name}:{hashlib.md5(id_seed.encode()).hexdigest()}"[:63]
 
-        print(f"    Embedding {i+1}/{len(docs)}: {doc_id[:50]}...", end='\r')
+        # Only use \r carriage-return progress in a TTY; in logfiles it creates
+        # one giant unreadable line. (Bug fix 2026-04-12.)
+        if is_tty:
+            print(f"    Embedding {i+1}/{len(docs)}: {doc_id[:50]}...", end='\r')
+        elif (i + 1) % 20 == 0:
+            print(f"    Embedding {i+1}/{len(docs)}")
         try:
             emb = get_embedding(embed_text)
         except RuntimeError as e:
@@ -183,13 +199,13 @@ def add_personal_documents(collection_name, docs, skip_stale_cleanup=False):
             'is_past': str(doc.get('is_past', '')),
             'participant_count': str(doc.get('participant_count', '')),
             'note_id': doc.get('note_id', ''),
-            'created_at': datetime.now().isoformat(),
+            'created_at': datetime.now(timezone.utc).isoformat(),
             'embed_model': EMBED_MODEL,
         })
 
     if not ids:
         print(f"    No valid docs after filtering for '{collection_name}'")
-        return 0
+        return set()
 
     BATCH = 20
     for start in range(0, len(ids), BATCH):
@@ -204,31 +220,46 @@ def add_personal_documents(collection_name, docs, skip_stale_cleanup=False):
             })
         print(f"    Batch {start//BATCH + 1}: upserted {end - start} chunks       ")
 
-    upserted_ids = set(ids)
-    if skip_stale_cleanup:
-        print(f"    Total: {len(ids)} chunks in '{collection_name}' (stale cleanup skipped — partial run)")
-        return len(ids)
+    print(f"    Total: {len(ids)} chunks in '{collection_name}'")
+    return set(ids)
+
+
+def _run_personal_stale_cleanup(collection_name: str, upserted_ids: set) -> int:
+    """Delete any IDs in the collection not present in the union of this run's
+    successful adapter upserts. MUST only be called if every adapter succeeded —
+    otherwise we'd wipe the crashed adapter's data.
+
+    Returns the number of docs deleted.
+    """
+    col_id = _get_collection_id(collection_name)
+    if not col_id:
+        return 0
+    BATCH = 20
     try:
         resp = chroma_api("POST",
             f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/get",
             {"limit": 1_000_000, "include": []})
         existing_ids = set(resp.get("ids", []))
-        if len(upserted_ids) < len(existing_ids) * 0.5 and len(existing_ids) > 20:
-            print(f"    WARNING: Skipping stale cleanup — current set ({len(upserted_ids)}) < 50% of existing ({len(existing_ids)})")
-        else:
-            stale_ids = list(existing_ids - upserted_ids)
-            if stale_ids:
-                for s in range(0, len(stale_ids), BATCH):
-                    e = min(s + BATCH, len(stale_ids))
-                    chroma_api("POST",
-                        f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/delete",
-                        {"ids": stale_ids[s:e]})
-                print(f"    Cleaned {len(stale_ids)} stale docs from '{collection_name}'")
+        stale_ids = list(existing_ids - upserted_ids)
+        if not stale_ids:
+            print(f"  Stale cleanup: 0 docs to prune from '{collection_name}'")
+            return 0
+        # Safety guard: refuse to delete > 30% of the collection in one run.
+        # Protects against a bug in an adapter that returns zero rows.
+        if len(stale_ids) > len(existing_ids) * 0.3:
+            print(f"  WARNING: Stale cleanup would delete {len(stale_ids)}/{len(existing_ids)} "
+                  f"({len(stale_ids)/len(existing_ids):.0%}) — refusing (>30% threshold)")
+            return 0
+        for s in range(0, len(stale_ids), BATCH):
+            e = min(s + BATCH, len(stale_ids))
+            chroma_api("POST",
+                f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/delete",
+                {"ids": stale_ids[s:e]})
+        print(f"  Stale cleanup: deleted {len(stale_ids)} stale docs from '{collection_name}'")
+        return len(stale_ids)
     except Exception as ex:
-        print(f"    WARNING: Stale cleanup failed: {ex}")
-
-    print(f"    Total: {len(ids)} chunks in '{collection_name}'")
-    return len(ids)
+        print(f"  WARNING: Stale cleanup failed: {ex}")
+        return 0
 
 
 # ── Adapter 1: Apple Notes (direct SQLite read from NoteStore.sqlite) ──
@@ -244,23 +275,71 @@ def _copy_sqlite_live(db_path: Path, tmpdir: str, suffixes: tuple[str, ...] = ('
 
 
 def _apple_timestamp_to_iso(ts: float | int | None) -> str:
+    """Return a tz-aware ISO-8601 string for a Core Data / Apple epoch timestamp.
+
+    Returns `.isoformat()` (with `+00:00` offset) so that downstream
+    `datetime.fromisoformat()` produces an aware datetime. Older code used
+    `.strftime("%Y-%m-%dT%H:%M:%S")` which silently dropped the tz and caused
+    naive-vs-aware comparisons downstream (bug: 2026-04-12).
+    """
     if not ts or ts <= 0:
         return ""
     try:
-        return datetime.fromtimestamp(ts + APPLE_EPOCH_OFFSET).strftime("%Y-%m-%dT%H:%M:%S")
+        return datetime.fromtimestamp(ts + APPLE_EPOCH_OFFSET, tz=timezone.utc).isoformat()
     except (ValueError, OSError):
         return ""
 
 
-def _extract_text_from_zdata(blob):
-    """Extract readable text from gzipped protobuf ZDATA blob."""
-    import gzip as _gzip
-    if not blob or blob[:2] != b'\x1f\x8b':
-        return ""
+def _pb_read_varint(data, pos):
+    """Read a protobuf varint from bytes, return (value, next_pos)."""
+    val = 0
+    shift = 0
+    while pos < len(data):
+        b = data[pos]
+        val |= (b & 0x7F) << shift
+        pos += 1
+        if not (b & 0x80):
+            return val, pos
+        shift += 7
+    raise ValueError("truncated varint")
+
+
+def _pb_walk(data, pos, end):
+    """Yield (field_num, wire_type, value) for each field in a protobuf message.
+
+    Bails silently on unknown wire types or truncated data. Callers filter by
+    field_num / wire_type so unknown fields are automatically ignored.
+    """
     try:
-        raw = _gzip.decompress(blob)
+        while pos < end:
+            tag, pos = _pb_read_varint(data, pos)
+            field_num = tag >> 3
+            wire_type = tag & 0x7
+            if wire_type == 0:  # varint
+                val, pos = _pb_read_varint(data, pos)
+                yield field_num, wire_type, val
+            elif wire_type == 2:  # length-delimited
+                length, pos = _pb_read_varint(data, pos)
+                if pos + length > end:
+                    return
+                yield field_num, wire_type, data[pos:pos + length]
+                pos += length
+            elif wire_type == 1:  # 64-bit fixed
+                pos += 8
+            elif wire_type == 5:  # 32-bit fixed
+                pos += 4
+            else:
+                return  # unknown wire type, bail
     except Exception:
-        return ""
+        return
+
+
+def _extract_text_legacy(raw):
+    """Legacy byte-range heuristic. Kept as a safety fallback because it
+    still works for malformed or unusual ZDATA blobs where the protobuf
+    walker can't find the canonical body field. ASCII/Latin1 only — Korean
+    and other CJK text are systematically dropped.
+    """
     segments = re.findall(rb'[\x20-\x7e\xc0-\xff][\x20-\x7e\x80-\xff]{8,}', raw)
     texts = []
     for seg in segments:
@@ -278,6 +357,58 @@ def _extract_text_from_zdata(blob):
             continue
         texts.append(decoded)
     return "\n".join(texts)
+
+
+def _extract_text_from_zdata(blob):
+    """Extract the UTF-8 note body from Apple Notes ZDATA protobuf blob.
+
+    The ZICNOTEDATA.ZDATA column stores a gzipped protobuf. Structure verified
+    empirically 2026-04-12 against 3 real notes:
+
+        top-level: field 2 (wire=2) = wrapper message
+            wrapper: field 3 (wire=2) = note content sub-message
+                content: field 2 (wire=2) = UTF-8 body text
+
+    Why this matters: the old implementation used a byte-range regex +
+    ASCII-space filter that systematically dropped Korean and other
+    multibyte text. ~88% of Chris's notes (Korean/mixed content) stored as
+    header-only empty chunks. This walker reads the protobuf structure
+    directly and returns the complete UTF-8 body.
+
+    Fallback: if the walker can't find the canonical body field (unusual
+    schema, corrupted blob, non-standard note type), fall back to the legacy
+    byte-range heuristic so we never regress on notes the old code worked on.
+    """
+    import gzip as _gzip
+    if not blob:
+        return ""
+    # Decompress if gzip-wrapped, else treat as raw
+    try:
+        raw = _gzip.decompress(blob) if blob[:2] == b'\x1f\x8b' else blob
+    except Exception:
+        raw = blob
+
+    # Primary: protobuf walker
+    try:
+        for f1, wt1, v1 in _pb_walk(raw, 0, len(raw)):
+            if f1 != 2 or wt1 != 2:
+                continue
+            for f2, wt2, v2 in _pb_walk(v1, 0, len(v1)):
+                if f2 != 3 or wt2 != 2:
+                    continue
+                for f3, wt3, v3 in _pb_walk(v2, 0, len(v2)):
+                    if f3 == 2 and wt3 == 2 and v3:
+                        try:
+                            text = v3.decode('utf-8', errors='replace').strip()
+                            if len(text) >= 2:
+                                return text
+                        except Exception:
+                            continue
+    except Exception:
+        pass
+
+    # Fallback: legacy byte-range heuristic
+    return _extract_text_legacy(raw)
 
 
 def collect_notes():
@@ -338,10 +469,21 @@ def collect_notes():
         folder = (row["folder"] or "Notes").strip()
         modified = _apple_timestamp_to_iso(row["modified"])
         note_pk = row["Z_PK"]
-        body = (row["snippet"] or "").strip()
-        if not body and row["body_blob"]:
-            body = _extract_text_from_zdata(row["body_blob"])
-        if body and len(body) < MIN_NOTE_LEN:
+        # Body extraction priority (bug fix 2026-04-12):
+        #   1. Protobuf walker on ZDATA — full body, handles CJK/emoji
+        #   2. ZSNIPPET fallback — short preview that Apple auto-populates
+        # Previously this was reversed: snippet took priority and the walker
+        # was only invoked when snippet was empty, which meant Korean notes
+        # with English-ish snippets showed ONLY the snippet instead of the
+        # full body the walker could extract.
+        body = ""
+        if row["body_blob"]:
+            body = _extract_text_from_zdata(row["body_blob"]) or ""
+        if not body:
+            body = (row["snippet"] or "").strip()
+        # MIN_NOTE_LEN lowered from 50 → 10 (2026-04-12): Korean notes are
+        # dense and short notes like "넥서스모드" (5 chars) are legitimate.
+        if body and len(body) < 10:
             body = ""
         content = f"Note: {title}\nFolder: {folder}\nModified: {modified}"
         if body:
@@ -383,7 +525,7 @@ def collect_messages(days_back=30):
             _log_failure("messages", msg)
             return []
 
-        cutoff_unix = (datetime.now() - timedelta(days=days_back)).timestamp()
+        cutoff_unix = (datetime.now(timezone.utc) - timedelta(days=days_back)).timestamp()
         cutoff_apple = int((cutoff_unix - APPLE_EPOCH_OFFSET) * 1_000_000_000)
 
         try:
@@ -452,7 +594,7 @@ def collect_messages(days_back=30):
 
         # Convert Apple date to unix
         unix_ts = (row['date'] / 1_000_000_000) + APPLE_EPOCH_OFFSET
-        dt = datetime.fromtimestamp(unix_ts)
+        dt = datetime.fromtimestamp(unix_ts, tz=timezone.utc)
         day = dt.strftime('%Y-%m-%d')
 
         contact = row['chat_name'] or row['chat_identifier'] or row['handle_id'] or 'unknown'
@@ -499,6 +641,7 @@ def collect_messages(days_back=30):
             if current.strip() != head.strip():
                 chunk_parts.append(current)
             for idx, part in enumerate(chunk_parts):
+                chunk_hash = hashlib.md5(part.encode()).hexdigest()[:8]
                 docs.append({
                     'content': part,
                     'source': f"imessage://{chat_id}/{day}/{idx}",
@@ -506,7 +649,7 @@ def collect_messages(days_back=30):
                     'service': contact,
                     'date': day,
                     'participant_count': meta['participants'],
-                    'stable_id': f"msg:{chat_id}:{day}:{idx}",
+                    'stable_id': f"msg:{chat_id}:{day}:{chunk_hash}",
                 })
         else:
             docs.append({
@@ -531,7 +674,7 @@ def collect_calendar(days_back=30, days_forward=60):
         _log_failure("calendar", msg)
         return docs
 
-    now = datetime.now()
+    now = datetime.now(timezone.utc)
     cutoff_start = (now - timedelta(days=days_back)).timestamp() - APPLE_EPOCH_OFFSET
     cutoff_end = (now + timedelta(days=days_forward)).timestamp() - APPLE_EPOCH_OFFSET
 
@@ -592,7 +735,7 @@ def collect_calendar(days_back=30, days_forward=60):
         try:
             if start_iso:
                 is_past = datetime.fromisoformat(start_iso) < now
-        except ValueError:
+        except (ValueError, TypeError):
             pass
 
         content_lines = [f"Event: {title}", f"Calendar: {cal_name}", f"Start: {start_iso}", f"End: {end_iso}"]
@@ -748,67 +891,92 @@ def main():
     args = parser.parse_args()
 
     print("=" * 60)
-    print(f"Personal Data Ingestion — {datetime.now().isoformat()}")
+    print(f"Personal Data Ingestion — {datetime.now(timezone.utc).isoformat()}")
     print("=" * 60)
 
     print("\n[setup] Ensuring collections...")
     ensure_collection('personal')
 
     state = load_state()
-    state['last_run'] = datetime.now().isoformat()
+    state['last_run'] = datetime.now(timezone.utc).isoformat()
 
-    n_count = m_count = c_count = t_count = 0
     only_flags = (args.notes_only, args.messages_only, args.calendar_only, args.reminders_only)
     run_all = not any(only_flags)
-    # Skip stale cleanup when running a single adapter — the consolidated 'personal'
-    # collection contains all 4 data types, so partial upserts would delete other types.
-    partial = not run_all
+
+    # New architecture (2026-04-12):
+    # 1. Each adapter runs in its own try/except so a crash in one doesn't kill the rest.
+    # 2. Each adapter's upserted IDs are unioned; stale cleanup runs ONCE at the end.
+    # 3. Stale cleanup ONLY runs if every invoked adapter succeeded — otherwise
+    #    we'd wipe the crashed adapter's still-good data from the last successful run.
+    all_upserted: set = set()
+    counts: dict[str, int] = {"notes": 0, "messages": 0, "calendar": 0, "tasks": 0}
+    crashed: list[str] = []
+
+    def _run_adapter(name: str, label: str, collector, *collector_args, **collector_kwargs):
+        print(f"\n[{label}] {name.title()}...")
+        try:
+            docs = collector(*collector_args, **collector_kwargs)
+            print(f"  Collected {len(docs)} {name} items")
+            upserted = add_personal_documents("personal", docs)
+            counts[name] = len(upserted)
+            all_upserted.update(upserted)
+            state[f'{name}_last_count'] = len(upserted)
+        except Exception as e:
+            crashed.append(name)
+            err_msg = f"{name} adapter crashed: {type(e).__name__}: {e}"
+            print(f"  ERROR: {err_msg}")
+            _log_failure(name, err_msg)
 
     if run_all or args.notes_only:
-        print("\n[1/4] Apple Notes...")
-        notes = collect_notes()
-        print(f"  Collected {len(notes)} notes")
-        n_count = add_personal_documents("personal", notes, skip_stale_cleanup=partial)
-        state['notes_last_count'] = n_count
+        _run_adapter("notes", "1/4", collect_notes)
 
     if run_all or args.messages_only:
-        print(f"\n[2/4] iMessage (last {args.days} days)...")
-        messages = collect_messages(days_back=args.days)
-        print(f"  Collected {len(messages)} message chunks")
-        m_count = add_personal_documents("personal", messages, skip_stale_cleanup=partial)
-        state['messages_last_count'] = m_count
+        _run_adapter("messages", "2/4", collect_messages, days_back=args.days)
 
     if run_all or args.calendar_only:
-        print(f"\n[3/4] Calendar (-{args.cal_back}/+{args.cal_forward} days)...")
-        events = collect_calendar(days_back=args.cal_back, days_forward=args.cal_forward)
-        print(f"  Collected {len(events)} events")
-        c_count = add_personal_documents("personal", events, skip_stale_cleanup=partial)
-        state['calendar_last_count'] = c_count
+        _run_adapter("calendar", "3/4", collect_calendar,
+                     days_back=args.cal_back, days_forward=args.cal_forward)
 
     if run_all or args.reminders_only:
-        print("\n[4/4] Reminders...")
-        tasks = collect_reminders()
-        print(f"  Collected {len(tasks)} reminders")
-        t_count = add_personal_documents("personal", tasks, skip_stale_cleanup=partial)
-        state['tasks_last_count'] = t_count
+        _run_adapter("tasks", "4/4", collect_reminders)
+
+    # Stale cleanup gate (2026-04-12 fix #2): only run when BOTH are true:
+    #   1. run_all — we actually invoked all 4 adapters this run (not --notes-only)
+    #   2. not crashed — every invoked adapter completed without exception
+    # A single-adapter run (e.g., --notes-only) has `all_upserted` covering only
+    # 55% of the collection, which would delete the other 45% as "stale" —
+    # exactly the bug that today's calendar TypeError caused, but in reverse.
+    if run_all and not crashed:
+        print("\n[cleanup] Running stale cleanup (full run, all adapters succeeded)...")
+        _run_personal_stale_cleanup("personal", all_upserted)
+    elif crashed:
+        print(f"\n[cleanup] SKIPPED — {len(crashed)} adapter(s) crashed: {', '.join(crashed)}")
+        print("           Last-good data from crashed adapters preserved until next healthy run.")
 
     save_state(state)
+
+    n_count = counts["notes"]
+    m_count = counts["messages"]
+    c_count = counts["calendar"]
+    t_count = counts["tasks"]
 
     print("\n" + "=" * 60)
     print(f"DONE — notes: {n_count}, messages: {m_count}, calendar: {c_count}, tasks: {t_count}")
     print(f"Total: {n_count + m_count + c_count + t_count} chunks indexed")
+    if crashed:
+        print(f"CRASHED: {', '.join(crashed)}")
     print("=" * 60)
 
-    # Fail loud: exit non-zero if any requested adapter ingested nothing.
-    # This makes launchd's last-exit-status reflect reality and prevents silent regressions.
-    failed = []
-    if (run_all or args.notes_only) and n_count == 0:
+    # Fail loud: exit non-zero if any requested adapter ingested nothing OR crashed.
+    # This makes launchd's last-exit-status reflect reality.
+    failed = list(crashed)
+    if (run_all or args.notes_only) and n_count == 0 and "notes" not in failed:
         failed.append("notes")
-    if (run_all or args.messages_only) and m_count == 0:
+    if (run_all or args.messages_only) and m_count == 0 and "messages" not in failed:
         failed.append("messages")
-    if (run_all or args.calendar_only) and c_count == 0:
+    if (run_all or args.calendar_only) and c_count == 0 and "calendar" not in failed:
         failed.append("calendar")
-    if (run_all or args.reminders_only) and t_count == 0:
+    if (run_all or args.reminders_only) and t_count == 0 and "tasks" not in failed:
         failed.append("tasks")
 
     if failed:

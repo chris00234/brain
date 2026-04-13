@@ -59,7 +59,19 @@ Rewrites:"""
 
 
 # ── Cache ─────────────────────────────────────────────────
+# Two-tier cache: in-memory hot path for repeat queries in the same session,
+# SQLite persistent cache for cross-session / restart survival. HyDE dispatch
+# is ~15-20s per unique query, so persistent caching is the difference between
+# "only fires on cold queries" and "fires every time the brain restarts".
+
+import sqlite3 as _sqlite3
+
+_HYDE_DB = Path("/Users/chrischo/server/brain/logs/hyde_cache.db")
+
+
 class _TTLCache:
+    """In-memory hot cache with per-key expiry. Bounded size, thread-safe."""
+
     def __init__(self, ttl_seconds: int, max_entries: int) -> None:
         self.ttl = ttl_seconds
         self.max_entries = max_entries
@@ -89,8 +101,89 @@ class _TTLCache:
             self._store.clear()
 
 
-_hyde_cache = _TTLCache(CACHE_TTL_SECONDS, MAX_CACHE_ENTRIES)
+class _PersistentHydeCache:
+    """SQLite-backed cache keyed on sha256(query) → (hypothetical, created_at).
+
+    Entries never expire — HyDE text is a function of the query + model prompt
+    and neither change day-to-day. On prompt edits, call clear() or delete
+    the db file.
+    """
+
+    def __init__(self, db_path: Path) -> None:
+        self.db_path = db_path
+        self._lock = threading.Lock()
+        self._conn: _sqlite3.Connection | None = None
+
+    def _get_conn(self) -> _sqlite3.Connection:
+        if self._conn is None:
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
+            self._conn = _sqlite3.connect(str(self.db_path), timeout=10, check_same_thread=False)
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("""
+                CREATE TABLE IF NOT EXISTS hyde_cache (
+                    query_hash TEXT PRIMARY KEY,
+                    query TEXT NOT NULL,
+                    hypothetical TEXT NOT NULL,
+                    created_at REAL NOT NULL
+                )
+            """)
+            self._conn.commit()
+        return self._conn
+
+    @staticmethod
+    def _hash(query: str) -> str:
+        import hashlib
+        return hashlib.sha256(query.strip().encode("utf-8")).hexdigest()[:32]
+
+    def get(self, query: str) -> str | None:
+        if not query:
+            return None
+        with self._lock:
+            try:
+                row = self._get_conn().execute(
+                    "SELECT hypothetical FROM hyde_cache WHERE query_hash = ?",
+                    (self._hash(query),),
+                ).fetchone()
+                return row[0] if row else None
+            except Exception:
+                return None
+
+    def set(self, query: str, hypothetical: str) -> None:
+        if not query or not hypothetical:
+            return
+        with self._lock:
+            try:
+                self._get_conn().execute(
+                    "INSERT OR REPLACE INTO hyde_cache VALUES (?, ?, ?, ?)",
+                    (self._hash(query), query, hypothetical, time.time()),
+                )
+                self._get_conn().commit()
+            except Exception:
+                pass
+
+    def count(self) -> int:
+        with self._lock:
+            try:
+                row = self._get_conn().execute("SELECT COUNT(*) FROM hyde_cache").fetchone()
+                return int(row[0]) if row else 0
+            except Exception:
+                return 0
+
+    def clear(self) -> None:
+        with self._lock:
+            try:
+                self._get_conn().execute("DELETE FROM hyde_cache")
+                self._get_conn().commit()
+            except Exception:
+                pass
+
+
+_hyde_mem_cache = _TTLCache(CACHE_TTL_SECONDS, MAX_CACHE_ENTRIES)
+_hyde_disk_cache = _PersistentHydeCache(_HYDE_DB)
 _expand_cache = _TTLCache(CACHE_TTL_SECONDS, MAX_CACHE_ENTRIES)
+
+# Backward compat alias for any external references
+_hyde_cache = _hyde_mem_cache
 
 
 # ── OpenClaw dispatch helper (thin wrapper around shared dispatcher) ─
@@ -101,26 +194,68 @@ def _dispatch_to_jenna(prompt: str, thinking: str = "low", timeout: int = DISPAT
 
 
 # ── HyDE ─────────────────────────────────────────────────
-def generate_hypothetical(query: str) -> str:
-    """Generate a hypothetical answer for the query. Cached for 5 min."""
+def _clean_reply(reply: str) -> str:
+    reply = re.sub(r"^```.*?\n", "", reply, flags=re.DOTALL)
+    reply = re.sub(r"\s*```$", "", reply)
+    reply = re.sub(r"^\s*Answer\s*:\s*", "", reply, flags=re.IGNORECASE)
+    return reply.strip()
+
+
+def generate_hypothetical(query: str, allow_dispatch: bool = True) -> str:
+    """Generate a hypothetical answer for the query.
+
+    Two-tier cache:
+      1. In-memory TTL cache — intra-session hot path
+      2. SQLite persistent cache — cross-restart, cross-session survival
+
+    On cache miss: dispatches to Jenna (OpenClaw subscription, no extra cost)
+    with a 10-second timeout. If ``allow_dispatch`` is False, returns "" on
+    miss without ever calling out — used by the async / confidence-skip paths
+    that only want cached answers.
+    """
     if not query or not query.strip():
         return ""
-    cached = _hyde_cache.get(query)
+
+    # Tier 1: in-memory
+    cached = _hyde_mem_cache.get(query)
     if cached is not None:
         return cached
 
+    # Tier 2: persistent SQLite
+    disk_cached = _hyde_disk_cache.get(query)
+    if disk_cached is not None:
+        _hyde_mem_cache.set(query, disk_cached)  # promote
+        return disk_cached
+
+    if not allow_dispatch:
+        return ""
+
+    # Cache miss + dispatch allowed — call Jenna
     # Tight timeout: HyDE is in the search hot path. A slow Jenna (or a dead
     # OpenClaw gateway) must not stall the search pipeline — fall back to the
     # raw query embedding quickly. 10s is enough for a small thinking=low reply.
     reply = _dispatch_to_jenna(HYDE_PROMPT.format(query=query), thinking="low", timeout=10)
-    # Strip markdown fences / leading "Answer:" boilerplate the model may add.
-    reply = re.sub(r"^```.*?\n", "", reply, flags=re.DOTALL)
-    reply = re.sub(r"\s*```$", "", reply)
-    reply = re.sub(r"^\s*Answer\s*:\s*", "", reply, flags=re.IGNORECASE)
-    reply = reply.strip()
+    reply = _clean_reply(reply)
 
-    _hyde_cache.set(query, reply)
+    if reply:
+        _hyde_mem_cache.set(query, reply)
+        _hyde_disk_cache.set(query, reply)
     return reply
+
+
+def hyde_cached_only(query: str) -> str:
+    """Return cached hypothetical or empty. Never dispatches. Used on the
+    confidence-skip path where HyDE only fires if already pre-generated."""
+    return generate_hypothetical(query, allow_dispatch=False)
+
+
+def hyde_cache_stats() -> dict:
+    """Return cache-occupancy diagnostics."""
+    return {
+        "mem_entries": len(_hyde_mem_cache._store),
+        "disk_entries": _hyde_disk_cache.count(),
+        "disk_path": str(_HYDE_DB),
+    }
 
 
 def hyde_embedding(query: str) -> tuple[list[float] | None, str]:

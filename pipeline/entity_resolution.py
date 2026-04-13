@@ -128,9 +128,9 @@ def merge_entity(canonical: str, alias: str):
     # Add alias name
     add_alias(canonical, alias)
 
-    # Transfer mention count
+    # Transfer mention count. Use separate MATCH to avoid cartesian product warning.
     run_write(
-        "MATCH (old:Entity {name: $alias}), (new:Entity {name: $canonical}) "
+        "MATCH (old:Entity {name: $alias}) MATCH (new:Entity {name: $canonical}) "
         "SET new.mention_count = new.mention_count + old.mention_count",
         {"alias": alias, "canonical": canonical},
     )

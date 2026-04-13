@@ -1,0 +1,13 @@
+skips:
+  - B101  # asserts allowed in tests
+  - B404  # subprocess legit in maintenance.py + openclaw_dispatch
+  - B603  # subprocess without shell — already validated by callers
+  - B607  # partial executable path — pinned in maintenance.py
+
+exclude_dirs:
+  - /Users/chrischo/server/brain/.venv
+  - /Users/chrischo/server/brain/logs
+  - /Users/chrischo/server/brain/tests
+  - /Users/chrischo/server/brain/__pycache__
+
+# Targets are passed via CLI: bandit -c bandit.yaml -r brain_core/ cli/ pipeline/ server.py
