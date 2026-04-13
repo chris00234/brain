@@ -122,6 +122,18 @@ def _promote(candidate: Path) -> None:
     print(f"[promoted] lora_active -> {candidate.resolve()}")
 
 
+def _bootstrap_active_if_missing() -> None:
+    """One-shot: if lora_active is missing AND lora_v1/ exists, symlink them.
+    Lets the gate run from a cold install without manual setup.
+    """
+    if LORA_ACTIVE.is_symlink() or LORA_ACTIVE.exists():
+        return
+    fallback = TRAINING_DIR / "lora_v1"
+    if fallback.exists() and fallback.is_dir():
+        LORA_ACTIVE.symlink_to(fallback.resolve())
+        print(f"[bootstrap] lora_active -> {fallback.resolve()}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="LoRA A/B gate and deploy")
     parser.add_argument(
@@ -155,9 +167,11 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    _bootstrap_active_if_missing()
+
     if not args.candidate.exists():
-        print(f"[error] candidate adapter missing: {args.candidate}")
-        return 1
+        print(f"[skip] candidate adapter missing: {args.candidate} (no fine-tune available)")
+        return 0  # not a hard error — first run before any training cycle
 
     print(f"[ab_gate] running base eval ({args.eval_set.name})")
     t0 = time.time()

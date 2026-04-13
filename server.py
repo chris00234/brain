@@ -110,6 +110,9 @@ JOB_REGISTRY: dict[str, list[str]] = {
     # Phase 7: closed-loop self-learning jobs
     "autonomy_proposer":  [_py, "-c", f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from autonomy_proposer import run; import json; print(json.dumps(run()))"],
     "lora_ab_gate":       [_py, f"{_bd}/cli/lora_ab_gate.py"],
+    # Phase C: eval auto-growth pipeline (run after lora_ab_gate but before sm2_nightly)
+    "eval_holdout_promote": [_py, "-c", f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from eval_holdout_promote import run; import json; print(json.dumps(run()))"],
+    "eval_holdout_audit":   [_py, "-c", f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from eval_holdout_audit import run; import json; print(json.dumps(run()))"],
     "reindex":            ["/bin/zsh", f"{_bd}/cli/reindex.sh"],
     # Maintenance
     "log_rotation":       [_py, f"{_bd}/brain_core/maintenance.py", "all_cleanup"],

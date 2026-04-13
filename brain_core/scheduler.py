@@ -188,6 +188,22 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         misfire_grace=1800,
     ),
 
+    # Phase C: eval auto-growth pipeline (Sun 8:45 promote → Sun 9:15 audit)
+    ScheduledJob(
+        name="eval_holdout_promote",
+        description="Phase C1: novelty-score eval candidates, promote top-N to pending file (Sun 8:45am)",
+        trigger=CronTrigger(day_of_week="sun", hour=8, minute=45),
+        agent="system",
+        misfire_grace=900,
+    ),
+    ScheduledJob(
+        name="eval_holdout_audit",
+        description="Phase C2: Telegram digest of pending eval candidates for human review (Sun 9:15am)",
+        trigger=CronTrigger(day_of_week="sun", hour=9, minute=15),
+        agent="jenna",
+        misfire_grace=900,
+    ),
+
     ScheduledJob(
         name="content_quality_slo",
         description="Daily content quality SLO check (4:00am, after eval_run)",
