@@ -3273,11 +3273,432 @@ def session_active_agents(session_id: Annotated[str, PathParam()]) -> dict:
 
 
 @app.get("/brain/triggers", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
-def list_triggers() -> dict:
+def list_triggers_endpoint() -> dict:
     try:
         from brain_core.action_triggers import list_triggers
         triggers = list_triggers()
         return {"triggers": triggers, "total": len(triggers)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)[:200])
+
+
+# ── Phase B1: Trigger CRUD ──────────────────────────────────────────────
+class TriggerCreateRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+    description: str = Field(default="", max_length=500)
+    condition_type: str = Field(..., max_length=50)
+    condition_config: dict = Field(default_factory=dict)
+    action_template: dict = Field(default_factory=dict)
+    enabled: bool = True
+    cooldown_seconds: int = Field(default=3600, ge=0, le=86400 * 7)
+
+
+class TriggerUpdateRequest(BaseModel):
+    description: str | None = None
+    enabled: bool | None = None
+    cooldown_seconds: int | None = Field(default=None, ge=0, le=86400 * 7)
+    condition_config: dict | None = None
+    action_template: dict | None = None
+
+
+@app.post("/brain/triggers", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
+def create_trigger_endpoint(req: TriggerCreateRequest) -> dict:
+    try:
+        from brain_core.action_triggers import create_trigger
+
+        return create_trigger(
+            name=req.name,
+            description=req.description,
+            condition_type=req.condition_type,
+            condition_config=req.condition_config,
+            action_template=req.action_template,
+            enabled=req.enabled,
+            cooldown_seconds=req.cooldown_seconds,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)[:200])
+
+
+@app.patch("/brain/triggers/{trigger_id}", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
+def update_trigger_endpoint(trigger_id: str, req: TriggerUpdateRequest) -> dict:
+    try:
+        from brain_core.action_triggers import update_trigger
+
+        result = update_trigger(
+            trigger_id,
+            description=req.description,
+            enabled=req.enabled,
+            cooldown_seconds=req.cooldown_seconds,
+            condition_config=req.condition_config,
+            action_template=req.action_template,
+        )
+        if result is None:
+            raise HTTPException(status_code=404, detail="trigger not found")
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)[:200])
+
+
+@app.delete("/brain/triggers/{trigger_id}", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
+def delete_trigger_endpoint(trigger_id: str) -> dict:
+    try:
+        from brain_core.action_triggers import delete_trigger
+
+        ok = delete_trigger(trigger_id)
+        if not ok:
+            raise HTTPException(status_code=404, detail="trigger not found")
+        return {"status": "deleted", "id": trigger_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)[:200])
+
+
+# ── Phase B2: Quiet hours ───────────────────────────────────────────────
+class QuietHoursRequest(BaseModel):
+    start: str = Field(..., pattern=r"^\d{2}:\d{2}$")
+    end: str = Field(..., pattern=r"^\d{2}:\d{2}$")
+    tz: str = Field(default="America/Los_Angeles", max_length=64)
+    exceptions: list[str] = Field(default_factory=list)
+
+
+def _quiet_hours_from_config() -> dict:
+    """Read quiet hours from brain_config, fall back to default_levels."""
+    try:
+        import sqlite3
+
+        from brain_core.config import AUTONOMY_DB
+        from brain_core.default_levels import QUIET_HOURS
+
+        conn = sqlite3.connect(str(AUTONOMY_DB))
+        try:
+            rows = conn.execute(
+                "SELECT key, value FROM brain_config WHERE key LIKE 'quiet_hours.%'"
+            ).fetchall()
+        finally:
+            conn.close()
+        cfg = dict(QUIET_HOURS)
+        import json as _json
+
+        for k, v in rows:
+            short_key = k[len("quiet_hours.") :]
+            if short_key == "exceptions":
+                try:
+                    cfg["exceptions"] = _json.loads(v)
+                except Exception:
+                    pass
+            else:
+                cfg[short_key] = v
+        return cfg
+    except Exception:
+        from brain_core.default_levels import QUIET_HOURS
+
+        return dict(QUIET_HOURS)
+
+
+@app.get("/brain/quiet-hours", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
+def get_quiet_hours() -> dict:
+    return _quiet_hours_from_config()
+
+
+@app.post("/brain/quiet-hours", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
+def set_quiet_hours(req: QuietHoursRequest) -> dict:
+    try:
+        import json as _json
+        import sqlite3
+        from datetime import datetime as _dt
+
+        from brain_core.autonomy import invalidate_levels_cache
+        from brain_core.config import AUTONOMY_DB
+
+        now_iso = _dt.utcnow().isoformat(timespec="seconds")
+        conn = sqlite3.connect(str(AUTONOMY_DB))
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS brain_config (
+                    key TEXT PRIMARY KEY, value TEXT NOT NULL,
+                    updated_at TEXT NOT NULL, updated_by TEXT DEFAULT 'system')"""
+            )
+            for k, v in (
+                ("quiet_hours.start", req.start),
+                ("quiet_hours.end", req.end),
+                ("quiet_hours.tz", req.tz),
+                ("quiet_hours.exceptions", _json.dumps(req.exceptions)),
+            ):
+                conn.execute(
+                    "INSERT INTO brain_config (key, value, updated_at, updated_by) "
+                    "VALUES (?, ?, ?, 'api') "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value, "
+                    "updated_at=excluded.updated_at, updated_by='api'",
+                    (k, v, now_iso),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+        invalidate_levels_cache()
+        return {"status": "set", **_quiet_hours_from_config()}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)[:200])
+
+
+# ── Phase B3: Denylist ──────────────────────────────────────────────────
+def _denylist_soft_from_config() -> list[str]:
+    try:
+        import sqlite3
+
+        from brain_core.config import AUTONOMY_DB
+
+        conn = sqlite3.connect(str(AUTONOMY_DB))
+        try:
+            rows = conn.execute(
+                "SELECT key FROM brain_config WHERE key LIKE 'denylist.%' AND value = '1'"
+            ).fetchall()
+        finally:
+            conn.close()
+        return [r[0][len("denylist.") :] for r in rows]
+    except Exception:
+        return []
+
+
+@app.get("/brain/denylist", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
+def get_denylist() -> dict:
+    from brain_core.default_levels import DENY_PREFIXES
+
+    return {
+        "hardcoded": list(DENY_PREFIXES),
+        "soft": _denylist_soft_from_config(),
+    }
+
+
+class DenylistEntryRequest(BaseModel):
+    prefix: str = Field(..., min_length=1, max_length=100)
+
+
+@app.post("/brain/denylist/add", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
+def add_denylist_entry(req: DenylistEntryRequest) -> dict:
+    try:
+        import sqlite3
+        from datetime import datetime as _dt
+
+        from brain_core.config import AUTONOMY_DB
+
+        conn = sqlite3.connect(str(AUTONOMY_DB))
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS brain_config (
+                    key TEXT PRIMARY KEY, value TEXT NOT NULL,
+                    updated_at TEXT NOT NULL, updated_by TEXT DEFAULT 'system')"""
+            )
+            conn.execute(
+                "INSERT INTO brain_config (key, value, updated_at, updated_by) "
+                "VALUES (?, '1', ?, 'api') "
+                "ON CONFLICT(key) DO UPDATE SET value='1', updated_at=excluded.updated_at",
+                (f"denylist.{req.prefix}", _dt.utcnow().isoformat(timespec="seconds")),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return {"status": "added", "prefix": req.prefix}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)[:200])
+
+
+@app.post("/brain/denylist/remove", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
+def remove_denylist_entry(req: DenylistEntryRequest) -> dict:
+    try:
+        import sqlite3
+
+        from brain_core.config import AUTONOMY_DB
+
+        conn = sqlite3.connect(str(AUTONOMY_DB))
+        try:
+            cur = conn.execute(
+                "DELETE FROM brain_config WHERE key = ?", (f"denylist.{req.prefix}",)
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="prefix not found in soft denylist")
+        return {"status": "removed", "prefix": req.prefix}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)[:200])
+
+
+# ── Phase B4: Eval proposals CRUD ────────────────────────────────────────
+@app.get("/brain/eval-proposals", tags=["eval"], dependencies=[Depends(verify_bearer)])
+def list_eval_proposals(status: str = "candidate", limit: int = 50) -> dict:
+    try:
+        from brain_core.eval_proposals import list_candidates, stats
+
+        return {
+            "items": list_candidates(status=status, limit=limit),
+            "stats": stats(),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)[:200])
+
+
+class EvalProposalCreateRequest(BaseModel):
+    query: str = Field(..., min_length=1, max_length=500)
+    expected: str = Field(..., min_length=1, max_length=2000)
+    expected_sources: list[str] = Field(default_factory=list)
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    source_event: str = Field(default="manual", max_length=64)
+
+
+@app.post("/brain/eval-proposals", tags=["eval"], dependencies=[Depends(verify_bearer)])
+def create_eval_proposal(req: EvalProposalCreateRequest) -> dict:
+    try:
+        from brain_core.eval_proposals import insert_proposal
+
+        pid = insert_proposal(
+            query=req.query,
+            expected=req.expected,
+            expected_sources=req.expected_sources,
+            source_event=req.source_event,
+            confidence=req.confidence,
+        )
+        if not pid:
+            raise HTTPException(status_code=500, detail="insert returned no id")
+        return {"status": "created", "id": pid}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)[:200])
+
+
+@app.post("/brain/eval-proposals/{proposal_id}/approve", tags=["eval"], dependencies=[Depends(verify_bearer)])
+def approve_eval_proposal(proposal_id: str) -> dict:
+    try:
+        from brain_core.eval_proposals import mark_status
+
+        ok = mark_status(proposal_id, "promoted")
+        if not ok:
+            raise HTTPException(status_code=404, detail="proposal not found")
+        return {"status": "promoted", "id": proposal_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)[:200])
+
+
+@app.post("/brain/eval-proposals/{proposal_id}/reject", tags=["eval"], dependencies=[Depends(verify_bearer)])
+def reject_eval_proposal(proposal_id: str) -> dict:
+    try:
+        from brain_core.eval_proposals import mark_status
+
+        ok = mark_status(proposal_id, "rejected")
+        if not ok:
+            raise HTTPException(status_code=404, detail="proposal not found")
+        return {"status": "rejected", "id": proposal_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)[:200])
+
+
+@app.get("/brain/eval-proposals/stats", tags=["eval"], dependencies=[Depends(verify_bearer)])
+def eval_proposal_stats() -> dict:
+    try:
+        from brain_core.eval_proposals import stats
+
+        return stats()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)[:200])
+
+
+# ── Phase B5: Atoms introspection ────────────────────────────────────────
+@app.get("/brain/atoms/stats", tags=["atoms"], dependencies=[Depends(verify_bearer)])
+def atoms_stats() -> dict:
+    try:
+        from brain_core.atoms_store import count_atoms
+
+        return count_atoms()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)[:200])
+
+
+@app.get("/brain/atoms", tags=["atoms"], dependencies=[Depends(verify_bearer)])
+def list_atoms(
+    tier: str | None = None,
+    kind: str | None = None,
+    canonical: int | None = None,
+    limit: int = 50,
+) -> dict:
+    try:
+        import sqlite3
+
+        from brain_core.atoms_store import BRAIN_ATOMS_ENABLED, BRAIN_DB
+
+        if not BRAIN_ATOMS_ENABLED:
+            return {"items": [], "total": 0, "enabled": False}
+        limit = max(1, min(500, limit))
+        clauses = []
+        params: list[object] = []
+        if tier:
+            clauses.append("tier = ?")
+            params.append(tier)
+        if kind:
+            clauses.append("kind = ?")
+            params.append(kind)
+        if canonical is not None:
+            clauses.append("canonical = ?")
+            params.append(int(canonical))
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        conn = sqlite3.connect(str(BRAIN_DB))
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                f"SELECT id, text, kind, tier, canonical, confidence, "
+                f"reinforcement_count, interval_days, easiness_factor, "
+                f"next_review_at, chroma_id, distilled_by, valid_from, valid_until, "
+                f"quality_score, created_at "
+                f"FROM atoms{where} ORDER BY created_at DESC LIMIT ?",
+                [*params, limit],
+            ).fetchall()
+        finally:
+            conn.close()
+        return {"items": [dict(r) for r in rows], "total": len(rows), "enabled": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)[:200])
+
+
+@app.get("/brain/atoms/{atom_id}", tags=["atoms"], dependencies=[Depends(verify_bearer)])
+def get_atom_detail(atom_id: str) -> dict:
+    try:
+        import sqlite3
+
+        from brain_core.atoms_store import BRAIN_ATOMS_ENABLED, BRAIN_DB
+
+        if not BRAIN_ATOMS_ENABLED:
+            raise HTTPException(status_code=503, detail="atoms not enabled")
+        conn = sqlite3.connect(str(BRAIN_DB))
+        conn.row_factory = sqlite3.Row
+        try:
+            row = conn.execute("SELECT * FROM atoms WHERE id = ?", (atom_id,)).fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="atom not found")
+            atom = dict(row)
+            prov = conn.execute(
+                "SELECT parent_kind, parent_id, child_kind, child_id, relation, confidence "
+                "FROM provenance WHERE parent_id = ? OR child_id = ? LIMIT 50",
+                (atom_id, atom_id),
+            ).fetchall()
+            atom["provenance"] = [dict(p) for p in prov]
+        finally:
+            conn.close()
+        return atom
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)[:200])
 

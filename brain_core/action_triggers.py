@@ -291,3 +291,89 @@ def list_triggers() -> list[dict]:
     with _conn() as conn:
         rows = conn.execute("SELECT * FROM triggers ORDER BY name").fetchall()
     return [_row_to_dict(r) for r in rows]
+
+
+def get_trigger(trigger_id: str) -> dict | None:
+    """Fetch one trigger by id. Returns None if not found."""
+    _init_db()
+    with _conn() as conn:
+        row = conn.execute("SELECT * FROM triggers WHERE id = ?", (trigger_id,)).fetchone()
+    return _row_to_dict(row) if row else None
+
+
+def create_trigger(
+    *,
+    name: str,
+    description: str = "",
+    condition_type: str,
+    condition_config: dict,
+    action_template: dict,
+    enabled: bool = True,
+    cooldown_seconds: int = 3600,
+) -> dict:
+    """Create a new trigger. Raises ValueError on duplicate name."""
+    _init_db()
+    if not name or not condition_type:
+        raise ValueError("name and condition_type are required")
+    trigger_id = str(uuid.uuid4())
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with _conn() as conn:
+        existing = conn.execute("SELECT id FROM triggers WHERE name = ?", (name,)).fetchone()
+        if existing:
+            raise ValueError(f"trigger with name '{name}' already exists")
+        conn.execute(
+            "INSERT INTO triggers (id, name, description, condition_type, condition_config, "
+            "action_template, enabled, cooldown_seconds, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                trigger_id,
+                name,
+                description,
+                condition_type,
+                json.dumps(condition_config),
+                json.dumps(action_template),
+                1 if enabled else 0,
+                cooldown_seconds,
+                now,
+            ),
+        )
+    result = get_trigger(trigger_id)
+    if result is None:
+        raise RuntimeError("trigger create succeeded but readback failed")
+    return result
+
+
+def update_trigger(trigger_id: str, **fields: object) -> dict | None:
+    """Patch a trigger. Allowed fields: enabled, cooldown_seconds, description,
+    condition_config, action_template. Returns updated row or None if missing."""
+    allowed = {"enabled", "cooldown_seconds", "description", "condition_config", "action_template"}
+    updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
+    if not updates:
+        return get_trigger(trigger_id)
+    _init_db()
+    set_clauses = []
+    params: list[object] = []
+    for k, v in updates.items():
+        if k in ("condition_config", "action_template") and isinstance(v, dict):
+            v = json.dumps(v)
+        elif k == "enabled":
+            v = 1 if v else 0
+        set_clauses.append(f"{k} = ?")
+        params.append(v)
+    params.append(trigger_id)
+    with _conn() as conn:
+        cur = conn.execute(
+            f"UPDATE triggers SET {', '.join(set_clauses)} WHERE id = ?",
+            params,
+        )
+        if cur.rowcount == 0:
+            return None
+    return get_trigger(trigger_id)
+
+
+def delete_trigger(trigger_id: str) -> bool:
+    """Delete a trigger by id. Returns True if deleted, False if not found."""
+    _init_db()
+    with _conn() as conn:
+        cur = conn.execute("DELETE FROM triggers WHERE id = ?", (trigger_id,))
+        return cur.rowcount > 0
