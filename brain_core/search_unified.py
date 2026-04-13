@@ -509,7 +509,16 @@ def _extract_frontmatter_sources(path: str) -> list[str]:
 
 def _classify_intent(query: str) -> dict[str, float]:
     """Cheap regex intent classifier — returns trust weight multipliers per source.
-    Uses phrase-level patterns to avoid false positives on common single words."""
+    Uses phrase-level patterns to avoid false positives on common single words.
+
+    Phase D experiment (2026-04-13): temporal source boost (personal/experience)
+    was net-negative on extended track (-0.5pt to -1.0pt). Reverted. The
+    temporal_router module remains for future use cases (timetravel endpoints,
+    NL date parsing in agent dispatch). Closing the 27.5pt extended gap will
+    require summarizing raw_events content into a tier the ranker can match
+    against semantic expected_content — that's a Phase 7B+ data plane change,
+    not a search routing change.
+    """
     if _RELATIONAL_PATTERNS.search(query):
         return {"graph": 1.3, "rag": 0.9, "canonical": 0.9}
     if _TEMPORAL_PATTERNS.search(query):
@@ -750,6 +759,12 @@ def search_all(query, limit=5, sources=None, domain=None, original_query=None,
         source_timing["graph_prefetch_ms"] = int((time.time() - t0) * 1000)
         return res
 
+    # Phase D2 follow-up: temporal_events direct lookup was net-negative
+    # (-0.7pt to -1.0pt content_hit on extended). raw_events content is
+    # unsummarized and didn't match the eval's semantic expected_content.
+    # Reverted to source-boost-only (see _classify_intent personal/experience
+    # bumps). The temporal_router module stays for future use cases.
+
     search_fns = [
         (_search_rag, "rag"),
         (_search_canonical, "canonical"),
@@ -758,7 +773,14 @@ def search_all(query, limit=5, sources=None, domain=None, original_query=None,
         (_search_fts, "fts"),
         (_search_graph_prefetch, "graph_prefetch"),
     ]
-    result_lists = {"rag": rag_results, "canonical": canonical_results, "obsidian": obsidian_results, "graph": graph_results, "fts": fts_results, "graph_prefetch": graph_prefetch_results}
+    result_lists = {
+        "rag": rag_results,
+        "canonical": canonical_results,
+        "obsidian": obsidian_results,
+        "graph": graph_results,
+        "fts": fts_results,
+        "graph_prefetch": graph_prefetch_results,
+    }
 
     future_map = {_search_fanout_pool.submit(fn): name for fn, name in search_fns}
     for fut in as_completed(future_map):
