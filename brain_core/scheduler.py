@@ -204,6 +204,15 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         misfire_grace=900,
     ),
 
+    # Phase E: SLO check loop — every 5 min, alerts on breach
+    ScheduledJob(
+        name="slos_check",
+        description="Phase E1: SLO budget check + Telegram alert on breach (every 5 min)",
+        trigger=IntervalTrigger(minutes=5),
+        agent="system",
+        misfire_grace=120,
+    ),
+
     ScheduledJob(
         name="content_quality_slo",
         description="Daily content quality SLO check (4:00am, after eval_run)",

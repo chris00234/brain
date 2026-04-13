@@ -113,6 +113,8 @@ JOB_REGISTRY: dict[str, list[str]] = {
     # Phase C: eval auto-growth pipeline (run after lora_ab_gate but before sm2_nightly)
     "eval_holdout_promote": [_py, "-c", f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from eval_holdout_promote import run; import json; print(json.dumps(run()))"],
     "eval_holdout_audit":   [_py, "-c", f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from eval_holdout_audit import run; import json; print(json.dumps(run()))"],
+    # Phase E: SLO check job — runs every 5 min, dispatches Telegram alerts on breach
+    "slos_check":           [_py, "-c", f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from slos import run; import json; print(json.dumps(run()))"],
     "reindex":            ["/bin/zsh", f"{_bd}/cli/reindex.sh"],
     # Maintenance
     "log_rotation":       [_py, f"{_bd}/brain_core/maintenance.py", "all_cleanup"],
@@ -3671,6 +3673,46 @@ def list_atoms(
         finally:
             conn.close()
         return {"items": [dict(r) for r in rows], "total": len(rows), "enabled": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)[:200])
+
+
+# ── Phase E: SLO observability ──────────────────────────────────────────
+@app.get("/brain/slos", tags=["observability"], dependencies=[Depends(verify_bearer)])
+def get_slos() -> dict:
+    """Return current SLO check results without dispatching alerts."""
+    try:
+        from brain_core.slos import check_all
+
+        results = check_all()
+        return {
+            "checked": len(results),
+            "breached": sum(1 for r in results if r.breached),
+            "results": [
+                {
+                    "name": r.slo.name,
+                    "description": r.slo.description,
+                    "target": r.slo.target,
+                    "actual": r.actual,
+                    "delta": r.delta,
+                    "breached": r.breached,
+                    "severity": r.slo.severity,
+                    "unit": r.slo.metric_unit,
+                }
+                for r in results
+            ],
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)[:200])
+
+
+@app.post("/brain/slos/check", tags=["observability"], dependencies=[Depends(verify_bearer)])
+def trigger_slos_check() -> dict:
+    """Manually trigger an SLO check + alert dispatch (for testing)."""
+    try:
+        from brain_core.slos import run
+
+        return run()
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)[:200])
 
