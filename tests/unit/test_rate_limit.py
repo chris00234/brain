@@ -55,9 +55,12 @@ def test_limited_routes_registered(client):
     live server with working ChromaDB, which integration tests cover."""
     _, server = client
     routes = server.limiter._route_limits
+    # M7-WS7 raised /recall and /recall/v2 from 60/min to 600/min so the
+    # eval harness (138-606 queries per run) doesn't get throttled by the
+    # newly-bearer-keyed limiter. Write paths stay tight.
     expected = {
-        "server.recall": "60 per 1 minute",
-        "server.recall_v2": "60 per 1 minute",
+        "server.recall": "600 per 1 minute",
+        "server.recall_v2": "600 per 1 minute",
         "server.learn_route": "10 per 1 minute",
         "server.create_memory": "30 per 1 minute",
         "server.create_memory_batch": "10 per 1 minute",

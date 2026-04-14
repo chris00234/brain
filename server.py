@@ -915,23 +915,30 @@ _rate_limit_disabled = os.getenv("BRAIN_RATE_LIMIT_DISABLED", "").lower() in ("1
 
 
 def _rate_limit_key(request: Request) -> str:
-    """Per-IP key, but loopback gets a no-limit bucket.
+    """Bearer-token-keyed rate limiting (M7-WS7 C1 fix).
 
-    The threat model is external token leak (unbounded LLM cost). Internal
-    callers (the eval script, scheduler jobs, the brain UI on localhost,
-    Claude Code on the same machine) come from 127.0.0.1 / ::1 / localhost
-    and should not be throttled — they share the same trust boundary as
-    the brain itself. External callers (Cloudflare tunnel proxy, anywhere
-    not loopback) get the full per-IP rate limit.
+    Threat model: external token leak ⇒ unbounded LLM cost. Brain runs behind
+    nginx in OrbStack and is reached via Cloudflare tunnel — every external
+    request lands at uvicorn with `request.client.host == "127.0.0.1"` because
+    we don't run a `forwarded_allow_ips` proxy header chain. Keying on client
+    IP would give EVERY tunnel request a free pass, which is what was
+    happening before this fix.
+
+    The right key is the bearer token itself (which is also the principal
+    being rate-limited). We only hash the first 16 hex chars to keep the key
+    space bounded and avoid leaking the secret into log buckets.
+
+    Anonymous requests (no Authorization header, e.g. /healthz) fall back to
+    client IP — fine because /healthz is unauth and not LLM-billable.
     """
-    addr = get_remote_address(request)
-    if addr in ("127.0.0.1", "::1", "localhost", None):
-        # Returning a stable string for loopback would put all internal
-        # callers in the same bucket. Returning a per-request unique key
-        # (id(request)) effectively disables the limiter for loopback
-        # because each call gets its own key with count=1.
-        return f"loopback-{id(request)}"
-    return addr
+    auth = request.headers.get("authorization", "")
+    if auth.lower().startswith("bearer "):
+        token = auth[7:].strip()
+        if token:
+            # 16 hex chars = 64 bits of bucket distinguishability — enough
+            # for a single-user brain, doesn't expose the actual secret.
+            return f"bearer:{hashlib.sha256(token.encode()).hexdigest()[:16]}"
+    return get_remote_address(request) or "anon"
 
 
 limiter = Limiter(
@@ -1066,7 +1073,7 @@ def profile_section(name: Annotated[str, PathParam()]) -> str:
 
 # ── Routes: recall ──────────────────────────────────────
 @app.get("/recall", response_model=RecallResponse, tags=["recall"], dependencies=[Depends(verify_bearer)])
-@limiter.limit("60/minute")
+@limiter.limit("600/minute")  # M7-WS7: read path — same envelope as /recall/v2
 def recall(
     request: Request,
     q: str,
@@ -1339,7 +1346,7 @@ def _record_auto_feedback(query: str, results: list[dict], agent: str) -> None:
 @app.get(
     "/recall/v2", response_model=RecallV2Response, tags=["recall"], dependencies=[Depends(verify_bearer)]
 )
-@limiter.limit("60/minute")
+@limiter.limit("600/minute")  # M7-WS7: read path needs to clear the eval (138-606 queries/run)
 def recall_v2(
     request: Request,
     q: str,
@@ -1641,13 +1648,18 @@ def recall_v2(
                 rewritten = _crag_expand_query(q, fused[:3])
                 if rewritten and rewritten != q:
                     crag_telemetry["expanded_query"] = rewritten
-                    # Recurse with iterative=False to prevent loops
+                    # M7-WS7 C2 fix: recurse with iterative=False AND force
+                    # hyde=False, expand=False to prevent the inner call from
+                    # firing additional LLM dispatches. Worst case before this
+                    # fix: 1 outer HyDE + 3 outer expand + 1 CRAG rewrite + 1
+                    # inner HyDE + 1 inner expand = up to 7 LLM calls per req.
+                    # After this fix: outer dispatches + 1 CRAG rewrite, max.
                     second_hop = recall_v2(
                         request,
                         q=rewritten,
                         n=n,
-                        hyde=hyde,
-                        expand=expand,
+                        hyde=False,
+                        expand=False,
                         rerank=rerank,
                         decay=decay,
                         iterative=False,
@@ -1752,37 +1764,41 @@ def recall_v2(
     except Exception:
         pass
 
-    # Auto-record search feedback for served results (fire-and-forget).
+    # Auto-record search feedback + adoption tracking — both fire-and-forget.
+    # M7-WS7 H3 fix: insert_action_audit was previously synchronous on the
+    # response path (0.5-30ms per call under writer contention). Both the
+    # auto-feedback recorder and the adoption tracker now share the same
+    # background dispatch so neither blocks the response.
     agent = request.headers.get("x-agent") or request.query_params.get("actor") or "unknown"
-    if background is not None:
-        background.add_task(_record_auto_feedback, q, fused[:n], agent)
-    else:
-        # Fallback: fire-and-forget via thread pool
-        try:
-            from brain_core.search_unified import _search_bg_pool
 
-            _search_bg_pool.submit(_record_auto_feedback, q, fused[:n], agent)
+    def _post_recall_side_effects() -> None:
+        _record_auto_feedback(q, fused[:n], agent)
+        try:
+            from brain_core.atoms_store import insert_action_audit as _iaa
+
+            _iaa(
+                route="/recall/v2",
+                tool="brain_recall",
+                actor=agent,
+                query_text=q[:500],
+                retrieved_chroma_ids=[
+                    str(r.get("id") or r.get("chroma_id") or "")[:64]
+                    for r in fused[:n]
+                    if r.get("id") or r.get("chroma_id")
+                ][:20],
+            )
         except Exception:
             pass
 
-    # M7-WS8: per-actor adoption tracking via action_audit.
-    # Best-effort, non-blocking — failures here NEVER impact the response.
-    try:
-        from brain_core.atoms_store import insert_action_audit as _iaa
+    if background is not None:
+        background.add_task(_post_recall_side_effects)
+    else:
+        try:
+            from brain_core.search_unified import _search_bg_pool
 
-        _iaa(
-            route="/recall/v2",
-            tool="brain_recall",
-            actor=agent,
-            query_text=q[:500],
-            retrieved_chroma_ids=[
-                str(r.get("id") or r.get("chroma_id") or "")[:64]
-                for r in fused[:n]
-                if r.get("id") or r.get("chroma_id")
-            ][:20],
-        )
-    except Exception:
-        pass
+            _search_bg_pool.submit(_post_recall_side_effects)
+        except Exception:
+            pass
 
     return response
 
@@ -1844,7 +1860,8 @@ class MultiHopReasonRequest(BaseModel):
 
 
 @app.post("/brain/reason/multihop", tags=["recall"], dependencies=[Depends(verify_bearer)])
-def brain_reason_multihop(req: MultiHopReasonRequest):
+@limiter.limit("10/minute")  # M7-WS7 H2: LLM dispatch — token-cost guard
+def brain_reason_multihop(request: Request, req: MultiHopReasonRequest):
     """Multi-hop reasoning with LangGraph-style checkpoints."""
     try:
         import reasoning_loop
@@ -1856,7 +1873,8 @@ def brain_reason_multihop(req: MultiHopReasonRequest):
 
 
 @app.post("/brain/reason/multihop/{thread_id}/resume", tags=["recall"], dependencies=[Depends(verify_bearer)])
-def brain_reason_multihop_resume(thread_id: Annotated[str, PathParam()]):
+@limiter.limit("10/minute")  # M7-WS7 H2: LLM dispatch — token-cost guard
+def brain_reason_multihop_resume(request: Request, thread_id: Annotated[str, PathParam()]):
     """Resume a reasoning thread from last checkpoint."""
     try:
         import reasoning_loop
@@ -4386,7 +4404,8 @@ def trace_provenance(note_id: str, max_depth: int = 3) -> dict:
 
 
 @app.post("/brain/ingest", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
-def brain_ingest(req: BrainIngestRequest) -> dict:
+@limiter.limit("10/minute")  # M7-WS7 H2: LLM dispatch — token-cost guard
+def brain_ingest(request: Request, req: BrainIngestRequest) -> dict:
     """Manual ingest: submit text/URL for LLM extraction and integration into knowledge base."""
     try:
         content = req.content

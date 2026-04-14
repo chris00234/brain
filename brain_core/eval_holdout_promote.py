@@ -15,9 +15,15 @@ from __future__ import annotations
 import json
 import logging
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+
+def _now_iso() -> str:
+    return datetime.now(UTC).isoformat(timespec="seconds")
+
 
 log = logging.getLogger("brain.eval_holdout_promote")
 
@@ -126,9 +132,31 @@ def run() -> dict:
     scored.sort(key=lambda x: x[0], reverse=True)
     promoted = scored[:TOP_N]
 
-    pending_payload = []
+    # M7-WS7 H1 fix: merge with existing pending file instead of clobbering.
+    # Before this fix, every Sunday run rewrote eval_holdout_pending.json from
+    # scratch, dropping items still awaiting human review (Telegram digest had
+    # already gone out, but Chris hadn't approved/rejected them yet). New
+    # behavior: read existing file, dedupe by id, append novel items, persist.
+    existing_pending: list[dict] = []
+    if PENDING_PATH.exists():
+        try:
+            existing_pending = json.loads(PENDING_PATH.read_text())
+            if not isinstance(existing_pending, list):
+                existing_pending = []
+        except (json.JSONDecodeError, OSError):
+            log.warning("could not read existing pending file; starting fresh")
+            existing_pending = []
+
+    existing_ids = {row.get("id") for row in existing_pending if isinstance(row, dict)}
+
+    new_rows: list[dict] = []
+    skipped_dupes = 0
     for novelty, cand in promoted:
-        pending_payload.append(
+        if cand["id"] in existing_ids:
+            skipped_dupes += 1
+            mark_status(cand["id"], "pending", novelty_score=novelty)
+            continue
+        new_rows.append(
             {
                 "id": cand["id"],
                 "query": cand["query"],
@@ -136,18 +164,23 @@ def run() -> dict:
                 "expected_sources": json.loads(cand.get("expected_sources") or "[]"),
                 "novelty": round(novelty, 3),
                 "source_event": cand.get("source_event"),
+                "promoted_at": _now_iso(),
             }
         )
         mark_status(cand["id"], "pending", novelty_score=novelty)
+
+    pending_payload = existing_pending + new_rows
 
     PENDING_PATH.parent.mkdir(parents=True, exist_ok=True)
     PENDING_PATH.write_text(json.dumps(pending_payload, indent=2, ensure_ascii=False))
 
     return {
         "checked": len(candidates),
-        "promoted": len(promoted),
+        "promoted": len(new_rows),
         "rejected": rejected,
         "pending_file": str(PENDING_PATH),
+        "pending_total": len(pending_payload),
+        "duplicates_skipped": skipped_dupes,
     }
 
 
