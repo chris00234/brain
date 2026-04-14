@@ -1637,7 +1637,22 @@ def recall_v2(
     # and trigger one query expansion + retry on low confidence. Capped at
     # 1 retry to bound latency. The retry recurses into recall_v2 with
     # iterative=False so it's a strict single-shot, no infinite loop.
-    if iterative and fused:
+    #
+    # M8.4: Adaptive-RAG router can override the caller's iterative flag for
+    # SIMPLE queries (where CRAG is pure latency cost with no recall benefit)
+    # and for MULTI queries auto-enable CRAG even when the caller didn't ask.
+    # Default OFF via BRAIN_ADAPTIVE_RAG env var. When disabled, the caller's
+    # explicit `iterative=` param is honored as before.
+    use_crag = iterative
+    try:
+        from brain_core.adaptive_rag import should_use_crag as _ar_should_use
+
+        use_crag, _ar_reason = _ar_should_use(q, caller_explicit=iterative)
+        timing["adaptive_rag"] = _ar_reason
+    except Exception:
+        use_crag = iterative
+
+    if use_crag and fused:
         try:
             from brain_core.crag import (
                 expand_query as _crag_expand_query,
