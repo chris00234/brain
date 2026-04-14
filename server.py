@@ -3302,7 +3302,9 @@ def list_triggers_endpoint() -> dict:
     try:
         from brain_core.action_triggers import list_triggers
         triggers = list_triggers()
-        return {"triggers": triggers, "total": len(triggers)}
+        # Standardized v2 envelope: {items, total}. The legacy `triggers` key
+        # is retained for back-compat with brain-ui pre-2026-04-13 clients.
+        return {"items": triggers, "total": len(triggers), "triggers": triggers}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)[:200])
 
@@ -3647,29 +3649,37 @@ def list_atoms(
 
 
 # ── Phase E: SLO observability ──────────────────────────────────────────
+def _slo_result_to_dict(r) -> dict:
+    return {
+        "name": r.slo.name,
+        "description": r.slo.description,
+        "target": r.slo.target,
+        "actual": r.actual,
+        "delta": r.delta,
+        "breached": r.breached,
+        "severity": r.slo.severity,
+        "unit": r.slo.metric_unit,
+    }
+
+
 @app.get("/brain/slos", tags=["observability"], dependencies=[Depends(verify_bearer)])
 def get_slos() -> dict:
-    """Return current SLO check results without dispatching alerts."""
+    """Return current SLO check results without dispatching alerts.
+
+    Shape matches POST /brain/slos/check (with alerts_sent always 0 here)
+    so callers can use a single response type regardless of method.
+    """
     try:
         from brain_core.slos import check_all
 
         results = check_all()
+        items = [_slo_result_to_dict(r) for r in results]
         return {
             "checked": len(results),
             "breached": sum(1 for r in results if r.breached),
-            "results": [
-                {
-                    "name": r.slo.name,
-                    "description": r.slo.description,
-                    "target": r.slo.target,
-                    "actual": r.actual,
-                    "delta": r.delta,
-                    "breached": r.breached,
-                    "severity": r.slo.severity,
-                    "unit": r.slo.metric_unit,
-                }
-                for r in results
-            ],
+            "alerts_sent": 0,
+            "items": items,
+            "results": items,  # legacy alias
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)[:200])
@@ -3677,11 +3687,18 @@ def get_slos() -> dict:
 
 @app.post("/brain/slos/check", tags=["observability"], dependencies=[Depends(verify_bearer)])
 def trigger_slos_check() -> dict:
-    """Manually trigger an SLO check + alert dispatch (for testing)."""
+    """Manually trigger an SLO check + alert dispatch (for testing).
+
+    Same envelope shape as GET /brain/slos but `alerts_sent` reflects
+    actual dispatches.
+    """
     try:
         from brain_core.slos import run
 
-        return run()
+        summary = run()
+        # slos.run() returns {checked, breached, alerts_sent, results} — add `items` alias
+        summary["items"] = summary.get("results", [])
+        return summary
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)[:200])
 
@@ -3916,23 +3933,24 @@ def breakers_list() -> dict:
     try:
         from breakers import list_all
 
-        return {
-            "breakers": [
-                {
-                    "kind": b.kind,
-                    "state": b.state,
-                    "failures": b.failures,
-                    "trip_count": b.trip_count,
-                    "reset_after_s": b.reset_after_s,
-                    "remaining_cooldown_s": round(b.remaining_cooldown_s, 1),
-                    "reason": b.reason,
-                    "opened_at": b.opened_at,
-                    "last_failure_at": b.last_failure_at,
-                    "last_action_at": b.last_action_at,
-                }
-                for b in list_all()
-            ]
-        }
+        rows = [
+            {
+                "kind": b.kind,
+                "state": b.state,
+                "failures": b.failures,
+                "trip_count": b.trip_count,
+                "reset_after_s": b.reset_after_s,
+                "remaining_cooldown_s": round(b.remaining_cooldown_s, 1),
+                "reason": b.reason,
+                "opened_at": b.opened_at,
+                "last_failure_at": b.last_failure_at,
+                "last_action_at": b.last_action_at,
+            }
+            for b in list_all()
+        ]
+        # Standardized v2 envelope: {items, total}. Legacy `breakers` key
+        # retained for back-compat with brain-ui pre-2026-04-13 clients.
+        return {"items": rows, "total": len(rows), "breakers": rows}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)[:200])
 
@@ -3956,7 +3974,9 @@ def brain_review(limit: int = 20, tier: str | None = None) -> dict:
         from sm2 import review_due
 
         items = review_due(limit=limit, tier=tier)
-        return {"items": items, "count": len(items)}
+        # Standardized v2 envelope: {items, total}. Legacy `count` retained
+        # for back-compat with brain-ui pre-2026-04-13 clients.
+        return {"items": items, "total": len(items), "count": len(items)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)[:200])
 
