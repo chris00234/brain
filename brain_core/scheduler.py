@@ -38,11 +38,12 @@ log = logging.getLogger("brain.scheduler")
 @dataclass
 class ScheduledJob:
     """Declarative spec for one cron job."""
-    name: str                    # must match a key in server.py JOB_REGISTRY
+
+    name: str  # must match a key in server.py JOB_REGISTRY
     description: str
-    trigger: object              # CronTrigger or IntervalTrigger
-    agent: str                   # owning agent (jenna|sage|ellie|market|system)
-    misfire_grace: int = 3600    # seconds — heavy jobs use 900 (15 min)
+    trigger: object  # CronTrigger or IntervalTrigger
+    agent: str  # owning agent (jenna|sage|ellie|market|system)
+    misfire_grace: int = 3600  # seconds — heavy jobs use 900 (15 min)
 
     def next_run_str(self, scheduler: AsyncIOScheduler) -> str:
         job = scheduler.get_job(self.name)
@@ -101,7 +102,22 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         trigger=CronTrigger(hour=5, minute=0),
         agent="market",
     ),
-
+    # M7-WS2a: PDF ingestion via Docling (off-hours, daily)
+    ScheduledJob(
+        name="pdf_ingest",
+        description="M7-WS2a: scan ~/Documents/PDFs, parse via Docling, embed → knowledge",
+        trigger=CronTrigger(hour=5, minute=30),
+        agent="system",
+        misfire_grace=1800,
+    ),
+    # M7-WS2b: image OCR + caption ingestion (off-hours, daily, after PDF run)
+    ScheduledJob(
+        name="image_ingest",
+        description="M7-WS2b: scan ~/Pictures/brain-ingest, OCR via Docling, embed captions → knowledge",
+        trigger=CronTrigger(hour=5, minute=45),
+        agent="system",
+        misfire_grace=1800,
+    ),
     # Synthesis (daily/weekly/monthly)
     ScheduledJob(
         name="daily_synthesis",
@@ -127,7 +143,6 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         trigger=CronTrigger(day=1, hour=5, minute=0),
         agent="sage",
     ),
-
     # Self-learning reflection
     ScheduledJob(
         name="brain_reflect",
@@ -136,7 +151,6 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         agent="sage",
         misfire_grace=900,
     ),
-
     # Maintenance
     ScheduledJob(
         name="memory_lifecycle",
@@ -144,7 +158,6 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         trigger=CronTrigger(day_of_week="sun", hour=2, minute=30),
         agent="system",
     ),
-
     # Eval — two-track gate (incident 2026-04-13)
     # stable  → 138 timeless queries, strict 5pt gate + heal dispatch (legacy alias eval_run)
     # extended → 606 timestamp/temporal queries, trend tracking only (no heal, 10pt threshold)
@@ -163,7 +176,6 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         agent="system",
         misfire_grace=900,
     ),
-
     # Phase 4: SM-2 nightly review scheduler (3:25am, before memory_consolidation)
     ScheduledJob(
         name="sm2_nightly",
@@ -172,7 +184,6 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         agent="system",
         misfire_grace=900,
     ),
-
     # Phase 7: closed-loop self-learning
     ScheduledJob(
         name="autonomy_proposer",
@@ -187,7 +198,6 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         agent="system",
         misfire_grace=1800,
     ),
-
     # Phase C: eval auto-growth pipeline (Sun 8:45 promote → Sun 9:15 audit)
     ScheduledJob(
         name="eval_holdout_promote",
@@ -203,7 +213,6 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         agent="jenna",
         misfire_grace=900,
     ),
-
     # Phase E: SLO check loop — every 5 min, alerts on breach
     ScheduledJob(
         name="slos_check",
@@ -212,7 +221,6 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         agent="system",
         misfire_grace=120,
     ),
-
     # Phase J2: HNSW ef_search adaptive tuning (weekly Sunday 4:15am, off-hours)
     # Advisory only — writes hnsw:search_ef metadata, picked up on next collection load.
     ScheduledJob(
@@ -222,7 +230,6 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         agent="system",
         misfire_grace=900,
     ),
-
     # Phase 2D: SessionEnd outbox replay — every 5 min, drains any envelopes
     # the inline post_session.sh hook missed. CRON_MAP and RUNBOOK already
     # documented this cadence; the schedule entry was missing until 2026-04-13.
@@ -233,7 +240,6 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         agent="system",
         misfire_grace=120,
     ),
-
     # Phase M6: weekly web_source_trust recompute — aggregates per-domain
     # useful/wrong outcomes from web_search_results into the trust score table.
     ScheduledJob(
@@ -243,14 +249,12 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         agent="system",
         misfire_grace=900,
     ),
-
     ScheduledJob(
         name="content_quality_slo",
         description="Daily content quality SLO check (4:00am, after eval_run)",
         trigger=CronTrigger(hour=4, minute=5),
         agent="system",
     ),
-
     # Profile regen (weekly Sunday 4am, after canonical pipeline accumulates a week of notes)
     ScheduledJob(
         name="profile_regen",
@@ -323,7 +327,6 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         agent="system",
         misfire_grace=900,
     ),
-
     # Canonical pipeline
     ScheduledJob(
         name="canonical_pipeline",
@@ -332,7 +335,6 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         agent="system",
         misfire_grace=900,
     ),
-
     # Proactive reasoning (4x daily)
     ScheduledJob(
         name="proactive_check",
@@ -347,7 +349,6 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         agent="system",
         misfire_grace=900,
     ),
-
     # Maintenance
     ScheduledJob(
         name="log_rotation",
@@ -403,7 +404,6 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         agent="system",
         misfire_grace=900,
     ),
-
     # Reindex — off-hours only to avoid competing with Ollama/ChromaDB during work hours.
     # Was 5x daily (3,9,13,18,22); moved to 2x daily at 3:17 AM and 11:17 PM PST.
     ScheduledJob(
@@ -413,7 +413,6 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         agent="system",
         misfire_grace=900,
     ),
-
     # ── New data source ingest (agent-distilled) ──────────
     ScheduledJob(
         name="openclaw_sessions_ingest",
@@ -464,7 +463,6 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         agent="system",
         misfire_grace=900,
     ),
-
     # Phase B — scale & observability
     ScheduledJob(
         name="event_compressor",
@@ -572,7 +570,7 @@ class BrainScheduler:
     """
 
     def __init__(self) -> None:
-        self._scheduler = AsyncIOScheduler(timezone='America/Los_Angeles')
+        self._scheduler = AsyncIOScheduler(timezone="America/Los_Angeles")
         self._dispatcher: Callable[[str], int] | None = None
         self._history: dict[str, list[dict]] = {}
         self._running_jobs: dict[str, int] = {}  # job_name -> pid
@@ -591,24 +589,32 @@ class BrainScheduler:
                 pid INTEGER, error TEXT, manual INTEGER DEFAULT 0,
                 finished_at TEXT DEFAULT NULL, duration_ms INTEGER DEFAULT NULL)""")
             # Migrate existing databases missing new columns
-            for col, typedef in [("finished_at", "TEXT DEFAULT NULL"),
-                                 ("duration_ms", "INTEGER DEFAULT NULL")]:
+            for col, typedef in [
+                ("finished_at", "TEXT DEFAULT NULL"),
+                ("duration_ms", "INTEGER DEFAULT NULL"),
+            ]:
                 try:
                     conn.execute(f"ALTER TABLE job_history ADD COLUMN {col} {typedef}")
                 except sqlite3.OperationalError:
                     pass  # column already exists
             cur = conn.execute(
                 "SELECT job_name, started_at, pid, error, manual, finished_at, duration_ms "
-                "FROM job_history ORDER BY id DESC LIMIT 400")
+                "FROM job_history ORDER BY id DESC LIMIT 400"
+            )
             for name, started, pid, error, manual, finished, duration in cur.fetchall():
-                entry = {"started_at": started, "pid": pid, "error": error,
-                         "finished_at": finished, "duration_ms": duration}
+                entry = {
+                    "started_at": started,
+                    "pid": pid,
+                    "error": error,
+                    "finished_at": finished,
+                    "duration_ms": duration,
+                }
                 if manual:
                     entry["manual"] = True
                 history = self._history.setdefault(name, [])
                 history.insert(0, entry)
             for name in self._history:
-                self._history[name] = self._history[name][:self._MAX_HISTORY]
+                self._history[name] = self._history[name][: self._MAX_HISTORY]
             conn.close()
         except Exception:
             pass
@@ -619,8 +625,14 @@ class BrainScheduler:
             conn = sqlite3.connect(str(self._db_path))
             cur = conn.execute(
                 "INSERT INTO job_history (job_name, started_at, pid, error, manual) VALUES (?, ?, ?, ?, ?)",
-                (job_name, entry.get("started_at"), entry.get("pid", -1),
-                 entry.get("error"), 1 if entry.get("manual") else 0))
+                (
+                    job_name,
+                    entry.get("started_at"),
+                    entry.get("pid", -1),
+                    entry.get("error"),
+                    1 if entry.get("manual") else 0,
+                ),
+            )
             row_id = cur.lastrowid
             conn.commit()
             conn.close()
@@ -628,8 +640,9 @@ class BrainScheduler:
         except Exception:
             return None
 
-    def record_completion(self, job_name: str, row_id: int | None,
-                          start_ts: float, error: str | None = None) -> None:
+    def record_completion(
+        self, job_name: str, row_id: int | None, start_ts: float, error: str | None = None
+    ) -> None:
         """Called by _wait_for_job after a subprocess finishes."""
         finished_at = datetime.now(timezone.utc).isoformat()
         duration_ms = int((time.time() - start_ts) * 1000)
@@ -649,7 +662,8 @@ class BrainScheduler:
                 conn = sqlite3.connect(str(self._db_path))
                 conn.execute(
                     "UPDATE job_history SET finished_at=?, duration_ms=?, error=COALESCE(error, ?) WHERE id=?",
-                    (finished_at, duration_ms, error[:200] if error else None, row_id))
+                    (finished_at, duration_ms, error[:200] if error else None, row_id),
+                )
                 conn.commit()
                 conn.close()
             except Exception:
@@ -671,7 +685,7 @@ class BrainScheduler:
                 name=job.description,
                 replace_existing=True,
                 misfire_grace_time=job.misfire_grace,
-                coalesce=True,             # collapse missed runs into 1
+                coalesce=True,  # collapse missed runs into 1
             )
         # In-process task executor (runs every 30s, not as subprocess)
         self._scheduler.add_job(
@@ -700,12 +714,15 @@ class BrainScheduler:
         2. process_ready — dispatch approved tasks to OpenClaw agents
         """
         import sys as _sys
+
         _sys.path.insert(0, str(Path(__file__).resolve().parent))
         try:
             from autopilot import is_enabled
+
             if not is_enabled():
                 return
             from task_queue import task_queue
+
             task_queue.process_pending()  # returns (approved, escalated) — escalation self-dispatches
             task_queue.process_ready()
         except Exception as e:
@@ -750,7 +767,7 @@ class BrainScheduler:
 
         # Alert on consecutive failures
         if error:
-            recent_errors = sum(1 for h in history[-self._ALERT_THRESHOLD:] if h.get("error"))
+            recent_errors = sum(1 for h in history[-self._ALERT_THRESHOLD :] if h.get("error"))
             if recent_errors >= self._ALERT_THRESHOLD and job_name not in self._alerted_jobs:
                 self._alerted_jobs.add(job_name)
                 self._alert_failure(job_name, error)
@@ -761,6 +778,7 @@ class BrainScheduler:
         """Send Telegram alert via Jenna when a job fails 3+ times consecutively."""
         try:
             from openclaw_dispatch import dispatch
+
             dispatch(
                 agent="jenna",
                 message=f"[BRAIN ALERT] Job '{job_name}' has failed {self._ALERT_THRESHOLD} consecutive times. Last error: {last_error}",
@@ -774,21 +792,19 @@ class BrainScheduler:
         jobs = []
         for spec in JOB_SCHEDULE:
             aps_job = self._scheduler.get_job(spec.name) if self._scheduler.running else None
-            next_run = (
-                aps_job.next_run_time.isoformat()
-                if aps_job and aps_job.next_run_time
-                else None
-            )
+            next_run = aps_job.next_run_time.isoformat() if aps_job and aps_job.next_run_time else None
             history = self._history.get(spec.name, [])
             last = history[-1] if history else None
-            jobs.append({
-                "name": spec.name,
-                "description": spec.description,
-                "agent": spec.agent,
-                "next_run": next_run,
-                "last_run": last,
-                "run_count": len(history),
-            })
+            jobs.append(
+                {
+                    "name": spec.name,
+                    "description": spec.description,
+                    "agent": spec.agent,
+                    "next_run": next_run,
+                    "last_run": last,
+                    "run_count": len(history),
+                }
+            )
         return jobs
 
     def get_history(self, job_name: str) -> list[dict]:

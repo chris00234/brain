@@ -230,6 +230,18 @@ JOB_REGISTRY: dict[str, list[str]] = {
     # schedule entry was missing prior to this commit, so failed envelopes
     # silently piled up in pending/.
     "outbox_drain": [_py, f"{_bd}/cli/outbox_drain.py"],
+    # M7-WS2a: Docling-based PDF ingestion (daily 5:30am).
+    "pdf_ingest": [
+        _py,
+        "-c",
+        f"import sys; sys.path.insert(0, '{_bd}/ingest'); from pdfs import run; import json; print(json.dumps(run()))",
+    ],
+    # M7-WS2b: image OCR + caption ingestion (daily 5:45am).
+    "image_ingest": [
+        _py,
+        "-c",
+        f"import sys; sys.path.insert(0, '{_bd}/ingest'); from images import run; import json; print(json.dumps(run()))",
+    ],
     # Phase M6: weekly trust score recompute for web_source_trust table —
     # aggregates per-domain useful/wrong outcomes from web_search_results.
     "web_source_trust_recompute": [

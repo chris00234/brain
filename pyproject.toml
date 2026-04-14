@@ -107,6 +107,11 @@ dependencies = [
   "dill==0.4.1",
   "multiprocess==0.70.19",
   "xxhash==3.6.0",
+
+  # M7-WS2: Docling for PDF text + image OCR ingestion. Pulls in ~50 transitive
+  # deps (pillow, pypdfium2, opencv-python, ocrmac on macOS, etc.) — these are
+  # documented as the broader docling install footprint, not pinned per-package.
+  "docling==2.88.0",
 ]
 
 [dependency-groups]
