@@ -82,3 +82,14 @@ BRAIN_ATOMS_ENABLED = os.getenv("BRAIN_ATOMS_ENABLED", "false").lower() in ("tru
 BRAIN_ATOMS_READ = os.getenv("BRAIN_ATOMS_READ", "false").lower() in ("true", "1", "yes")
 BRAIN_ENABLE_ATOMS_MIGRATION = os.getenv("BRAIN_ENABLE_ATOMS_MIGRATION", "false").lower() in ("true", "1", "yes")
 BRAIN_DB = BRAIN_LOGS_DIR / "brain.db"
+
+
+def load_bearer_secret() -> str:
+    """Load the personal webhook bearer secret from disk.
+
+    Centralizes the path + read + strip pattern that was duplicated across
+    8+ call sites (self_heal, slo_monitor, ingest/healthcheck, pipeline/
+    memory_nudge, etc.). Raises FileNotFoundError if the secret is missing
+    so callers fail loud instead of silently auth-bypassing.
+    """
+    return SECRET_FILE.read_text().strip()

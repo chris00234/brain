@@ -3434,38 +3434,17 @@ def get_quiet_hours() -> dict:
 def set_quiet_hours(req: QuietHoursRequest) -> dict:
     try:
         import json as _json
-        import sqlite3
-        from datetime import UTC as _UTC
-        from datetime import datetime as _dt
 
+        from brain_core import brain_config_store
         from brain_core.autonomy import invalidate_levels_cache
-        from brain_core.config import AUTONOMY_DB
 
-        now_iso = _dt.now(_UTC).isoformat(timespec="seconds")
-        conn = sqlite3.connect(str(AUTONOMY_DB))
-        try:
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute(
-                """CREATE TABLE IF NOT EXISTS brain_config (
-                    key TEXT PRIMARY KEY, value TEXT NOT NULL,
-                    updated_at TEXT NOT NULL, updated_by TEXT DEFAULT 'system')"""
-            )
-            for k, v in (
-                ("quiet_hours.start", req.start),
-                ("quiet_hours.end", req.end),
-                ("quiet_hours.tz", req.tz),
-                ("quiet_hours.exceptions", _json.dumps(req.exceptions)),
-            ):
-                conn.execute(
-                    "INSERT INTO brain_config (key, value, updated_at, updated_by) "
-                    "VALUES (?, ?, ?, 'api') "
-                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value, "
-                    "updated_at=excluded.updated_at, updated_by='api'",
-                    (k, v, now_iso),
-                )
-            conn.commit()
-        finally:
-            conn.close()
+        for k, v in (
+            ("quiet_hours.start", req.start),
+            ("quiet_hours.end", req.end),
+            ("quiet_hours.tz", req.tz),
+            ("quiet_hours.exceptions", _json.dumps(req.exceptions)),
+        ):
+            brain_config_store.set(k, v, updated_by="api")
         invalidate_levels_cache()
         return {"status": "set", **_quiet_hours_from_config()}
     except Exception as e:
@@ -3475,18 +3454,10 @@ def set_quiet_hours(req: QuietHoursRequest) -> dict:
 # ── Phase B3: Denylist ──────────────────────────────────────────────────
 def _denylist_soft_from_config() -> list[str]:
     try:
-        import sqlite3
+        from brain_core import brain_config_store
 
-        from brain_core.config import AUTONOMY_DB
-
-        conn = sqlite3.connect(str(AUTONOMY_DB))
-        try:
-            rows = conn.execute(
-                "SELECT key FROM brain_config WHERE key LIKE 'denylist.%' AND value = '1'"
-            ).fetchall()
-        finally:
-            conn.close()
-        return [r[0][len("denylist.") :] for r in rows]
+        rows = brain_config_store.get_prefix("denylist.")
+        return [k[len("denylist.") :] for k, v in rows.items() if v == "1"]
     except Exception:
         return []
 
@@ -3508,30 +3479,10 @@ class DenylistEntryRequest(BaseModel):
 @app.post("/brain/denylist/add", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
 def add_denylist_entry(req: DenylistEntryRequest) -> dict:
     try:
-        import sqlite3
-        from datetime import UTC as _UTC
-        from datetime import datetime as _dt
-
+        from brain_core import brain_config_store
         from brain_core.autonomy import invalidate_levels_cache
-        from brain_core.config import AUTONOMY_DB
 
-        conn = sqlite3.connect(str(AUTONOMY_DB))
-        try:
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute(
-                """CREATE TABLE IF NOT EXISTS brain_config (
-                    key TEXT PRIMARY KEY, value TEXT NOT NULL,
-                    updated_at TEXT NOT NULL, updated_by TEXT DEFAULT 'system')"""
-            )
-            conn.execute(
-                "INSERT INTO brain_config (key, value, updated_at, updated_by) "
-                "VALUES (?, '1', ?, 'api') "
-                "ON CONFLICT(key) DO UPDATE SET value='1', updated_at=excluded.updated_at",
-                (f"denylist.{req.prefix}", _dt.now(_UTC).isoformat(timespec="seconds")),
-            )
-            conn.commit()
-        finally:
-            conn.close()
+        brain_config_store.set(f"denylist.{req.prefix}", "1", updated_by="api")
         invalidate_levels_cache()
         return {"status": "added", "prefix": req.prefix}
     except Exception as e:
@@ -3541,20 +3492,11 @@ def add_denylist_entry(req: DenylistEntryRequest) -> dict:
 @app.post("/brain/denylist/remove", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
 def remove_denylist_entry(req: DenylistEntryRequest) -> dict:
     try:
-        import sqlite3
-
+        from brain_core import brain_config_store
         from brain_core.autonomy import invalidate_levels_cache
-        from brain_core.config import AUTONOMY_DB
 
-        conn = sqlite3.connect(str(AUTONOMY_DB))
-        try:
-            cur = conn.execute(
-                "DELETE FROM brain_config WHERE key = ?", (f"denylist.{req.prefix}",)
-            )
-            conn.commit()
-        finally:
-            conn.close()
-        if cur.rowcount == 0:
+        removed = brain_config_store.delete(f"denylist.{req.prefix}")
+        if not removed:
             raise HTTPException(status_code=404, detail="prefix not found in soft denylist")
         invalidate_levels_cache()
         return {"status": "removed", "prefix": req.prefix}

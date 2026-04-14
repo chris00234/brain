@@ -20,7 +20,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from datetime import time as dtime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -28,6 +28,7 @@ from zoneinfo import ZoneInfo
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 try:
+    import brain_config_store
     from breakers import peek_breaker, try_claim_probe
     from config import AUTONOMY_DB
     from default_levels import (
@@ -43,6 +44,7 @@ except ImportError:
     DENY_PREFIXES = ()
     EXECUTION_WINDOWS = {}
     QUIET_HOURS = {"start": "23:00", "end": "07:00", "tz": "America/Los_Angeles", "exceptions": []}
+    brain_config_store = None  # type: ignore[assignment]
 
     def notify_lag_for(_kind: str) -> int:
         return 30
@@ -85,23 +87,9 @@ class AuthorizationDecision:
 
 
 def _ensure_brain_config_schema() -> None:
-    AUTONOMY_DB.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(AUTONOMY_DB))
-    try:
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS brain_config (
-              key TEXT PRIMARY KEY,
-              value TEXT NOT NULL,
-              updated_at TEXT NOT NULL,
-              updated_by TEXT DEFAULT 'system'
-            )
-            """
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    """Thin shim — brain_config_store owns the DDL now. Kept for back-compat."""
+    if brain_config_store is not None:
+        brain_config_store.ensure_schema()
 
 
 def _load_level_overrides() -> dict[str, str]:
@@ -112,20 +100,20 @@ def _load_level_overrides() -> dict[str, str]:
     hot path of every action; a single brain_config lock contention event
     used to crash every authorize() call.
     """
-    overrides: dict[str, str] = {}
+    if brain_config_store is None:
+        return {}
     try:
-        _ensure_brain_config_schema()
-        conn = sqlite3.connect(str(AUTONOMY_DB))
-        try:
-            for row in conn.execute("SELECT key, value FROM brain_config WHERE key LIKE 'autonomy.%.level'"):
-                key, value = row[0], row[1]
-                kind = key[len("autonomy.") : -len(".level")]
-                if value in ("L0", "L1", "L2", "L3"):
-                    overrides[kind] = value
-        finally:
-            conn.close()
+        rows = brain_config_store.get_prefix("autonomy.")
     except sqlite3.Error:
         return {}
+    overrides: dict[str, str] = {}
+    for key, value in rows.items():
+        if not key.endswith(".level"):
+            continue
+        if value not in ("L0", "L1", "L2", "L3"):
+            continue
+        kind = key[len("autonomy.") : -len(".level")]
+        overrides[kind] = value
     return overrides
 
 
@@ -157,21 +145,18 @@ def _load_soft_denylist() -> tuple[str, ...]:
     Returns an empty tuple on any sqlite error so the gate falls through
     instead of crashing.
     """
-    prefixes: list[str] = []
+    if brain_config_store is None:
+        return ()
     try:
-        _ensure_brain_config_schema()
-        conn = sqlite3.connect(str(AUTONOMY_DB))
-        try:
-            for row in conn.execute("SELECT key, value FROM brain_config WHERE key LIKE 'denylist.%'"):
-                key, value = row[0], row[1]
-                if value == "1":
-                    prefix = key[len("denylist.") :]
-                    if prefix:
-                        prefixes.append(prefix)
-        finally:
-            conn.close()
+        rows = brain_config_store.get_prefix("denylist.")
     except sqlite3.Error:
         return ()
+    prefixes: list[str] = []
+    for key, value in rows.items():
+        if value == "1":
+            prefix = key[len("denylist.") :]
+            if prefix:
+                prefixes.append(prefix)
     return tuple(prefixes)
 
 
@@ -193,24 +178,9 @@ def set_level(kind: str, level: str, *, updated_by: str = "system") -> None:
     """Persist a level override to brain_config and invalidate the cache."""
     if level not in ("L0", "L1", "L2", "L3"):
         raise ValueError(f"invalid level: {level}")
-    _ensure_brain_config_schema()
-    conn = sqlite3.connect(str(AUTONOMY_DB))
-    try:
-        conn.execute(
-            "INSERT INTO brain_config (key, value, updated_at, updated_by) "
-            "VALUES (?, ?, ?, ?) "
-            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, "
-            " updated_at=excluded.updated_at, updated_by=excluded.updated_by",
-            (
-                f"autonomy.{kind}.level",
-                level,
-                datetime.now(UTC).isoformat(timespec="seconds"),
-                updated_by,
-            ),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    if brain_config_store is None:
+        return
+    brain_config_store.set(f"autonomy.{kind}.level", level, updated_by=updated_by)
     invalidate_levels_cache()
 
 

@@ -256,42 +256,20 @@ def check_all() -> list[SLOResult]:
 
 # ─── Alert dispatch (rate-limited Telegram) ─────────────────────────────
 
-# Rate-limit state is persisted to autonomy.db/brain_config so it survives
-# brain-server restarts. An in-memory dict gets wiped on every launchd
-# kickstart, which would defeat the 30-minute suppression during crash loops.
+# Rate-limit state is persisted to autonomy.db/brain_config via the shared
+# brain_config_store so it survives brain-server restarts. An in-memory dict
+# would be wiped on every launchd kickstart, defeating the 30-minute
+# suppression during crash loops.
 _ALERT_KEY_PREFIX = "slo_alert."
-
-
-def _ensure_brain_config_schema() -> None:
-    AUTONOMY_DB.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(AUTONOMY_DB))
-    try:
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS brain_config (
-              key TEXT PRIMARY KEY,
-              value TEXT NOT NULL,
-              updated_at TEXT NOT NULL,
-              updated_by TEXT DEFAULT 'system'
-            )
-            """
-        )
-        conn.commit()
-    finally:
-        conn.close()
 
 
 def _load_last_alert_at(slo_name: str, severity: str) -> float:
     key = f"{_ALERT_KEY_PREFIX}{slo_name}.{severity}.last_at"
     try:
-        _ensure_brain_config_schema()
-        conn = sqlite3.connect(str(AUTONOMY_DB))
-        try:
-            row = conn.execute("SELECT value FROM brain_config WHERE key = ?", (key,)).fetchone()
-            return float(row[0]) if row else 0.0
-        finally:
-            conn.close()
+        import brain_config_store
+
+        value = brain_config_store.get(key)
+        return float(value) if value else 0.0
     except (sqlite3.Error, ValueError):
         return 0.0
 
@@ -299,20 +277,9 @@ def _load_last_alert_at(slo_name: str, severity: str) -> float:
 def _save_last_alert_at(slo_name: str, severity: str, ts: float) -> None:
     key = f"{_ALERT_KEY_PREFIX}{slo_name}.{severity}.last_at"
     try:
-        _ensure_brain_config_schema()
-        conn = sqlite3.connect(str(AUTONOMY_DB))
-        try:
-            from datetime import UTC, datetime
+        import brain_config_store
 
-            conn.execute(
-                "INSERT INTO brain_config (key, value, updated_at, updated_by) "
-                "VALUES (?, ?, ?, 'slos') "
-                "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
-                (key, f"{ts:.3f}", datetime.now(UTC).isoformat(timespec="seconds")),
-            )
-            conn.commit()
-        finally:
-            conn.close()
+        brain_config_store.set(key, f"{ts:.3f}", updated_by="slos")
     except sqlite3.Error:
         pass
 
