@@ -37,7 +37,7 @@ except ImportError as e:
 # Always register at the latest version — migrations are idempotent and safe
 # to run on every startup. Without this, a brain restart after a manual migrate
 # would hit downgrade-refused on subsequent restarts (db v3 vs code v0).
-CURRENT_VERSIONS["brain_db"] = 7
+CURRENT_VERSIONS["brain_db"] = 8
 
 
 def _safe_int(v: object, default: int = 0) -> int:
@@ -472,6 +472,58 @@ def _add_atom_evidence() -> dict:
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='atom_evidence'"
             ).fetchall()
         }, "columns": sorted(cols)}
+    finally:
+        conn.close()
+
+
+# ──────────────────────────────────────────────────────────────────────
+# brain_db@8 — Phase N4: sleep consolidation + co-activation matrix
+# ──────────────────────────────────────────────────────────────────────
+
+
+_N4_DDL = """
+CREATE TABLE IF NOT EXISTS atom_coactivation (
+  atom_a_id    TEXT NOT NULL REFERENCES atoms(id) ON DELETE CASCADE,
+  atom_b_id    TEXT NOT NULL REFERENCES atoms(id) ON DELETE CASCADE,
+  n_events     INTEGER NOT NULL DEFAULT 1,
+  last_seen_at TEXT NOT NULL,
+  PRIMARY KEY (atom_a_id, atom_b_id),
+  CHECK (atom_a_id < atom_b_id)
+);
+CREATE INDEX IF NOT EXISTS idx_coact_b ON atom_coactivation(atom_b_id);
+
+CREATE TABLE IF NOT EXISTS sleep_cycles (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  started_at   TEXT NOT NULL,
+  ended_at     TEXT,
+  replay_count INTEGER NOT NULL DEFAULT 0,
+  edges_added  INTEGER NOT NULL DEFAULT 0,
+  consolidated INTEGER NOT NULL DEFAULT 0,
+  summary_json TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_sleep_cycles_started ON sleep_cycles(started_at);
+"""
+
+
+@migration("brain_db", 7, 8)
+def _add_sleep_consolidation_tables() -> dict:
+    """Add atom_coactivation + sleep_cycles tables for Phase N4 CLS-style
+    sleep consolidation. The sleep_consolidate pipeline job rebuilds
+    coactivation nightly from action_audit and logs a row to sleep_cycles.
+
+    Idempotent — CREATE TABLE IF NOT EXISTS.
+    """
+    conn = _connect_brain_db()
+    try:
+        conn.executescript(_N4_DDL)
+        conn.commit()
+        tables = {
+            r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name IN ('atom_coactivation', 'sleep_cycles')"
+            ).fetchall()
+        }
+        return {"tables": sorted(tables)}
     finally:
         conn.close()
 

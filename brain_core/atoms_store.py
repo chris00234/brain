@@ -171,6 +171,32 @@ CREATE TABLE IF NOT EXISTS atom_evidence (
 );
 CREATE INDEX IF NOT EXISTS idx_atom_evidence_atom    ON atom_evidence(atom_id);
 CREATE INDEX IF NOT EXISTS idx_atom_evidence_type_ts ON atom_evidence(event_type, created_at);
+
+-- Phase N4 (brain_db@8): CLS sleep consolidation co-activation matrix.
+-- Sparse top-K per atom, rebuilt daily by sleep_consolidate job. Ordered
+-- pair invariant (atom_a_id < atom_b_id) so each edge has one row.
+CREATE TABLE IF NOT EXISTS atom_coactivation (
+  atom_a_id    TEXT NOT NULL REFERENCES atoms(id) ON DELETE CASCADE,
+  atom_b_id    TEXT NOT NULL REFERENCES atoms(id) ON DELETE CASCADE,
+  n_events     INTEGER NOT NULL DEFAULT 1,
+  last_seen_at TEXT NOT NULL,
+  PRIMARY KEY (atom_a_id, atom_b_id),
+  CHECK (atom_a_id < atom_b_id)
+);
+CREATE INDEX IF NOT EXISTS idx_coact_b ON atom_coactivation(atom_b_id);
+
+-- Phase N4 (brain_db@8): sleep cycle log. One row per sleep_consolidate run
+-- so we can post-hoc audit what happened during each "night's consolidation".
+CREATE TABLE IF NOT EXISTS sleep_cycles (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  started_at   TEXT NOT NULL,
+  ended_at     TEXT,
+  replay_count INTEGER NOT NULL DEFAULT 0,
+  edges_added  INTEGER NOT NULL DEFAULT 0,
+  consolidated INTEGER NOT NULL DEFAULT 0,
+  summary_json TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_sleep_cycles_started ON sleep_cycles(started_at);
 """
 
 
@@ -326,6 +352,27 @@ def upsert_atom(
     atom_id = derive_atom_id(chroma_id)
     now = _now()
     valid_from = valid_from or now
+    # Phase N4: seal the dead insert_raw_event path — every atom on the hot
+    # path gets a matching raw_events row so provenance + replay works.
+    # Best-effort, gated by BRAIN_ATOMS_ENABLED and content_hash UNIQUE so
+    # dedupes cleanly. If the caller already wired raw_event_id, respect it.
+    if raw_event_id is None:
+        try:
+            derived_raw_id = f"raw_{derive_content_hash(text)[:16]}"
+            inserted = insert_raw_event(
+                event_id=derived_raw_id,
+                timestamp=valid_from,
+                source_type="atoms_hot_path",
+                content=text,
+                source_ref=chroma_id,
+                db_path=db_path,
+            )
+            if inserted:
+                raw_event_id = inserted
+            else:
+                raw_event_id = derived_raw_id  # existing row — point atom at it
+        except sqlite3.Error:
+            raw_event_id = None
     try:
         with _conn(db_path) as conn:
             conn.execute(
@@ -734,6 +781,85 @@ def count_atoms(*, db_path: Path | None = None) -> dict[str, int]:
             }
     except sqlite3.Error:
         return {"enabled": 1, "error": "sqlite_error"}
+
+
+def upsert_entity(
+    name: str,
+    entity_type: str = "concept",
+    *,
+    db_path: Path | None = None,
+) -> str | None:
+    """Phase N4: idempotent insert into brain.db `entities` mirror.
+
+    The entities table exists since brain_db@1. Neo4j is primary for the
+    graph, but atom_entity has FKs on this SQL mirror — so we have to keep
+    it populated on the hot path to land atom↔entity edges.
+
+    Returns entity_id on success (existing or newly-created), None otherwise.
+    Name normalization: trimmed lower-case, deduped on (name, entity_type).
+    """
+    if not BRAIN_ATOMS_ENABLED:
+        return None
+    nm = (name or "").strip().lower()
+    if not nm or len(nm) > 100:
+        return None
+    etype = (entity_type or "concept").lower()
+    try:
+        with _conn(db_path) as conn:
+            existing = conn.execute(
+                "SELECT id FROM entities WHERE name = ? AND entity_type = ?",
+                (nm, etype),
+            ).fetchone()
+            if existing:
+                conn.execute(
+                    "UPDATE entities SET last_seen_at = ?, mention_count = mention_count + 1 "
+                    "WHERE id = ?",
+                    (_now(), existing["id"]),
+                )
+                conn.commit()
+                return existing["id"]
+            new_id = f"ent_{hashlib.sha256((nm + ':' + etype).encode()).hexdigest()[:12]}"
+            conn.execute(
+                "INSERT INTO entities (id, name, entity_type, first_seen_at, last_seen_at, mention_count) "
+                "VALUES (?, ?, ?, ?, ?, 1)",
+                (new_id, nm, etype, _now(), _now()),
+            )
+            conn.commit()
+            return new_id
+    except sqlite3.Error:
+        return None
+
+
+def link_atom_entity(
+    atom_id: str,
+    entity_id: str,
+    role: str = "subject",
+    *,
+    db_path: Path | None = None,
+) -> bool:
+    """Phase N4: INSERT OR IGNORE an atom↔entity edge.
+
+    The atom_entity table has existed since brain_db@1 (DDL line 117) but
+    the sleep_consolidate pipeline + entity_graph are the only writers.
+    Seals Gap C5 — the join table finally fills.
+
+    Returns True on insert (or no-op conflict), False on disabled / error.
+    """
+    if not BRAIN_ATOMS_ENABLED:
+        return False
+    if not atom_id or not entity_id:
+        return False
+    try:
+        with _conn(db_path) as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO atom_entity (atom_id, entity_id, role) "
+                "VALUES (?, ?, ?)",
+                (atom_id, entity_id, role),
+            )
+            conn.commit()
+            return True
+    except sqlite3.Error:
+        return False
 
 
 def insert_action_audit(

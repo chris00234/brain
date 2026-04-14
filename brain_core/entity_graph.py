@@ -222,8 +222,35 @@ def extract_and_store_entities(memory_content: str, memory_id: str = "") -> int:
         now = _now()
 
         if _use_neo4j():
-            return _neo4j_store_entities(entities, relations, now, memory_id)
-        return _sqlite_store_entities(entities, relations, now, memory_id)
+            created = _neo4j_store_entities(entities, relations, now, memory_id)
+        else:
+            created = _sqlite_store_entities(entities, relations, now, memory_id)
+
+        # Phase N4: mirror every extracted entity into brain.db atom_entity so
+        # the join table populates even when the atoms truth layer is the
+        # consumer (sleep_consolidate, downstream retrieval). Gated by
+        # BRAIN_ATOMS_ENABLED — no-op when atoms disabled.
+        try:
+            from atoms_store import (
+                BRAIN_ATOMS_ENABLED as _ae,
+                derive_atom_id as _dai,
+                link_atom_entity as _lae,
+                upsert_entity as _ue,
+            )
+            if _ae and memory_id:
+                atom_id = _dai(memory_id)
+                for ent in entities[:5]:
+                    name = (ent.get("name") or "").strip().lower()
+                    etype = (ent.get("type") or "concept").lower()
+                    if not name or len(name) < 2 or len(name) > 50:
+                        continue
+                    eid = _ue(name, etype)
+                    if eid:
+                        _lae(atom_id, eid, role="subject")
+        except Exception as _exc:
+            log.debug("atom_entity mirror failed: %s", _exc)
+
+        return created
 
     except Exception as e:
         log.debug("entity extraction failed: %s", e)

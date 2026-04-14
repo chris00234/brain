@@ -378,6 +378,17 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         agent="system",
         misfire_grace=900,
     ),
+    # Phase N4 — CLS sleep consolidation. Runs AFTER memory_consolidation 3:45
+    # (it depends on the freshly-classified tiers). Coactivation matrix, A-MEM
+    # auto-linking, episodic → semantic promotion. Outside the 9am-6pm work
+    # hours rule. 900s misfire grace matches the other heavy nightly jobs.
+    ScheduledJob(
+        name="sleep_consolidate",
+        description="CLS sleep consolidation: coactivation + A-MEM + promotion (3:55am, Phase N4)",
+        trigger=CronTrigger(hour=3, minute=55),
+        agent="system",
+        misfire_grace=900,
+    ),
     ScheduledJob(
         name="llm_usage_purge",
         description="Weekly purge of llm_usage.db >90 days (Sun 4:55am)",
