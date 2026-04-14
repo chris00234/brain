@@ -662,137 +662,171 @@ def embed_and_store(memories: list[dict[str, Any]], source: str, agent: str) -> 
 
 
 # ── Step 4: contradiction detection ─────────────────────────────────────
+def check_contradictions_for_memory(
+    mem_id: str,
+    content: str,
+    embedding: list[float],
+    category: str,
+    confidence: float = 0.5,
+    created_at: str = "",
+    sem_col_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Phase N1: per-memory contradiction check, usable from the hot path.
+
+    Same heuristic as check_contradictions (same-category + cosine ≥ 0.90 +
+    jaccard ≥ 0.55 + stopword-aware symmetric diff) but operates on a single
+    memory's embedding so POST /memory and POST /memory/batch can wire it
+    directly after the Chroma upsert. Auto-resolves clear cases (newer +
+    >= 0.2 higher confidence) and logs predictive_error action_audit rows
+    (Friston predictive coding — disagreement against stored beliefs is the
+    learning signal).
+    """
+    contradictions: list[dict[str, Any]] = []
+    if not embedding:
+        return contradictions
+    if sem_col_id is None:
+        sem_col_id = _get_collection_id(SEMANTIC_COLLECTION)
+    if not sem_col_id:
+        return contradictions
+    ensure_collection(CONTRADICTIONS_COLLECTION)
+
+    try:
+        res = chroma_api(
+            "POST",
+            f"/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col_id}/query",
+            {
+                "query_embeddings": [embedding],
+                "n_results": 8,
+                "include": ["documents", "metadatas", "distances"],
+            },
+        )
+    except Exception:
+        return contradictions
+
+    ids_lists = res.get("ids") or []
+    if not ids_lists or not ids_lists[0]:
+        return contradictions
+    ids = ids_lists[0]
+    docs = (res.get("documents") or [[]])[0]
+    dists = (res.get("distances") or [[]])[0]
+    metas_list = (res.get("metadatas") or [[]])[0]
+
+    new_tokens = _tokenize(content)
+
+    for other_id, other_doc, other_dist, other_meta in zip(ids, docs, dists, metas_list):
+        if other_id == mem_id:
+            continue
+        other_category = (other_meta or {}).get("category", "")
+        if other_category and other_category != category:
+            continue
+        if other_dist > (1 - SIMILARITY_THRESHOLD):
+            continue
+        other_tokens = _tokenize(other_doc)
+        overlap = _jaccard(new_tokens, other_tokens)
+        if overlap < MIN_CONTRADICTION_OVERLAP:
+            continue
+        sym_diff = (new_tokens ^ other_tokens) - PREFERENCE_STOPWORDS
+        if not sym_diff:
+            continue
+
+        contradiction = {
+            "id": f"contra:{uuid.uuid4().hex[:12]}",
+            "new_id": mem_id,
+            "old_id": other_id,
+            "new_content": content,
+            "old_content": other_doc,
+            "category": category,
+            "distance": round(float(other_dist), 4),
+            "token_overlap": round(overlap, 3),
+            "created_at": _now_iso(),
+            "review_state": "pending",
+        }
+
+        # Phase N1: fire the predictive_error audit row — disagreement against
+        # an existing atom IS the Friston learning signal. Best-effort.
+        try:
+            from atoms_store import insert_action_audit as _iaa
+            _iaa(
+                route="/memory.contradiction",
+                tool="predictive_error",
+                query_text=content[:500],
+                retrieved_chroma_ids=[mem_id, other_id],
+            )
+        except Exception:
+            pass
+
+        new_conf = float(confidence or 0.5)
+        old_conf = float((other_meta or {}).get("confidence", 0.5))
+        new_time = created_at or ""
+        old_time = (other_meta or {}).get("created_at", "")
+
+        if new_conf - old_conf > 0.2 and new_time and old_time and new_time > old_time:
+            contradiction["review_state"] = "auto_resolved"
+            contradiction["resolution"] = "keep_new"
+            try:
+                _store_contradiction(contradiction)
+            except Exception:
+                contradiction["review_state"] = "pending"
+                contradiction.pop("resolution", None)
+                contradictions.append(contradiction)
+                continue
+            try:
+                chroma_api(
+                    "POST",
+                    f"/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col_id}/delete",
+                    {"ids": [other_id]},
+                )
+                try:
+                    from audit_log import log_event
+                    log_event(
+                        "resolve",
+                        entity_a=other_id,
+                        entity_b=mem_id,
+                        match_score=round(float(other_dist), 3),
+                        conflict_type="contradiction",
+                        resolution="auto_keep_new",
+                        reason=f"Auto: newer ({new_time[:10]}) + higher conf ({new_conf:.2f} vs {old_conf:.2f})",
+                    )
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            contradictions.append(contradiction)
+        else:
+            contradictions.append(contradiction)
+            _store_contradiction(contradiction)
+
+    return contradictions
+
+
 def check_contradictions(stored: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """For each new memory, find existing entries that may contradict it.
 
-    Heuristic (Round 11): real contradictions share most of their wording but
-    differ on a key content word (e.g. "lives in Irvine" vs "lives in San
-    Francisco"). We require:
-      - same category, AND
-      - cosine similarity >= SIMILARITY_THRESHOLD (near-duplicate embeddings), AND
-      - token overlap >= MIN_CONTRADICTION_OVERLAP (lexically similar), AND
-      - the symmetric-difference tokens are not all generic preference stopwords.
-
-    Previous versions required LOW overlap, which was semantically backward —
-    low overlap pairs are complementary/paraphrased, not contradictory, and
-    that produced 31 false positives on one week of brain activity.
+    Phase N1: thin wrapper over check_contradictions_for_memory so the /learn
+    path and the hot path (/memory, /memory/batch) share the same heuristic
+    and audit signal.
     """
     if not stored:
         return []
-
-    ensure_collection(CONTRADICTIONS_COLLECTION)
-    contradictions: list[dict[str, Any]] = []
-
     sem_col_id = _get_collection_id(SEMANTIC_COLLECTION)
     if not sem_col_id:
         return []
-
+    contradictions: list[dict[str, Any]] = []
     for mem in stored:
         try:
-            res = chroma_api(
-                "POST",
-                f"/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col_id}/query",
-                {
-                    "query_embeddings": [mem["embedding"]],
-                    "n_results": 8,
-                    "include": ["documents", "metadatas", "distances"],
-                },
+            meta = mem.get("metadata") or {}
+            found = check_contradictions_for_memory(
+                mem_id=mem["id"],
+                content=mem.get("content", ""),
+                embedding=mem.get("embedding", []),
+                category=meta.get("category", ""),
+                confidence=float(meta.get("confidence", 0.5) or 0.5),
+                created_at=meta.get("created_at", ""),
+                sem_col_id=sem_col_id,
             )
+            contradictions.extend(found)
         except Exception:
             continue
-
-        ids_lists = res.get("ids") or []
-        if not ids_lists or not ids_lists[0]:
-            continue
-        ids = ids_lists[0]
-        docs = (res.get("documents") or [[]])[0]
-        dists = (res.get("distances") or [[]])[0]
-        metas_list = (res.get("metadatas") or [[]])[0]
-
-        new_tokens = _tokenize(mem["content"])
-        new_category = mem["metadata"]["category"]
-
-        for other_id, other_doc, other_dist, other_meta in zip(ids, docs, dists, metas_list):
-            if other_id == mem["id"]:
-                continue
-            # Skip cross-category comparisons — a preference can't contradict a fact
-            other_category = (other_meta or {}).get("category", "")
-            if other_category and other_category != new_category:
-                continue
-            # ChromaDB returns cosine distance in [0, 2] (0 = identical).
-            # Require very high similarity (distance <= 1 - 0.90 = 0.10) — we
-            # only want near-duplicates in embedding space.
-            if other_dist > (1 - SIMILARITY_THRESHOLD):
-                continue
-            other_tokens = _tokenize(other_doc)
-            overlap = _jaccard(new_tokens, other_tokens)
-            # Real contradictions share most wording but differ on a key term.
-            # Previous logic (flag when overlap < 0.5) was semantically backward
-            # and produced mostly false positives on complementary preferences.
-            if overlap < MIN_CONTRADICTION_OVERLAP:
-                continue
-            # Content-word diff check: ignore pairs whose only differences are
-            # generic preference stopwords. A real contradiction must differ on
-            # a content word that's not in the stopword set.
-            sym_diff = (new_tokens ^ other_tokens) - PREFERENCE_STOPWORDS
-            if not sym_diff:
-                continue  # differences are all generic filler
-
-            # Record the contradiction
-            contradiction = {
-                "id": f"contra:{uuid.uuid4().hex[:12]}",
-                "new_id": mem["id"],
-                "old_id": other_id,
-                "new_content": mem["content"],
-                "old_content": other_doc,
-                "category": mem["metadata"]["category"],
-                "distance": round(float(other_dist), 4),
-                "token_overlap": round(overlap, 3),
-                "created_at": _now_iso(),
-                "review_state": "pending",
-            }
-            # Auto-resolve clear cases: newer + higher confidence wins
-            new_conf = float(mem["metadata"].get("confidence", 0.5))
-            old_conf = float((other_meta or {}).get("confidence", 0.5))
-            new_time = mem["metadata"].get("created_at", "")
-            old_time = (other_meta or {}).get("created_at", "")
-
-            if new_conf - old_conf > 0.2 and new_time and old_time and new_time > old_time:
-                # Auto-resolve: keep newer high-confidence entry. ALWAYS persist
-                # the contradiction record first so the decision has an audit
-                # trail — if the delete succeeds but no record exists, the
-                # losing memory is gone with no recovery path.
-                contradiction["review_state"] = "auto_resolved"
-                contradiction["resolution"] = "keep_new"
-                try:
-                    _store_contradiction(contradiction)
-                except Exception as e:
-                    # Audit store failed — do NOT delete the losing memory.
-                    # Downgrade the contradiction back to pending so the UI
-                    # surfaces it for manual review instead of showing a
-                    # falsely-resolved record with no backing audit row.
-                    contradiction["review_state"] = "pending"
-                    contradiction.pop("resolution", None)
-                    contradictions.append(contradiction)
-                    continue
-                try:
-                    chroma_api("POST",
-                        f"/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col_id}/delete",
-                        {"ids": [other_id]})
-                    try:
-                        from audit_log import log_event
-                        log_event("resolve", entity_a=other_id, entity_b=mem["id"],
-                                  match_score=round(float(other_dist), 3),
-                                  conflict_type="contradiction", resolution="auto_keep_new",
-                                  reason=f"Auto: newer ({new_time[:10]}) + higher conf ({new_conf:.2f} vs {old_conf:.2f})")
-                    except Exception:
-                        pass
-                except Exception:
-                    pass
-            else:
-                contradictions.append(contradiction)
-                _store_contradiction(contradiction)
-
     return contradictions
 
 

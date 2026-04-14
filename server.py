@@ -2859,6 +2859,33 @@ def create_memory(request: Request, req: MemoryCreateRequest) -> MemoryEntry:
     response_meta = dict(metadata)
     response_meta["operation"] = operation
 
+    # Phase N1: hot-path contradiction detection. Same heuristic as /learn,
+    # runs inline so manual writes don't silently pollute retrieval. Killable
+    # via BRAIN_CONTRADICT_ON_WRITE=0 without touching code paths.
+    if os.environ.get("BRAIN_CONTRADICT_ON_WRITE", "1") != "0":
+        try:
+            contradictions = learn.check_contradictions_for_memory(
+                mem_id=mem_id,
+                content=req.content,
+                embedding=embedding,
+                category=req.category,
+                confidence=req.confidence,
+                created_at=now_iso,
+                sem_col_id=col_id,
+            )
+            if contradictions:
+                response_meta["contradictions"] = [
+                    {
+                        "id": c["id"],
+                        "old_id": c["old_id"],
+                        "review_state": c["review_state"],
+                        "distance": c["distance"],
+                    }
+                    for c in contradictions
+                ]
+        except Exception:
+            pass
+
     # M7-WS8: action_audit insert for brain_store adoption tracking.
     try:
         from brain_core.atoms_store import insert_action_audit as _iaa
@@ -3015,11 +3042,50 @@ def create_memory_batch(request: Request, req: MemoryBatchRequest) -> dict:
     except Exception:
         pass
 
+    # Phase N1: hot-path contradiction detection for the batch. Post-upsert
+    # so the nearest-neighbor query sees the newly-written siblings. One
+    # call per just-written memory (already in-process, no LLM roundtrip).
+    # Killable via BRAIN_CONTRADICT_ON_WRITE=0.
+    batch_contradictions: dict[str, list[dict]] = {}
+    if ids_to_upsert and os.environ.get("BRAIN_CONTRADICT_ON_WRITE", "1") != "0":
+        for mem_id_w, emb_w, doc_w, meta_w in zip(
+            ids_to_upsert, embeddings_to_upsert, docs_to_upsert, metas_to_upsert
+        ):
+            try:
+                found = learn.check_contradictions_for_memory(
+                    mem_id=mem_id_w,
+                    content=doc_w,
+                    embedding=emb_w,
+                    category=meta_w.get("category", ""),
+                    confidence=float(meta_w.get("confidence", 0.5) or 0.5),
+                    created_at=meta_w.get("created_at", ""),
+                    sem_col_id=col_id,
+                )
+                if found:
+                    batch_contradictions[mem_id_w] = [
+                        {
+                            "id": c["id"],
+                            "old_id": c["old_id"],
+                            "review_state": c["review_state"],
+                            "distance": c["distance"],
+                        }
+                        for c in found
+                    ]
+            except Exception:
+                continue
+
+    if batch_contradictions:
+        for r in results:
+            rid = r.get("id")
+            if rid in batch_contradictions:
+                r["contradictions"] = batch_contradictions[rid]
+
     return {
         "stored": len(ids_to_upsert),
         "superseded": len(supersede_updates),
         "deleted": len(deletes_to_apply),
         "total_requested": len(req.memories),
+        "contradictions_found": sum(len(v) for v in batch_contradictions.values()),
         "results": results,
     }
 
