@@ -1280,7 +1280,9 @@ def recall_v2(
                 # Only rerank the top window — tail stays ordered by stage 1.
                 # cross_encoder_rerank overwrites `score` with a blend of the
                 # stage-1 score (which already includes trust_boost) and CE signal.
-                fused = rerank_with_cross_encoder(q, fused, top_k=50)
+                # top_k=20 is sufficient for n≤10 responses — the tail was
+                # wasted CE compute (~60% overhead per review).
+                fused = rerank_with_cross_encoder(q, fused, top_k=20)
                 timing["cross_encoder_ms"] = int((time.time() - t_ce) * 1000)
             except Exception as _ce_err:
                 log.warning("cross-encoder rerank failed, stage-1 result stands: %s", _ce_err)

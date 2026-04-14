@@ -21,11 +21,16 @@ import threading
 import atexit
 from concurrent.futures import ThreadPoolExecutor as _TPE
 _search_bg_pool = _TPE(max_workers=2, thread_name_prefix="search_bg")
-_search_fanout_pool = _TPE(max_workers=5, thread_name_prefix="search_fanout")
+_search_fanout_pool = _TPE(max_workers=6, thread_name_prefix="search_fanout")
+# Shared single-worker pool for Neo4j timeout-wrapped calls in _graph_entity_boost.
+# Previously each call constructed + destroyed its own ThreadPoolExecutor — ~1–3ms
+# per recall of pool churn. The shared pool is reused across calls.
+_graph_boost_pool = _TPE(max_workers=2, thread_name_prefix="graph_boost")
 _cooccurrence_lock = threading.Lock()
 _cooccurrence_counter = [0]  # mutable container for thread-safe increment
 atexit.register(_search_bg_pool.shutdown, wait=False)  # Neo4j writes are best-effort
 atexit.register(_search_fanout_pool.shutdown, wait=False)
+atexit.register(_graph_boost_pool.shutdown, wait=False)
 import time
 from pathlib import Path
 from datetime import datetime, timezone
@@ -368,16 +373,14 @@ def _graph_entity_boost(query: str, results: list[dict]) -> set[str]:
     # Use a single Cypher call that checks each entity name against the query.
     query_lower = query.lower()
     try:
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-            fut = ex.submit(
-                _rq,
-                "MATCH (e:Entity) "
-                "WHERE size(e.name) >= 2 AND toLower($q) CONTAINS toLower(e.name) "
-                "RETURN e.name AS name LIMIT 10",
-                {"q": query_lower},
-            )
-            matched = fut.result(timeout=_GRAPH_BOOST_TIMEOUT_S)
+        fut = _graph_boost_pool.submit(
+            _rq,
+            "MATCH (e:Entity) "
+            "WHERE size(e.name) >= 2 AND toLower($q) CONTAINS toLower(e.name) "
+            "RETURN e.name AS name LIMIT 10",
+            {"q": query_lower},
+        )
+        matched = fut.result(timeout=_GRAPH_BOOST_TIMEOUT_S)
     except Exception:
         return set()
 
@@ -388,20 +391,18 @@ def _graph_entity_boost(query: str, results: list[dict]) -> set[str]:
 
     # Step 2: walk 2 hops from matched entities, collect source_memory_ids from edges.
     try:
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-            fut = ex.submit(
-                _rq,
-                "MATCH (seed:Entity) WHERE seed.name IN $names "
-                "MATCH (seed)-[r1:RELATES_TO]-(hop1) "
-                "OPTIONAL MATCH (hop1)-[r2:RELATES_TO]-(hop2) WHERE hop2 <> seed "
-                "WITH collect(DISTINCT r1.source_memory_id) + collect(DISTINCT r2.source_memory_id) AS mids "
-                "UNWIND mids AS mid "
-                "WHERE mid IS NOT NULL AND mid <> '' "
-                "RETURN collect(DISTINCT mid) AS memory_ids",
-                {"names": entity_names},
-            )
-            rows = fut.result(timeout=_GRAPH_BOOST_TIMEOUT_S)
+        fut = _graph_boost_pool.submit(
+            _rq,
+            "MATCH (seed:Entity) WHERE seed.name IN $names "
+            "MATCH (seed)-[r1:RELATES_TO]-(hop1) "
+            "OPTIONAL MATCH (hop1)-[r2:RELATES_TO]-(hop2) WHERE hop2 <> seed "
+            "WITH collect(DISTINCT r1.source_memory_id) + collect(DISTINCT r2.source_memory_id) AS mids "
+            "UNWIND mids AS mid "
+            "WHERE mid IS NOT NULL AND mid <> '' "
+            "RETURN collect(DISTINCT mid) AS memory_ids",
+            {"names": entity_names},
+        )
+        rows = fut.result(timeout=_GRAPH_BOOST_TIMEOUT_S)
     except Exception:
         return set()
 
@@ -723,6 +724,16 @@ def search_all(query, limit=5, sources=None, domain=None, original_query=None,
         if "obsidian" not in sources:
             return []
         if collections:
+            return []
+        # Hot-path optimization: _search_rag already iterates _ALL_COLLECTIONS
+        # (which includes "obsidian"), so every recall was hitting ChromaDB
+        # for the obsidian collection twice — once normalized via
+        # normalize_rag_result, once via normalize_obsidian_result — wasting
+        # one full hybrid_search fanout (~40–100ms on p95). Suppress the
+        # dedicated path when the main rag search covers it; the dedicated
+        # fn is still reachable via explicit `sources=["obsidian"]` only.
+        if "rag" in sources and "obsidian" in _ALL_COLLECTIONS:
+            source_timing["obsidian_ms"] = 0
             return []
         t0 = time.time()
         res = [normalize_obsidian_result(r) for r in search_obsidian(query, limit)]
