@@ -187,10 +187,6 @@ def test_concurrent_apply_quality_no_lost_updates(enabled_sm2):
 
     assert not errors, f"apply_quality raised: {errors}"
     conn = sqlite3.connect(str(atoms_store_mod.BRAIN_DB))
-    row = conn.execute(
-        "SELECT reinforcement_count FROM atoms WHERE chroma_id='sm2_race:1'"
-    ).fetchone()
+    row = conn.execute("SELECT reinforcement_count FROM atoms WHERE chroma_id='sm2_race:1'").fetchone()
     conn.close()
-    assert row[0] == n_threads, (
-        f"expected reinforcement_count={n_threads}, got {row[0]} (race lost updates)"
-    )
+    assert row[0] == n_threads, f"expected reinforcement_count={n_threads}, got {row[0]} (race lost updates)"
