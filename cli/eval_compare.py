@@ -138,6 +138,27 @@ def _expected_hit(
     return hit_source, hit_content_strict, rank, hit_content_loose
 
 
+def _ndcg_at_k(rank: int, k: int = 5) -> float:
+    """Normalized DCG@k for a single binary-relevance item.
+
+    rank is 1-indexed; rank=0 means not in top-k. DCG = 1/log2(rank+1) for the
+    one relevant doc, 0 otherwise. IDCG = 1/log2(2) = 1 (relevant doc at rank 1).
+    Returns 0 when not retrieved, 1 when at rank 1, ~0.63 at rank 2, etc.
+    """
+    import math
+
+    if rank <= 0 or rank > k:
+        return 0.0
+    return 1.0 / math.log2(rank + 1)
+
+
+def _reciprocal_rank(rank: int) -> float:
+    """Reciprocal rank for a single binary-relevance item. 0 if not retrieved."""
+    if rank <= 0:
+        return 0.0
+    return 1.0 / rank
+
+
 def run_eval(
     use_v2: bool, hyde: bool, expand: bool, iterative: bool, token: str, cases: list[dict], n_results: int = 5
 ) -> dict:
@@ -145,6 +166,8 @@ def run_eval(
     hits_content_strict = 0
     hits_content_loose = 0
     ranks: list[int] = []
+    rr_sum = 0.0
+    ndcg_sum = 0.0
     latencies: list[float] = []
     per_test: list[dict] = []
 
@@ -181,6 +204,14 @@ def run_eval(
         if rank > 0:
             ranks.append(rank)
 
+        # M8.1: rank-aware metrics. MRR rewards rank-1 hits 5x more than rank-5 hits.
+        # NDCG@5 is normalized so a perfect retrieval (relevant at rank 1) = 1.0.
+        # Both are computed on the "rank" signal which uses expected_source matching.
+        rr = _reciprocal_rank(rank)
+        ndcg = _ndcg_at_k(rank, k=5)
+        rr_sum += rr
+        ndcg_sum += ndcg
+
         per_test.append(
             {
                 "query": q,
@@ -188,6 +219,8 @@ def run_eval(
                 "hit_content": hc_strict,
                 "hit_content_loose": hc_loose,
                 "rank": rank,
+                "rr": round(rr, 3),
+                "ndcg5": round(ndcg, 3),
                 "latency_ms": int(dt),
             }
         )
@@ -199,6 +232,8 @@ def run_eval(
         "hit_content_pct": round(100 * hits_content_strict / total, 1) if total else 0,
         "hit_content_loose_pct": round(100 * hits_content_loose / total, 1) if total else 0,
         "mean_rank": round(sum(ranks) / len(ranks), 2) if ranks else 0,
+        "mrr": round(rr_sum / total, 3) if total else 0,
+        "ndcg5": round(ndcg_sum / total, 3) if total else 0,
         "mean_latency_ms": round(sum(latencies) / len(latencies), 0) if latencies else 0,
         "per_test": per_test,
     }
