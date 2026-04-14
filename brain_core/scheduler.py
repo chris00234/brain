@@ -206,6 +206,18 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         agent="system",
         misfire_grace=1800,
     ),
+    # Phase N3: auto-graduation of holdout candidates back into eval_set.json.
+    # Runs BEFORE the existing promote job so this week's graduates exit the
+    # pending file before new candidates arrive. Removes the Telegram tap
+    # gate from the routine path — only stuck candidates (>=14d) still ping
+    # eval_holdout_audit.
+    ScheduledJob(
+        name="eval_holdout_graduate",
+        description="Phase N3: auto-graduate consistently-passing holdout candidates (Sun 7:30am)",
+        trigger=CronTrigger(day_of_week="sun", hour=7, minute=30),
+        agent="system",
+        misfire_grace=900,
+    ),
     # Phase C: eval auto-growth pipeline (Sun 8:45 promote → Sun 9:15 audit)
     ScheduledJob(
         name="eval_holdout_promote",
@@ -216,10 +228,20 @@ JOB_SCHEDULE: list[ScheduledJob] = [
     ),
     ScheduledJob(
         name="eval_holdout_audit",
-        description="Phase C2: Telegram digest of pending eval candidates for human review (Sun 9:15am)",
+        description="Phase C2: Telegram digest of >=14d stuck candidates only (Sun 9:15am)",
         trigger=CronTrigger(day_of_week="sun", hour=9, minute=15),
         agent="jenna",
         misfire_grace=900,
+    ),
+    # Phase N3: LoRA training — was missing from the cron entirely, so the
+    # A/B gate always ran against stale weights. Sat 23:30 PT is ~10h before
+    # lora_ab_gate Sun 9:30 so fresh weights are ready for the A/B decision.
+    ScheduledJob(
+        name="embed_finetune",
+        description="Phase N3: weekly LoRA training on accumulated feedback pairs (Sat 23:30)",
+        trigger=CronTrigger(day_of_week="sat", hour=23, minute=30),
+        agent="system",
+        misfire_grace=3600,
     ),
     # Phase E: SLO check loop — every 5 min, alerts on breach
     ScheduledJob(

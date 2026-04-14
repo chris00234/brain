@@ -74,6 +74,10 @@ def test_build_digest_includes_approve_reject_urls(isolated_audit):
 
 
 def test_run_sends_when_pending_present(isolated_audit, monkeypatch):
+    # Phase N3: audit only dispatches Telegram for candidates stuck >= 14 days.
+    # The fresh-pending path is handled silently by auto_graduate. This test
+    # stubs stuck_candidates so the candidate qualifies as "stuck" and we
+    # still exercise the send path.
     audit, pending = isolated_audit
     pending.write_text(json.dumps([{"id": "prop_1", "query": "q1", "expected": "e1", "novelty": 0.7}]))
 
@@ -84,6 +88,9 @@ def test_run_sends_when_pending_present(isolated_audit, monkeypatch):
         return True
 
     monkeypatch.setattr(audit, "_send_telegram", fake_send)
+    # Force the candidate to look stuck so N3's >=14d gate opens
+    import eval_holdout_promote as ehp
+    monkeypatch.setattr(ehp, "stuck_candidates", lambda *a, **k: [{"candidate_id": "prop_1"}])
     result = audit.run()
     assert result["sent"] is True
     assert result["items"] == 1

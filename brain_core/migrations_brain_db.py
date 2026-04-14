@@ -37,7 +37,7 @@ except ImportError as e:
 # Always register at the latest version — migrations are idempotent and safe
 # to run on every startup. Without this, a brain restart after a manual migrate
 # would hit downgrade-refused on subsequent restarts (db v3 vs code v0).
-CURRENT_VERSIONS["brain_db"] = 8
+CURRENT_VERSIONS["brain_db"] = 9
 
 
 def _safe_int(v: object, default: int = 0) -> int:
@@ -503,6 +503,49 @@ CREATE TABLE IF NOT EXISTS sleep_cycles (
 );
 CREATE INDEX IF NOT EXISTS idx_sleep_cycles_started ON sleep_cycles(started_at);
 """
+
+
+# ──────────────────────────────────────────────────────────────────────
+# brain_db@9 — Phase N3: eval holdout lifecycle tracker
+# ──────────────────────────────────────────────────────────────────────
+
+
+_N3_DDL = """
+CREATE TABLE IF NOT EXISTS eval_holdout_lifecycle (
+  candidate_id   TEXT PRIMARY KEY,
+  promoted_at    TEXT NOT NULL,
+  eval_runs      INTEGER NOT NULL DEFAULT 0,
+  eval_passes    INTEGER NOT NULL DEFAULT 0,
+  auto_stable_at TEXT,
+  rejected_at    TEXT,
+  reject_reason  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_eval_lifecycle_promoted ON eval_holdout_lifecycle(promoted_at);
+CREATE INDEX IF NOT EXISTS idx_eval_lifecycle_unresolved
+  ON eval_holdout_lifecycle(promoted_at)
+  WHERE auto_stable_at IS NULL AND rejected_at IS NULL;
+"""
+
+
+@migration("brain_db", 8, 9)
+def _add_eval_holdout_lifecycle() -> dict:
+    """Add eval_holdout_lifecycle for Phase N3 self-learning loop closure.
+    Tracks pending candidates through nightly auto-eval so auto_graduate can
+    promote consistently-passing ones and flag failures without waiting on
+    the Telegram human-approval step.
+
+    Idempotent — CREATE TABLE IF NOT EXISTS.
+    """
+    conn = _connect_brain_db()
+    try:
+        conn.executescript(_N3_DDL)
+        conn.commit()
+        cols = {
+            r[1] for r in conn.execute("PRAGMA table_info(eval_holdout_lifecycle)").fetchall()
+        }
+        return {"columns": sorted(cols)}
+    finally:
+        conn.close()
 
 
 @migration("brain_db", 7, 8)

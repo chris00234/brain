@@ -297,6 +297,12 @@ JOB_REGISTRY: dict[str, list[str]] = {
     "memory_consolidation": [_py, f"{_bd}/brain_core/pipeline/memory_consolidation.py"],
     # Phase N4 — CLS sleep consolidation pipeline
     "sleep_consolidate": [_py, f"{_bd}/brain_core/pipeline/sleep_consolidate.py"],
+    # Phase N3 — eval holdout auto-graduation (runs before the weekly promote)
+    "eval_holdout_graduate": [
+        _py,
+        f"{_bd}/brain_core/eval_holdout_promote.py",
+        "--graduate",
+    ],
     "llm_usage_purge": [_py, f"{_bd}/brain_core/pipeline/llm_usage_purge.py"],
     "fts_rebuild": [_py, f"{_bd}/brain_core/fts_index.py"],
     "event_compressor": [_py, f"{_bd}/brain_core/pipeline/event_compressor.py"],

@@ -85,6 +85,11 @@ def _send_telegram(message: str) -> bool:
 
 
 def run() -> dict:
+    """Phase N3: gate Telegram to ONLY candidates stuck >= 14 days with no
+    auto-graduation or rejection. The routine self-learning path is fully
+    autonomous via auto_graduate — humans only get pinged on ambiguous
+    long-lingering items that need judgment.
+    """
     if not PENDING_PATH.exists():
         return {"sent": False, "items": 0, "reason": "no pending file"}
     try:
@@ -92,9 +97,38 @@ def run() -> dict:
     except Exception as exc:
         return {"sent": False, "items": 0, "error": str(exc)[:200]}
 
-    digest = _build_digest(items)
+    if not isinstance(items, list):
+        items = []
+
+    try:
+        from eval_holdout_promote import stuck_candidates
+        stuck = {row["candidate_id"] for row in stuck_candidates()}
+    except Exception as exc:
+        log.warning("stuck_candidates unavailable: %s — skipping telegram", exc)
+        return {
+            "sent": False,
+            "items": len(items),
+            "reason": "lifecycle_unavailable",
+            "error": str(exc)[:200],
+        }
+
+    stuck_items = [it for it in items if isinstance(it, dict) and it.get("id") in stuck]
+    if not stuck_items:
+        return {
+            "sent": False,
+            "items": 0,
+            "pending_total": len(items),
+            "reason": "no candidates stuck >= 14d — routine path handled everything",
+        }
+
+    digest = _build_digest(stuck_items)
     sent = _send_telegram(digest)
-    return {"sent": sent, "items": len(items), "digest_length": len(digest)}
+    return {
+        "sent": sent,
+        "items": len(stuck_items),
+        "pending_total": len(items),
+        "digest_length": len(digest),
+    }
 
 
 if __name__ == "__main__":

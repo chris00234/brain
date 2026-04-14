@@ -197,6 +197,25 @@ CREATE TABLE IF NOT EXISTS sleep_cycles (
   summary_json TEXT NOT NULL DEFAULT '{}'
 );
 CREATE INDEX IF NOT EXISTS idx_sleep_cycles_started ON sleep_cycles(started_at);
+
+-- Phase N3 (brain_db@9): eval holdout lifecycle tracker. Candidates stay in
+-- eval_holdout_pending.json for N weeks of nightly auto-evaluation before
+-- auto_graduate() merges passing ones into eval_set.json or marks failures.
+-- Seals Gap C1 + C2: removes the human Telegram-tap gate and auto-promotes
+-- stable eval growth.
+CREATE TABLE IF NOT EXISTS eval_holdout_lifecycle (
+  candidate_id   TEXT PRIMARY KEY,
+  promoted_at    TEXT NOT NULL,
+  eval_runs      INTEGER NOT NULL DEFAULT 0,
+  eval_passes    INTEGER NOT NULL DEFAULT 0,
+  auto_stable_at TEXT,
+  rejected_at    TEXT,
+  reject_reason  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_eval_lifecycle_promoted ON eval_holdout_lifecycle(promoted_at);
+CREATE INDEX IF NOT EXISTS idx_eval_lifecycle_unresolved
+  ON eval_holdout_lifecycle(promoted_at)
+  WHERE auto_stable_at IS NULL AND rejected_at IS NULL;
 """
 
 
