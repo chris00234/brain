@@ -596,6 +596,10 @@ class MemoryCreateRequest(BaseModel):
     source: str = Field(default="manual", max_length=64)
     confidence: float = Field(default=0.7, ge=0.0, le=1.0)
     reason: str = Field(default="", max_length=300)
+    # M8.7: parent-child chunking. Optional parent atom id for callers that
+    # want to store this memory as a child of a larger-context parent atom.
+    # Retrieval can expand the child → parent when extra context is useful.
+    parent_atom_id: str | None = Field(default=None, max_length=64)
 
 
 class MemoryPatchRequest(BaseModel):
@@ -1724,6 +1728,51 @@ def recall_v2(
             log.warning("crag iterative path failed: %s", _crag_err)
             timing["crag_error"] = str(_crag_err)[:200]
 
+    # M8.7: inject GraphRAG community summaries for MULTI-class queries.
+    # When adaptive_rag classifies a query as MULTI (comparison, reasoning,
+    # multi-fact synthesis), the weekly-generated community summaries from
+    # the entity graph Louvain clusters are prepended as a synthetic result
+    # at rank 0 with a special source marker. Gives the caller cross-document
+    # synthesis that single-doc retrieval can't provide.
+    #
+    # Cheap: the summaries are pre-computed and sit in a small table with
+    # the entities indexed. get_summaries_matching does a single SELECT + a
+    # substring check against the query terms (<5ms).
+    #
+    # Off when BRAIN_COMMUNITY_SUMMARIES is unset or when no community
+    # matches the query entities.
+    try:
+        from brain_core.adaptive_rag import classify as _ar_classify
+        from brain_core.community_summaries import get_summaries_matching as _cs_match
+
+        _classification = _ar_classify(q)
+        if _classification.label == "multi":
+            _summaries = _cs_match(q, limit=2)
+            if _summaries:
+                # Prepend as synthetic results so the caller sees them first
+                synthetic = []
+                for s in _summaries:
+                    synthetic.append(
+                        {
+                            "id": f"community:{','.join(s['entities'][:3])[:64]}",
+                            "score": 95.0,  # high — MULTI queries benefit from global context
+                            "source_type": "community",
+                            "collection": "community_summaries",
+                            "title": f"Community: {', '.join(s['entities'][:5])}",
+                            "content": s["summary"],
+                            "path": "graph/community/" + s.get("generated_at", ""),
+                            "metadata": {
+                                "entities": s["entities"],
+                                "atom_count": s.get("atom_count", 0),
+                                "generated_at": s.get("generated_at"),
+                            },
+                        }
+                    )
+                fused = synthetic + fused
+                timing["community_summaries_injected"] = len(synthetic)
+    except Exception as _cs_err:  # noqa: BLE001
+        log.warning("community summary inject failed: %s", _cs_err)
+
     _metrics_buf.record_search_latency(timing["total_ms"], timing)
 
     response = RecallV2Response(
@@ -2788,6 +2837,7 @@ def create_memory(request: Request, req: MemoryCreateRequest) -> MemoryEntry:
                 "operation": operation,
                 "atoms_gate_status": atom_status,
             },
+            parent_atom_id=req.parent_atom_id,
         )
         if operation == "UPDATE" and supersede_target:
             mark_superseded(supersede_target, mem_id)

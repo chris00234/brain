@@ -230,20 +230,35 @@ def get_summaries_matching(query: str, limit: int = 3) -> list[dict]:
     except Exception:
         return []
 
-    q_lower = query.lower()
+    # M8.7: word-level overlap match instead of strict substring. Previously
+    # `"brain system" in "compare brain and homelab"` was False because the
+    # multi-word entity didn't appear contiguously, even though "brain" clearly
+    # links this query to the brain-system cluster. Now: tokenize the query,
+    # tokenize each entity, and match if ANY entity word of length >= 4 is in
+    # the query tokens. The length floor avoids "ai"/"pr" false positives.
+    import re as _re
+
+    q_tokens = {t for t in _re.findall(r"[\w가-힣]+", query.lower()) if len(t) >= 4}
+
     matches: list[dict] = []
     for entities_json, summary, atom_count, generated_at in rows:
         try:
             entities = json.loads(entities_json)
         except (json.JSONDecodeError, TypeError):
             continue
-        if any(e.lower() in q_lower for e in entities):
+        entity_tokens: set[str] = set()
+        for e in entities:
+            for t in _re.findall(r"[\w가-힣]+", e.lower()):
+                if len(t) >= 4:
+                    entity_tokens.add(t)
+        if q_tokens & entity_tokens:
             matches.append(
                 {
                     "summary": summary,
                     "entities": entities,
                     "atom_count": atom_count,
                     "generated_at": generated_at,
+                    "matched_tokens": sorted(q_tokens & entity_tokens),
                 }
             )
             if len(matches) >= limit:

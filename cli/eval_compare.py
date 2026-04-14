@@ -248,6 +248,13 @@ def main() -> int:
         action="store_true",
         help="Phase M9 CRAG iterative retrieval — pass ?iterative=true to /recall/v2",
     )
+    parser.add_argument(
+        "--ragas",
+        action="store_true",
+        help="M8.3: run RAGAS LLM-as-judge scoring (faithfulness/relevance) on each case "
+        "via openclaw_dispatch to Sage. Much slower (~5s/case) and costs "
+        "~$0.0005/case. Use on --limit 50 subsets.",
+    )
     parser.add_argument("--limit", type=int, default=0, help="Only run first N cases (0 = all)")
     parser.add_argument("--json", action="store_true")
     parser.add_argument(
@@ -274,6 +281,55 @@ def main() -> int:
         use_v2=True, hyde=args.hyde, expand=args.expand, iterative=args.iterative, token=token, cases=cases
     )
 
+    # M8.3: RAGAS LLM-as-judge scoring (opt-in)
+    ragas_agg = None
+    if args.ragas:
+        import sys as _sys
+
+        _sys.path.insert(0, "/Users/chrischo/server/brain/brain_core")
+        try:
+            from ragas_judge import aggregate as _ragas_agg
+            from ragas_judge import score_one as _ragas_score
+
+            if not args.json:
+                print(f"\nRunning RAGAS judge on {len(cases)} cases...")
+            scores = []
+            for i, case in enumerate(cases):
+                q = case["query"]
+                expected = case.get("expected_content", "")
+                # Re-query to capture contexts for the judge
+                params = {"q": q, "n": "5"}
+                if args.hyde:
+                    params["hyde"] = "true"
+                if args.expand:
+                    params["expand"] = "true"
+                if args.iterative:
+                    params["iterative"] = "true"
+                path = "/recall/v2?" + urllib.parse.urlencode(params)
+                try:
+                    payload = _get(path, token)
+                    results = payload.get("results", [])[:5]
+                    contexts = [r.get("content", "")[:800] for r in results if r.get("content")]
+                    # The "answer" for RAGAS is the top-1 result's content — mirrors
+                    # how a naive RAG answer would be constructed from retrieval alone
+                    answer = contexts[0] if contexts else ""
+                    s = _ragas_score(
+                        q,
+                        answer,
+                        contexts,
+                        expected=expected,
+                        metrics=["faithfulness", "answer_relevance"],
+                        timeout=30,
+                    )
+                    scores.append(s)
+                    if not args.json and (i + 1) % 10 == 0:
+                        print(f"  {i + 1}/{len(cases)} scored")
+                except Exception as e:
+                    sys.stderr.write(f"ragas_judge failed on {i}: {e}\n")
+            ragas_agg = _ragas_agg(scores)
+        except Exception as e:
+            sys.stderr.write(f"ragas_judge wiring failed: {e}\n")
+
     mode_parts = []
     if args.hyde:
         mode_parts.append("hyde")
@@ -289,6 +345,8 @@ def main() -> int:
         "baseline": {k: v for k, v in baseline.items() if k != "per_test"},
         "v2": {k: v for k, v in v2.items() if k != "per_test"},
     }
+    if ragas_agg:
+        report["ragas"] = ragas_agg
 
     if args.json:
         print(json.dumps(report, indent=2))

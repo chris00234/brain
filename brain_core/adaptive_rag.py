@@ -66,11 +66,18 @@ _SIMPLE_PATTERNS = re.compile(
 # these false-fired on substrings like `차이점`/`비교적`/`변화에`). Kept the
 # explicit comparison lexicon and the multi-character "차이점은"/"장단점" forms
 # that are unambiguous comparison signals.
+
+# M8.7: split into STRONG (unambiguous compare/vs) vs WEAK (pattern that
+# needs supporting signal to promote). Strong patterns score 3 → promote on
+# their own. Weak patterns score 2 → need temporal/multi_clause/long_query
+# to reach MULTI_THRESHOLD=3.
+_MULTI_STRONG_PATTERNS = re.compile(
+    r"\b(compare|contrast|vs|versus|trade.?off|pros and cons)\b|" r"(차이점은|장단점|어떻게 다른|뭐가 다른)",
+    re.IGNORECASE,
+)
 _MULTI_PATTERNS = re.compile(
-    r"\b(compare|contrast|differences?|both|either|neither|"
-    r"vs|versus|trade.?off|pros and cons|why does|why is|"
-    r"what changed|what's changed|how has|how have)\b|"
-    r"(차이점은|장단점|어떻게 다른|뭐가 다른)",
+    r"\b(differences?|both|either|neither|why does|why is|"
+    r"what changed|what's changed|how has|how have)\b",
     re.IGNORECASE,
 )
 
@@ -109,7 +116,13 @@ def classify(query: str) -> QueryClass:
 
     # Strong MULTI signals first — comparison, reasoning, multi-clause
     multi_score = 0
-    if _MULTI_PATTERNS.search(q):
+    # M8.7: explicit compare/vs words are unambiguous — weight 3 so they
+    # alone promote to MULTI without needing a secondary signal. Other
+    # patterns (what changed, why) stay at weight 2 so they need support.
+    if _MULTI_STRONG_PATTERNS.search(q):
+        multi_score += 3
+        reasons.append("multi_strong_pattern")
+    elif _MULTI_PATTERNS.search(q):
         multi_score += 2
         reasons.append("multi_pattern")
     if _MULTI_TEMPORAL.search(q):

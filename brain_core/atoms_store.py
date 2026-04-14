@@ -89,6 +89,7 @@ CREATE TABLE IF NOT EXISTS atoms (
   valid_from          TEXT NOT NULL,
   valid_until         TEXT,
   provenance_json     TEXT NOT NULL DEFAULT '{}',
+  parent_atom_id      TEXT,
   created_at          TEXT NOT NULL,
   updated_at          TEXT NOT NULL
 );
@@ -99,6 +100,7 @@ CREATE INDEX IF NOT EXISTS idx_atoms_raw_event   ON atoms(raw_event_id);
 CREATE INDEX IF NOT EXISTS idx_atoms_version_of  ON atoms(version_of);
 CREATE INDEX IF NOT EXISTS idx_atoms_canonical   ON atoms(canonical) WHERE canonical = 1;
 CREATE INDEX IF NOT EXISTS idx_atoms_simhash     ON atoms(simhash) WHERE simhash IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_atoms_parent_id   ON atoms(parent_atom_id) WHERE parent_atom_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS entities (
   id              TEXT PRIMARY KEY,
@@ -284,9 +286,16 @@ def upsert_atom(
     valid_from: str | None = None,
     valid_until: str | None = None,
     provenance: dict | None = None,
+    parent_atom_id: str | None = None,
     db_path: Path | None = None,
 ) -> str | None:
-    """Insert or update an atom row. Returns atom id or None if disabled / failed."""
+    """Insert or update an atom row. Returns atom id or None if disabled / failed.
+
+    M8.7: `parent_atom_id` wires to the brain_db@6 column added for
+    parent-child chunking. Child atoms set this to the id of their parent
+    atom (a larger-context chunk); retrieval paths can swap in parent context
+    when the child wins the rank.
+    """
     if not BRAIN_ATOMS_ENABLED:
         return None
     if not text or not chroma_id:
@@ -307,8 +316,8 @@ def upsert_atom(
                 "(id, text, kind, confidence, tier, canonical, version_of, "
                 " distilled_by, quality_score, raw_event_id, chroma_id, "
                 " collection_hint, valid_from, valid_until, provenance_json, "
-                " created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                " parent_atom_id, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(id) DO UPDATE SET "
                 "  text=excluded.text, "
                 "  kind=excluded.kind, "
@@ -323,6 +332,7 @@ def upsert_atom(
                 "  valid_from=excluded.valid_from, "
                 "  valid_until=excluded.valid_until, "
                 "  provenance_json=excluded.provenance_json, "
+                "  parent_atom_id=COALESCE(excluded.parent_atom_id, atoms.parent_atom_id), "
                 "  updated_at=excluded.updated_at",
                 (
                     atom_id,
@@ -340,6 +350,7 @@ def upsert_atom(
                     valid_from,
                     valid_until,
                     json.dumps(provenance or {}),
+                    parent_atom_id,
                     now,
                     now,
                 ),
