@@ -4610,6 +4610,42 @@ def get_atom_detail(atom_id: str) -> dict:
         raise HTTPException(status_code=500, detail=str(e)[:200])
 
 
+@app.get(
+    "/brain/atoms/{atom_id}/history",
+    tags=["atoms"],
+    dependencies=[Depends(verify_bearer)],
+)
+def get_atom_confidence_history(atom_id: str, limit: int = 50) -> dict:
+    """Phase N2: return the append-only atom_evidence ledger for an atom.
+
+    Every row = one observation that shifted the atom's confidence
+    (corroborate / contradict / reinforce / retrieval_hit / retrieval_miss
+    / manual). Most-recent first. The ledger is reversible via
+    rollback_confidence — see cli/backfill_atom_evidence.py for the
+    one-shot baseline writer used for pre-N2 atoms.
+    """
+    try:
+        from brain_core.atoms_store import (
+            BRAIN_ATOMS_ENABLED,
+            get_confidence_history,
+        )
+
+        if not BRAIN_ATOMS_ENABLED:
+            raise HTTPException(status_code=503, detail="atoms not enabled")
+        if limit < 1 or limit > 500:
+            raise HTTPException(status_code=400, detail="limit must be 1-500")
+        history = get_confidence_history(atom_id, limit=limit)
+        return {
+            "atom_id": atom_id,
+            "count": len(history),
+            "history": history,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)[:200])
+
+
 @app.get("/brain/trace/{note_id}", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
 def trace_provenance(note_id: str, max_depth: int = 3) -> dict:
     """Trace relation chains from a canonical note."""
