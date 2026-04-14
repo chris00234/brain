@@ -104,11 +104,15 @@ def test_upsert_atom_roundtrip(enabled_atoms):
 
 
 def test_upsert_idempotent(enabled_atoms):
+    # Phase N2: upsert_atom freezes confidence on ON CONFLICT. Re-upserting
+    # still updates text/kind/etc., but confidence is immutable from this
+    # code path. update_atom_confidence is the ONLY mover — see
+    # test_confidence_evidence.py::test_upsert_atom_freezes_confidence_on_conflict.
     enabled_atoms.upsert_atom(text="v1", chroma_id="x:1", confidence=0.5)
     enabled_atoms.upsert_atom(text="v2", chroma_id="x:1", confidence=0.7)
     fetched = enabled_atoms.get_atom_by_chroma_id("x:1")
     assert fetched["text"] == "v2"
-    assert fetched["confidence"] == 0.7
+    assert fetched["confidence"] == 0.5, "upsert must NOT overwrite confidence"
     counts = enabled_atoms.count_atoms()
     assert counts["atoms_total"] == 1
 

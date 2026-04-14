@@ -755,6 +755,30 @@ def check_contradictions_for_memory(
         except Exception:
             pass
 
+        # Phase N2: shift the LOSER atom's confidence down via the evidence
+        # ledger. Contradict = logit -1.0, scaled by cluster size so one
+        # contradictory observation among k near-duplicate atoms only counts
+        # as 1/k (Kuhn). Best-effort — update_atom_confidence is disabled
+        # until brain_db migrates to @7.
+        try:
+            from atoms_store import (
+                cluster_size_for as _cluster_size,
+                derive_atom_id as _derive_atom_id,
+                update_atom_confidence as _uac,
+            )
+
+            loser_atom_id = _derive_atom_id(other_id)
+            cluster = _cluster_size(other_id, embedding)
+            _uac(
+                atom_id=loser_atom_id,
+                event_type="contradict",
+                weight=-1.0,
+                evidence_ref=_derive_atom_id(mem_id),
+                cluster_size=cluster,
+            )
+        except Exception:
+            pass
+
         new_conf = float(confidence or 0.5)
         old_conf = float((other_meta or {}).get("confidence", 0.5))
         new_time = created_at or ""

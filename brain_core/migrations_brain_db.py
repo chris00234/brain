@@ -37,7 +37,7 @@ except ImportError as e:
 # Always register at the latest version — migrations are idempotent and safe
 # to run on every startup. Without this, a brain restart after a manual migrate
 # would hit downgrade-refused on subsequent restarts (db v3 vs code v0).
-CURRENT_VERSIONS["brain_db"] = 6
+CURRENT_VERSIONS["brain_db"] = 7
 
 
 def _safe_int(v: object, default: int = 0) -> int:
@@ -427,6 +427,51 @@ def _add_atoms_parent_id() -> dict:
         conn.commit()
         final_cols = {r[1] for r in conn.execute("PRAGMA table_info(atoms)").fetchall()}
         return {"columns_includes_parent": "parent_atom_id" in final_cols}
+    finally:
+        conn.close()
+
+
+# ──────────────────────────────────────────────────────────────────────
+# brain_db@7 — Phase N2: mutable Bayesian confidence ledger (atom_evidence)
+# ──────────────────────────────────────────────────────────────────────
+
+
+_N2_DDL = """
+CREATE TABLE IF NOT EXISTS atom_evidence (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  atom_id       TEXT NOT NULL REFERENCES atoms(id) ON DELETE CASCADE,
+  event_type    TEXT NOT NULL,
+  weight        REAL NOT NULL,
+  evidence_ref  TEXT,
+  cluster_size  INTEGER NOT NULL DEFAULT 1,
+  created_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_atom_evidence_atom    ON atom_evidence(atom_id);
+CREATE INDEX IF NOT EXISTS idx_atom_evidence_type_ts ON atom_evidence(event_type, created_at);
+"""
+
+
+@migration("brain_db", 6, 7)
+def _add_atom_evidence() -> dict:
+    """Add atom_evidence append-only ledger for Phase N2 mutable Bayesian
+    confidence. Every observation that moves an atom's confidence lands here
+    so updates are reversible (ROME principle) and Kuhn cluster-size
+    normalization is auditable.
+
+    Idempotent — uses CREATE TABLE IF NOT EXISTS.
+    """
+    conn = _connect_brain_db()
+    try:
+        conn.executescript(_N2_DDL)
+        conn.commit()
+        cols = {
+            r[1] for r in conn.execute("PRAGMA table_info(atom_evidence)").fetchall()
+        }
+        return {"table_created": "atom_evidence" in {
+            r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='atom_evidence'"
+            ).fetchall()
+        }, "columns": sorted(cols)}
     finally:
         conn.close()
 

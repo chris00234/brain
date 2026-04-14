@@ -23,9 +23,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import sqlite3
 import sys
 import threading
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -154,6 +156,21 @@ CREATE INDEX IF NOT EXISTS idx_action_audit_session ON action_audit(session_id);
 CREATE INDEX IF NOT EXISTS idx_action_audit_pending ON action_audit(outcome) WHERE outcome IS NULL;
 CREATE INDEX IF NOT EXISTS idx_action_audit_actor_ts ON action_audit(actor, created_at);
 CREATE INDEX IF NOT EXISTS idx_action_audit_tool_ts  ON action_audit(tool,  created_at);
+
+-- Phase N2 (brain_db@7): mutable Bayesian confidence ledger. One row per
+-- observation that shifted an atom's confidence. Append-only + reversible
+-- (ROME principle). cluster_size is the Kuhn semantic-uncertainty normalizer.
+CREATE TABLE IF NOT EXISTS atom_evidence (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  atom_id       TEXT NOT NULL REFERENCES atoms(id) ON DELETE CASCADE,
+  event_type    TEXT NOT NULL,
+  weight        REAL NOT NULL,
+  evidence_ref  TEXT,
+  cluster_size  INTEGER NOT NULL DEFAULT 1,
+  created_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_atom_evidence_atom    ON atom_evidence(atom_id);
+CREATE INDEX IF NOT EXISTS idx_atom_evidence_type_ts ON atom_evidence(event_type, created_at);
 """
 
 
@@ -333,6 +350,11 @@ def upsert_atom(
                 "  valid_until=excluded.valid_until, "
                 "  provenance_json=excluded.provenance_json, "
                 "  parent_atom_id=COALESCE(excluded.parent_atom_id, atoms.parent_atom_id), "
+                # Phase N2: DO NOT touch confidence via upsert_atom. The only
+                # path that moves confidence is update_atom_confidence() — which
+                # writes an atom_evidence ledger row in the same transaction,
+                # keeping every shift auditable and reversible.
+                "  confidence=atoms.confidence, "
                 "  updated_at=excluded.updated_at",
                 (
                     atom_id,
@@ -465,6 +487,226 @@ def get_atom_by_chroma_id(chroma_id: str, *, db_path: Path | None = None) -> dic
             return dict(row) if row else None
     except sqlite3.Error:
         return None
+
+
+# ── Phase N2: mutable Bayesian confidence ledger ────────────────────────
+
+_CONFIDENCE_MIN = 0.02
+_CONFIDENCE_MAX = 0.98
+_ALLOWED_EVIDENCE_EVENTS = frozenset(
+    {"corroborate", "contradict", "reinforce", "retrieval_hit", "retrieval_miss", "manual"}
+)
+
+
+def _conf_to_logit(p: float) -> float:
+    p = max(_CONFIDENCE_MIN, min(_CONFIDENCE_MAX, float(p)))
+    return math.log(p / (1.0 - p))
+
+
+def _logit_to_conf(logit: float) -> float:
+    prob = 1.0 / (1.0 + math.exp(-logit))
+    return max(_CONFIDENCE_MIN, min(_CONFIDENCE_MAX, prob))
+
+
+def update_atom_confidence(
+    atom_id: str,
+    event_type: str,
+    weight: float,
+    evidence_ref: str | None = None,
+    cluster_size: int = 1,
+    *,
+    db_path: Path | None = None,
+) -> dict | None:
+    """Phase N2: localized, reversible confidence update.
+
+    Logit-space shift: `new_logit = old_logit + weight / max(1, cluster_size)`.
+    Kuhn semantic uncertainty — dividing by the cluster size normalizes the
+    evidence so a single observation among k near-duplicates counts as 1/k.
+    Clamps to [_CONFIDENCE_MIN, _CONFIDENCE_MAX] so sigmoid never saturates.
+
+    Writes one append-only row to atom_evidence AND updates atoms.confidence
+    in the SAME transaction — if either leg fails, both roll back and the
+    confidence stays stable. Caller gets back `{atom_id, old_conf, new_conf,
+    evidence_id}` on success or None on failure / disabled.
+    """
+    if not BRAIN_ATOMS_ENABLED:
+        return None
+    if event_type not in _ALLOWED_EVIDENCE_EVENTS:
+        return None
+    denom = max(1, int(cluster_size or 1))
+    effective_weight = float(weight) / denom
+    try:
+        with _conn(db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT confidence FROM atoms WHERE id = ?", (atom_id,)
+            ).fetchone()
+            if not row:
+                conn.rollback()
+                return None
+            old_conf = float(row["confidence"] or 0.5)
+            new_logit = _conf_to_logit(old_conf) + effective_weight
+            new_conf = _logit_to_conf(new_logit)
+            cur = conn.execute(
+                "INSERT INTO atom_evidence "
+                "(atom_id, event_type, weight, evidence_ref, cluster_size, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (atom_id, event_type, float(weight), evidence_ref, denom, _now()),
+            )
+            evidence_id = cur.lastrowid
+            conn.execute(
+                "UPDATE atoms SET confidence = ?, updated_at = ? WHERE id = ?",
+                (new_conf, _now(), atom_id),
+            )
+            conn.commit()
+            return {
+                "atom_id": atom_id,
+                "old_conf": round(old_conf, 4),
+                "new_conf": round(new_conf, 4),
+                "evidence_id": evidence_id,
+            }
+    except sqlite3.Error:
+        return None
+
+
+def get_confidence_history(
+    atom_id: str, *, limit: int = 50, db_path: Path | None = None
+) -> list[dict]:
+    """Return the atom_evidence ledger for an atom, most recent first.
+
+    Caller can audit every logit delta that moved an atom's confidence.
+    Empty list on disabled / unknown atom — never None so callers can
+    iterate unconditionally.
+    """
+    if not BRAIN_ATOMS_ENABLED:
+        return []
+    try:
+        with _conn(db_path) as conn:
+            rows = conn.execute(
+                "SELECT id, event_type, weight, evidence_ref, cluster_size, created_at "
+                "FROM atom_evidence WHERE atom_id = ? ORDER BY id DESC LIMIT ?",
+                (atom_id, int(limit)),
+            ).fetchall()
+            return [dict(r) for r in rows]
+    except sqlite3.Error:
+        return []
+
+
+def rollback_confidence(
+    atom_id: str, back_to_event_id: int = 0, *, db_path: Path | None = None
+) -> dict | None:
+    """Replay the atom_evidence ledger in reverse up to (not including) the
+    given event id. back_to_event_id=0 means "undo every event" — the atom
+    returns to its write-time default confidence 0.5.
+
+    Reversibility is the ROME principle: every confidence shift must be
+    undoable. We compute the target logit by integrating all surviving
+    events' (weight/cluster_size) from the initial 0.5 base, then write
+    that back + log a "manual" rollback audit row.
+    """
+    if not BRAIN_ATOMS_ENABLED:
+        return None
+    try:
+        with _conn(db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            atom = conn.execute(
+                "SELECT confidence FROM atoms WHERE id = ?", (atom_id,)
+            ).fetchone()
+            if not atom:
+                conn.rollback()
+                return None
+            base_logit = _conf_to_logit(0.5)
+            surviving = conn.execute(
+                "SELECT weight, cluster_size FROM atom_evidence "
+                "WHERE atom_id = ? AND id < ? ORDER BY id ASC",
+                (atom_id, int(back_to_event_id) or 0),
+            ).fetchall()
+            replay_logit = base_logit + sum(
+                (r["weight"] / max(1, r["cluster_size"])) for r in surviving
+            )
+            new_conf = _logit_to_conf(replay_logit)
+            conn.execute(
+                "UPDATE atoms SET confidence = ?, updated_at = ? WHERE id = ?",
+                (new_conf, _now(), atom_id),
+            )
+            conn.execute(
+                "INSERT INTO atom_evidence "
+                "(atom_id, event_type, weight, evidence_ref, cluster_size, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    atom_id,
+                    "manual",
+                    0.0,
+                    f"rollback_to:{back_to_event_id}",
+                    1,
+                    _now(),
+                ),
+            )
+            conn.commit()
+            return {"atom_id": atom_id, "new_conf": round(new_conf, 4), "replayed": len(surviving)}
+    except sqlite3.Error:
+        return None
+
+
+# Kuhn cluster-size cache: (chroma_id) → (size, inserted_at). 5-min TTL.
+_CLUSTER_SIZE_CACHE: dict[str, tuple[int, float]] = {}
+_CLUSTER_SIZE_TTL = 300.0
+
+
+def cluster_size_for(
+    chroma_id: str,
+    embedding: list[float] | None = None,
+    *,
+    threshold: float = 0.92,
+    db_path: Path | None = None,
+) -> int:
+    """Count near-duplicate atoms (Kuhn semantic uncertainty normalizer).
+
+    Counts ``atoms`` rows with matching chroma_id entries that land within
+    ``threshold`` cosine similarity in semantic_memory. Returns 1 on empty
+    corpus or any error — the update path multiplies by 1/size so a
+    conservative 1 floor means "no normalization".
+
+    LRU-cached by chroma_id for 5 minutes to keep POST /memory latency
+    within SLO — the probe would otherwise add ~15-30ms per write.
+    """
+    if not BRAIN_ATOMS_ENABLED or not chroma_id:
+        return 1
+    now_ts = time.time()
+    cached = _CLUSTER_SIZE_CACHE.get(chroma_id)
+    if cached and (now_ts - cached[1]) < _CLUSTER_SIZE_TTL:
+        return cached[0]
+
+    if embedding is None:
+        _CLUSTER_SIZE_CACHE[chroma_id] = (1, now_ts)
+        return 1
+
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from indexer import _get_collection_id, chroma_api  # noqa: E402
+
+        col_id = _get_collection_id("semantic_memory")
+        if not col_id:
+            _CLUSTER_SIZE_CACHE[chroma_id] = (1, now_ts)
+            return 1
+        res = chroma_api(
+            "POST",
+            f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/query",
+            {
+                "query_embeddings": [embedding],
+                "n_results": 10,
+                "include": ["distances"],
+            },
+        )
+        dists = (res.get("distances") or [[]])[0]
+        limit_dist = 1.0 - threshold  # cosine distance threshold
+        size = sum(1 for d in dists if d <= limit_dist)
+        size = max(1, size)
+        _CLUSTER_SIZE_CACHE[chroma_id] = (size, now_ts)
+        return size
+    except Exception:
+        _CLUSTER_SIZE_CACHE[chroma_id] = (1, now_ts)
+        return 1
 
 
 def count_atoms(*, db_path: Path | None = None) -> dict[str, int]:

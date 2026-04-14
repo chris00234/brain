@@ -2862,6 +2862,7 @@ def create_memory(request: Request, req: MemoryCreateRequest) -> MemoryEntry:
     # Phase N1: hot-path contradiction detection. Same heuristic as /learn,
     # runs inline so manual writes don't silently pollute retrieval. Killable
     # via BRAIN_CONTRADICT_ON_WRITE=0 without touching code paths.
+    contradictions: list[dict] = []
     if os.environ.get("BRAIN_CONTRADICT_ON_WRITE", "1") != "0":
         try:
             contradictions = learn.check_contradictions_for_memory(
@@ -2883,6 +2884,57 @@ def create_memory(request: Request, req: MemoryCreateRequest) -> MemoryEntry:
                     }
                     for c in contradictions
                 ]
+        except Exception:
+            pass
+
+    # Phase N2: corroboration probe — if the new memory is a near-duplicate of
+    # siblings that the contradiction check did NOT flag (i.e. they share
+    # intent, not conflict), bump their confidence up via the evidence ledger.
+    # Bounded to at most 3 sibling bumps per write so the O(n) probe stays
+    # cheap and POST /memory p95 doesn't regress. Gated by
+    # BRAIN_CORROBORATE_ON_WRITE (default on). Any exception is swallowed —
+    # N2 is best-effort while brain_db migrates to @7.
+    if os.environ.get("BRAIN_CORROBORATE_ON_WRITE", "1") != "0":
+        try:
+            contradict_old_ids = {c["old_id"] for c in (contradictions or [])}
+            res = _chroma_api(
+                "POST",
+                f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/query",
+                {
+                    "query_embeddings": [embedding],
+                    "n_results": 5,
+                    "include": ["metadatas", "distances"],
+                },
+            )
+            sibling_ids = (res.get("ids") or [[]])[0]
+            sibling_dists = (res.get("distances") or [[]])[0]
+            sibling_metas = (res.get("metadatas") or [[]])[0]
+            from brain_core.atoms_store import (
+                cluster_size_for as _cluster_size,
+                derive_atom_id as _derive_atom_id,
+                update_atom_confidence as _uac,
+            )
+            bumped = 0
+            for sib_id, sib_dist, sib_meta in zip(
+                sibling_ids, sibling_dists, sibling_metas
+            ):
+                if bumped >= 3:
+                    break
+                if sib_id == mem_id or sib_id in contradict_old_ids:
+                    continue
+                if sib_dist > 0.20:
+                    continue
+                if (sib_meta or {}).get("category") != req.category:
+                    continue
+                cluster = _cluster_size(sib_id, embedding)
+                _uac(
+                    atom_id=_derive_atom_id(sib_id),
+                    event_type="corroborate",
+                    weight=0.5,
+                    evidence_ref=_derive_atom_id(mem_id),
+                    cluster_size=cluster,
+                )
+                bumped += 1
         except Exception:
             pass
 
