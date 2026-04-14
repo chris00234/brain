@@ -1,0 +1,103 @@
+# Brain — composable local deployment.
+#
+# Brings up the brain service alongside its three storage backends.
+# This is a deployment template — Chris's primary box runs everything natively
+# via launchd for performance, but this compose file proves the brain can be
+# stood up on a fresh Linux machine in one command.
+#
+# Usage:
+#   docker compose up -d
+#   docker compose logs -f brain
+#   docker compose down
+#
+# Bearer secret + brain DBs are mounted from the host so state survives
+# container restarts.
+
+services:
+  chromadb:
+    image: chromadb/chroma:latest
+    container_name: brain-chromadb
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - chroma-data:/chroma/chroma
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/api/v2/heartbeat"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: brain-ollama
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    # On Apple Silicon hosts Chris runs Ollama natively to use the GPU/NE;
+    # this Linux fallback uses CPU. Add --gpus=all if you have NVIDIA.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  neo4j:
+    image: neo4j:5-community
+    container_name: brain-neo4j
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:7474:7474"  # HTTP browser
+      - "127.0.0.1:7687:7687"  # Bolt
+    environment:
+      NEO4J_AUTH: none
+      NEO4J_PLUGINS: '["apoc"]'
+      NEO4J_dbms_memory_heap_max__size: 512m
+      NEO4J_dbms_memory_pagecache_size: 256m
+    volumes:
+      - neo4j-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://127.0.0.1:7474 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  brain:
+    build: .
+    image: brain:latest
+    container_name: brain-server
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8791:8791"
+    environment:
+      BRAIN_AUTOPILOT_DISABLED: "1"  # safe first boot — flip to 0 after testing
+      BRAIN_ATOMS_ENABLED: "true"
+      BRAIN_ATOMS_READ: "true"
+      CHROMA_HOST: chromadb
+      OLLAMA_HOST: ollama
+      NEO4J_URI: bolt://neo4j:7687
+    volumes:
+      - ./logs:/app/logs
+      - ./brain.db:/app/brain.db
+      - ${HOME}/.openclaw/credentials:/credentials:ro
+    depends_on:
+      chromadb:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+      neo4j:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8791/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  chroma-data:
+  ollama-data:
+  neo4j-data:
