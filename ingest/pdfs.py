@@ -48,6 +48,13 @@ from indexer import (  # noqa: E402
     _get_collection_id,
 )
 
+# M8.2: optional semantic chunking. Module-level kill switch via
+# BRAIN_SEMANTIC_CHUNKING env var. Falls back to indexer.chunk_text otherwise.
+try:
+    from semantic_chunk import chunk_with_fallback  # noqa: E402
+except Exception:
+    chunk_with_fallback = None  # type: ignore[assignment]
+
 log = logging.getLogger("brain.ingest.pdfs")
 
 KNOWLEDGE_COLLECTION = "knowledge"
@@ -136,21 +143,29 @@ def _parse_pdf_to_markdown(pdf_path: Path, max_pages: int = MAX_PAGES_DEFAULT) -
 
 
 def _chunk_markdown(markdown: str, source: str) -> list[dict]:
-    """Use indexer.chunk_text — same pipeline as other ingest sources.
+    """Chunk a markdown document. Uses semantic chunking when
+    BRAIN_SEMANTIC_CHUNKING=1, falls back to indexer.chunk_text otherwise.
 
-    indexer.chunk_text returns a list of dicts of shape
-    `{"content": str, "section": str}`. We extract the `content` field and
-    re-wrap with our pdf-source metadata.
+    Returns list of `{"content": str, "metadata": dict}` records.
     """
-    raw_chunks = chunk_text(markdown, max_size=CHUNK_SIZE)
+    if chunk_with_fallback is not None:
+        raw_chunks = chunk_with_fallback(markdown, max_size=CHUNK_SIZE)
+    else:
+        raw_chunks = chunk_text(markdown, max_size=CHUNK_SIZE)
     out: list[dict] = []
     for i, raw in enumerate(raw_chunks):
         if isinstance(raw, dict):
             content_str = raw.get("content", "")
             section = raw.get("section", "")
+            chunk_id = raw.get("chunk_id", "")
+            parent_id = raw.get("parent_id")
+            is_parent = raw.get("is_parent", False)
         else:
             content_str = str(raw)
             section = ""
+            chunk_id = ""
+            parent_id = None
+            is_parent = False
         if not content_str.strip():
             continue
         out.append(
@@ -162,6 +177,9 @@ def _chunk_markdown(markdown: str, source: str) -> list[dict]:
                     "chunk_index": i,
                     "total_chunks": len(raw_chunks),
                     "section": section,
+                    "chunk_id": chunk_id,
+                    "parent_id": parent_id,
+                    "is_parent": is_parent,
                 },
             }
         )

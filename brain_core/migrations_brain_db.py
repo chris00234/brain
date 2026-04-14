@@ -37,7 +37,7 @@ except ImportError as e:
 # Always register at the latest version — migrations are idempotent and safe
 # to run on every startup. Without this, a brain restart after a manual migrate
 # would hit downgrade-refused on subsequent restarts (db v3 vs code v0).
-CURRENT_VERSIONS["brain_db"] = 5
+CURRENT_VERSIONS["brain_db"] = 6
 
 
 def _safe_int(v: object, default: int = 0) -> int:
@@ -398,6 +398,37 @@ def _create_web_search_tables() -> dict:
 # ──────────────────────────────────────────────────────────────────────
 # brain_db@5 — Phase M7 WS8: per-actor adoption tracking on action_audit
 # ──────────────────────────────────────────────────────────────────────
+
+
+# ──────────────────────────────────────────────────────────────────────
+# brain_db@6 — Phase M8.2: parent-child chunking on atoms
+# ──────────────────────────────────────────────────────────────────────
+
+
+@migration("brain_db", 5, 6)
+def _add_atoms_parent_id() -> dict:
+    """Add parent_atom_id column to atoms for parent-child chunking (M8.2).
+
+    Children point at their parent atom via this column. Search returns the
+    child for retrieval precision; the recall handler can swap in the parent
+    for context width when configured.
+
+    Idempotent — checks pragma table_info first.
+    """
+    conn = _connect_brain_db()
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(atoms)").fetchall()}
+        if "parent_atom_id" not in cols:
+            conn.execute("ALTER TABLE atoms ADD COLUMN parent_atom_id TEXT")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_atoms_parent_id "
+                "ON atoms(parent_atom_id) WHERE parent_atom_id IS NOT NULL"
+            )
+        conn.commit()
+        final_cols = {r[1] for r in conn.execute("PRAGMA table_info(atoms)").fetchall()}
+        return {"columns_includes_parent": "parent_atom_id" in final_cols}
+    finally:
+        conn.close()
 
 
 @migration("brain_db", 4, 5)
