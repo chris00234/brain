@@ -36,6 +36,9 @@ BRAIN_ROOT = Path("/Users/chrischo/server/brain")
 EVAL_COMPARE = BRAIN_ROOT / "cli" / "eval_compare.py"
 DEFAULT_EVAL_SET = BRAIN_ROOT / "cli" / "eval_set.json"
 DEFAULT_BASELINE = BRAIN_ROOT / "cli" / "eval_baseline.json"
+PENDING_HOLDOUT = BRAIN_ROOT / "cli" / "eval_holdout_pending.json"
+SECRET_FILE = Path("/Users/chrischo/.openclaw/credentials/.personal_webhook_secret")
+BRAIN_URL = "http://127.0.0.1:8791"
 OPENCLAW_BIN = "/Users/chrischo/.local/bin/openclaw"
 TELEGRAM_CHAT_ID = "8484060831"
 TELEGRAM_ACCOUNT = "jenna-bot"
@@ -304,8 +307,87 @@ def main() -> int:
     except Exception as e:
         print(f"[eval_gate] baseline age check failed: {e}", file=sys.stderr)
 
+    # Phase N3: also score pending holdout candidates against the live brain
+    # and record each outcome into eval_holdout_lifecycle. After 4 passing
+    # runs at >=75% ratio, auto_graduate (Sun 7:30) will merge them into the
+    # stable set. Best-effort — any failure is logged but does not fail the
+    # main eval_gate run.
+    try:
+        _score_holdout_candidates()
+    except Exception as exc:
+        print(f"[eval_gate] holdout scoring failed: {exc}", file=sys.stderr)
+
     print(f"[eval_gate] PASS (within {args.threshold}pts threshold)")
     return 0
+
+
+def _score_holdout_candidates() -> None:
+    """Phase N3: run each pending holdout candidate against /recall/v2 and
+    record pass/fail via eval_holdout_promote.record_eval_result().
+
+    Pass rule (mirrors eval_compare's strict content_hit):
+      the expected_content substring appears in any of the top-5 retrieved
+      contents OR any entry in expected_alternates matches.
+    """
+    if not PENDING_HOLDOUT.exists():
+        return
+    try:
+        pending = json.loads(PENDING_HOLDOUT.read_text())
+    except Exception:
+        return
+    if not isinstance(pending, list) or not pending:
+        return
+    if not SECRET_FILE.exists():
+        print("[eval_gate] no secret — skipping holdout scoring", file=sys.stderr)
+        return
+    token = SECRET_FILE.read_text().strip()
+
+    try:
+        from eval_holdout_promote import record_eval_result
+    except Exception as exc:
+        print(f"[eval_gate] record_eval_result unavailable: {exc}", file=sys.stderr)
+        return
+
+    import urllib.parse
+    import urllib.request
+
+    scored = passed = 0
+    for cand in pending:
+        if not isinstance(cand, dict):
+            continue
+        cid = cand.get("id")
+        q = cand.get("query") or ""
+        expected = (cand.get("expected") or "").strip().lower()
+        if not cid or not q or not expected:
+            continue
+        path = "/recall/v2?" + urllib.parse.urlencode({"q": q, "n": "5"})
+        req = urllib.request.Request(
+            BRAIN_URL + path,
+            headers={"Authorization": f"Bearer {token}", "x-agent": "eval_gate"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:  # noqa: S310
+                payload = json.loads(resp.read().decode())
+        except Exception:
+            continue
+        results = payload.get("results", [])[:5]
+        alternates = [
+            (a or "").strip().lower()
+            for a in (cand.get("expected_alternates") or [])
+            if isinstance(a, str)
+        ]
+        forms = [expected] + [a for a in alternates if a]
+        hit = False
+        for r in results:
+            content = (r.get("content") or "").lower()
+            if any(form in content for form in forms):
+                hit = True
+                break
+        record_eval_result(cid, hit)
+        scored += 1
+        if hit:
+            passed += 1
+    print(f"[eval_gate] holdout scored: {scored} candidates, {passed} passed")
 
 
 if __name__ == "__main__":

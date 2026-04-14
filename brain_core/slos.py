@@ -111,6 +111,49 @@ SLOS: dict[str, SLO] = {
         metric_unit="proposals",
         consecutive_breaches_required=1,
     ),
+    # Phase N2 watcher — confidence "pancake" detector. The Bayesian ledger
+    # can silently collapse every atom's confidence to the clamp boundaries
+    # if the logit-space math is miscalibrated. stddev < 0.05 = every atom
+    # is at ~0.02 or ~0.98 with nothing in between.
+    "atoms_confidence_stddev_1d": SLO(
+        name="atoms_confidence_stddev_1d",
+        description="Population stddev of non-obsolete atoms.confidence (pancake detector)",
+        target=0.05,  # breach when BELOW
+        severity="warning",
+        metric_unit="stddev",
+        consecutive_breaches_required=2,
+    ),
+    # Phase N4 watcher — sleep_consolidate wall-clock. Alert if the job
+    # starts creeping past 2 minutes — usually means atom_coactivation is
+    # approaching the O(n²) cap or the A-MEM step is linking too aggressively.
+    "sleep_cycles_duration_1d_p95": SLO(
+        name="sleep_cycles_duration_1d_p95",
+        description="P95 wall-clock duration of sleep_consolidate over last 24h",
+        target=120.0,
+        severity="warning",
+        metric_unit="seconds",
+        consecutive_breaches_required=1,
+    ),
+    # Phase N3 watcher — runaway auto-graduation. Weekly cap is 5; if this
+    # ever hits 6+ we're double-graduating or the lifecycle db is corrupt.
+    "holdout_auto_graduation_7d": SLO(
+        name="holdout_auto_graduation_7d",
+        description="Count of holdout candidates auto-graduated in last 7 days (cap is 5)",
+        target=5.0,
+        severity="warning",
+        metric_unit="candidates",
+        consecutive_breaches_required=1,
+    ),
+    # Phase N4 watcher — coactivation table size. Emergency cap is 100k;
+    # warn at 50k so we catch the explosion before the job's own skip kicks in.
+    "atom_coactivation_rowcount": SLO(
+        name="atom_coactivation_rowcount",
+        description="Total rows in atom_coactivation (emergency cap = 100k)",
+        target=50_000.0,
+        severity="warning",
+        metric_unit="rows",
+        consecutive_breaches_required=1,
+    ),
 }
 
 
@@ -208,6 +251,93 @@ def _measure_eval_holdout_growth() -> float:
         return 0.0
 
 
+def _measure_atoms_confidence_stddev() -> float:
+    """Phase N2 pancake detector. Returns the population stddev of
+    atoms.confidence across non-obsolete atoms. If the Bayesian ledger
+    collapses everything to [0.02, 0.98], stddev drops below ~0.05 and
+    the SLO fires.
+    """
+    try:
+        conn = sqlite3.connect(str(BRAIN_DB))
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*), AVG(confidence), "
+                "SUM(confidence * confidence) "
+                "FROM atoms WHERE tier != 'obsolete'"
+            ).fetchone()
+            if not row or not row[0]:
+                return 0.5
+            n, mean, sum_sq = row
+            mean = float(mean or 0.0)
+            variance = max(0.0, (float(sum_sq or 0.0) / n) - (mean * mean))
+            return round(variance**0.5, 4)
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return 0.5  # assume healthy on read error — don't page
+
+
+def _measure_sleep_cycles_duration_p95() -> float:
+    """Phase N4 watcher. Reads sleep_cycles rows from the last 24h and
+    computes the p95 of (ended_at - started_at). Returns 0 when no rows
+    exist (no cycles yet = no alert).
+    """
+    try:
+        conn = sqlite3.connect(str(BRAIN_DB))
+        try:
+            rows = conn.execute(
+                "SELECT (julianday(ended_at) - julianday(started_at)) * 86400 AS secs "
+                "FROM sleep_cycles "
+                "WHERE ended_at IS NOT NULL "
+                "AND started_at >= datetime('now', '-1 day') "
+                "ORDER BY secs ASC"
+            ).fetchall()
+            if not rows:
+                return 0.0
+            seconds = [float(r[0] or 0.0) for r in rows]
+            idx = max(0, int(len(seconds) * 0.95) - 1)
+            return round(seconds[idx], 2)
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return 0.0
+
+
+def _measure_holdout_auto_graduation_7d() -> float:
+    """Phase N3 watcher. Count rows in eval_holdout_lifecycle auto_stable_at
+    >= now - 7 days. Sanity check against the weekly cap of 5.
+    """
+    try:
+        conn = sqlite3.connect(str(BRAIN_DB))
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM eval_holdout_lifecycle "
+                "WHERE auto_stable_at IS NOT NULL "
+                "AND auto_stable_at >= datetime('now', '-7 days')"
+            ).fetchone()
+            return float(row[0]) if row else 0.0
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return 0.0
+
+
+def _measure_atom_coactivation_rowcount() -> float:
+    """Phase N4 watcher. Alert when atom_coactivation approaches the 100k
+    emergency cap so we can DELETE WHERE n_events < 2 before the nightly
+    job starts skipping upserts.
+    """
+    try:
+        conn = sqlite3.connect(str(BRAIN_DB))
+        try:
+            row = conn.execute("SELECT COUNT(*) FROM atom_coactivation").fetchone()
+            return float(row[0]) if row else 0.0
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return 0.0
+
+
 _MEASUREMENTS: dict[str, Callable[[], float]] = {
     "recall_v2_p95_ms": _measure_recall_v2_p95,
     "recall_v2_content_hit_pct": _measure_recall_v2_content_hit,
@@ -215,6 +345,10 @@ _MEASUREMENTS: dict[str, Callable[[], float]] = {
     "outbox_pending_count": _measure_outbox_pending,
     "atoms_write_fail_rate_1h": _measure_atoms_write_fail_rate,
     "eval_holdout_growth_weekly": _measure_eval_holdout_growth,
+    "atoms_confidence_stddev_1d": _measure_atoms_confidence_stddev,
+    "sleep_cycles_duration_1d_p95": _measure_sleep_cycles_duration_p95,
+    "holdout_auto_graduation_7d": _measure_holdout_auto_graduation_7d,
+    "atom_coactivation_rowcount": _measure_atom_coactivation_rowcount,
 }
 
 
@@ -222,6 +356,9 @@ def _is_breach(slo: SLO, actual: float) -> bool:
     """SLO direction-aware breach check."""
     if slo.name == "recall_v2_content_hit_pct":
         # Higher is better — breach when below target
+        return actual < slo.target
+    if slo.name == "atoms_confidence_stddev_1d":
+        # Phase N2 pancake — higher is better; breach when below target
         return actual < slo.target
     if slo.name == "eval_holdout_growth_weekly":
         # Info-only — never breach

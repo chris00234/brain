@@ -20,8 +20,8 @@ def slos_module():
     return slos
 
 
-def test_six_slos_defined(slos_module):
-    assert len(slos_module.SLOS) == 6
+def test_slo_count(slos_module):
+    assert len(slos_module.SLOS) == 10  # 6 base + 4 N-series watchers
 
 
 def test_recall_v2_p95_lower_is_better(slos_module):
@@ -68,11 +68,11 @@ def test_check_one_unknown_slo(slos_module):
     assert slos_module.check_one("does_not_exist") is None
 
 
-def test_check_all_returns_six(slos_module, monkeypatch):
+def test_check_all_returns_all(slos_module, monkeypatch):
     for name in slos_module.SLOS:
         monkeypatch.setitem(slos_module._MEASUREMENTS, name, lambda: 0.0)
     results = slos_module.check_all()
-    assert len(results) == 6
+    assert len(results) == 10
 
 
 def test_alert_rate_limited(slos_module, monkeypatch):
@@ -117,6 +117,6 @@ def test_run_returns_summary(slos_module, monkeypatch):
         lambda name, sev, ts: fake_store.__setitem__((name, sev), ts),
     )
     summary = slos_module.run()
-    assert summary["checked"] == 6
+    assert summary["checked"] == 10
     assert "results" in summary
-    assert len(summary["results"]) == 6
+    assert len(summary["results"]) == 10
