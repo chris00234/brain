@@ -70,6 +70,7 @@ log = logging.getLogger("brain.dispatch")
 
 try:
     from config import OPENCLAW_BIN, BRAIN_LOGS_DIR, BRAIN_DISPATCH_CACHE_ENABLED
+
     FAILURE_LOG = BRAIN_LOGS_DIR / "dispatch-failures.jsonl"
 except ImportError:
     OPENCLAW_BIN = "/Users/chrischo/.local/bin/openclaw"
@@ -100,7 +101,14 @@ def _ensure_usage_schema(conn):
         pass  # column already exists
 
 
-def _record_usage(agent: str, duration_ms: int, ok: bool, prompt_tokens: int = 0, response_tokens: int = 0, skipped_cb: bool = False):
+def _record_usage(
+    agent: str,
+    duration_ms: int,
+    ok: bool,
+    prompt_tokens: int = 0,
+    response_tokens: int = 0,
+    skipped_cb: bool = False,
+):
     """Record a dispatch to SQLite for budget monitoring."""
     try:
         LLM_USAGE_DB.parent.mkdir(parents=True, exist_ok=True)
@@ -109,7 +117,15 @@ def _record_usage(agent: str, duration_ms: int, ok: bool, prompt_tokens: int = 0
             _ensure_usage_schema(conn)
             conn.execute(
                 "INSERT INTO llm_usage (timestamp, agent, duration_ms, ok, prompt_tokens, response_tokens, skipped_cb) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (_dt.now().isoformat(), agent, duration_ms, 1 if ok else 0, prompt_tokens, response_tokens, 1 if skipped_cb else 0)
+                (
+                    _dt.now().isoformat(),
+                    agent,
+                    duration_ms,
+                    1 if ok else 0,
+                    prompt_tokens,
+                    response_tokens,
+                    1 if skipped_cb else 0,
+                ),
             )
             conn.commit()
         finally:
@@ -127,21 +143,20 @@ def get_usage_stats(days: int = 30) -> dict:
             _ensure_usage_schema(conn)
             cutoff = (_dt.now() - timedelta(days=days)).isoformat()
             total = conn.execute(
-                "SELECT COUNT(*) FROM llm_usage WHERE timestamp >= ? AND skipped_cb = 0",
-                (cutoff,)
+                "SELECT COUNT(*) FROM llm_usage WHERE timestamp >= ? AND skipped_cb = 0", (cutoff,)
             ).fetchone()[0]
-            per_agent = dict(conn.execute(
-                "SELECT agent, COUNT(*) FROM llm_usage WHERE timestamp >= ? AND skipped_cb = 0 GROUP BY agent",
-                (cutoff,)
-            ).fetchall())
+            per_agent = dict(
+                conn.execute(
+                    "SELECT agent, COUNT(*) FROM llm_usage WHERE timestamp >= ? AND skipped_cb = 0 GROUP BY agent",
+                    (cutoff,),
+                ).fetchall()
+            )
             today_cutoff = _dt.now().strftime("%Y-%m-%d")
             today_count = conn.execute(
-                "SELECT COUNT(*) FROM llm_usage WHERE timestamp >= ? AND skipped_cb = 0",
-                (today_cutoff,)
+                "SELECT COUNT(*) FROM llm_usage WHERE timestamp >= ? AND skipped_cb = 0", (today_cutoff,)
             ).fetchone()[0]
             cb_skipped = conn.execute(
-                "SELECT COUNT(*) FROM llm_usage WHERE timestamp >= ? AND skipped_cb = 1",
-                (cutoff,)
+                "SELECT COUNT(*) FROM llm_usage WHERE timestamp >= ? AND skipped_cb = 1", (cutoff,)
             ).fetchone()[0]
             return {
                 "total": total,
@@ -174,6 +189,7 @@ def purge_old_usage(days: int = 90) -> int:
         log.debug("purge_old_usage failed: %s", e)
         return 0
 
+
 # ── Circuit breaker ──────────────────────────────────────
 _cb_failures = 0
 _cb_open_until = 0.0
@@ -197,6 +213,7 @@ def _dispatch_cache_embed(message: str) -> list[float] | None:
     try:
         sys.path.insert(0, str(Path(__file__).parent))
         from search import get_embedding
+
         return get_embedding(message[:500])
     except Exception:
         return None
@@ -208,6 +225,7 @@ def _dispatch_cache_lookup(message: str) -> str | None:
     if not emb:
         return None
     import math
+
     now = _time.monotonic()
     with _dispatch_cache_lock:
         # Evict expired
@@ -235,9 +253,9 @@ def _dispatch_cache_put(message: str, response_text: str) -> None:
             _dispatch_cache.pop(0)
 
 
-RETRY_DELAYS_SECONDS = (15, 30)               # 2 retries (was 3) — keeps total wall time under 3 min
+RETRY_DELAYS_SECONDS = (15, 30)  # 2 retries (was 3) — keeps total wall time under 3 min
 MAX_ATTEMPTS = len(RETRY_DELAYS_SECONDS) + 1  # 3 attempts total
-MAX_TOTAL_SECONDS = 180                       # hard cap — abort if total time exceeds 3 minutes
+MAX_TOTAL_SECONDS = 180  # hard cap — abort if total time exceeds 3 minutes
 
 # Rate-limit + auth-failure patterns we recognize.
 RATE_LIMIT_PATTERNS = [
@@ -262,12 +280,15 @@ _agent_stats_lock = threading.Lock()
 def _update_agent_stats(agent: str, duration_ms: int, ok: bool, attempts: int):
     """Track per-agent dispatch patterns for active learning."""
     with _agent_stats_lock:
-        s = _agent_stats.setdefault(agent, {
-            "durations": [],
-            "failures": 0,
-            "total": 0,
-            "last_struggle_logged": 0.0,
-        })
+        s = _agent_stats.setdefault(
+            agent,
+            {
+                "durations": [],
+                "failures": 0,
+                "total": 0,
+                "last_struggle_logged": 0.0,
+            },
+        )
         s["total"] += 1
         s["durations"].append(duration_ms)
         if len(s["durations"]) > 50:
@@ -310,6 +331,7 @@ def _check_struggle(agent: str, message: str, duration_ms: int, ok: bool, attemp
 
         try:
             from failure_memory import record_failure_lesson
+
             record_failure_lesson(
                 task_description=message[:300],
                 failure_reason="; ".join(signals),
@@ -323,6 +345,7 @@ def _check_struggle(agent: str, message: str, duration_ms: int, ok: bool, attemp
 @dataclass
 class DispatchResult:
     """Outcome of an openclaw dispatch call."""
+
     ok: bool
     text: str = ""
     error: str = ""
@@ -459,8 +482,14 @@ def dispatch(
             log.warning("circuit breaker open — fast-failing dispatch to %s", agent)
             # Record as skipped_cb so it doesn't inflate failure counts in budget stats
             _record_usage(agent, 0, ok=False, skipped_cb=True)
-            return DispatchResult(ok=False, text="", error="circuit breaker open", attempts=0,
-                                 duration_ms=0, degraded="circuit breaker open")
+            return DispatchResult(
+                ok=False,
+                text="",
+                error="circuit breaker open",
+                attempts=0,
+                duration_ms=0,
+                degraded="circuit breaker open",
+            )
         # Half-open transition: breaker just expired. Reset the failure counter
         # so the next attempt gets a fresh budget rather than tripping instantly
         # the moment it encounters the first error.
@@ -475,26 +504,70 @@ def dispatch(
             result.error = f"total wall time exceeded {MAX_TOTAL_SECONDS}s"
             break
         result.attempts = attempt_index + 1
+        # M9.1 fix: use Popen with preexec_fn=os.setsid so we can SIGKILL the
+        # entire process group on timeout. subprocess.run() with timeout alone
+        # only kills the immediate child — openclaw's agent subcommand spawns
+        # grandchildren (ACP gateway HTTP client) that hold the stdout pipe
+        # open, causing Python's _communicate() to block forever on pipe EOF
+        # even after the parent is SIGKILL'd. This hit eval_relabel twice,
+        # losing multi-hour runs. Process group kill is the only reliable
+        # way to tear down the whole tree.
+        popen = None
         try:
-            proc = subprocess.run(
+            popen = subprocess.Popen(  # noqa: S603
                 [
-                    OPENCLAW_BIN, "agent",
-                    "--agent", agent,
-                    "--message", message,
+                    OPENCLAW_BIN,
+                    "agent",
+                    "--agent",
+                    agent,
+                    "--message",
+                    message,
                     "--json",
-                    "--thinking", thinking,
-                    "--timeout", str(timeout),
+                    "--thinking",
+                    thinking,
+                    "--timeout",
+                    str(timeout),
                 ],
-                capture_output=True, text=True, timeout=timeout + 30,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                start_new_session=True,  # makes popen.pid a process group leader
             )
+            try:
+                stdout, stderr = popen.communicate(timeout=timeout + 30)
+
+                class _ProcLike:
+                    pass
+
+                proc = _ProcLike()
+                proc.returncode = popen.returncode
+                proc.stdout = stdout
+                proc.stderr = stderr
+            except subprocess.TimeoutExpired as e:
+                # Hard-kill the whole process group — don't wait for children
+                try:
+                    import os as _os
+                    import signal as _signal
+
+                    _os.killpg(_os.getpgid(popen.pid), _signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+                # Now drain whatever's left (should unblock after group kill)
+                try:
+                    popen.communicate(timeout=5)
+                except subprocess.TimeoutExpired:
+                    popen.kill()
+                raise e from None
         except subprocess.TimeoutExpired as e:
             result.error = f"subprocess timeout: {e}"
-            _log_failure({
-                "agent": agent,
-                "attempt": result.attempts,
-                "error": result.error,
-                "kind": "timeout",
-            })
+            _log_failure(
+                {
+                    "agent": agent,
+                    "attempt": result.attempts,
+                    "error": result.error,
+                    "kind": "timeout",
+                }
+            )
         else:
             rate, auth = _classify_error(proc.stderr, proc.stdout)
             result.rate_limited = result.rate_limited or rate
@@ -523,22 +596,26 @@ def dispatch(
                     return result
                 # Empty text despite rc=0 — treat as transient error.
                 result.error = "empty text in envelope"
-                _log_failure({
-                    "agent": agent,
-                    "attempt": result.attempts,
-                    "error": result.error,
-                    "stdout_preview": proc.stdout[:300],
-                })
+                _log_failure(
+                    {
+                        "agent": agent,
+                        "attempt": result.attempts,
+                        "error": result.error,
+                        "stdout_preview": proc.stdout[:300],
+                    }
+                )
             else:
                 result.error = (proc.stderr or proc.stdout or "unknown error")[:300]
-                _log_failure({
-                    "agent": agent,
-                    "attempt": result.attempts,
-                    "returncode": proc.returncode,
-                    "error": result.error,
-                    "rate_limited": rate,
-                    "auth_failed": auth,
-                })
+                _log_failure(
+                    {
+                        "agent": agent,
+                        "attempt": result.attempts,
+                        "returncode": proc.returncode,
+                        "error": result.error,
+                        "rate_limited": rate,
+                        "auth_failed": auth,
+                    }
+                )
 
         # Auth failures don't recover from retry — fail fast.
         if result.auth_failed:
@@ -553,7 +630,9 @@ def dispatch(
         _cb_failures += 1
         if _cb_failures >= _CB_THRESHOLD:
             _cb_open_until = _time.monotonic() + _CB_COOLDOWN
-            log.warning("circuit breaker OPEN — %d consecutive failures, cooldown %ds", _cb_failures, _CB_COOLDOWN)
+            log.warning(
+                "circuit breaker OPEN — %d consecutive failures, cooldown %ds", _cb_failures, _CB_COOLDOWN
+            )
     if _persistent_cb is not None:
         try:
             _persistent_cb[1]("llm.dispatch", ok=False, error=result.error[:200])
@@ -610,7 +689,11 @@ def dispatch_with_schema(
 def _build_degraded_placeholder(agent: str, message: str, result: DispatchResult) -> str:
     """Generate a marker string that synthesis jobs can safely persist as 'no-op output'."""
     ts = datetime.now().isoformat(timespec="seconds")
-    reason = "rate_limited" if result.rate_limited else ("auth_failed" if result.auth_failed else "dispatch_failed")
+    reason = (
+        "rate_limited"
+        if result.rate_limited
+        else ("auth_failed" if result.auth_failed else "dispatch_failed")
+    )
     return (
         f"[DEGRADED {ts}] agent={agent} reason={reason} attempts={result.attempts}\n"
         f"(Original request: {message[:300]})\n"
@@ -620,6 +703,7 @@ def _build_degraded_placeholder(agent: str, message: str, result: DispatchResult
 
 if __name__ == "__main__":
     import argparse
+
     parser = argparse.ArgumentParser(description="openclaw dispatch smoke test")
     parser.add_argument("--agent", default="jenna")
     parser.add_argument("--message", required=True)

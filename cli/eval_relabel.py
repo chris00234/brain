@@ -170,6 +170,17 @@ def main() -> int:
     dispatched_batches = 0
     total_rewritten = 0
 
+    def _persist() -> None:
+        """Write current progress snapshot to DST (crash-safe resume)."""
+        if not args.apply:
+            return
+        snapshot = []
+        for i in range(len(cases)):
+            snapshot.append(rewrites.get(i, cases[i]))
+        tmp = DST.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(snapshot, indent=2, ensure_ascii=False))
+        tmp.replace(DST)
+
     for batch_start in range(0, len(cases), BATCH_SIZE):
         # Skip whole batch if all cases are already rewritten
         if all(i in rewrites for i in range(batch_start, min(batch_start + BATCH_SIZE, len(cases)))):
@@ -201,6 +212,9 @@ def main() -> int:
             f"  rewrote {len(rewrite_items)} items in {dt:.1f}s (running total: {total_rewritten})",
             file=sys.stderr,
         )
+        # M9.1 crash-safe: persist after EVERY batch so a hung dispatch
+        # on batch N+1 doesn't lose batches 0..N.
+        _persist()
 
     # Build the full v2 list
     v2 = []

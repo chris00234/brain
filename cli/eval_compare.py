@@ -215,7 +215,16 @@ def run_eval(
         latencies.append(dt)
 
         results = payload.get("results", [])
-        expected_alternates = case.get("expected_alternates")
+        expected_alternates = list(case.get("expected_alternates") or [])
+        # M9.1 fix: also accept the pre-relabel original substring if present.
+        # Sage rewrote expected_content to concept-level forms (e.g.
+        # "Start: August 2024" → "August 2024 start date") but the ChromaDB
+        # chunks still contain the verbatim original. Without this merge the
+        # relabel caused a 58pt drop on extended content_hit — classic
+        # "rewrote the test, not the codebase" mistake.
+        origin = case.get("_relabel_origin")
+        if origin and origin != expected_content:
+            expected_alternates.append(origin)
         hs, hc_strict, rank, hc_loose = _expected_hit(
             results, expected_source, expected_content, expected_alternates
         )
