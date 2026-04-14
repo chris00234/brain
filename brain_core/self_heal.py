@@ -24,9 +24,12 @@ HEAL_STATE_DB = Path("/Users/chrischo/server/brain/logs/self_heal_state.db")
 RATE_LIMIT_SECONDS = 6 * 3600  # 6 hours per (signal_type, target)
 
 try:
-    from config import BRAIN_AUTO_HEAL_ENABLED
+    from config import BRAIN_AUTO_HEAL_ENABLED, load_bearer_secret
 except ImportError:
     BRAIN_AUTO_HEAL_ENABLED = False
+
+    def load_bearer_secret() -> str:
+        return Path("/Users/chrischo/.openclaw/credentials/.personal_webhook_secret").read_text().strip()
 
 # Optional whitelist: if set, ONLY signals with `signal.source` in this set
 # are actioned, even when BRAIN_AUTO_HEAL_ENABLED=true. Empty = all sources.
@@ -154,7 +157,7 @@ def heal_eval_regression(signal: HealingSignal) -> dict:
 
     try:
         import urllib.request
-        secret = Path("/Users/chrischo/.openclaw/credentials/.personal_webhook_secret").read_text().strip()
+        secret = load_bearer_secret()
         req = urllib.request.Request(
             "http://127.0.0.1:8791/jobs/reindex",
             method="POST",
@@ -183,7 +186,7 @@ def heal_slo_latency(signal: HealingSignal) -> dict:
         # Vacuum embed cache + prewarm
         try:
             import urllib.request
-            secret = Path("/Users/chrischo/.openclaw/credentials/.personal_webhook_secret").read_text().strip()
+            secret = load_bearer_secret()
             req = urllib.request.Request(
                 "http://127.0.0.1:8791/jobs/log_rotation",
                 method="POST",
@@ -197,7 +200,7 @@ def heal_slo_latency(signal: HealingSignal) -> dict:
     if breach_count < 10:
         try:
             import urllib.request
-            secret = Path("/Users/chrischo/.openclaw/credentials/.personal_webhook_secret").read_text().strip()
+            secret = load_bearer_secret()
             req = urllib.request.Request(
                 "http://127.0.0.1:8791/jobs/reindex",
                 method="POST",
@@ -216,7 +219,7 @@ def heal_memory_growth(signal: HealingSignal) -> dict:
     """Triggered when a collection grows >20% WoW."""
     try:
         import urllib.request
-        secret = Path("/Users/chrischo/.openclaw/credentials/.personal_webhook_secret").read_text().strip()
+        secret = load_bearer_secret()
         # Trigger consolidation + dedup
         for job in ("memory_consolidation",):
             req = urllib.request.Request(

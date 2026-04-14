@@ -24,7 +24,14 @@ DISPATCH_COOLDOWN_HOURS = 22  # ~daily
 CHROMA_URL = "http://127.0.0.1:8000"
 CHROMA_API = f"{CHROMA_URL}/api/v2/tenants/default_tenant/databases/default_database/collections"
 BRAIN_URL = "http://127.0.0.1:8791"
-SECRET_FILE = Path("/Users/chrischo/.openclaw/credentials/.personal_webhook_secret")
+
+try:
+    from config import SECRET_FILE, load_bearer_secret
+except ImportError:
+    SECRET_FILE = Path("/Users/chrischo/.openclaw/credentials/.personal_webhook_secret")
+
+    def load_bearer_secret() -> str:
+        return SECRET_FILE.read_text().strip()
 
 PROMPT_TEMPLATE = """Review these recent memories from Chris's brain. For each, classify as:
 - durable: should be promoted to canonical knowledge
@@ -114,7 +121,7 @@ def store_patterns(patterns: list[dict]) -> int:
     if not patterns or not SECRET_FILE.exists():
         return 0
     try:
-        secret = SECRET_FILE.read_text().strip()
+        secret = load_bearer_secret()
     except Exception:
         return 0
     import urllib.request

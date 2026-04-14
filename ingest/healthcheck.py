@@ -332,16 +332,28 @@ def check_chroma_write() -> list[str]:
         return [f"❌ ChromaDB write probe failed: {e}"]
 
 
+def _bearer_secret() -> str | None:
+    """Lazy load the brain bearer secret via the shared helper. Returns None if absent."""
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "brain_core"))
+        from config import SECRET_FILE, load_bearer_secret
+
+        if not SECRET_FILE.exists():
+            return None
+        return load_bearer_secret()
+    except Exception:
+        return None
+
+
 # ── Recall vector search probe ─────────────────────────
 def check_recall_vector() -> list[str]:
     """Hit /recall with a simple query. Catches the ChromaDB 1.4.1 `where` bug and
     any other silent recall-path breakage.
     """
     import urllib.request
-    secret_path = Path("/Users/chrischo/.openclaw/credentials/.personal_webhook_secret")
-    if not secret_path.exists():
+    secret = _bearer_secret()
+    if not secret:
         return []  # can't probe without bearer
-    secret = secret_path.read_text().strip()
     try:
         req = urllib.request.Request(
             f"{BRAIN_URL}/recall?q=homelab&n=3",
@@ -359,10 +371,9 @@ def check_recall_vector() -> list[str]:
 def check_recall_vector_temporal() -> list[str]:
     """Hit /recall with since/until — specifically catches the string-operand bug."""
     import urllib.request
-    secret_path = Path("/Users/chrischo/.openclaw/credentials/.personal_webhook_secret")
-    if not secret_path.exists():
+    secret = _bearer_secret()
+    if not secret:
         return []
-    secret = secret_path.read_text().strip()
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d")
     try:

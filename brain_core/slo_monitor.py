@@ -23,7 +23,6 @@ from pathlib import Path
 log = logging.getLogger("brain.slo_monitor")
 
 BRAIN_URL = "http://127.0.0.1:8791"
-SECRET_FILE = Path("/Users/chrischo/.openclaw/credentials/.personal_webhook_secret")
 BASELINE_FILE = Path("/Users/chrischo/server/brain/tests/slo_baseline.json")
 STATE_FILE = Path("/Users/chrischo/server/brain/logs/slo_state.json")
 EVAL_REPORT_FILE = Path("/Users/chrischo/server/brain/logs/eval-report.json")
@@ -69,7 +68,8 @@ PROBE_QUERIES = [
 
 
 def _token() -> str:
-    return SECRET_FILE.read_text().strip()
+    from config import load_bearer_secret
+    return load_bearer_secret()
 
 
 def _probe_latency(endpoint: str, query: str, token: str, timeout: int = 10) -> float | None:
