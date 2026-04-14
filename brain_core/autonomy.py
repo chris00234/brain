@@ -13,6 +13,7 @@ Hot-path target: <5 ms p99 on warm cache. Implementation:
 
 from __future__ import annotations
 
+import contextlib
 import os
 import sqlite3
 import sys
@@ -104,18 +105,27 @@ def _ensure_brain_config_schema() -> None:
 
 
 def _load_level_overrides() -> dict[str, str]:
-    """Pull autonomy.<kind>.level rows from brain_config and merge over defaults."""
-    _ensure_brain_config_schema()
+    """Pull autonomy.<kind>.level rows from brain_config and merge over defaults.
+
+    Returns an empty dict on any sqlite error so callers fall through to
+    DEFAULT_LEVELS instead of crashing the autonomy gate. The gate is on the
+    hot path of every action; a single brain_config lock contention event
+    used to crash every authorize() call.
+    """
     overrides: dict[str, str] = {}
-    conn = sqlite3.connect(str(AUTONOMY_DB))
     try:
-        for row in conn.execute("SELECT key, value FROM brain_config WHERE key LIKE 'autonomy.%.level'"):
-            key, value = row[0], row[1]
-            kind = key[len("autonomy.") : -len(".level")]
-            if value in ("L0", "L1", "L2", "L3"):
-                overrides[kind] = value
-    finally:
-        conn.close()
+        _ensure_brain_config_schema()
+        conn = sqlite3.connect(str(AUTONOMY_DB))
+        try:
+            for row in conn.execute("SELECT key, value FROM brain_config WHERE key LIKE 'autonomy.%.level'"):
+                key, value = row[0], row[1]
+                kind = key[len("autonomy.") : -len(".level")]
+                if value in ("L0", "L1", "L2", "L3"):
+                    overrides[kind] = value
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return {}
     return overrides
 
 
@@ -126,7 +136,9 @@ def _resolve_level_cached() -> dict[str, str]:
         if _level_cache and (now - _level_cache_stamp) < _LEVEL_CACHE_TTL_S:
             return _level_cache
         merged = dict(DEFAULT_LEVELS)
-        merged.update(_load_level_overrides())
+        # Gate hot path must never crash on a transient brain_config error.
+        with contextlib.suppress(sqlite3.Error):
+            merged.update(_load_level_overrides())
         _level_cache = merged
         _level_cache_stamp = now
         return merged
@@ -140,19 +152,26 @@ def invalidate_levels_cache() -> None:
 
 
 def _load_soft_denylist() -> tuple[str, ...]:
-    """Pull denylist.<prefix>=1 rows from brain_config."""
-    _ensure_brain_config_schema()
+    """Pull denylist.<prefix>=1 rows from brain_config.
+
+    Returns an empty tuple on any sqlite error so the gate falls through
+    instead of crashing.
+    """
     prefixes: list[str] = []
-    conn = sqlite3.connect(str(AUTONOMY_DB))
     try:
-        for row in conn.execute("SELECT key, value FROM brain_config WHERE key LIKE 'denylist.%'"):
-            key, value = row[0], row[1]
-            if value == "1":
-                prefix = key[len("denylist.") :]
-                if prefix:
-                    prefixes.append(prefix)
-    finally:
-        conn.close()
+        _ensure_brain_config_schema()
+        conn = sqlite3.connect(str(AUTONOMY_DB))
+        try:
+            for row in conn.execute("SELECT key, value FROM brain_config WHERE key LIKE 'denylist.%'"):
+                key, value = row[0], row[1]
+                if value == "1":
+                    prefix = key[len("denylist.") :]
+                    if prefix:
+                        prefixes.append(prefix)
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return ()
     return tuple(prefixes)
 
 

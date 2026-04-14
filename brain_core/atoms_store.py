@@ -342,7 +342,20 @@ def upsert_atom(
             )
             conn.commit()
             return atom_id
-    except sqlite3.Error:
+    except sqlite3.Error as exc:
+        # Emit an audit event so SLO atoms_write_fail_rate_1h is observable.
+        # Best-effort — never raise from the audit path.
+        import contextlib
+
+        with contextlib.suppress(Exception):
+            from audit_log import log_event
+
+            log_event(
+                "atoms_write_fail",
+                entity_a=chroma_id,
+                reason=str(exc)[:200],
+                source_evidence={"kind": kind, "tier": tier},
+            )
         return None
 
 

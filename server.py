@@ -117,6 +117,12 @@ JOB_REGISTRY: dict[str, list[str]] = {
     "slos_check":           [_py, "-c", f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from slos import run; import json; print(json.dumps(run()))"],
     # Phase J2: adaptive HNSW ef_search tuning (advisory — applied on next collection load)
     "hnsw_tune":          [_py, "-c", f"import sys; sys.path.insert(0, '{_bd}/brain_core/pipeline'); sys.path.insert(0, '{_bd}/brain_core'); from hnsw_tuner import adaptive_tune; import json; print(json.dumps(adaptive_tune(dry_run=False)))"],
+    # Phase 2D: SessionEnd outbox drainer — replays envelopes that the
+    # post_session.sh fire-and-forget call missed (brain down, orphan inflight,
+    # no SessionEnd at all). Documented as 5-min job in CRON_MAP/RUNBOOK; the
+    # schedule entry was missing prior to this commit, so failed envelopes
+    # silently piled up in pending/.
+    "outbox_drain":       [_py, f"{_bd}/cli/outbox_drain.py"],
     "reindex":            ["/bin/zsh", f"{_bd}/cli/reindex.sh"],
     # Maintenance
     "log_rotation":       [_py, f"{_bd}/brain_core/maintenance.py", "all_cleanup"],
@@ -3429,12 +3435,13 @@ def set_quiet_hours(req: QuietHoursRequest) -> dict:
     try:
         import json as _json
         import sqlite3
+        from datetime import UTC as _UTC
         from datetime import datetime as _dt
 
         from brain_core.autonomy import invalidate_levels_cache
         from brain_core.config import AUTONOMY_DB
 
-        now_iso = _dt.utcnow().isoformat(timespec="seconds")
+        now_iso = _dt.now(_UTC).isoformat(timespec="seconds")
         conn = sqlite3.connect(str(AUTONOMY_DB))
         try:
             conn.execute("PRAGMA journal_mode=WAL")

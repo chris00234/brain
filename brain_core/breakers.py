@@ -199,10 +199,20 @@ def record_result(kind: str, *, ok: bool, error: str = "") -> BreakerSnapshot:
 
     Uses BEGIN IMMEDIATE to serialize concurrent writers on the same kind —
     the read-modify-write pattern is racy without an explicit write lock.
+
+    Sqlite errors are swallowed and the prior cached snapshot is returned
+    so the autonomy hot path never sees a raw exception from this layer.
     """
-    conn = _connect()
     try:
-        conn.execute("BEGIN IMMEDIATE")
+        conn = _connect()
+    except sqlite3.Error:
+        return _row_to_snapshot(kind, None)
+    try:
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+        except sqlite3.Error:
+            conn.close()
+            return _row_to_snapshot(kind, None)
         row = conn.execute("SELECT * FROM heal_breakers WHERE kind = ?", (kind,)).fetchone()
         snapshot = _row_to_snapshot(kind, row)
         now = time.time()
@@ -244,32 +254,35 @@ def record_result(kind: str, *, ok: bool, error: str = "") -> BreakerSnapshot:
                 new_reset_after = snapshot.reset_after_s
             new_reason = error[:200] if error else snapshot.reason
 
-        conn.execute(
-            "INSERT INTO heal_breakers (kind, state, failures, trip_count, opened_at, "
-            " last_failure_at, last_action_at, reset_after_s, reason) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
-            "ON CONFLICT(kind) DO UPDATE SET "
-            " state=excluded.state, failures=excluded.failures, "
-            " trip_count=excluded.trip_count, opened_at=excluded.opened_at, "
-            " last_failure_at=excluded.last_failure_at, "
-            " last_action_at=excluded.last_action_at, "
-            " reset_after_s=excluded.reset_after_s, reason=excluded.reason",
-            (
-                kind,
-                new_state,
-                new_failures,
-                new_trip_count,
-                new_opened_at,
-                now if not ok else snapshot.last_failure_at,
-                now,
-                new_reset_after,
-                new_reason,
-            ),
-        )
-        conn.commit()
+        try:
+            conn.execute(
+                "INSERT INTO heal_breakers (kind, state, failures, trip_count, opened_at, "
+                " last_failure_at, last_action_at, reset_after_s, reason) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(kind) DO UPDATE SET "
+                " state=excluded.state, failures=excluded.failures, "
+                " trip_count=excluded.trip_count, opened_at=excluded.opened_at, "
+                " last_failure_at=excluded.last_failure_at, "
+                " last_action_at=excluded.last_action_at, "
+                " reset_after_s=excluded.reset_after_s, reason=excluded.reason",
+                (
+                    kind,
+                    new_state,
+                    new_failures,
+                    new_trip_count,
+                    new_opened_at,
+                    now if not ok else snapshot.last_failure_at,
+                    now,
+                    new_reset_after,
+                    new_reason,
+                ),
+            )
+            conn.commit()
 
-        row = conn.execute("SELECT * FROM heal_breakers WHERE kind = ?", (kind,)).fetchone()
-        result = _row_to_snapshot(kind, row)
+            row = conn.execute("SELECT * FROM heal_breakers WHERE kind = ?", (kind,)).fetchone()
+            result = _row_to_snapshot(kind, row)
+        except sqlite3.Error:
+            result = snapshot
     finally:
         conn.close()
 

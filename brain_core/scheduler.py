@@ -223,6 +223,17 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         misfire_grace=900,
     ),
 
+    # Phase 2D: SessionEnd outbox replay — every 5 min, drains any envelopes
+    # the inline post_session.sh hook missed. CRON_MAP and RUNBOOK already
+    # documented this cadence; the schedule entry was missing until 2026-04-13.
+    ScheduledJob(
+        name="outbox_drain",
+        description="Phase 2D: drain SessionEnd outbox envelopes (every 5 min)",
+        trigger=IntervalTrigger(minutes=5),
+        agent="system",
+        misfire_grace=120,
+    ),
+
     ScheduledJob(
         name="content_quality_slo",
         description="Daily content quality SLO check (4:00am, after eval_run)",

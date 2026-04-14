@@ -66,7 +66,14 @@ All times are local (`America/Los_Angeles`). Source of truth: `brain_core/schedu
 
 ## Job count
 
-74 total scheduled jobs as of 2026-04-13 after Phase E.
+68 total scheduled jobs as of 2026-04-13 after Phase J.
+
+The exact count comes from `len(brain_core.scheduler.JOB_SCHEDULE)`. To
+re-derive after a phase, run:
+
+```bash
+.venv/bin/python -c "import sys; sys.path.insert(0, 'brain_core'); from scheduler import JOB_SCHEDULE; print(len(JOB_SCHEDULE))"
+```
 
 ## Maintenance windows
 
