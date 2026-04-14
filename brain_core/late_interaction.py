@@ -33,6 +33,10 @@ Pluggable backend pattern:
 
 Default OFF — search_unified.py keeps using cross_encoder_rerank unless the
 env var is set. Safe rollout.
+
+NOTE: BRAIN_RERANK_BACKEND is read at module import time (line ~50), so
+flipping the env var at runtime has no effect until the brain server restarts.
+Ops procedure: edit the LaunchAgent plist and `launchctl kickstart -k`.
 """
 
 from __future__ import annotations

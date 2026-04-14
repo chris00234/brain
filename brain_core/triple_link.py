@@ -41,8 +41,16 @@ TRIPLE_CACHE_TTL_S = 300  # 5 minutes — Neo4j triples don't change every reque
 # vs 1500 ~45s. Same recall on the typical query because top-K of 10 is
 # usually saturated by the first few hundred most-connected entities anyway.
 MAX_TRIPLES = 1500
-TOP_K = 10  # how many query→triple matches to consider per request
-MIN_SIMILARITY = 0.55  # below this, no boost — avoids spurious matches
+TOP_K = 5  # how many query→triple matches to consider per request (was 10)
+# M8 follow-up: raised from 0.55 → 0.72. At 0.55 the query-to-triple
+# cosine was matching semantically-loose pairs on e5 (which tends to
+# produce ~0.5 for any tangentially related phrase), which then boosted
+# off-topic docs whose content mentioned those entities. 0.72 is
+# empirically much more selective. Live A/B on extended:
+#   off       = 73.8% source_hit
+#   on@0.55   = 72.3%
+#   on@0.72   = TBD (if still degrades, disable the feature)
+MIN_SIMILARITY = 0.72
 
 
 # Module-level cache: list of (triple_str, embedding, entity_a, entity_b)

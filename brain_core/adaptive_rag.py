@@ -39,6 +39,14 @@ log = logging.getLogger("brain.adaptive_rag")
 
 ENABLED = os.environ.get("BRAIN_ADAPTIVE_RAG", "").lower() in {"1", "true", "yes"}
 
+# M8 follow-up: promotion threshold was a magic number in classify(). A single
+# _MULTI_PATTERNS match contributes weight 2, so a threshold of 2 was "one
+# pattern alone flips the class" which over-triggered on the Korean regex. 3
+# means a pattern hit MUST combine with a secondary signal (temporal / multi-
+# clause / long query) to promote. Lower means more CRAG triggers (more
+# latency + potentially more recall); higher means stricter gating.
+MULTI_THRESHOLD = 3
+
 
 # ── Heuristic patterns for query complexity ──────────────────────────────────
 # These are deliberately CHEAP regex patterns. The Adaptive-RAG paper uses a
@@ -114,12 +122,7 @@ def classify(query: str) -> QueryClass:
         multi_score += 1
         reasons.append("long_query")
 
-    # M8 follow-up: raised promotion threshold from 2 → 3. With the threshold
-    # at 2, a single _MULTI_PATTERNS match alone (worth 2) flipped the class
-    # — too many false positives on the Korean half of the extended eval
-    # caused -5pt source_hit. At 3 we require a pattern AND a secondary signal
-    # (temporal connective, multi-clause, or long query).
-    if multi_score >= 3:
+    if multi_score >= MULTI_THRESHOLD:
         return QueryClass(
             label="multi",
             confidence=min(1.0, 0.5 + 0.12 * multi_score),
@@ -173,19 +176,9 @@ def should_use_crag(query: str, caller_explicit: bool = False) -> tuple[bool, st
     return caller_explicit, "single_query_caller_choice"
 
 
-def should_skip_atoms(query: str) -> tuple[bool, str]:
-    """Decide whether atoms-tier filtering can be skipped (latency win).
-
-    SIMPLE atomic factual queries don't benefit from supersession filtering
-    because they typically hit canonical/chris/* which is already curated.
-    """
-    if not ENABLED:
-        return False, "adaptive_rag_disabled"
-
-    classification = classify(query)
-    if classification.label == "simple":
-        return True, "simple_query_skips_atoms"
-    return False, classification.label
+# should_skip_atoms was drafted but never wired. Dead function removed in
+# M8 follow-up. The latency win was <5ms (atoms tier filter is an indexed
+# SQLite lookup) which didn't justify the additional code path.
 
 
 def stats() -> dict:
