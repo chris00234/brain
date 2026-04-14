@@ -978,13 +978,31 @@ def search_all(
     # activation pattern below). +5pt bonus per matched entity, capped at
     # +15pt total, so it tiebreaks but never overrides cross-encoder.
     if linked_entities:
+        # M8 follow-up: filter linked_entities to length >= 4 to avoid
+        # short-name false positives (substring matches "ai" inside "pair",
+        # "pr" inside "prior", etc). Then enforce word-ish boundaries via
+        # whitespace/punctuation neighbors so we don't double-count
+        # substrings inside larger tokens.
+        safe_entities = [e for e in linked_entities if e and len(e) >= 4]
         for r in unique:
             content_lower = (r.get("content") or r.get("title") or "").lower()
-            matched = sum(1 for e in linked_entities if e and e in content_lower)
+            matched = 0
+            for e in safe_entities:
+                idx = content_lower.find(e)
+                if idx == -1:
+                    continue
+                before = content_lower[idx - 1] if idx > 0 else " "
+                after_pos = idx + len(e)
+                after = content_lower[after_pos] if after_pos < len(content_lower) else " "
+                if not before.isalnum() and not after.isalnum():
+                    matched += 1
             if matched > 0:
                 bonus = min(15.0, 5.0 * matched)
                 r["score"] = min(100.0, float(r.get("score", 0)) + bonus)
                 r["triple_link_matches"] = matched
+        # M8 follow-up: re-sort after boost so late_interaction.rerank() sees
+        # the correct top-k window
+        unique.sort(key=lambda x: float(x.get("score", 0) or 0), reverse=True)
 
     # M8.6: late-interaction rerank backend swap. Only fires when
     # BRAIN_RERANK_BACKEND=late_interaction (default off). The module is

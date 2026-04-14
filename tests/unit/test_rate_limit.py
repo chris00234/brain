@@ -55,12 +55,14 @@ def test_limited_routes_registered(client):
     live server with working ChromaDB, which integration tests cover."""
     _, server = client
     routes = server.limiter._route_limits
-    # M7-WS7 raised /recall and /recall/v2 from 60/min to 600/min so the
-    # eval harness (138-606 queries per run) doesn't get throttled by the
-    # newly-bearer-keyed limiter. Write paths stay tight.
+    # M7-WS7 + M8 follow-up: /recall and /recall/v2 raised again from 600 →
+    # 3000/min. Read path is non-LLM-billable (Ollama only) and back-to-back
+    # eval runs (1212 calls/run on 606-query extended set) burst-throttled
+    # under 600. Write paths stay tight at 10-30/min because they DO fire
+    # billable LLM dispatches.
     expected = {
-        "server.recall": "600 per 1 minute",
-        "server.recall_v2": "600 per 1 minute",
+        "server.recall": "3000 per 1 minute",
+        "server.recall_v2": "3000 per 1 minute",
         "server.learn_route": "10 per 1 minute",
         "server.create_memory": "30 per 1 minute",
         "server.create_memory_batch": "10 per 1 minute",

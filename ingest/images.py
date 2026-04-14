@@ -156,6 +156,21 @@ def _vision_dispatches_today() -> int:
     return count
 
 
+# M8 follow-up: same singleton optimization as pdfs.py — reuse one
+# DocumentConverter across all images in an ingest run instead of
+# constructing a fresh one (and re-loading ~1GB of models) per file.
+_converter_singleton = None
+
+
+def _get_converter():  # noqa: ANN202 — Docling type not in our type system
+    global _converter_singleton
+    if _converter_singleton is None:
+        from docling.document_converter import DocumentConverter
+
+        _converter_singleton = DocumentConverter()
+    return _converter_singleton
+
+
 def _ocr_image(image_path: Path) -> str:
     """Use Docling's OCR (Apple Vision via ocrmac) for text extraction.
 
@@ -164,9 +179,7 @@ def _ocr_image(image_path: Path) -> str:
     via the same pipeline and exports to markdown.
     """
     try:
-        from docling.document_converter import DocumentConverter
-
-        converter = DocumentConverter()
+        converter = _get_converter()
         result = converter.convert(str(image_path))
         text = result.document.export_to_markdown() if result.document else ""
         return text.strip()

@@ -52,12 +52,17 @@ _SIMPLE_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
-# MULTI: comparison, reasoning, multi-fact synthesis, "how" with multiple facets
+# MULTI: comparison, reasoning, multi-fact synthesis. Tightened post-M8
+# rollout: dropped `왜` (too common in Korean factual questions) and `차이`/
+# `변화`/`비교` (Python `\b` doesn't word-boundary Korean syllable blocks, so
+# these false-fired on substrings like `차이점`/`비교적`/`변화에`). Kept the
+# explicit comparison lexicon and the multi-character "차이점은"/"장단점" forms
+# that are unambiguous comparison signals.
 _MULTI_PATTERNS = re.compile(
-    r"\b(compare|contrast|difference|differences|both|either|neither|"
+    r"\b(compare|contrast|differences?|both|either|neither|"
     r"vs|versus|trade.?off|pros and cons|why does|why is|"
-    r"what changed|what's changed|how has|how have|"
-    r"비교|차이|변화|왜|어떻게.*되|차이점|장단점)\b",
+    r"what changed|what's changed|how has|how have)\b|"
+    r"(차이점은|장단점|어떻게 다른|뭐가 다른)",
     re.IGNORECASE,
 )
 
@@ -109,10 +114,15 @@ def classify(query: str) -> QueryClass:
         multi_score += 1
         reasons.append("long_query")
 
-    if multi_score >= 2:
+    # M8 follow-up: raised promotion threshold from 2 → 3. With the threshold
+    # at 2, a single _MULTI_PATTERNS match alone (worth 2) flipped the class
+    # — too many false positives on the Korean half of the extended eval
+    # caused -5pt source_hit. At 3 we require a pattern AND a secondary signal
+    # (temporal connective, multi-clause, or long query).
+    if multi_score >= 3:
         return QueryClass(
             label="multi",
-            confidence=min(1.0, 0.5 + 0.15 * multi_score),
+            confidence=min(1.0, 0.5 + 0.12 * multi_score),
             reasons=reasons,
             word_count=word_count,
         )

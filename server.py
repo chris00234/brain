@@ -1091,7 +1091,7 @@ def profile_section(name: Annotated[str, PathParam()]) -> str:
 
 # ── Routes: recall ──────────────────────────────────────
 @app.get("/recall", response_model=RecallResponse, tags=["recall"], dependencies=[Depends(verify_bearer)])
-@limiter.limit("600/minute")  # M7-WS7: read path — same envelope as /recall/v2
+@limiter.limit("3000/minute")  # M7-WS7 + M8 follow-up: read path — same envelope as /recall/v2
 def recall(
     request: Request,
     q: str,
@@ -1364,7 +1364,8 @@ def _record_auto_feedback(query: str, results: list[dict], agent: str) -> None:
 @app.get(
     "/recall/v2", response_model=RecallV2Response, tags=["recall"], dependencies=[Depends(verify_bearer)]
 )
-@limiter.limit("600/minute")  # M7-WS7: read path needs to clear the eval (138-606 queries/run)
+@limiter.limit("3000/minute")  # M7-WS7 + M8 follow-up: read path is non-LLM-billable (Ollama only).
+# Bumped from 600 → 3000 because back-to-back eval (1212 calls/run) was burst-throttling.
 def recall_v2(
     request: Request,
     q: str,

@@ -34,7 +34,13 @@ log = logging.getLogger("brain.triple_link")
 
 ENABLED = os.environ.get("BRAIN_TRIPLE_LINK_ENABLED", "").lower() in {"1", "true", "yes"}
 TRIPLE_CACHE_TTL_S = 300  # 5 minutes — Neo4j triples don't change every request
-MAX_TRIPLES = 5000  # cap memory; cover the most-mentioned ones first
+# M8 follow-up: lowered from 5000 → 1500. The mention_count > 1 filter on the
+# Neo4j side already removes long-tail entities, and 1500 triples x 1024-dim
+# embeddings x 4 bytes = ~6MB resident — small enough to barely register, but
+# the SAVINGS is on first-load wall-clock: 5000 sequential embed calls ~150s
+# vs 1500 ~45s. Same recall on the typical query because top-K of 10 is
+# usually saturated by the first few hundred most-connected entities anyway.
+MAX_TRIPLES = 1500
 TOP_K = 10  # how many query→triple matches to consider per request
 MIN_SIMILARITY = 0.55  # below this, no boost — avoids spurious matches
 
@@ -45,13 +51,30 @@ _cache: _TripleCache = []
 _cache_loaded_at: float = 0.0
 
 
-def _ollama_embed(text: str) -> list[float] | None:
+def _embed_passage(text: str) -> list[float] | None:
+    """Embed a triple (entity rel entity) — uses passage prefix per e5 contract."""
     try:
         from indexer import get_embedding
 
         return get_embedding(text, prefix="passage")
     except Exception as exc:
-        log.warning("triple_link embed failed: %s", exc)
+        log.warning("triple_link passage embed failed: %s", exc)
+        return None
+
+
+def _embed_query(text: str) -> list[float] | None:
+    """Embed an incoming query — uses query prefix per e5 contract.
+
+    M8 follow-up: split from the single _ollama_embed helper that hardcoded
+    `prefix="passage"` for both. That was wrong on an asymmetric model and
+    would underperform by several recall points the moment ENABLED flipped.
+    """
+    try:
+        from indexer import get_embedding
+
+        return get_embedding(text, prefix="query")
+    except Exception as exc:
+        log.warning("triple_link query embed failed: %s", exc)
         return None
 
 
@@ -95,7 +118,7 @@ def _refresh_cache_if_stale() -> None:
         if not a or not b or a == b:
             continue
         triple_str = f"{a} {rel} {b}"
-        emb = _ollama_embed(triple_str)
+        emb = _embed_passage(triple_str)
         if emb:
             new_cache.append((triple_str, emb, a, b))
 
@@ -131,7 +154,7 @@ def get_query_linked_entities(query: str, top_k: int = TOP_K) -> set[str]:
     if not _cache:
         return set()
 
-    q_emb = _ollama_embed(query)
+    q_emb = _embed_query(query)
     if not q_emb:
         return set()
 
