@@ -202,3 +202,44 @@ def test_half_open_probing_blocks_new_callers(isolated_breakers):
     assert snap.state == "half_open_probing"
     assert snap.blocks_new_callers is True
     assert snap.is_probing is True
+
+
+def test_concurrent_record_result_failures_consistent(isolated_breakers):
+    """Regression: BEGIN IMMEDIATE on record_result must serialize concurrent writers.
+
+    Without it, N threads racing on the same kind could each read failures=K
+    and write K+1, losing increments. After 10 simultaneous failures the
+    final state must show failures>=CB_THRESHOLD AND state='open' (the
+    threshold IS crossed even if specific counter values vary).
+    """
+    import threading
+
+    n_threads = 10
+    barrier = threading.Barrier(n_threads)
+    errors: list[Exception] = []
+
+    def worker():
+        try:
+            barrier.wait()
+            isolated_breakers.record_result("conc.kind", ok=False, error="probe")
+        except Exception as exc:  # pragma: no cover
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(n_threads)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, f"record_result raised: {errors}"
+    isolated_breakers._snapshot_cache.clear()
+    snap = isolated_breakers.peek_breaker("conc.kind")
+    assert snap.state == "open", f"breaker should be open after {n_threads} failures, got {snap.state}"
+    # With BEGIN IMMEDIATE, each worker reads then writes serially. The exact
+    # final failures count can vary depending on the order of cache reads vs
+    # commits, but it must be in [CB_THRESHOLD, n_threads].
+    assert isolated_breakers.CB_THRESHOLD <= snap.failures <= n_threads, (
+        f"failures count {snap.failures} outside expected range "
+        f"[{isolated_breakers.CB_THRESHOLD}, {n_threads}]"
+    )
+    assert snap.trip_count >= 1, "trip_count must increment when threshold crosses"

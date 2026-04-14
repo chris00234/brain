@@ -174,3 +174,96 @@ def test_action_audit_insert(enabled_atoms):
     conn.close()
     assert row["query_text"] == "test query"
     assert row["session_id"] == "sess-1"
+
+
+def test_concurrent_reinforce_no_lost_updates(enabled_atoms):
+    """Regression: BEGIN IMMEDIATE on reinforce() must serialize concurrent writers.
+
+    Without the explicit transaction, two threads reading reinforcement_count=N
+    and both writing N+1 would lose one increment. With BEGIN IMMEDIATE the
+    second writer blocks on the lock and re-reads the new value.
+    """
+    import sqlite3
+    import threading
+
+    enabled_atoms.upsert_atom(text="race target", chroma_id="race:1")
+
+    n_threads = 10
+    barrier = threading.Barrier(n_threads)
+    errors: list[Exception] = []
+
+    def worker():
+        try:
+            barrier.wait()
+            enabled_atoms.reinforce("race:1", success=True)
+        except Exception as exc:  # pragma: no cover — fail loud
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(n_threads)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, f"reinforce raised: {errors}"
+    conn = sqlite3.connect(str(enabled_atoms.BRAIN_DB))
+    row = conn.execute(
+        "SELECT reinforcement_count FROM atoms WHERE chroma_id='race:1'"
+    ).fetchone()
+    conn.close()
+    assert row[0] == n_threads, (
+        f"expected reinforcement_count={n_threads}, got {row[0]} (lost updates from race)"
+    )
+
+
+def test_concurrent_mark_superseded_atomic(enabled_atoms):
+    """Regression: BEGIN IMMEDIATE on mark_superseded must serialize the
+    parent → child two-row flip. Without it, two writers racing on the same
+    parent could leave the supersedes/superseded_by chain inconsistent.
+    """
+    import sqlite3
+    import threading
+
+    enabled_atoms.upsert_atom(text="parent atom", chroma_id="race:parent")
+    # Create N distinct child atoms; threads each try to claim the parent.
+    children = [f"race:child{i}" for i in range(8)]
+    for c in children:
+        enabled_atoms.upsert_atom(text=f"child {c}", chroma_id=c)
+
+    barrier = threading.Barrier(len(children))
+    errors: list[Exception] = []
+
+    def worker(child_id: str):
+        try:
+            barrier.wait()
+            enabled_atoms.mark_superseded("race:parent", child_id)
+        except Exception as exc:  # pragma: no cover
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(c,)) for c in children]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, f"mark_superseded raised: {errors}"
+    conn = sqlite3.connect(str(enabled_atoms.BRAIN_DB))
+    conn.row_factory = sqlite3.Row
+    parent = conn.execute(
+        "SELECT superseded_by FROM atoms WHERE chroma_id='race:parent'"
+    ).fetchone()
+    # The winning child's atom_id should equal the parent.superseded_by
+    winning_child_id = parent["superseded_by"]
+    assert winning_child_id is not None, "parent never got superseded_by set"
+    # And THAT child's supersedes should point back at the parent
+    parent_atom_id = conn.execute(
+        "SELECT id FROM atoms WHERE chroma_id='race:parent'"
+    ).fetchone()[0]
+    winner = conn.execute(
+        "SELECT supersedes FROM atoms WHERE id = ?", (winning_child_id,)
+    ).fetchone()
+    conn.close()
+    assert winner is not None and winner["supersedes"] == parent_atom_id, (
+        "winning child's supersedes pointer doesn't match parent — race produced "
+        "inconsistent two-row state"
+    )

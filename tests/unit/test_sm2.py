@@ -154,3 +154,43 @@ def test_disabled_returns_empty(monkeypatch, tmp_path):
     assert sm2.apply_quality("x:1", quality=4) is None
     assert sm2.review_due() == []
     assert sm2.consolidate_obsolete()["obsoleted"] == 0
+
+
+def test_concurrent_apply_quality_no_lost_updates(enabled_sm2):
+    """Regression: BEGIN IMMEDIATE on apply_quality must serialize concurrent
+    reviews on the same atom. Without the explicit transaction, two threads
+    reading reinforcement_count=N would both compute N+1 and the second
+    commit would silently lose one increment.
+    """
+    import sqlite3
+    import threading
+
+    sm2_mod, atoms_store_mod = enabled_sm2
+    atoms_store_mod.upsert_atom(text="race target", chroma_id="sm2_race:1")
+
+    n_threads = 10
+    barrier = threading.Barrier(n_threads)
+    errors: list[Exception] = []
+
+    def worker():
+        try:
+            barrier.wait()
+            sm2_mod.apply_quality("sm2_race:1", quality=4)
+        except Exception as exc:  # pragma: no cover
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(n_threads)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, f"apply_quality raised: {errors}"
+    conn = sqlite3.connect(str(atoms_store_mod.BRAIN_DB))
+    row = conn.execute(
+        "SELECT reinforcement_count FROM atoms WHERE chroma_id='sm2_race:1'"
+    ).fetchone()
+    conn.close()
+    assert row[0] == n_threads, (
+        f"expected reinforcement_count={n_threads}, got {row[0]} (race lost updates)"
+    )
