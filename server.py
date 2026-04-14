@@ -733,6 +733,51 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# ── Phase M5: per-route rate limiting via slowapi ─────────
+# Defends against token-leak runaway (hardest gap in the commercial-bar audit:
+# /learn dispatches openclaw LLM calls; an unbounded loop bills real money).
+# Disable in tests via BRAIN_RATE_LIMIT_DISABLED=1.
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
+from slowapi.util import get_remote_address
+
+_rate_limit_disabled = os.getenv("BRAIN_RATE_LIMIT_DISABLED", "").lower() in ("1", "true", "yes")
+
+
+def _rate_limit_key(request: Request) -> str:
+    """Per-IP key, but loopback gets a no-limit bucket.
+
+    The threat model is external token leak (unbounded LLM cost). Internal
+    callers (the eval script, scheduler jobs, the brain UI on localhost,
+    Claude Code on the same machine) come from 127.0.0.1 / ::1 / localhost
+    and should not be throttled — they share the same trust boundary as
+    the brain itself. External callers (Cloudflare tunnel proxy, anywhere
+    not loopback) get the full per-IP rate limit.
+    """
+    addr = get_remote_address(request)
+    if addr in ("127.0.0.1", "::1", "localhost", None):
+        # Returning a stable string for loopback would put all internal
+        # callers in the same bucket. Returning a per-request unique key
+        # (id(request)) effectively disables the limiter for loopback
+        # because each call gets its own key with count=1.
+        return f"loopback-{id(request)}"
+    return addr
+
+
+limiter = Limiter(
+    key_func=_rate_limit_key,
+    enabled=not _rate_limit_disabled,
+    default_limits=["1000/minute"],  # global ceiling; per-route overrides below
+    headers_enabled=False,  # informational X-RateLimit-* injection requires every
+                            # rate-limited route to return Response; our routes
+                            # return dict + Pydantic models, so we keep just the
+                            # 429 enforcement on breach.
+)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_middleware(SlowAPIMiddleware)
+
 _cors_origins = os.getenv("BRAIN_CORS_ORIGINS", "").strip()
 app.add_middleware(
     CORSMiddleware,
@@ -842,7 +887,9 @@ def profile_section(name: Annotated[str, PathParam()]) -> str:
 
 # ── Routes: recall ──────────────────────────────────────
 @app.get("/recall", response_model=RecallResponse, tags=["recall"], dependencies=[Depends(verify_bearer)])
+@limiter.limit("60/minute")
 def recall(
+    request: Request,
     q: str,
     n: int = Query(default=10, ge=1, le=50),
     since: str | None = None,
@@ -1096,6 +1143,7 @@ def _record_auto_feedback(query: str, results: list[dict], agent: str) -> None:
 
 
 @app.get("/recall/v2", response_model=RecallV2Response, tags=["recall"], dependencies=[Depends(verify_bearer)])
+@limiter.limit("60/minute")
 def recall_v2(
     request: Request,
     q: str,
@@ -1883,7 +1931,8 @@ def trigger_job(job: Annotated[str, PathParam()]) -> JobResponse:
 
 # ── Routes: self-learning ───────────────────────────────
 @app.post("/learn", response_model=LearnResponse, tags=["learn"], dependencies=[Depends(verify_bearer)])
-def learn_route(req: LearnRequest, background: BackgroundTasks) -> LearnResponse:
+@limiter.limit("10/minute")  # Phase M5: hardest gap — /learn fires LLM dispatch
+def learn_route(request: Request, req: LearnRequest, background: BackgroundTasks) -> LearnResponse:
     """Submit a session transcript for distillation. Runs in background — returns immediately.
 
     The pipeline (extract → distill via Jenna → embed → contradiction-check) is fire-and-forget
@@ -2138,7 +2187,8 @@ def get_memory(mem_id: Annotated[str, PathParam()]) -> MemoryEntry:
 
 
 @app.post("/memory", response_model=MemoryEntry, tags=["memory"], dependencies=[Depends(verify_bearer)])
-def create_memory(req: MemoryCreateRequest) -> MemoryEntry:
+@limiter.limit("30/minute")
+def create_memory(request: Request, req: MemoryCreateRequest) -> MemoryEntry:
     """Direct memory insert with Phase 1 lifecycle (operations, supersession, temporal, tiers)."""
     col_id = _memory_collection_id()
     if not col_id:
@@ -2302,7 +2352,8 @@ class MemoryBatchRequest(BaseModel):
 
 
 @app.post("/memory/batch", tags=["memory"], dependencies=[Depends(verify_bearer)])
-def create_memory_batch(req: MemoryBatchRequest) -> dict:
+@limiter.limit("10/minute")  # Phase M5: bulk write — same envelope as /learn
+def create_memory_batch(request: Request, req: MemoryBatchRequest) -> dict:
     """Batch insert memories — 10x faster than single /memory calls.
 
     Each memory still gets individual classification (ADD/UPDATE/NOOP/DELETE)
