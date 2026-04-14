@@ -33,7 +33,10 @@ BASE = "http://127.0.0.1:8791"
 def _get(path: str, token: str) -> dict:
     req = urllib.request.Request(
         BASE + path,
-        headers={"Authorization": f"Bearer {token}"},
+        # M9.4: x-agent=eval so action_audit attributes eval runs correctly
+        # instead of lumping them into the generic "unknown" bucket. The
+        # brain's /brain/usage endpoint now shows eval load separately.
+        headers={"Authorization": f"Bearer {token}", "x-agent": "eval"},
     )
     try:
         with urllib.request.urlopen(req, timeout=120) as resp:
@@ -92,14 +95,22 @@ def _signif_tokens(text: str) -> set[str]:
 
 
 def _expected_hit(
-    results: list[dict], expected_source: str, expected_content: str
+    results: list[dict],
+    expected_source: str,
+    expected_content: str,
+    expected_alternates: list[str] | None = None,
 ) -> tuple[bool, bool, int, bool]:
     """Returns (hit_source_top5, hit_content_strict, hit_at_rank, hit_content_loose).
 
-    - hit_content_strict: literal lowercased substring of expected_content in content
-    - hit_content_loose:  ≥75% of significant expected_content tokens appear in content
-      (fallback for paraphrased/translated matches — reported separately, does NOT
-      drive sweep decisions)
+    - hit_content_strict: literal lowercased substring of expected_content OR any
+      of expected_alternates appears in the retrieved content
+    - hit_content_loose:  ≥75% of significant tokens from expected_content appear
+      in the retrieved content (fallback for paraphrased/translated matches)
+
+    M9.1: expected_alternates lets the eval dataset carry multiple equivalent
+    phrasings of the same semantic answer. A hit on ANY alternate is a strict
+    hit. This removes the ~8% false-negative ceiling from brittle exact-
+    substring matching on paraphrased chunks.
 
     Empty expected_source/expected_content fields pass automatically.
     """
@@ -108,7 +119,16 @@ def _expected_hit(
     hit_content_strict = not expected_content
     hit_content_loose = not expected_content
     exp_source_lower = (expected_source or "").lower()
-    exp_content_lower = (expected_content or "").lower()
+
+    # Build list of all acceptable strict-match substrings
+    exp_strict_forms: list[str] = []
+    if expected_content:
+        exp_strict_forms.append(expected_content.lower())
+    if expected_alternates:
+        for alt in expected_alternates:
+            if alt and isinstance(alt, str):
+                exp_strict_forms.append(alt.lower())
+
     exp_content_tokens = _signif_tokens(expected_content or "")
     threshold = max(1, int(len(exp_content_tokens) * 0.75))
 
@@ -127,7 +147,8 @@ def _expected_hit(
             if rank == 0:
                 rank = i
             hit_source = True
-        if exp_content_lower and exp_content_lower in content:
+        # Strict hit if ANY acceptable form is a substring
+        if exp_strict_forms and any(form in content for form in exp_strict_forms):
             hit_content_strict = True
             hit_content_loose = True
         elif exp_content_tokens and not hit_content_loose:
@@ -194,7 +215,10 @@ def run_eval(
         latencies.append(dt)
 
         results = payload.get("results", [])
-        hs, hc_strict, rank, hc_loose = _expected_hit(results, expected_source, expected_content)
+        expected_alternates = case.get("expected_alternates")
+        hs, hc_strict, rank, hc_loose = _expected_hit(
+            results, expected_source, expected_content, expected_alternates
+        )
         if hs:
             hits_source += 1
         if hc_strict:

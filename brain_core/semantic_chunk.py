@@ -264,13 +264,22 @@ def chunk_semantic(
     return out
 
 
-def chunk_with_fallback(text: str, max_size: int = DEFAULT_MAX_CHUNK_SIZE) -> list[dict]:
+def chunk_with_fallback(
+    text: str,
+    max_size: int = DEFAULT_MAX_CHUNK_SIZE,
+    parent_size: int | None = DEFAULT_PARENT_SIZE,
+) -> list[dict]:
     """Convenience wrapper: semantic chunking when ENABLED, character chunking otherwise.
 
     Drop-in replacement for indexer.chunk_text from ingest call sites.
+
+    M9.2: parent_size defaults to DEFAULT_PARENT_SIZE (1800) so parent/child
+    chunks are actually emitted. Pass parent_size=None to disable and get
+    flat semantic chunks only (backward compat for callers that don't want
+    the parent overhead).
     """
     if ENABLED:
-        return chunk_semantic(text, max_size=max_size)
+        return chunk_semantic(text, max_size=max_size, parent_size=parent_size)
     from indexer import chunk_text
 
     return chunk_text(text, max_size=max_size)

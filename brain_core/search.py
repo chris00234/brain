@@ -295,6 +295,13 @@ def hybrid_search(query, collections, limit=5, use_keyword=True, where=None, ded
                 "score": round(combined, 4),
                 "created_at": metas[i].get("created_at", ""),
                 "section": metas[i].get("section", ""),
+                # M9.2: parent-child chunking fields. Propagated from ChromaDB
+                # metadata so search_unified.normalize_rag_result can put them
+                # in the output metadata and parent_child_expand can swap
+                # child content for parent content at recall time.
+                "parent_id": metas[i].get("parent_id"),
+                "is_parent": metas[i].get("is_parent", False),
+                "chunk_id": metas[i].get("chunk_id"),
             })
 
     # Sort by combined score, optionally deduplicate by full content hash.

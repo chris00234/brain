@@ -275,6 +275,12 @@ def normalize_rag_result(r):
             "type": r.get("type", ""),
             "vector_score": r.get("vector_score", 0),
             "keyword_score": r.get("keyword_score", 0),
+            # M9.2: thread parent-child chunking fields through so the
+            # retrieval-side expand pass (parent_child_expand.py) can find
+            # children with parent_id and swap in parent content.
+            "parent_id": r.get("parent_id") or r.get("metadata", {}).get("parent_id"),
+            "is_parent": r.get("is_parent") or r.get("metadata", {}).get("is_parent", False),
+            "chunk_id": r.get("chunk_id") or r.get("metadata", {}).get("chunk_id"),
         },
     }
 

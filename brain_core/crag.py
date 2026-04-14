@@ -43,7 +43,11 @@ MIN_RESULTS_FOR_CONFIDENCE = 3
 
 # Iteration knobs
 DEFAULT_MAX_HOPS = 2
-DEFAULT_ITERATE_THRESHOLD = 0.45  # score below this → trigger expansion
+DEFAULT_ITERATE_THRESHOLD = 0.30  # M9.3: calibrated against 150-query extended
+# histogram (p10=0.327, current 0.45 triggered on 14.7% of queries). 0.30 gives
+# ~7% trigger rate, keeping weighted p50 latency increase under 100ms when
+# adaptive_rag also classifies the query as MULTI. adaptive_rag remains the
+# primary gate — CRAG fires only when caller_explicit OR classification is MULTI.
 DEFAULT_EXPANSION_TIMEOUT_S = 6.0  # hard wall-clock cap on the LLM dispatch
 EXPANSION_PER_ATTEMPT_TIMEOUT_S = 3  # passed to openclaw_dispatch per-attempt
 

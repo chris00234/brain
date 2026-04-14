@@ -1728,6 +1728,18 @@ def recall_v2(
             log.warning("crag iterative path failed: %s", _crag_err)
             timing["crag_error"] = str(_crag_err)[:200]
 
+    # M9.2: parent-child retrieval expand. When a child chunk wins the rank,
+    # swap its content for the wider parent chunk so the LLM consumer gets
+    # more context. Off by default; enabled via BRAIN_PARENT_CHILD_EXPAND.
+    # Runs BEFORE community injection so parents are available for both
+    # the child-expanded path and the community synthetic results.
+    try:
+        from brain_core.parent_child_expand import expand_to_parents as _pc_expand
+
+        fused = _pc_expand(fused)
+    except Exception as _pc_err:  # noqa: BLE001
+        log.warning("parent-child expand failed: %s", _pc_err)
+
     # M8.7: inject GraphRAG community summaries for MULTI-class queries.
     # When adaptive_rag classifies a query as MULTI (comparison, reasoning,
     # multi-fact synthesis), the weekly-generated community summaries from
