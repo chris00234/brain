@@ -111,7 +111,8 @@ dev = [
   "pytest-timeout==2.3.1",
   "hypothesis==6.122.3",
   "ruff==0.8.4",
-  "bandit==1.8.0",
+  # bandit removed 2026-04-13: bandit 1.8.0 cannot parse Python 3.14 AST.
+  # Security rules are enforced via ruff S-rules (ruff.toml::lint.select).
   "pre-commit==4.0.1",
   "respx==0.22.0",
 ]

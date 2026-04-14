@@ -1259,10 +1259,20 @@ def recall_v2(
     # When BRAIN_CROSS_ENCODER_ENABLED=false, only stage 1 runs.
     if rerank:
         t_rerank = time.time()
-        # Stage 1: token-overlap + trust/source boosts
-        fused = _rerank.rerank(q, fused, top_k=None)
-        for r in fused:
-            r["score"] = r.get("rerank_score", r.get("score", 0))
+        # Stage 1: token-overlap + trust/source boosts.
+        # search_all already runs this once per variant. For single-variant
+        # queries (the common case — `expand=False` default), the RRF step
+        # is a no-op fuse and these scores are already final, so re-running
+        # rerank is pure duplicate work (~5–10ms per recall). Skip if the
+        # fused list already carries rerank_score from search_all.
+        already_reranked = bool(fused) and all("rerank_score" in r for r in fused)
+        if already_reranked and len(variants) == 1:
+            for r in fused:
+                r["score"] = r.get("rerank_score", r.get("score", 0))
+        else:
+            fused = _rerank.rerank(q, fused, top_k=None)
+            for r in fused:
+                r["score"] = r.get("rerank_score", r.get("score", 0))
         timing["rerank_ms"] = int((time.time() - t_rerank) * 1000)
 
         # Stage 2: real cross-encoder refinement on the top window

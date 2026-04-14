@@ -145,9 +145,7 @@ def _load_soft_denylist() -> tuple[str, ...]:
     prefixes: list[str] = []
     conn = sqlite3.connect(str(AUTONOMY_DB))
     try:
-        for row in conn.execute(
-            "SELECT key, value FROM brain_config WHERE key LIKE 'denylist.%'"
-        ):
+        for row in conn.execute("SELECT key, value FROM brain_config WHERE key LIKE 'denylist.%'"):
             key, value = row[0], row[1]
             if value == "1":
                 prefix = key[len("denylist.") :]

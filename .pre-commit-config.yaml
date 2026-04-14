@@ -17,11 +17,6 @@ repos:
         types: [python]
         pass_filenames: true
 
-      - id: bandit
-        name: bandit (security scan)
-        entry: .venv/bin/python -m bandit -c bandit.yaml -q -r
-        language: system
-        types: [python]
-        pass_filenames: false
-        always_run: false
-        files: ^(brain_core|cli|pipeline|server\.py|brain_mcp_server\.py)
+# bandit removed 2026-04-13 — bandit 1.8.0 can't parse Python 3.14 AST and
+# silently skips every file. Security checks moved to ruff S-rules
+# (ruff.toml::lint.select includes "S" — bandit-lite ported to ruff).

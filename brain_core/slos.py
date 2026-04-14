@@ -288,9 +288,7 @@ def _load_last_alert_at(slo_name: str, severity: str) -> float:
         _ensure_brain_config_schema()
         conn = sqlite3.connect(str(AUTONOMY_DB))
         try:
-            row = conn.execute(
-                "SELECT value FROM brain_config WHERE key = ?", (key,)
-            ).fetchone()
+            row = conn.execute("SELECT value FROM brain_config WHERE key = ?", (key,)).fetchone()
             return float(row[0]) if row else 0.0
         finally:
             conn.close()

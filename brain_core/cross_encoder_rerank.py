@@ -39,12 +39,12 @@ def rerank_with_cross_encoder(query: str, results: list[dict], top_k: int = 20) 
     """Rerank top-k results with a real cross-encoder. No-op if flag off.
 
     Computes CE score for each (query, doc) pair in one batched .predict() call,
-    blends 40% original RRF/hybrid score + 60% CE score (normalized to 0-100),
+    blends 20% original RRF/hybrid score + 80% CE score (normalized to 0-100),
     re-sorts the top_k window, leaves the tail unchanged.
 
     Every reranked row gets:
       - `cross_encoder_score` (sigmoid-normalized to [0, 1])
-      - `ce_blended_score` (40/60 blend of original score × CE, in the same
+      - `ce_blended_score` (20/80 blend of original score × CE, in the same
                             scale as upstream RRF/hybrid scores)
       - `score` overwritten with ce_blended_score so downstream sorts work
     """

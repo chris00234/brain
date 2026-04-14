@@ -180,9 +180,9 @@ def test_half_open_failure_sets_fresh_opened_at(isolated_breakers, monkeypatch):
     assert snap2.state == "open"
     assert snap2.trip_count == 2
     assert snap2.reset_after_s > first_tier, "probe failure should escalate backoff tier"
-    assert snap2.opened_at is not None and snap2.opened_at >= before, (
-        "probe failure should reset opened_at to now, not reuse stale value"
-    )
+    assert (
+        snap2.opened_at is not None and snap2.opened_at >= before
+    ), "probe failure should reset opened_at to now, not reuse stale value"
 
 
 def test_half_open_probing_blocks_new_callers(isolated_breakers):
