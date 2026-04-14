@@ -213,6 +213,16 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         misfire_grace=120,
     ),
 
+    # Phase J2: HNSW ef_search adaptive tuning (weekly Sunday 4:15am, off-hours)
+    # Advisory only — writes hnsw:search_ef metadata, picked up on next collection load.
+    ScheduledJob(
+        name="hnsw_tune",
+        description="Phase J2: adaptive HNSW ef_search tuning based on measured p95 (Sun 4:15am)",
+        trigger=CronTrigger(day_of_week="sun", hour=4, minute=15),
+        agent="system",
+        misfire_grace=900,
+    ),
+
     ScheduledJob(
         name="content_quality_slo",
         description="Daily content quality SLO check (4:00am, after eval_run)",

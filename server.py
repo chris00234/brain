@@ -115,6 +115,8 @@ JOB_REGISTRY: dict[str, list[str]] = {
     "eval_holdout_audit":   [_py, "-c", f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from eval_holdout_audit import run; import json; print(json.dumps(run()))"],
     # Phase E: SLO check job — runs every 5 min, dispatches Telegram alerts on breach
     "slos_check":           [_py, "-c", f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from slos import run; import json; print(json.dumps(run()))"],
+    # Phase J2: adaptive HNSW ef_search tuning (advisory — applied on next collection load)
+    "hnsw_tune":          [_py, "-c", f"import sys; sys.path.insert(0, '{_bd}/brain_core/pipeline'); sys.path.insert(0, '{_bd}/brain_core'); from hnsw_tuner import adaptive_tune; import json; print(json.dumps(adaptive_tune(dry_run=False)))"],
     "reindex":            ["/bin/zsh", f"{_bd}/cli/reindex.sh"],
     # Maintenance
     "log_rotation":       [_py, f"{_bd}/brain_core/maintenance.py", "all_cleanup"],
