@@ -39,13 +39,19 @@ TOP_N = 5  # max items to promote per weekly run
 
 
 def _embed(text: str) -> list[float] | None:
-    """Embed via the local Ollama embedder. Returns None on failure."""
-    try:
-        from indexer import _embed_texts  # type: ignore[attr-defined]
+    """Embed via the local Ollama embedder. Returns None on failure.
 
-        result = _embed_texts([text])
-        if result and len(result) == 1:
-            return result[0]
+    indexer exposes `get_embedding(text)` for single texts and
+    `get_embeddings_batch(texts)` for batches. The previous import of
+    `_embed_texts` was a stale name and silently broke the M7 self-evolution
+    loop (caught by tests/integration/test_self_evolution_e2e.py).
+    """
+    try:
+        from indexer import get_embedding  # type: ignore[attr-defined]
+
+        result = get_embedding(text, prefix="query")
+        if result and isinstance(result, list):
+            return result
     except Exception as exc:
         log.warning("embed failed: %s", exc)
     return None
