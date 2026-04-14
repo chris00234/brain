@@ -236,6 +236,12 @@ JOB_REGISTRY: dict[str, list[str]] = {
         "-c",
         f"import sys; sys.path.insert(0, '{_bd}/ingest'); from pdfs import run; import json; print(json.dumps(run()))",
     ],
+    # M8.5: GraphRAG community summaries (Sun 5:00am).
+    "community_summaries": [
+        _py,
+        "-c",
+        f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from community_summaries import run; import json; print(json.dumps(run()))",
+    ],
     # M7-WS2b: image OCR + caption ingestion (daily 5:45am).
     "image_ingest": [
         _py,

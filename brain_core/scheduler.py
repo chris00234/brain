@@ -110,6 +110,14 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         agent="system",
         misfire_grace=1800,
     ),
+    # M8.5: GraphRAG community summaries — Louvain on entity graph + Sage summary per cluster
+    ScheduledJob(
+        name="community_summaries",
+        description="M8.5: Louvain community detection on entity graph + Sage summary per cluster (Sun 5:00am)",
+        trigger=CronTrigger(day_of_week="sun", hour=5, minute=0),
+        agent="sage",
+        misfire_grace=1800,
+    ),
     # M7-WS2b: image OCR + caption ingestion (off-hours, daily, after PDF run)
     ScheduledJob(
         name="image_ingest",
