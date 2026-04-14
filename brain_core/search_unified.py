@@ -986,6 +986,16 @@ def search_all(
                 r["score"] = min(100.0, float(r.get("score", 0)) + bonus)
                 r["triple_link_matches"] = matched
 
+    # M8.6: late-interaction rerank backend swap. Only fires when
+    # BRAIN_RERANK_BACKEND=late_interaction (default off). The module is
+    # a no-op when the env var isn't set, so adding the call is free.
+    try:
+        from late_interaction import rerank as _li_rerank
+
+        unique = _li_rerank(relevance_query, unique, top_k=20)
+    except Exception:
+        pass
+
     # Cross-encoder rerank runs in server.py recall_v2 handler (post-RRF).
 
     # Round 10 A1 (Wave 1.5b): spreading activation via Personalized PageRank.
