@@ -28,7 +28,16 @@ from pathlib import Path
 from typing import Annotated, Any, Literal
 
 import structlog
-from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Path as PathParam, Query, Request
+from fastapi import (
+    BackgroundTasks,
+    Depends,
+    FastAPI,
+    Header,
+    HTTPException,
+    Path as PathParam,
+    Query,
+    Request,
+)
 
 log = structlog.get_logger("brain.server")
 from fastapi.middleware.cors import CORSMiddleware
@@ -58,9 +67,18 @@ from scheduler import brain_scheduler  # noqa: E402
 
 # ── Config ──────────────────────────────────────────────
 from config import (  # noqa: E402
-    SECRET_FILE, INBOX_DIR, IDENTITY_FILE, STATE_FILE, DISTILLED_DAILY,
-    WEEKLY_DIR, MONTHLY_DIR, FAILURE_LOG, BRAIN_DIR, PYTHON,
+    SECRET_FILE,
+    INBOX_DIR,
+    IDENTITY_FILE,
+    STATE_FILE,
+    DISTILLED_DAILY,
+    WEEKLY_DIR,
+    MONTHLY_DIR,
+    FAILURE_LOG,
+    BRAIN_DIR,
+    PYTHON,
 )
+
 LISTEN_HOST = os.getenv("BRAIN_SERVER_HOST", "127.0.0.1")
 LISTEN_PORT = int(os.getenv("BRAIN_SERVER_PORT", "8791"))
 
@@ -70,112 +88,245 @@ _py = PYTHON
 _bd = str(BRAIN_DIR)
 JOB_REGISTRY: dict[str, list[str]] = {
     # Ingestion
-    "personal_ingest":    ["/bin/bash", f"{_bd}/ingest/run_personal.sh"],
-    "gmail_ingest":       [_py, f"{_bd}/ingest/gmail.py"],
-    "browser_ingest":     [_py, f"{_bd}/ingest/browser.py"],
-    "shell_ingest":       [_py, f"{_bd}/ingest/shell_history.py"],
-    "obsidian_sync":      [_py, f"{_bd}/ingest/obsidian.py", "pull"],
-    "healthcheck":        [_py, f"{_bd}/ingest/healthcheck.py"],
-    "ghost_blog_ingest":  [_py, f"{_bd}/ingest/ghost_blog.py"],
+    "personal_ingest": ["/bin/bash", f"{_bd}/ingest/run_personal.sh"],
+    "gmail_ingest": [_py, f"{_bd}/ingest/gmail.py"],
+    "browser_ingest": [_py, f"{_bd}/ingest/browser.py"],
+    "shell_ingest": [_py, f"{_bd}/ingest/shell_history.py"],
+    "obsidian_sync": [_py, f"{_bd}/ingest/obsidian.py", "pull"],
+    "healthcheck": [_py, f"{_bd}/ingest/healthcheck.py"],
+    "ghost_blog_ingest": [_py, f"{_bd}/ingest/ghost_blog.py"],
     # New data source ingest (agent-distilled)
-    "openclaw_sessions_ingest":  [_py, f"{_bd}/ingest/openclaw_sessions.py"],
-    "openclaw_sessions_ingest_market": [_py, f"{_bd}/ingest/openclaw_sessions.py", "--agents", "market", "--max-sessions", "20"],
-    "openclaw_sessions_ingest_jenna":  [_py, f"{_bd}/ingest/openclaw_sessions.py", "--agents", "jenna",  "--max-sessions", "20"],
-    "openclaw_sessions_ingest_liz":    [_py, f"{_bd}/ingest/openclaw_sessions.py", "--agents", "liz",    "--max-sessions", "20"],
-    "openclaw_sessions_ingest_ellie":  [_py, f"{_bd}/ingest/openclaw_sessions.py", "--agents", "ellie",  "--max-sessions", "20"],
-    "openclaw_sessions_ingest_sage":   [_py, f"{_bd}/ingest/openclaw_sessions.py", "--agents", "sage",   "--max-sessions", "20"],
+    "openclaw_sessions_ingest": [_py, f"{_bd}/ingest/openclaw_sessions.py"],
+    "openclaw_sessions_ingest_market": [
+        _py,
+        f"{_bd}/ingest/openclaw_sessions.py",
+        "--agents",
+        "market",
+        "--max-sessions",
+        "20",
+    ],
+    "openclaw_sessions_ingest_jenna": [
+        _py,
+        f"{_bd}/ingest/openclaw_sessions.py",
+        "--agents",
+        "jenna",
+        "--max-sessions",
+        "20",
+    ],
+    "openclaw_sessions_ingest_liz": [
+        _py,
+        f"{_bd}/ingest/openclaw_sessions.py",
+        "--agents",
+        "liz",
+        "--max-sessions",
+        "20",
+    ],
+    "openclaw_sessions_ingest_ellie": [
+        _py,
+        f"{_bd}/ingest/openclaw_sessions.py",
+        "--agents",
+        "ellie",
+        "--max-sessions",
+        "20",
+    ],
+    "openclaw_sessions_ingest_sage": [
+        _py,
+        f"{_bd}/ingest/openclaw_sessions.py",
+        "--agents",
+        "sage",
+        "--max-sessions",
+        "20",
+    ],
     "claude_code_sessions_ingest": [_py, f"{_bd}/ingest/claude_code_sessions.py"],
-    "git_activity_ingest":       [_py, f"{_bd}/ingest/git_activity.py"],
-    "screen_time_ingest":        [_py, f"{_bd}/ingest/screen_time.py"],
-    "active_contacts_ingest":    [_py, f"{_bd}/ingest/active_contacts.py"],
+    "git_activity_ingest": [_py, f"{_bd}/ingest/git_activity.py"],
+    "screen_time_ingest": [_py, f"{_bd}/ingest/screen_time.py"],
+    "active_contacts_ingest": [_py, f"{_bd}/ingest/active_contacts.py"],
     # Synthesis
-    "daily_synthesis":    [_py, f"{_bd}/synthesis/daily.py"],
-    "daily_reflection":   [_py, f"{_bd}/synthesis/reflection.py"],
-    "weekly_synthesis":   [_py, f"{_bd}/synthesis/weekly.py"],
-    "monthly_synthesis":  [_py, f"{_bd}/synthesis/monthly.py"],
-    "brain_reflect":      [_py, f"{_bd}/synthesis/reflect.py"],
-    "profile_regen":      [_py, f"{_bd}/synthesis/profile_regen.py"],
-    "proactive_check":    [_py, f"{_bd}/brain_core/proactive.py"],
+    "daily_synthesis": [_py, f"{_bd}/synthesis/daily.py"],
+    "daily_reflection": [_py, f"{_bd}/synthesis/reflection.py"],
+    "weekly_synthesis": [_py, f"{_bd}/synthesis/weekly.py"],
+    "monthly_synthesis": [_py, f"{_bd}/synthesis/monthly.py"],
+    "brain_reflect": [_py, f"{_bd}/synthesis/reflect.py"],
+    "profile_regen": [_py, f"{_bd}/synthesis/profile_regen.py"],
+    "proactive_check": [_py, f"{_bd}/brain_core/proactive.py"],
     # Maintenance
-    "memory_lifecycle":   [_py, f"{_bd}/brain_core/memory_lifecycle.py"],
+    "memory_lifecycle": [_py, f"{_bd}/brain_core/memory_lifecycle.py"],
     "canonical_pipeline": [_py, f"{_bd}/pipeline/pipeline_auto.py"],
     # Two-track eval (incident 2026-04-13): stable=strict gate+heal, extended=trend only.
     # `eval_run` aliases to the stable track so legacy scheduled triggers keep working.
-    "eval_run":           [_py, f"{_bd}/cli/eval_gate.py", "--eval-set", f"{_bd}/cli/eval_set_stable.json", "--baseline", f"{_bd}/cli/eval_baseline_stable.json", "--track", "stable"],
-    "eval_run_stable":    [_py, f"{_bd}/cli/eval_gate.py", "--eval-set", f"{_bd}/cli/eval_set_stable.json", "--baseline", f"{_bd}/cli/eval_baseline_stable.json", "--track", "stable"],
-    "eval_run_extended":  [_py, f"{_bd}/cli/eval_gate.py", "--eval-set", f"{_bd}/cli/eval_set_extended.json", "--baseline", f"{_bd}/cli/eval_baseline_extended.json", "--track", "extended", "--no-heal", "--threshold", "10"],
-    "eval_run_full":      [_py, f"{_bd}/cli/eval_gate.py", "--track", "full", "--no-heal", "--threshold", "10"],
+    "eval_run": [
+        _py,
+        f"{_bd}/cli/eval_gate.py",
+        "--eval-set",
+        f"{_bd}/cli/eval_set_stable.json",
+        "--baseline",
+        f"{_bd}/cli/eval_baseline_stable.json",
+        "--track",
+        "stable",
+    ],
+    "eval_run_stable": [
+        _py,
+        f"{_bd}/cli/eval_gate.py",
+        "--eval-set",
+        f"{_bd}/cli/eval_set_stable.json",
+        "--baseline",
+        f"{_bd}/cli/eval_baseline_stable.json",
+        "--track",
+        "stable",
+    ],
+    "eval_run_extended": [
+        _py,
+        f"{_bd}/cli/eval_gate.py",
+        "--eval-set",
+        f"{_bd}/cli/eval_set_extended.json",
+        "--baseline",
+        f"{_bd}/cli/eval_baseline_extended.json",
+        "--track",
+        "extended",
+        "--no-heal",
+        "--threshold",
+        "10",
+    ],
+    "eval_run_full": [_py, f"{_bd}/cli/eval_gate.py", "--track", "full", "--no-heal", "--threshold", "10"],
     # Phase 4: SM-2 nightly review scheduler — seeds null next_review_at + obsoletes stale atoms
-    "sm2_nightly":        [_py, "-c", f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from sm2 import nightly_pass; import json; print(json.dumps(nightly_pass()))"],
+    "sm2_nightly": [
+        _py,
+        "-c",
+        f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from sm2 import nightly_pass; import json; print(json.dumps(nightly_pass()))",
+    ],
     # Phase 7: closed-loop self-learning jobs
-    "autonomy_proposer":  [_py, "-c", f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from autonomy_proposer import run; import json; print(json.dumps(run()))"],
-    "lora_ab_gate":       [_py, f"{_bd}/cli/lora_ab_gate.py"],
+    "autonomy_proposer": [
+        _py,
+        "-c",
+        f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from autonomy_proposer import run; import json; print(json.dumps(run()))",
+    ],
+    "lora_ab_gate": [_py, f"{_bd}/cli/lora_ab_gate.py"],
     # Phase C: eval auto-growth pipeline (run after lora_ab_gate but before sm2_nightly)
-    "eval_holdout_promote": [_py, "-c", f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from eval_holdout_promote import run; import json; print(json.dumps(run()))"],
-    "eval_holdout_audit":   [_py, "-c", f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from eval_holdout_audit import run; import json; print(json.dumps(run()))"],
+    "eval_holdout_promote": [
+        _py,
+        "-c",
+        f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from eval_holdout_promote import run; import json; print(json.dumps(run()))",
+    ],
+    "eval_holdout_audit": [
+        _py,
+        "-c",
+        f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from eval_holdout_audit import run; import json; print(json.dumps(run()))",
+    ],
     # Phase E: SLO check job — runs every 5 min, dispatches Telegram alerts on breach
-    "slos_check":           [_py, "-c", f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from slos import run; import json; print(json.dumps(run()))"],
+    "slos_check": [
+        _py,
+        "-c",
+        f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from slos import run; import json; print(json.dumps(run()))",
+    ],
     # Phase J2: adaptive HNSW ef_search tuning (advisory — applied on next collection load)
-    "hnsw_tune":          [_py, "-c", f"import sys; sys.path.insert(0, '{_bd}/brain_core/pipeline'); sys.path.insert(0, '{_bd}/brain_core'); from hnsw_tuner import adaptive_tune; import json; print(json.dumps(adaptive_tune(dry_run=False)))"],
+    "hnsw_tune": [
+        _py,
+        "-c",
+        f"import sys; sys.path.insert(0, '{_bd}/brain_core/pipeline'); sys.path.insert(0, '{_bd}/brain_core'); from hnsw_tuner import adaptive_tune; import json; print(json.dumps(adaptive_tune(dry_run=False)))",
+    ],
     # Phase 2D: SessionEnd outbox drainer — replays envelopes that the
     # post_session.sh fire-and-forget call missed (brain down, orphan inflight,
     # no SessionEnd at all). Documented as 5-min job in CRON_MAP/RUNBOOK; the
     # schedule entry was missing prior to this commit, so failed envelopes
     # silently piled up in pending/.
-    "outbox_drain":       [_py, f"{_bd}/cli/outbox_drain.py"],
+    "outbox_drain": [_py, f"{_bd}/cli/outbox_drain.py"],
     # Phase M6: weekly trust score recompute for web_source_trust table —
     # aggregates per-domain useful/wrong outcomes from web_search_results.
-    "web_source_trust_recompute": [_py, "-c", f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from web_search import recompute_domain_trust; import json; print(json.dumps(recompute_domain_trust()))"],
-    "reindex":            ["/bin/zsh", f"{_bd}/cli/reindex.sh"],
+    "web_source_trust_recompute": [
+        _py,
+        "-c",
+        f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from web_search import recompute_domain_trust; import json; print(json.dumps(recompute_domain_trust()))",
+    ],
+    "reindex": ["/bin/zsh", f"{_bd}/cli/reindex.sh"],
     # Maintenance
-    "log_rotation":       [_py, f"{_bd}/brain_core/maintenance.py", "all_cleanup"],
-    "chroma_integrity":   [_py, f"{_bd}/brain_core/maintenance.py", "chroma_integrity"],
-    "canonical_index":    ["/bin/bash", "-c", "SECRET=$(cat ~/.openclaw/credentials/.personal_webhook_secret) && curl -sf -X POST -H \"Authorization: Bearer $SECRET\" http://127.0.0.1:8791/brain/index/rebuild"],
+    "log_rotation": [_py, f"{_bd}/brain_core/maintenance.py", "all_cleanup"],
+    "chroma_integrity": [_py, f"{_bd}/brain_core/maintenance.py", "chroma_integrity"],
+    "canonical_index": [
+        "/bin/bash",
+        "-c",
+        'SECRET=$(cat ~/.openclaw/credentials/.personal_webhook_secret) && curl -sf -X POST -H "Authorization: Bearer $SECRET" http://127.0.0.1:8791/brain/index/rebuild',
+    ],
     "graph_consolidation": [_py, f"{_bd}/brain_core/graph_consolidation.py"],
-    "stale_cleanup":      [_py, f"{_bd}/brain_core/maintenance.py", "stale_cleanup"],
+    "stale_cleanup": [_py, f"{_bd}/brain_core/maintenance.py", "stale_cleanup"],
     "memory_observability": [_py, f"{_bd}/pipeline/memory_observability.py"],
-    "lint_memory":          [_py, f"{_bd}/pipeline/lint_memory.py"],
-    "near_dedup":         [_py, "-c", f"import sys; sys.path.insert(0,'{_bd}/brain_core'); from memory_lifecycle import dedup_semantic_near_duplicates; import json; print(json.dumps(dedup_semantic_near_duplicates()))"],
-    "auto_resolve_contradictions": [_py, "-c", f"import sys; sys.path.insert(0,'{_bd}/brain_core'); from memory_lifecycle import auto_resolve_stale_contradictions; import json; print(json.dumps(auto_resolve_stale_contradictions()))"],
-    "supersession_chain_cleanup": [_py, "-c", f"import sys; sys.path.insert(0,'{_bd}/brain_core'); from memory_lifecycle import cleanup_supersession_chains; import json; print(json.dumps(cleanup_supersession_chains()))"],
+    "lint_memory": [_py, f"{_bd}/pipeline/lint_memory.py"],
+    "near_dedup": [
+        _py,
+        "-c",
+        f"import sys; sys.path.insert(0,'{_bd}/brain_core'); from memory_lifecycle import dedup_semantic_near_duplicates; import json; print(json.dumps(dedup_semantic_near_duplicates()))",
+    ],
+    "auto_resolve_contradictions": [
+        _py,
+        "-c",
+        f"import sys; sys.path.insert(0,'{_bd}/brain_core'); from memory_lifecycle import auto_resolve_stale_contradictions; import json; print(json.dumps(auto_resolve_stale_contradictions()))",
+    ],
+    "supersession_chain_cleanup": [
+        _py,
+        "-c",
+        f"import sys; sys.path.insert(0,'{_bd}/brain_core'); from memory_lifecycle import cleanup_supersession_chains; import json; print(json.dumps(cleanup_supersession_chains()))",
+    ],
     "feedback_aggregate": [_py, f"{_bd}/brain_core/feedback_aggregator.py"],
-    "entity_resolution":  [_py, f"{_bd}/pipeline/entity_resolution.py", "--apply"],
-    "neo4j_backup":       [_py, f"{_bd}/cli/backup_neo4j.py"],
+    "entity_resolution": [_py, f"{_bd}/pipeline/entity_resolution.py", "--apply"],
+    "neo4j_backup": [_py, f"{_bd}/cli/backup_neo4j.py"],
     # Backup (also runs via independent launchd plist as a failure-domain safety net)
-    "backup":             [_py, f"{_bd}/cli/backup_chroma.py"],
-    "backup_verify":      [_py, f"{_bd}/cli/backup_verify.py"],
+    "backup": [_py, f"{_bd}/cli/backup_chroma.py"],
+    "backup_verify": [_py, f"{_bd}/cli/backup_verify.py"],
     # reembed_migrator is manual-only (requires positional <collection> arg).
     # Invoke directly: python brain_core/pipeline/reembed_migrator.py <collection_name>
     "proactive_insights": [_py, f"{_bd}/brain_core/pipeline/proactive_linker.py"],
-    "skill_extract":      [_py, f"{_bd}/brain_core/pipeline/skill_extractor.py"],
-    "memory_nudge":       [_py, f"{_bd}/brain_core/pipeline/memory_nudge.py"],
+    "skill_extract": [_py, f"{_bd}/brain_core/pipeline/skill_extractor.py"],
+    "memory_nudge": [_py, f"{_bd}/brain_core/pipeline/memory_nudge.py"],
     "memory_consolidation": [_py, f"{_bd}/brain_core/pipeline/memory_consolidation.py"],
-    "llm_usage_purge":    [_py, f"{_bd}/brain_core/pipeline/llm_usage_purge.py"],
-    "fts_rebuild":        [_py, f"{_bd}/brain_core/fts_index.py"],
-    "event_compressor":   [_py, f"{_bd}/brain_core/pipeline/event_compressor.py"],
-    "slo_monitor":        [_py, f"{_bd}/brain_core/slo_monitor.py"],
-    "hnsw_adaptive":      [_py, f"{_bd}/brain_core/pipeline/hnsw_tuner.py", "--adaptive"],
+    "llm_usage_purge": [_py, f"{_bd}/brain_core/pipeline/llm_usage_purge.py"],
+    "fts_rebuild": [_py, f"{_bd}/brain_core/fts_index.py"],
+    "event_compressor": [_py, f"{_bd}/brain_core/pipeline/event_compressor.py"],
+    "slo_monitor": [_py, f"{_bd}/brain_core/slo_monitor.py"],
+    "hnsw_adaptive": [_py, f"{_bd}/brain_core/pipeline/hnsw_tuner.py", "--adaptive"],
     "memory_leak_detector": [_py, f"{_bd}/brain_core/pipeline/memory_leak_detector.py"],
     "training_pairs_generate": [_py, f"{_bd}/brain_core/pipeline/training_pair_generator.py"],
     # Round 9 — Tier 2 new pipelines
-    "code_index_refresh":  [_py, f"{_bd}/ingest/code_repos.py"],
-    "gap_detection":       [_py, f"{_bd}/brain_core/pipeline/gap_detector.py"],
-    "trust_recompute":     [_py, "-c", f"import sys; sys.path.insert(0,'{_bd}/brain_core'); from memory_lifecycle import recompute_trust_scores; import json; print(json.dumps(recompute_trust_scores()))"],
-    "focus_aggregate":     [_py, f"{_bd}/brain_core/pipeline/focus_aggregator.py"],
+    "code_index_refresh": [_py, f"{_bd}/ingest/code_repos.py"],
+    "gap_detection": [_py, f"{_bd}/brain_core/pipeline/gap_detector.py"],
+    "trust_recompute": [
+        _py,
+        "-c",
+        f"import sys; sys.path.insert(0,'{_bd}/brain_core'); from memory_lifecycle import recompute_trust_scores; import json; print(json.dumps(recompute_trust_scores()))",
+    ],
+    "focus_aggregate": [_py, f"{_bd}/brain_core/pipeline/focus_aggregator.py"],
     # Round 10 Wave 2 — episodic memory binding (CoALA-style)
-    "episode_binder":      [_py, f"{_bd}/brain_core/pipeline/episode_binder.py"],
+    "episode_binder": [_py, f"{_bd}/brain_core/pipeline/episode_binder.py"],
     # Round 10 Wave 3 — synaptic pruning of atrophied memories (MemoryBank)
-    "memory_pruning":      [_py, "-c", f"import sys; sys.path.insert(0,'{_bd}/brain_core'); from memory_lifecycle import prune_atrophied_memories; import json; print(json.dumps(prune_atrophied_memories(dry_run=True)))"],
-    "memory_pruning_active": [_py, "-c", f"import sys; sys.path.insert(0,'{_bd}/brain_core'); from memory_lifecycle import prune_atrophied_memories; import json; print(json.dumps(prune_atrophied_memories(dry_run=False, max_age_days=120, compress_with_gist=True)))"],
-    "stale_superseded_cleanup": [_py, "-c", f"import sys; sys.path.insert(0,'{_bd}/brain_core'); from memory_lifecycle import cleanup_stale_superseded; import json; print(json.dumps(cleanup_stale_superseded()))"],
+    "memory_pruning": [
+        _py,
+        "-c",
+        f"import sys; sys.path.insert(0,'{_bd}/brain_core'); from memory_lifecycle import prune_atrophied_memories; import json; print(json.dumps(prune_atrophied_memories(dry_run=True)))",
+    ],
+    "memory_pruning_active": [
+        _py,
+        "-c",
+        f"import sys; sys.path.insert(0,'{_bd}/brain_core'); from memory_lifecycle import prune_atrophied_memories; import json; print(json.dumps(prune_atrophied_memories(dry_run=False, max_age_days=120, compress_with_gist=True)))",
+    ],
+    "stale_superseded_cleanup": [
+        _py,
+        "-c",
+        f"import sys; sys.path.insert(0,'{_bd}/brain_core'); from memory_lifecycle import cleanup_stale_superseded; import json; print(json.dumps(cleanup_stale_superseded()))",
+    ],
     # LoRA fine-tuning — manual trigger only, behind BRAIN_FINETUNE_ENABLED flag.
     # Must run in the brain venv since sentence-transformers/peft/torch are only
     # installed there, not in the system Python.
-    "embed_finetune":     [f"{_bd}/.venv/bin/python3", f"{_bd}/cli/brain_finetune.py"],
+    "embed_finetune": [f"{_bd}/.venv/bin/python3", f"{_bd}/cli/brain_finetune.py"],
     # Infra validation + health reports
-    "infra_validation":     [_py, f"{_bd}/brain_core/maintenance.py", "validate_infra"],
-    "memory_health_report": [_py, "-c", f"import sys; sys.path.insert(0,'{_bd}/brain_core'); from memory_lifecycle import memory_health_report; import json; print(json.dumps(memory_health_report()))"],
-    "content_quality_slo":  [_py, "-c", f"import sys; sys.path.insert(0,'{_bd}/brain_core'); from slo_monitor import check_content_quality; import json; print(json.dumps(check_content_quality()))"],
+    "infra_validation": [_py, f"{_bd}/brain_core/maintenance.py", "validate_infra"],
+    "memory_health_report": [
+        _py,
+        "-c",
+        f"import sys; sys.path.insert(0,'{_bd}/brain_core'); from memory_lifecycle import memory_health_report; import json; print(json.dumps(memory_health_report()))",
+    ],
+    "content_quality_slo": [
+        _py,
+        "-c",
+        f"import sys; sys.path.insert(0,'{_bd}/brain_core'); from slo_monitor import check_content_quality; import json; print(json.dumps(check_content_quality()))",
+    ],
 }
 
 _running_jobs: dict[str, subprocess.Popen] = {}
@@ -212,6 +363,7 @@ class MetricsResponse(BaseModel):
 
 class CaptureRequest(BaseModel):
     """Generic capture payload — wrapped into a schema-compliant raw record on write."""
+
     event: str | None = None
     place: str | None = None
     lat: float | None = None
@@ -534,11 +686,17 @@ def _log_failure(reason: str, route: str = "?") -> None:
     try:
         FAILURE_LOG.parent.mkdir(parents=True, exist_ok=True)
         with FAILURE_LOG.open("a") as f:
-            f.write(json.dumps({
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "route": route,
-                "reason": reason[:500],
-            }, ensure_ascii=False) + "\n")
+            f.write(
+                json.dumps(
+                    {
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "route": route,
+                        "reason": reason[:500],
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
     except Exception:
         pass
 
@@ -612,7 +770,7 @@ def verify_bearer(authorization: Annotated[str | None, Header()] = None) -> None
         raise HTTPException(status_code=503, detail="server misconfigured")
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="missing bearer token")
-    provided = authorization[len("Bearer "):].strip()
+    provided = authorization[len("Bearer ") :].strip()
     if not hmac.compare_digest(provided, secret):
         raise HTTPException(status_code=401, detail="invalid bearer token")
 
@@ -642,6 +800,7 @@ def _prewarm_caches() -> None:
 
     try:
         from boot_context import _predictive_queries
+
         PREWARM_QUERIES.extend(_predictive_queries("claude"))
     except Exception:
         pass
@@ -652,6 +811,7 @@ def _prewarm_caches() -> None:
         # block user requests if they race for the same OpenClaw session.
         try:
             from search import get_embedding, get_collections
+
             get_collections()  # populate the collections name→id cache
             for q in PREWARM_QUERIES:
                 get_embedding(q)
@@ -682,11 +842,13 @@ async def lifespan(app: FastAPI):
     )
     import asyncio
     from concurrent.futures import ThreadPoolExecutor
+
     loop = asyncio.get_running_loop()
     loop.set_default_executor(ThreadPoolExecutor(max_workers=32))
     # Phase A6: run schema migrations before starting scheduler
     try:
         from brain_core.schema_versions import check_and_migrate
+
         migration_result = check_and_migrate()
         log.info("schema_migrations", **migration_result)
     except RuntimeError as e:
@@ -707,15 +869,19 @@ async def lifespan(app: FastAPI):
     # thread so startup doesn't block on model download.
     try:
         from brain_core import config as _brain_config
+
         if getattr(_brain_config, "BRAIN_CROSS_ENCODER_ENABLED", False):
             import threading
+
             def _warm_ce():
                 try:
                     from brain_core.cross_encoder_model import warmup as _ce_warmup
+
                     ok = _ce_warmup()
                     log.info("cross_encoder_warmup", ok=ok)
                 except Exception as _e:
                     log.warning("cross_encoder_warmup_failed", error=str(_e))
+
             threading.Thread(target=_warm_ce, daemon=True).start()
     except Exception:
         pass
@@ -773,9 +939,9 @@ limiter = Limiter(
     enabled=not _rate_limit_disabled,
     default_limits=["1000/minute"],  # global ceiling; per-route overrides below
     headers_enabled=False,  # informational X-RateLimit-* injection requires every
-                            # rate-limited route to return Response; our routes
-                            # return dict + Pydantic models, so we keep just the
-                            # 429 enforcement on breach.
+    # rate-limited route to return Response; our routes
+    # return dict + Pydantic models, so we keep just the
+    # 429 enforcement on breach.
 )
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
@@ -784,7 +950,9 @@ app.add_middleware(SlowAPIMiddleware)
 _cors_origins = os.getenv("BRAIN_CORS_ORIGINS", "").strip()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_cors_origins.split(",") if _cors_origins else [
+    allow_origins=_cors_origins.split(",")
+    if _cors_origins
+    else [
         "http://localhost:5173",
         "http://127.0.0.1:5173",
         "http://localhost:8791",
@@ -844,6 +1012,7 @@ def metrics() -> MetricsResponse:
     # Embedding cache stats
     try:
         from embed_cache import cache_stats as _embed_stats
+
         embed_cache = _embed_stats()
     except Exception:
         embed_cache = {}
@@ -872,7 +1041,9 @@ def collections() -> dict[str, int]:
 
 
 # ── Routes: profile ─────────────────────────────────────
-@app.get("/profile", response_class=PlainTextResponse, tags=["profile"], dependencies=[Depends(verify_bearer)])
+@app.get(
+    "/profile", response_class=PlainTextResponse, tags=["profile"], dependencies=[Depends(verify_bearer)]
+)
 def profile() -> str:
     content = _profile_cache.get()
     if content is None:
@@ -880,7 +1051,12 @@ def profile() -> str:
     return content
 
 
-@app.get("/profile/section/{name}", response_class=PlainTextResponse, tags=["profile"], dependencies=[Depends(verify_bearer)])
+@app.get(
+    "/profile/section/{name}",
+    response_class=PlainTextResponse,
+    tags=["profile"],
+    dependencies=[Depends(verify_bearer)],
+)
 def profile_section(name: Annotated[str, PathParam()]) -> str:
     content = _profile_cache.section(name)
     if content is None:
@@ -917,8 +1093,9 @@ def recall(
 
     # Semantic similarity cache — only for plain queries (no filters)
     # When filters are present, results differ per filter combo so we skip cache.
-    _filter_free = not any((since, until, entity, collection, domain, source_type,
-                            include_history, include_obsolete, as_of))
+    _filter_free = not any(
+        (since, until, entity, collection, domain, source_type, include_history, include_obsolete, as_of)
+    )
     if _filter_free:
         cached = _recall_emb_cache_lookup(q)
         if cached is not None:
@@ -942,6 +1119,7 @@ def recall(
                 if cached_sem_ids:
                     from brain_core.memory_lifecycle import reinforce_on_access
                     from brain_core.search_unified import _search_bg_pool
+
                     _search_bg_pool.submit(reinforce_on_access, cached_sem_ids)
             except Exception:
                 pass
@@ -955,18 +1133,22 @@ def recall(
     search_n = n * 3 if (start_dt or end_dt) else n
 
     payload = search_unified.search_all(
-        q, search_n, sources=["rag", "canonical", "obsidian"],
-        domain=domain, original_query=q, where=where,
-        collections=collections_arg, entity=entity, explain=False,
+        q,
+        search_n,
+        sources=["rag", "canonical", "obsidian"],
+        domain=domain,
+        original_query=q,
+        where=where,
+        collections=collections_arg,
+        entity=entity,
+        explain=False,
         source_type=source_type,
         include_history=include_history,
         include_obsolete=include_obsolete,
         as_of=as_of,
     )
     if (start_dt or end_dt) and isinstance(payload, dict):
-        payload["results"] = temporal.filter_by_created_at(
-            payload.get("results", []), start_dt, end_dt
-        )[:n]
+        payload["results"] = temporal.filter_by_created_at(payload.get("results", []), start_dt, end_dt)[:n]
     if _filter_free:
         _recall_emb_cache_put(q, payload)
 
@@ -997,6 +1179,7 @@ def recall(
         if sem_ids:
             from brain_core.memory_lifecycle import reinforce_on_access
             from brain_core.search_unified import _search_bg_pool
+
             _search_bg_pool.submit(reinforce_on_access, sem_ids)
     except Exception:
         pass
@@ -1033,7 +1216,9 @@ def _recall_cache_put(key: str, response: RecallV2Response) -> None:
 
 
 # ── Semantic query cache for /recall (embedding-similarity based, 60s TTL) ──
-_recall_embedding_cache: list[tuple[float, list[float], str, dict]] = []  # (timestamp, embedding, query, response)
+_recall_embedding_cache: list[
+    tuple[float, list[float], str, dict]
+] = []  # (timestamp, embedding, query, response)
 _RECALL_EMB_TTL = 60.0
 _RECALL_EMB_MAX = 50
 _RECALL_EMB_SIM_THRESHOLD = 0.92
@@ -1041,6 +1226,7 @@ _RECALL_EMB_SIM_THRESHOLD = 0.92
 
 def _cosine(a: list[float], b: list[float]) -> float:
     import math
+
     if not a or not b or len(a) != len(b):
         return 0.0
     dot = sum(x * y for x, y in zip(a, b))
@@ -1114,15 +1300,19 @@ def _record_auto_feedback(query: str, results: list[dict], agent: str) -> None:
         rid = r.get("id") or r.get("path") or (r.get("metadata") or {}).get("id") or ""
         col = r.get("collection") or ""
         is_sem = col == "semantic_memory" or "semantic" in col
-        lines.append(json.dumps({
-            "query": query[:500],
-            "result_id": rid,
-            "result_source": col,
-            "score": 0.7 if is_sem else None,
-            "served": True,
-            "timestamp": ts,
-            "agent": agent,
-        }))
+        lines.append(
+            json.dumps(
+                {
+                    "query": query[:500],
+                    "result_id": rid,
+                    "result_source": col,
+                    "score": 0.7 if is_sem else None,
+                    "served": True,
+                    "timestamp": ts,
+                    "agent": agent,
+                }
+            )
+        )
         if is_sem and rid:
             sem_ids.append(rid)
     if not lines:
@@ -1140,12 +1330,15 @@ def _record_auto_feedback(query: str, results: list[dict], agent: str) -> None:
         try:
             from brain_core.memory_lifecycle import reinforce_on_access
             from brain_core.search_unified import _search_bg_pool
+
             _search_bg_pool.submit(reinforce_on_access, sem_ids[:5])
         except Exception:
             pass
 
 
-@app.get("/recall/v2", response_model=RecallV2Response, tags=["recall"], dependencies=[Depends(verify_bearer)])
+@app.get(
+    "/recall/v2", response_model=RecallV2Response, tags=["recall"], dependencies=[Depends(verify_bearer)]
+)
 @limiter.limit("60/minute")
 def recall_v2(
     request: Request,
@@ -1213,9 +1406,11 @@ def recall_v2(
     t_search = time.time()
     all_payloads: list[dict] = []
     from concurrent.futures import ThreadPoolExecutor as _VariantPool, as_completed as _as_completed
+
     def _run_variant(v_query):
         return search_unified.search_all(
-            v_query, n * search_n_mult,
+            v_query,
+            n * search_n_mult,
             sources=["rag", "canonical", "obsidian"],
             domain=domain,
             original_query=q,
@@ -1228,6 +1423,7 @@ def recall_v2(
             include_obsolete=include_obsolete,
             as_of=as_of,
         )
+
     if len(variants) == 1:
         try:
             all_payloads.append(_run_variant(variants[0]))
@@ -1259,7 +1455,8 @@ def recall_v2(
             hypothetical = _hyde.generate_hypothetical(q)
             if hypothetical:
                 hyde_payload = search_unified.search_all(
-                    hypothetical, n * search_n_mult,
+                    hypothetical,
+                    n * search_n_mult,
                     sources=["rag", "canonical", "obsidian"],
                     domain=domain,
                     original_query=q,
@@ -1282,9 +1479,7 @@ def recall_v2(
     if start_dt or end_dt:
         for p in all_payloads:
             if isinstance(p, dict) and p.get("results"):
-                p["results"] = temporal.filter_by_created_at(
-                    p["results"], start_dt, end_dt
-                )
+                p["results"] = temporal.filter_by_created_at(p["results"], start_dt, end_dt)
 
     # Merge all result lists via RRF.
     result_lists = [p.get("results", []) for p in all_payloads if p.get("results")]
@@ -1337,6 +1532,7 @@ def recall_v2(
         ce_enabled = False
         try:
             from brain_core import config as _brain_config
+
             ce_enabled = bool(getattr(_brain_config, "BRAIN_CROSS_ENCODER_ENABLED", False))
         except Exception:
             ce_enabled = False
@@ -1345,6 +1541,7 @@ def recall_v2(
             t_ce = time.time()
             try:
                 from brain_core.cross_encoder_rerank import rerank_with_cross_encoder
+
                 # Only rerank the top window — tail stays ordered by stage 1.
                 # cross_encoder_rerank overwrites `score` with a blend of the
                 # stage-1 score (which already includes trust_boost) and CE signal.
@@ -1373,13 +1570,20 @@ def recall_v2(
     t_enrich = time.time()
     _seen_paths: set[str] = set()
     _max_file_bytes = 4000  # cap per result so responses stay compact
-    _enrichable_types = {"canonical-note", "distilled-note", "obsidian-note",
-                         "agent-config", "learning", "docker-compose", "nginx-conf"}
+    _enrichable_types = {
+        "canonical-note",
+        "distilled-note",
+        "obsidian-note",
+        "agent-config",
+        "learning",
+        "docker-compose",
+        "nginx-conf",
+    }
     for _r in fused[:n]:
         _path = _r.get("path", "")
         if not _path or _path in _seen_paths:
             continue
-        _rtype = (_r.get("type") or (_r.get("metadata") or {}).get("type") or "")
+        _rtype = _r.get("type") or (_r.get("metadata") or {}).get("type") or ""
         if _rtype not in _enrichable_types:
             continue
         try:
@@ -1502,11 +1706,24 @@ def recall_v2(
     # intentional.
     # Moved from /recall v1 on 2026-04-12; v1's max_score<5.0 threshold never fired.
     try:
-        filter_free = not (collection or domain or entity or source_type or since or until or as_of
-                           or include_history or include_obsolete)
+        filter_free = not (
+            collection
+            or domain
+            or entity
+            or source_type
+            or since
+            or until
+            or as_of
+            or include_history
+            or include_obsolete
+        )
         if filter_free:
             results_list = fused[:n]
-            ce_scores = [float(r.get("cross_encoder_score", 0)) for r in results_list if r.get("cross_encoder_score") is not None]
+            ce_scores = [
+                float(r.get("cross_encoder_score", 0))
+                for r in results_list
+                if r.get("cross_encoder_score") is not None
+            ]
             max_ce = max(ce_scores, default=0.0)
             # Fall back to blended score threshold if CE wasn't run (flag off)
             max_score = max((float(r.get("score", 0)) for r in results_list), default=0.0)
@@ -1519,28 +1736,53 @@ def recall_v2(
                 gap_log = BRAIN_DIR / "logs" / "recall-gaps.jsonl"
                 gap_log.parent.mkdir(parents=True, exist_ok=True)
                 with gap_log.open("a") as gf:
-                    gf.write(json.dumps({
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                        "query": q[:500],
-                        "n_results": len(results_list),
-                        "max_score": round(max_score, 2),
-                        "max_ce_score": round(max_ce, 4) if ce_scores else None,
-                        "endpoint": "/recall/v2",
-                    }) + "\n")
+                    gf.write(
+                        json.dumps(
+                            {
+                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                                "query": q[:500],
+                                "n_results": len(results_list),
+                                "max_score": round(max_score, 2),
+                                "max_ce_score": round(max_ce, 4) if ce_scores else None,
+                                "endpoint": "/recall/v2",
+                            }
+                        )
+                        + "\n"
+                    )
     except Exception:
         pass
 
     # Auto-record search feedback for served results (fire-and-forget).
-    agent = request.headers.get("x-agent") or "unknown"
+    agent = request.headers.get("x-agent") or request.query_params.get("actor") or "unknown"
     if background is not None:
         background.add_task(_record_auto_feedback, q, fused[:n], agent)
     else:
         # Fallback: fire-and-forget via thread pool
         try:
             from brain_core.search_unified import _search_bg_pool
+
             _search_bg_pool.submit(_record_auto_feedback, q, fused[:n], agent)
         except Exception:
             pass
+
+    # M7-WS8: per-actor adoption tracking via action_audit.
+    # Best-effort, non-blocking — failures here NEVER impact the response.
+    try:
+        from brain_core.atoms_store import insert_action_audit as _iaa
+
+        _iaa(
+            route="/recall/v2",
+            tool="brain_recall",
+            actor=agent,
+            query_text=q[:500],
+            retrieved_chroma_ids=[
+                str(r.get("id") or r.get("chroma_id") or "")[:64]
+                for r in fused[:n]
+                if r.get("id") or r.get("chroma_id")
+            ][:20],
+        )
+    except Exception:
+        pass
 
     return response
 
@@ -1552,14 +1794,19 @@ def search_feedback(req: SearchFeedbackRequest):
         feedback_log = BRAIN_DIR / "logs" / "search-feedback.jsonl"
         feedback_log.parent.mkdir(parents=True, exist_ok=True)
         with feedback_log.open("a") as f:
-            f.write(json.dumps({
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "query": req.query,
-                "result_id": req.result_id,
-                "source": req.result_source,
-                "useful": req.useful,
-                "agent": req.agent,
-            }) + "\n")
+            f.write(
+                json.dumps(
+                    {
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "query": req.query,
+                        "result_id": req.result_id,
+                        "source": req.result_source,
+                        "useful": req.useful,
+                        "agent": req.agent,
+                    }
+                )
+                + "\n"
+            )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"feedback log write failed: {e}")
 
@@ -1567,6 +1814,7 @@ def search_feedback(req: SearchFeedbackRequest):
     if req.result_id.startswith("semantic_memory:"):
         try:
             from entity_graph import reinforce_memory
+
             reinforce_memory(req.result_id, success=req.useful)
         except Exception:
             pass
@@ -1600,6 +1848,7 @@ def brain_reason_multihop(req: MultiHopReasonRequest):
     """Multi-hop reasoning with LangGraph-style checkpoints."""
     try:
         import reasoning_loop
+
         result = reasoning_loop.run_reasoning(req.question, max_hops=req.max_hops)
         return result
     except Exception as e:
@@ -1611,6 +1860,7 @@ def brain_reason_multihop_resume(thread_id: Annotated[str, PathParam()]):
     """Resume a reasoning thread from last checkpoint."""
     try:
         import reasoning_loop
+
         return reasoning_loop.resume_reasoning(thread_id)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -1652,13 +1902,15 @@ def _compose_think_prompt(question: str, extra_context: str | None) -> tuple[str
     memory_lines: list[str] = []
     try:
         sm_payload = search_unified.search_all(
-            question, 8,
+            question,
+            8,
             sources=["rag", "canonical"],
             collections=["semantic_memory"],
             original_query=question,
         )
         rag_payload = search_unified.search_all(
-            question, 6,
+            question,
+            6,
             sources=["rag", "canonical"],
             original_query=question,
         )
@@ -1672,12 +1924,14 @@ def _compose_think_prompt(question: str, extra_context: str | None) -> tuple[str
             content = (m.get("content") or "")[:250]
             title = m.get("title") or m.get("collection") or ""
             memory_lines.append(f"- {content}")
-            provenance.append({
-                "id": m.get("path") or m.get("metadata", {}).get("id", ""),
-                "title": title[:120],
-                "source": m.get("collection", ""),
-                "snippet": content[:200],
-            })
+            provenance.append(
+                {
+                    "id": m.get("path") or m.get("metadata", {}).get("id", ""),
+                    "title": title[:120],
+                    "source": m.get("collection", ""),
+                    "snippet": content[:200],
+                }
+            )
     except Exception:
         pass
     memories_text = "\n".join(memory_lines) or "(no relevant memories found)"
@@ -1686,7 +1940,8 @@ def _compose_think_prompt(question: str, extra_context: str | None) -> tuple[str
     context_lines: list[str] = []
     try:
         cal_payload = search_unified.search_all(
-            question, 3,
+            question,
+            3,
             sources=["rag"],
             collections=["personal"],
             original_query=question,
@@ -1715,7 +1970,9 @@ _think_cache_lock = threading.Lock()
 _THINK_CACHE_TTL = 60
 
 
-@app.post("/chris/think", response_model=ThinkResponse, tags=["decide"], dependencies=[Depends(verify_bearer)])
+@app.post(
+    "/chris/think", response_model=ThinkResponse, tags=["decide"], dependencies=[Depends(verify_bearer)]
+)
 def chris_think(req: ThinkRequest) -> ThinkResponse:
     """Ask Chris's second brain a decision question. Answers in first-person voice.
 
@@ -1806,7 +2063,12 @@ _WEEK_RE = re.compile(r"^\d{4}-W\d{2}$")
 _MONTH_RE = re.compile(r"^\d{4}-\d{2}$")
 
 
-@app.get("/synthesis/daily", response_class=PlainTextResponse, tags=["synthesis"], dependencies=[Depends(verify_bearer)])
+@app.get(
+    "/synthesis/daily",
+    response_class=PlainTextResponse,
+    tags=["synthesis"],
+    dependencies=[Depends(verify_bearer)],
+)
 def synthesis_daily(date: str | None = None) -> str:
     target = date or datetime.now().strftime("%Y-%m-%d")
     if not _DATE_RE.match(target):
@@ -1817,7 +2079,12 @@ def synthesis_daily(date: str | None = None) -> str:
     return f.read_text()
 
 
-@app.get("/synthesis/weekly", response_class=PlainTextResponse, tags=["synthesis"], dependencies=[Depends(verify_bearer)])
+@app.get(
+    "/synthesis/weekly",
+    response_class=PlainTextResponse,
+    tags=["synthesis"],
+    dependencies=[Depends(verify_bearer)],
+)
 def synthesis_weekly(week: str | None = None) -> str:
     target = week or datetime.now().strftime("%G-W%V")
     if not _WEEK_RE.match(target):
@@ -1828,7 +2095,12 @@ def synthesis_weekly(week: str | None = None) -> str:
     return f.read_text()
 
 
-@app.get("/synthesis/monthly", response_class=PlainTextResponse, tags=["synthesis"], dependencies=[Depends(verify_bearer)])
+@app.get(
+    "/synthesis/monthly",
+    response_class=PlainTextResponse,
+    tags=["synthesis"],
+    dependencies=[Depends(verify_bearer)],
+)
 def synthesis_monthly(month: str | None = None) -> str:
     target = month or datetime.now().strftime("%Y-%m")
     if not _MONTH_RE.match(target):
@@ -1840,8 +2112,19 @@ def synthesis_monthly(month: str | None = None) -> str:
 
 
 # ── Routes: capture (POST) ──────────────────────────────
-@app.post("/location/ingest", response_model=CaptureResponse, tags=["capture"], dependencies=[Depends(verify_bearer)])
-@app.post("/location", response_model=CaptureResponse, tags=["capture"], include_in_schema=False, dependencies=[Depends(verify_bearer)])
+@app.post(
+    "/location/ingest",
+    response_model=CaptureResponse,
+    tags=["capture"],
+    dependencies=[Depends(verify_bearer)],
+)
+@app.post(
+    "/location",
+    response_model=CaptureResponse,
+    tags=["capture"],
+    include_in_schema=False,
+    dependencies=[Depends(verify_bearer)],
+)
 def capture_location(payload: CaptureRequest) -> CaptureResponse:
     data = payload.model_dump(exclude_none=True)
     data["_received_at"] = datetime.now(timezone.utc).isoformat()
@@ -1849,8 +2132,16 @@ def capture_location(payload: CaptureRequest) -> CaptureResponse:
     return CaptureResponse(stored=out.name, kind="location")
 
 
-@app.post("/health/ingest", response_model=CaptureResponse, tags=["capture"], dependencies=[Depends(verify_bearer)])
-@app.post("/health", response_model=CaptureResponse, tags=["capture"], include_in_schema=False, dependencies=[Depends(verify_bearer)])
+@app.post(
+    "/health/ingest", response_model=CaptureResponse, tags=["capture"], dependencies=[Depends(verify_bearer)]
+)
+@app.post(
+    "/health",
+    response_model=CaptureResponse,
+    tags=["capture"],
+    include_in_schema=False,
+    dependencies=[Depends(verify_bearer)],
+)
 def capture_health(payload: CaptureRequest) -> CaptureResponse:
     data = payload.model_dump(exclude_none=True)
     data["_received_at"] = datetime.now(timezone.utc).isoformat()
@@ -1858,9 +2149,14 @@ def capture_health(payload: CaptureRequest) -> CaptureResponse:
     return CaptureResponse(stored=out.name, kind="health")
 
 
-@app.post("/capture/{source_type}", response_model=CaptureResponse, tags=["capture"], dependencies=[Depends(verify_bearer)])
+@app.post(
+    "/capture/{source_type}",
+    response_model=CaptureResponse,
+    tags=["capture"],
+    dependencies=[Depends(verify_bearer)],
+)
 def capture_generic(source_type: Annotated[str, PathParam()], payload: CaptureRequest) -> CaptureResponse:
-    if not source_type or not re.fullmatch(r'[a-z0-9_\-]{1,32}', source_type):
+    if not source_type or not re.fullmatch(r"[a-z0-9_\-]{1,32}", source_type):
         raise HTTPException(status_code=400, detail="source_type must be 1-32 chars of [a-z0-9_-]")
     data = payload.model_dump(exclude_none=True)
     data["_received_at"] = datetime.now(timezone.utc).isoformat()
@@ -1981,7 +2277,11 @@ def job_history(job: Annotated[str, PathParam()]) -> dict:
 def trigger_job(job: Annotated[str, PathParam()]) -> JobResponse:
     """Manually trigger a job now. Records in scheduler history."""
     try:
-        pid = brain_scheduler.trigger_now(job) if getattr(brain_scheduler, '_dispatcher', None) else _dispatch_job(job)
+        pid = (
+            brain_scheduler.trigger_now(job)
+            if getattr(brain_scheduler, "_dispatcher", None)
+            else _dispatch_job(job)
+        )
     except ValueError as e:
         if "already running" in str(e):
             raise HTTPException(
@@ -2119,8 +2419,7 @@ def list_memory(
         docs = res.get("documents") or []
         metas = res.get("metadatas") or []
         all_entries = [
-            MemoryEntry(id=i, content=d or "", metadata=(m or {}))
-            for i, d, m in zip(ids, docs, metas)
+            MemoryEntry(id=i, content=d or "", metadata=(m or {})) for i, d, m in zip(ids, docs, metas)
         ]
 
         # Sort newest first by created_at
@@ -2149,7 +2448,12 @@ def list_memory(
             inflight.set()
 
 
-@app.get("/memory/contradictions", response_model=ContradictionListResponse, tags=["memory"], dependencies=[Depends(verify_bearer)])
+@app.get(
+    "/memory/contradictions",
+    response_model=ContradictionListResponse,
+    tags=["memory"],
+    dependencies=[Depends(verify_bearer)],
+)
 def list_contradictions(limit: int = 50) -> ContradictionListResponse:
     col_id = _contradictions_collection_id()
     if not col_id:
@@ -2162,11 +2466,15 @@ def list_contradictions(limit: int = 50) -> ContradictionListResponse:
         count_res = _chroma_api("POST", f"{_col_path}/get", {"where": _where, "include": [], "limit": 10000})
         total = len(count_res.get("ids") or [])
         # Paginated fetch with content
-        res = _chroma_api("POST", f"{_col_path}/get", {
-            "limit": min(max(limit, 1), 200),
-            "where": _where,
-            "include": ["documents", "metadatas"],
-        })
+        res = _chroma_api(
+            "POST",
+            f"{_col_path}/get",
+            {
+                "limit": min(max(limit, 1), 200),
+                "where": _where,
+                "include": ["documents", "metadatas"],
+            },
+        )
     except Exception:
         return ContradictionListResponse(results=[], total=0)
 
@@ -2191,17 +2499,19 @@ def list_contradictions(limit: int = 50) -> ContradictionListResponse:
                     new_content += "\n" + line
                 elif current_section == "old":
                     old_content += "\n" + line
-        entries.append(ContradictionEntry(
-            id=i,
-            new_content=new_content,
-            old_content=old_content,
-            category=meta.get("category", ""),
-            distance=float(meta.get("distance", 0)),
-            token_overlap=float(meta.get("token_overlap", 0)),
-            review_state=meta.get("review_state", "pending"),
-            created_at=meta.get("created_at", ""),
-            metadata=meta,
-        ))
+        entries.append(
+            ContradictionEntry(
+                id=i,
+                new_content=new_content,
+                old_content=old_content,
+                category=meta.get("category", ""),
+                distance=float(meta.get("distance", 0)),
+                token_overlap=float(meta.get("token_overlap", 0)),
+                review_state=meta.get("review_state", "pending"),
+                created_at=meta.get("created_at", ""),
+                metadata=meta,
+            )
+        )
     return ContradictionListResponse(results=entries, total=total)
 
 
@@ -2217,10 +2527,15 @@ def export_memory() -> list[dict]:
     offset = 0
     try:
         while True:
-            res = _chroma_api("POST", f"{_col_base}/get", {
-                "limit": page_size, "offset": offset,
-                "include": ["documents", "metadatas"],
-            })
+            res = _chroma_api(
+                "POST",
+                f"{_col_base}/get",
+                {
+                    "limit": page_size,
+                    "offset": offset,
+                    "include": ["documents", "metadatas"],
+                },
+            )
             ids = res.get("ids") or []
             docs = res.get("documents") or []
             metas = res.get("metadatas") or []
@@ -2234,7 +2549,9 @@ def export_memory() -> list[dict]:
     return all_results
 
 
-@app.get("/memory/{mem_id}", response_model=MemoryEntry, tags=["memory"], dependencies=[Depends(verify_bearer)])
+@app.get(
+    "/memory/{mem_id}", response_model=MemoryEntry, tags=["memory"], dependencies=[Depends(verify_bearer)]
+)
 def get_memory(mem_id: Annotated[str, PathParam()]) -> MemoryEntry:
     col_id = _memory_collection_id()
     if not col_id:
@@ -2259,12 +2576,21 @@ def get_memory(mem_id: Annotated[str, PathParam()]) -> MemoryEntry:
 @limiter.limit("30/minute")
 def create_memory(request: Request, req: MemoryCreateRequest) -> MemoryEntry:
     """Direct memory insert with Phase 1 lifecycle (operations, supersession, temporal, tiers)."""
+    # M7-WS8: infer actor from header/query-param when caller left the default.
+    # Goal: kill the 518/534 atoms with provenance.agent="?" problem.
+    if not req.agent or req.agent in {"mcp", "unknown", "claude", "?"}:
+        header_actor = request.headers.get("x-agent")
+        query_actor = request.query_params.get("actor")
+        inferred = header_actor or query_actor
+        if inferred:
+            req.agent = inferred
+
     col_id = _memory_collection_id()
     if not col_id:
         raise HTTPException(status_code=503, detail="semantic_memory collection unavailable")
 
     mem_id = f"{learn.SEMANTIC_COLLECTION}:{learn._digest(req.content)}"
-    embedding = _get_embedding(req.content[:learn.EMBED_TRUNCATE])
+    embedding = _get_embedding(req.content[: learn.EMBED_TRUNCATE])
     if not embedding:
         raise HTTPException(status_code=502, detail="embedding failed")
 
@@ -2275,9 +2601,13 @@ def create_memory(request: Request, req: MemoryCreateRequest) -> MemoryEntry:
     supersede_target = None
     try:
         from memory_operations import classify_operation, should_delete_by_content  # noqa: E402
+
         # Always run classify_operation to find a target (for DELETE/UPDATE/NOOP)
         op, target_id, _diag = classify_operation(
-            req.content, embedding, req.confidence, col_id,
+            req.content,
+            embedding,
+            req.confidence,
+            col_id,
             category=req.category,
         )
         supersede_target = target_id
@@ -2375,6 +2705,7 @@ def create_memory(request: Request, req: MemoryCreateRequest) -> MemoryEntry:
     # Fire hook (Phase 6A)
     try:
         import hooks  # noqa: E402
+
         hooks.fire("on_memory_stored", mem_id=mem_id, category=req.category, operation=operation)
     except Exception:
         pass
@@ -2413,6 +2744,21 @@ def create_memory(request: Request, req: MemoryCreateRequest) -> MemoryEntry:
 
     response_meta = dict(metadata)
     response_meta["operation"] = operation
+
+    # M7-WS8: action_audit insert for brain_store adoption tracking.
+    try:
+        from brain_core.atoms_store import insert_action_audit as _iaa
+
+        _iaa(
+            route="/memory",
+            tool="brain_store",
+            actor=req.agent or "unknown",
+            query_text=req.content[:500],
+            retrieved_chroma_ids=[mem_id],
+        )
+    except Exception:
+        pass
+
     return MemoryEntry(id=mem_id, content=req.content, metadata=response_meta)
 
 
@@ -2445,7 +2791,7 @@ def create_memory_batch(request: Request, req: MemoryBatchRequest) -> dict:
 
     for mem_req in req.memories:
         mem_id = f"{learn.SEMANTIC_COLLECTION}:{learn._digest(mem_req.content)}"
-        embedding = _get_embedding(mem_req.content[:learn.EMBED_TRUNCATE])
+        embedding = _get_embedding(mem_req.content[: learn.EMBED_TRUNCATE])
         if not embedding:
             results.append({"id": mem_id, "operation": "SKIP", "reason": "embedding failed"})
             continue
@@ -2454,7 +2800,9 @@ def create_memory_batch(request: Request, req: MemoryBatchRequest) -> dict:
         operation = "ADD"
         supersede_target = None
         try:
-            op, target_id, _diag = classify_operation(mem_req.content, embedding, mem_req.confidence, col_id, category=mem_req.category)
+            op, target_id, _diag = classify_operation(
+                mem_req.content, embedding, mem_req.confidence, col_id, category=mem_req.category
+            )
             supersede_target = target_id
             if should_delete_by_content(mem_req.content):
                 operation = "DELETE"
@@ -2547,6 +2895,7 @@ def create_memory_batch(request: Request, req: MemoryBatchRequest) -> dict:
     # Fire hooks for stored memories
     try:
         import hooks  # noqa: E402
+
         for mem_id, op in zip(ids_to_upsert, operations):
             hooks.fire("on_memory_stored", mem_id=mem_id, category="batch", operation=op)
     except Exception:
@@ -2561,7 +2910,9 @@ def create_memory_batch(request: Request, req: MemoryBatchRequest) -> dict:
     }
 
 
-@app.patch("/memory/{mem_id}", response_model=MemoryEntry, tags=["memory"], dependencies=[Depends(verify_bearer)])
+@app.patch(
+    "/memory/{mem_id}", response_model=MemoryEntry, tags=["memory"], dependencies=[Depends(verify_bearer)]
+)
 def patch_memory(mem_id: Annotated[str, PathParam()], req: MemoryPatchRequest) -> MemoryEntry:
     col_id = _memory_collection_id()
     if not col_id:
@@ -2577,7 +2928,7 @@ def patch_memory(mem_id: Annotated[str, PathParam()], req: MemoryPatchRequest) -
         new_meta["confidence"] = str(round(req.confidence, 3))
     new_meta["updated_at"] = learn._now_iso()
 
-    embedding = _get_embedding(new_content[:learn.EMBED_TRUNCATE]) if req.content is not None else None
+    embedding = _get_embedding(new_content[: learn.EMBED_TRUNCATE]) if req.content is not None else None
     upsert_body: dict[str, Any] = {
         "ids": [mem_id],
         "documents": [new_content],
@@ -2613,8 +2964,9 @@ def delete_memory(mem_id: Annotated[str, PathParam()]) -> dict:
     return {"status": "deleted", "id": mem_id}
 
 
-
-@app.post("/memory/contradictions/{contra_id}/resolve", tags=["memory"], dependencies=[Depends(verify_bearer)])
+@app.post(
+    "/memory/contradictions/{contra_id}/resolve", tags=["memory"], dependencies=[Depends(verify_bearer)]
+)
 def resolve_contradiction(
     contra_id: Annotated[str, PathParam()],
     req: ContradictionResolveRequest,
@@ -2653,9 +3005,14 @@ def resolve_contradiction(
                 log.warning("contradiction_resolution_error", phase="delete_old", error=str(e))
             # Mark winner as superseding loser
             try:
-                _chroma_api("POST", f"/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col}/update", {
-                    "ids": [new_id], "metadatas": [{"supersedes": old_id}],
-                })
+                _chroma_api(
+                    "POST",
+                    f"/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col}/update",
+                    {
+                        "ids": [new_id],
+                        "metadatas": [{"supersedes": old_id}],
+                    },
+                )
             except Exception as e:
                 log.warning("contradiction_resolution_error", phase="supersede", error=str(e))
         elif req.action == "keep_old" and new_id:
@@ -2670,9 +3027,14 @@ def resolve_contradiction(
         elif req.action == "merge" and old_id and new_id:
             # Combine both entries: keep old ID, merge content
             try:
-                old_data = _chroma_api("POST", f"/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col}/get", {
-                    "ids": [old_id, new_id], "include": ["documents", "metadatas", "embeddings"],
-                })
+                old_data = _chroma_api(
+                    "POST",
+                    f"/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col}/get",
+                    {
+                        "ids": [old_id, new_id],
+                        "include": ["documents", "metadatas", "embeddings"],
+                    },
+                )
                 docs = old_data.get("documents", [])
                 if len(docs) == 2 and docs[0] and docs[1]:
                     merged = docs[0].strip() + "\n\n" + docs[1].strip()
@@ -2680,17 +3042,32 @@ def resolve_contradiction(
                     # Re-embed merged content so vector search stays accurate
                     try:
                         new_emb = _get_embedding(merged, use_cache=False, prefix="passage")
-                        _chroma_api("POST", f"/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col}/update", {
-                            "ids": [old_id], "documents": [merged], "embeddings": [new_emb],
-                        })
+                        _chroma_api(
+                            "POST",
+                            f"/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col}/update",
+                            {
+                                "ids": [old_id],
+                                "documents": [merged],
+                                "embeddings": [new_emb],
+                            },
+                        )
                     except Exception as e:
                         log.warning("contradiction_resolution_error", error=str(e))
-                        _chroma_api("POST", f"/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col}/update", {
-                            "ids": [old_id], "documents": [merged],
-                        })
-                    _chroma_api("POST", f"/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col}/delete", {
-                        "ids": [new_id],
-                    })
+                        _chroma_api(
+                            "POST",
+                            f"/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col}/update",
+                            {
+                                "ids": [old_id],
+                                "documents": [merged],
+                            },
+                        )
+                    _chroma_api(
+                        "POST",
+                        f"/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col}/delete",
+                        {
+                            "ids": [new_id],
+                        },
+                    )
             except Exception as e:
                 log.warning("contradiction_resolution_error", error=str(e))
                 raise HTTPException(status_code=500, detail=f"resolution failed: {e}")
@@ -2699,6 +3076,7 @@ def resolve_contradiction(
     # Audit trail
     try:
         from audit_log import log_event
+
         log_event(
             event_type="resolve",
             entity_a=old_id or "",
@@ -2726,12 +3104,14 @@ def resolve_contradiction(
 
 # ── Routes: reasoning + decision ─────────────────────────
 
+
 def _persist_reasoning_result(title: str, content: str, domain: str, confidence: float) -> None:
     """Karpathy principle: valuable analysis should accumulate, not evaporate into chat history."""
     if confidence < 0.7:
         return
     try:
         import hashlib
+
         slug = hashlib.md5(title.encode()).hexdigest()[:12]
         note_path = BRAIN_DIR.parent / "knowledge" / "distilled" / "decisions" / f"brain_analysis_{slug}.md"
         if note_path.exists():
@@ -2739,13 +3119,17 @@ def _persist_reasoning_result(title: str, content: str, domain: str, confidence:
         note_path.parent.mkdir(parents=True, exist_ok=True)
         meta = {
             "id": f"dist_brain_analysis_{slug}",
-            "type": "distilled", "domain": domain or "decisions",
-            "subtype": "brain-analysis", "title": title[:120],
-            "status": "active", "confidence": round(confidence, 2),
+            "type": "distilled",
+            "domain": domain or "decisions",
+            "subtype": "brain-analysis",
+            "title": title[:120],
+            "status": "active",
+            "confidence": round(confidence, 2),
             "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "sources": ["brain_reasoning_api"],
         }
         import json as _json
+
         with note_path.open("w") as f:
             f.write("---json\n")
             f.write(_json.dumps(meta, indent=2, ensure_ascii=False))
@@ -2755,19 +3139,29 @@ def _persist_reasoning_result(title: str, content: str, domain: str, confidence:
         pass  # never let persistence break the API response
 
 
-@app.post("/brain/decide", response_model=DecideResponse, tags=["decide"],
-          dependencies=[Depends(verify_bearer)])
+@app.post(
+    "/brain/decide", response_model=DecideResponse, tags=["decide"], dependencies=[Depends(verify_bearer)]
+)
 def brain_decide(req: DecideRequest) -> DecideResponse:
     """Agent asks brain for a structured decision recommendation."""
     start = time.time()
     try:
         from brain_core.reasoning import evaluate_decision, DecisionOption
-        options = [DecisionOption(label=o.get("label", ""), description=o.get("description", ""))
-                   for o in req.options]
+
+        options = [
+            DecisionOption(label=o.get("label", ""), description=o.get("description", ""))
+            for o in req.options
+        ]
         result = evaluate_decision(req.situation, options, req.agent, req.domain)
-        evidence = [{"content": h.content[:200], "category": h.category,
-                     "confidence": h.confidence, "source": h.source}
-                    for h in result.preference_hits[:5]]
+        evidence = [
+            {
+                "content": h.content[:200],
+                "category": h.category,
+                "confidence": h.confidence,
+                "source": h.source,
+            }
+            for h in result.preference_hits[:5]
+        ]
         resp = DecideResponse(
             situation=req.situation,
             recommendation=result.recommendation,
@@ -2783,7 +3177,8 @@ def brain_decide(req: DecideRequest) -> DecideResponse:
         _persist_reasoning_result(
             f"Decision: {req.situation[:80]} → {result.recommendation}",
             f"## Situation\n{req.situation}\n\n## Recommendation\n{result.recommendation}\n\n## Reasoning\n{result.reasoning}",
-            req.domain or "decisions", result.confidence,
+            req.domain or "decisions",
+            result.confidence,
         )
         return resp
     except Exception as e:
@@ -2791,27 +3186,30 @@ def brain_decide(req: DecideRequest) -> DecideResponse:
         raise HTTPException(status_code=500, detail=str(e)[:200])
 
 
-@app.post("/brain/reason", response_model=ReasonResponse, tags=["decide"],
-          dependencies=[Depends(verify_bearer)])
+@app.post(
+    "/brain/reason", response_model=ReasonResponse, tags=["decide"], dependencies=[Depends(verify_bearer)]
+)
 def brain_reason(req: ReasonRequest) -> ReasonResponse:
     """Deeper multi-step reasoning for complex questions."""
     start = time.time()
     try:
         from brain_core.reasoning import reason_deep
+
         result = reason_deep(req.question, req.context, req.agent, req.domain)
         resp = ReasonResponse(
             question=req.question,
             analysis=getattr(result, "answer", ""),
             reasoning_steps=getattr(result, "reasoning_steps", []),
             confidence=getattr(result, "confidence", 0.0),
-            provenance=[vars(p) if hasattr(p, '__dict__') else p for p in getattr(result, "provenance", [])],
+            provenance=[vars(p) if hasattr(p, "__dict__") else p for p in getattr(result, "provenance", [])],
             model=getattr(result, "model", "sage"),
             latency_ms=int((time.time() - start) * 1000),
         )
         _persist_reasoning_result(
             f"Analysis: {req.question[:80]}",
             f"## Question\n{req.question}\n\n## Analysis\n{getattr(result, 'answer', '')}",
-            req.domain or "analysis", getattr(result, "confidence", 0.0),
+            req.domain or "analysis",
+            getattr(result, "confidence", 0.0),
         )
         return resp
     except Exception as e:
@@ -2824,21 +3222,22 @@ def brain_proactive(severity: str | None = None, max_age_hours: int = 24) -> dic
     """Returns current proactive insights/alerts."""
     try:
         from brain_core.proactive import get_current_insights
+
         insights = get_current_insights(max_age_hours=max_age_hours, severity=severity)
         return {
-            "insights": [vars(i) if hasattr(i, '__dict__') else i for i in insights],
+            "insights": [vars(i) if hasattr(i, "__dict__") else i for i in insights],
             "total": len(insights),
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)[:200])
 
 
-@app.post("/brain/proactive/{insight_id}/dismiss", tags=["decide"],
-          dependencies=[Depends(verify_bearer)])
+@app.post("/brain/proactive/{insight_id}/dismiss", tags=["decide"], dependencies=[Depends(verify_bearer)])
 def dismiss_proactive(insight_id: str) -> dict:
     """Mark a proactive insight as acknowledged."""
     try:
         from brain_core.proactive import dismiss_insight
+
         ok = dismiss_insight(insight_id)
         return {"status": "dismissed" if ok else "not_found", "id": insight_id}
     except Exception as e:
@@ -2854,6 +3253,7 @@ def brain_insights(days: int = Query(default=7, ge=1, le=30)) -> dict:
     markdown body containing one section per insight.
     """
     from datetime import datetime as _dt, timedelta as _td
+
     # Sibling of DISTILLED_DAILY (knowledge/distilled/daily) — derive from
     # config so this respects KNOWLEDGE_DIR / BRAIN_DIR overrides.
     insights_dir = DISTILLED_DAILY.parent / "insights"
@@ -2897,10 +3297,12 @@ def brain_insights(days: int = Query(default=7, ge=1, le=30)) -> dict:
         for line in body.splitlines():
             if line.startswith("## "):
                 if current_title is not None:
-                    sections.append({
-                        "title": current_title,
-                        "description": "\n".join(current_desc_lines).strip()[:600],
-                    })
+                    sections.append(
+                        {
+                            "title": current_title,
+                            "description": "\n".join(current_desc_lines).strip()[:600],
+                        }
+                    )
                 # Strip leading "N. " ordinal if present
                 t = line[3:].strip()
                 if t and t[0].isdigit():
@@ -2912,18 +3314,22 @@ def brain_insights(days: int = Query(default=7, ge=1, le=30)) -> dict:
             elif current_title is not None:
                 current_desc_lines.append(line)
         if current_title is not None:
-            sections.append({
-                "title": current_title,
-                "description": "\n".join(current_desc_lines).strip()[:600],
-            })
+            sections.append(
+                {
+                    "title": current_title,
+                    "description": "\n".join(current_desc_lines).strip()[:600],
+                }
+            )
 
-        out.append({
-            "date": d.isoformat(),
-            "title": meta.get("title", f"Daily Insights — {d.isoformat()}"),
-            "entities": meta.get("entities", []),
-            "confidence": meta.get("confidence", 0.0),
-            "insights": sections,
-        })
+        out.append(
+            {
+                "date": d.isoformat(),
+                "title": meta.get("title", f"Daily Insights — {d.isoformat()}"),
+                "entities": meta.get("entities", []),
+                "confidence": meta.get("confidence", 0.0),
+                "insights": sections,
+            }
+        )
 
     return {"days": days, "files": len(out), "results": out}
 
@@ -2933,6 +3339,7 @@ def brain_insights(days: int = Query(default=7, ge=1, le=30)) -> dict:
 def get_autopilot() -> dict:
     try:
         from brain_core.autopilot import get_state
+
         return get_state()
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)[:200])
@@ -2942,10 +3349,12 @@ def get_autopilot() -> dict:
 def set_autopilot(req: AutopilotRequest) -> dict:
     try:
         from brain_core.autopilot import set_state
+
         state = set_state(req.enabled, req.confidence_threshold, req.updated_by)
         if not req.enabled:
             try:
                 from brain_core.task_queue import task_queue
+
                 paused = task_queue.pause_running_tasks()
                 state["paused_tasks"] = paused
             except Exception:
@@ -2959,28 +3368,38 @@ def set_autopilot(req: AutopilotRequest) -> dict:
 def create_task(req: TaskCreateRequest) -> dict:
     try:
         from brain_core.task_queue import task_queue
+
         agent = req.assigned_agent
         if not agent:
             try:
                 from brain_core.reasoning import suggest_delegation
+
                 suggestion = suggest_delegation(req.title + " " + req.description)
                 agent = suggestion.get("agent", "jenna")
             except Exception:
                 agent = "jenna"
         confidence = req.confidence if req.confidence is not None else 0.5
         return task_queue.create_task(
-            title=req.title, description=req.description, assigned_agent=agent,
-            priority=req.priority, parent_goal_id=req.parent_goal_id,
-            confidence=confidence, created_by="api", metadata=req.metadata)
+            title=req.title,
+            description=req.description,
+            assigned_agent=agent,
+            priority=req.priority,
+            parent_goal_id=req.parent_goal_id,
+            confidence=confidence,
+            created_by="api",
+            metadata=req.metadata,
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)[:200])
 
 
 @app.get("/brain/tasks", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
-def list_tasks(status: str | None = None, agent: str | None = None,
-               goal: str | None = None, limit: int = 50) -> dict:
+def list_tasks(
+    status: str | None = None, agent: str | None = None, goal: str | None = None, limit: int = 50
+) -> dict:
     try:
         from brain_core.task_queue import task_queue
+
         tasks = task_queue.list_tasks(status=status, agent=agent, parent_goal_id=goal, limit=limit)
         return {"tasks": tasks, "total": len(tasks)}
     except Exception as e:
@@ -2993,13 +3412,18 @@ def process_pending_tasks() -> dict:
     try:
         from brain_core.autopilot import is_enabled, get_state
         from brain_core.task_queue import task_queue
+
         state = get_state()
         if not is_enabled():
             return {"approved": [], "autopilot_enabled": False, "message": "autopilot is off"}
         approved, escalated = task_queue.process_pending()
         return {
-            "approved": [{"id": t["id"], "title": t["title"], "confidence": t["confidence"]} for t in approved],
-            "escalated": [{"id": t["id"], "title": t["title"], "confidence": t["confidence"]} for t in escalated],
+            "approved": [
+                {"id": t["id"], "title": t["title"], "confidence": t["confidence"]} for t in approved
+            ],
+            "escalated": [
+                {"id": t["id"], "title": t["title"], "confidence": t["confidence"]} for t in escalated
+            ],
             "total_approved": len(approved),
             "total_escalated": len(escalated),
             "autopilot_enabled": True,
@@ -3015,12 +3439,18 @@ def dispatch_ready_tasks() -> dict:
     try:
         from brain_core.autopilot import is_enabled
         from brain_core.task_queue import task_queue
+
         if not is_enabled():
             return {"dispatched": [], "autopilot_enabled": False, "message": "autopilot is off"}
         results = task_queue.process_ready()
         return {
             "dispatched": [
-                {"id": t.get("id"), "title": t.get("title"), "status": t.get("status"), "agent": t.get("assigned_agent")}
+                {
+                    "id": t.get("id"),
+                    "title": t.get("title"),
+                    "status": t.get("status"),
+                    "agent": t.get("assigned_agent"),
+                }
                 for t in results
             ],
             "total_dispatched": len(results),
@@ -3034,6 +3464,7 @@ def dispatch_ready_tasks() -> dict:
 def get_task(task_id: str) -> dict:
     try:
         from brain_core.task_queue import task_queue
+
         task = task_queue.get_task(task_id)
         if not task:
             raise HTTPException(status_code=404, detail="task not found")
@@ -3048,6 +3479,7 @@ def get_task(task_id: str) -> dict:
 def approve_task(task_id: str) -> dict:
     try:
         from brain_core.task_queue import task_queue
+
         return task_queue.approve_task(task_id)
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
@@ -3059,6 +3491,7 @@ def approve_task(task_id: str) -> dict:
 def start_task(task_id: str) -> dict:
     try:
         from brain_core.task_queue import task_queue
+
         return task_queue.start_task(task_id)
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
@@ -3079,14 +3512,17 @@ def complete_task_route(task_id: str, result: str = "", body: CompleteTaskReques
         result = body.result or ""
     try:
         from brain_core.task_queue import task_queue
+
         task = task_queue.get_task(task_id)
         updated = task_queue.complete_task(task_id, result=result)
         try:
             domain = (task.get("metadata") or {}).get("domain", "general") if task else "general"
             task_queue.record_outcome(
-                task_id=task_id, domain=domain,
+                task_id=task_id,
+                domain=domain,
                 brain_recommendation=task.get("confidence_reasoning", "") if task else "",
-                actual_action=result[:500], chris_override=False,
+                actual_action=result[:500],
+                chris_override=False,
             )
         except Exception:
             pass
@@ -3101,15 +3537,18 @@ def complete_task_route(task_id: str, result: str = "", body: CompleteTaskReques
 def reject_task(task_id: str) -> dict:
     try:
         from brain_core.task_queue import task_queue
+
         task = task_queue.get_task(task_id)
         updated = task_queue.fail_task(task_id, error="rejected by Chris")
         try:
             domain = (task.get("metadata") or {}).get("domain", "general") if task else "general"
             task_queue.record_outcome(
-                task_id=task_id, domain=domain,
+                task_id=task_id,
+                domain=domain,
                 brain_recommendation=task.get("confidence_reasoning", "") if task else "",
                 actual_action="rejected by Chris",
-                chris_override=True, override_reason="manual rejection",
+                chris_override=True,
+                override_reason="manual rejection",
             )
         except Exception:
             pass
@@ -3124,10 +3563,12 @@ def reject_task(task_id: str) -> dict:
 def create_goal(req: GoalCreateRequest) -> dict:
     try:
         from brain_core.task_queue import task_queue
+
         goal = task_queue.create_goal(title=req.title, description=req.description)
         if req.auto_decompose:
             try:
                 from brain_core.goal_decompose import decompose_goal
+
                 subtasks = decompose_goal(goal["id"])
                 goal["subtasks"] = subtasks
             except Exception as exc:
@@ -3144,6 +3585,7 @@ def create_goal(req: GoalCreateRequest) -> dict:
 def list_goals(status: str | None = None) -> dict:
     try:
         from brain_core.task_queue import task_queue
+
         goals = task_queue.list_goals(status=status)
         return {"goals": goals, "total": len(goals)}
     except Exception as e:
@@ -3154,6 +3596,7 @@ def list_goals(status: str | None = None) -> dict:
 def complete_goal_route(goal_id: str) -> dict:
     try:
         from brain_core.task_queue import task_queue
+
         return task_queue.complete_goal(goal_id, by="chris")
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
@@ -3165,6 +3608,7 @@ def complete_goal_route(goal_id: str) -> dict:
 def get_goal(goal_id: str) -> dict:
     try:
         from brain_core.task_queue import task_queue
+
         goal = task_queue.get_goal(goal_id)
         if not goal:
             raise HTTPException(status_code=404, detail="goal not found")
@@ -3182,6 +3626,7 @@ def decompose_goal_endpoint(goal_id: str) -> dict:
     try:
         from brain_core.task_queue import task_queue
         from brain_core.goal_decompose import decompose_goal
+
         if not task_queue.get_goal(goal_id):
             raise HTTPException(status_code=404, detail="goal not found")
         tasks = decompose_goal(goal_id)
@@ -3206,8 +3651,10 @@ class AgentMessageRequest(BaseModel):
 def send_message(req: AgentMessageRequest) -> dict:
     try:
         from brain_core.agent_messenger import send_message
-        return send_message(req.from_agent, req.to_agent, req.content,
-                            req.message_type, req.priority, req.parent_task_id)
+
+        return send_message(
+            req.from_agent, req.to_agent, req.content, req.message_type, req.priority, req.parent_task_id
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)[:200])
 
@@ -3216,6 +3663,7 @@ def send_message(req: AgentMessageRequest) -> dict:
 def get_focus() -> dict:
     try:
         from brain_core.working_memory import get_working_context
+
         return get_working_context()
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)[:200])
@@ -3225,6 +3673,7 @@ def get_focus() -> dict:
 def add_focus(req: FocusRequest) -> dict:
     try:
         from brain_core.working_memory import add_focus
+
         return add_focus(req.content, req.category, req.agent, req.expires_hours)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)[:200])
@@ -3234,6 +3683,7 @@ def add_focus(req: FocusRequest) -> dict:
 def delete_focus(focus_id: str) -> dict:
     try:
         from brain_core.working_memory import remove_focus
+
         ok = remove_focus(focus_id)
         return {"status": "removed" if ok else "not_found", "id": focus_id}
     except Exception as e:
@@ -3246,6 +3696,7 @@ def send_agent_message(req: AgentMessageRequest) -> dict:
     """Send a message from one agent to another via the brain."""
     try:
         from brain_core.agent_messenger import send_message
+
         msg = send_message(
             from_agent=req.from_agent,
             to_agent=req.to_agent,
@@ -3267,6 +3718,7 @@ def get_agent_messages(
     """Get pending messages for an agent."""
     try:
         from brain_core.agent_messenger import get_pending_messages
+
         messages = get_pending_messages(agent, limit=limit)
         return {"agent": agent, "total": len(messages), "messages": messages}
     except Exception as e:
@@ -3278,6 +3730,7 @@ def ack_agent_message(msg_id: Annotated[str, PathParam()]) -> dict:
     """Mark a message as delivered."""
     try:
         from brain_core.agent_messenger import deliver_message
+
         result = deliver_message(msg_id)
         if not result or (isinstance(result, dict) and result.get("error") == "not_found"):
             raise HTTPException(status_code=404, detail=f"message {msg_id} not found")
@@ -3293,6 +3746,7 @@ def dismiss_all_messages(agent: Annotated[str, PathParam()]) -> dict:
     """Bulk-mark all pending messages for an agent as delivered."""
     try:
         from brain_core.agent_messenger import dismiss_all
+
         count = dismiss_all(agent)
         return {"agent": agent, "dismissed": count}
     except Exception as e:
@@ -3310,6 +3764,7 @@ class ContradictionVoteRequest(BaseModel):
 @contextmanager
 def _votes_conn():
     import sqlite3
+
     db = BRAIN_DIR / "logs" / "autonomy.db"
     conn = sqlite3.connect(str(db))
     try:
@@ -3335,11 +3790,19 @@ def vote_on_contradiction(contra_id: Annotated[str, PathParam()], req: Contradic
     """Cast an agent vote on how to resolve a contradiction."""
     try:
         from datetime import datetime as _dt, timezone as _tz
+
         with _votes_conn() as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO contradiction_votes (contradiction_id, voter_agent, vote, confidence, reasoning, voted_at) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
-                (contra_id, req.voter_agent, req.vote, req.confidence, req.reasoning, _dt.now(_tz.utc).isoformat()),
+                (
+                    contra_id,
+                    req.voter_agent,
+                    req.vote,
+                    req.confidence,
+                    req.reasoning,
+                    _dt.now(_tz.utc).isoformat(),
+                ),
             )
             conn.commit()
             rows = conn.execute(
@@ -3390,7 +3853,9 @@ def get_contradiction_votes(contra_id: Annotated[str, PathParam()]) -> dict:
 
 
 # ── Phase D4: Session active agents ──
-@app.get("/brain/session/{session_id}/active_agents", tags=["coordination"], dependencies=[Depends(verify_bearer)])
+@app.get(
+    "/brain/session/{session_id}/active_agents", tags=["coordination"], dependencies=[Depends(verify_bearer)]
+)
 def session_active_agents(session_id: Annotated[str, PathParam()]) -> dict:
     """Show which agents have context in this session and their latest keys."""
     try:
@@ -3402,11 +3867,13 @@ def session_active_agents(session_id: Annotated[str, PathParam()]) -> dict:
             ).fetchall()
         by_agent: dict[str, list] = {}
         for agent, key, value, updated_at in rows:
-            by_agent.setdefault(agent, []).append({
-                "key": key,
-                "value": value[:200],
-                "updated_at": updated_at,
-            })
+            by_agent.setdefault(agent, []).append(
+                {
+                    "key": key,
+                    "value": value[:200],
+                    "updated_at": updated_at,
+                }
+            )
         return {
             "session_id": session_id,
             "active_agents": list(by_agent.keys()),
@@ -3421,6 +3888,7 @@ def session_active_agents(session_id: Annotated[str, PathParam()]) -> dict:
 def list_triggers_endpoint() -> dict:
     try:
         from brain_core.action_triggers import list_triggers
+
         triggers = list_triggers()
         # Standardized v2 envelope: {items, total}. The legacy `triggers` key
         # is retained for back-compat with brain-ui pre-2026-04-13 clients.
@@ -3907,6 +4375,7 @@ def trace_provenance(note_id: str, max_depth: int = 3) -> dict:
     """Trace relation chains from a canonical note."""
     try:
         from brain_core.provenance import trace
+
         if max_depth < 0 or max_depth > 10:
             raise HTTPException(status_code=400, detail="max_depth must be 0-10")
         return trace(note_id, max_depth=max_depth)
@@ -3924,6 +4393,7 @@ def brain_ingest(req: BrainIngestRequest) -> dict:
         source_name = req.source
 
         from brain_core.openclaw_dispatch import dispatch
+
         prompt = (
             f"Extract key facts, decisions, and insights from this content. "
             f"Write a concise summary as a knowledge note.\n\n"
@@ -3938,18 +4408,26 @@ def brain_ingest(req: BrainIngestRequest) -> dict:
 
         # Parse and write to raw/inbox
         import json as _json
+
         try:
             extracted = _json.loads(result.text.strip().strip("`").strip())
         except _json.JSONDecodeError:
-            extracted = {"title": source_name, "summary": result.text[:500], "key_facts": [], "domain": "decisions"}
+            extracted = {
+                "title": source_name,
+                "summary": result.text[:500],
+                "key_facts": [],
+                "domain": "decisions",
+            }
 
         inbox_dir = BRAIN_DIR.parent / "knowledge" / "raw" / "inbox"
         inbox_dir.mkdir(parents=True, exist_ok=True)
         import hashlib
+
         slug = hashlib.md5(content[:200].encode()).hexdigest()[:12]
         record = {
             "id": f"raw_manual_{slug}",
-            "type": "raw", "subtype": "manual_ingest",
+            "type": "raw",
+            "subtype": "manual_ingest",
             "title": extracted.get("title", source_name)[:120],
             "content": extracted.get("summary", ""),
             "key_facts": extracted.get("key_facts", []),
@@ -3960,7 +4438,12 @@ def brain_ingest(req: BrainIngestRequest) -> dict:
         out_path = inbox_dir / f"manual_{slug}.json"
         out_path.write_text(_json.dumps(record, indent=2, ensure_ascii=False))
 
-        return {"status": "ingested", "id": record["id"], "title": record["title"], "path": str(out_path.relative_to(BRAIN_DIR.parent))}
+        return {
+            "status": "ingested",
+            "id": record["id"],
+            "title": record["title"],
+            "path": str(out_path.relative_to(BRAIN_DIR.parent)),
+        }
     except HTTPException:
         raise
     except Exception as e:
@@ -3977,6 +4460,7 @@ def rebuild_canonical_index() -> dict:
             return {"status": "no canonical dir"}
 
         import json as _json
+
         entries = []
         for md_file in sorted(canonical_dir.rglob("*.md")):
             try:
@@ -3998,18 +4482,28 @@ def rebuild_canonical_index() -> dict:
                 status = meta.get("status", "")
                 confidence = meta.get("confidence", 0)
                 # Extract first meaningful line of body as summary
-                body_lines = [l.strip() for l in lines[end_idx+1:] if l.strip() and not l.startswith("#")]
+                body_lines = [l.strip() for l in lines[end_idx + 1 :] if l.strip() and not l.startswith("#")]
                 summary = body_lines[0][:120] if body_lines else ""
-                entries.append({"id": note_id, "title": title, "domain": domain,
-                               "status": status, "confidence": confidence, "summary": summary,
-                               "path": str(md_file.relative_to(knowledge_dir))})
+                entries.append(
+                    {
+                        "id": note_id,
+                        "title": title,
+                        "domain": domain,
+                        "status": status,
+                        "confidence": confidence,
+                        "summary": summary,
+                        "path": str(md_file.relative_to(knowledge_dir)),
+                    }
+                )
             except Exception:
                 continue
 
         # Write index.md
-        index_lines = [f"# Canonical Knowledge Index\n",
-                       f"Generated: {datetime.now(timezone.utc).isoformat(timespec='seconds')}\n",
-                       f"Total: {len(entries)} notes\n\n"]
+        index_lines = [
+            f"# Canonical Knowledge Index\n",
+            f"Generated: {datetime.now(timezone.utc).isoformat(timespec='seconds')}\n",
+            f"Total: {len(entries)} notes\n\n",
+        ]
         by_domain: dict[str, list] = {}
         for e in entries:
             by_domain.setdefault(e["domain"] or "other", []).append(e)
@@ -4022,16 +4516,24 @@ def rebuild_canonical_index() -> dict:
         index_path = canonical_dir / "index.md"
         index_path.write_text("".join(index_lines))
 
-        return {"status": "rebuilt", "total_notes": len(entries), "domains": len(by_domain), "path": str(index_path.relative_to(knowledge_dir))}
+        return {
+            "status": "rebuilt",
+            "total_notes": len(entries),
+            "domains": len(by_domain),
+            "path": str(index_path.relative_to(knowledge_dir)),
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)[:200])
 
 
 # ── Routes: audit log ──────────────────────────────────
 @app.get("/brain/audit", tags=["audit"], dependencies=[Depends(verify_bearer)])
-def audit_list(type: str | None = None, since: str | None = None, pending: bool = False, limit: int = 50) -> dict:
+def audit_list(
+    type: str | None = None, since: str | None = None, pending: bool = False, limit: int = 50
+) -> dict:
     try:
         from audit_log import list_events
+
         return {"events": list_events(event_type=type, since=since, pending_only=pending, limit=limit)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)[:200])
@@ -4171,6 +4673,7 @@ def brain_review_grade(chroma_id: str, payload: dict) -> dict:
 def audit_stats_endpoint() -> dict:
     try:
         from audit_log import stats
+
         return stats()
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)[:200])
@@ -4180,6 +4683,7 @@ def audit_stats_endpoint() -> dict:
 def audit_review(event_id: str) -> dict:
     try:
         from audit_log import review_event
+
         review_event(event_id)
         return {"status": "reviewed", "id": event_id}
     except Exception as e:
@@ -4191,6 +4695,7 @@ def audit_review(event_id: str) -> dict:
 def facts_query(entity: str | None = None, attribute: str | None = None, limit: int = 50) -> dict:
     try:
         from fact_store import query_facts
+
         return {"facts": query_facts(entity=entity, attribute=attribute, limit=limit)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)[:200])
@@ -4211,6 +4716,7 @@ class FactStoreRequest(BaseModel):
 def facts_store(req: FactStoreRequest) -> dict:
     try:
         from fact_store import store_fact
+
         return store_fact(
             entity=req.entity,
             attribute=req.attribute,
@@ -4229,6 +4735,7 @@ def facts_store(req: FactStoreRequest) -> dict:
 def facts_by_entity(entity_name: str) -> dict:
     try:
         from fact_store import get_entity_facts
+
         return {"entity": entity_name, "facts": get_entity_facts(entity_name)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)[:200])
@@ -4238,6 +4745,7 @@ def facts_by_entity(entity_name: str) -> dict:
 def facts_stats() -> dict:
     try:
         from fact_store import stats
+
         return stats()
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)[:200])
@@ -4247,6 +4755,7 @@ def facts_stats() -> dict:
 def graph_stats_endpoint() -> dict:
     try:
         from brain_core.entity_graph import get_graph_stats
+
         return get_graph_stats()
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)[:200])
@@ -4257,6 +4766,7 @@ def graph_nodes_endpoint(limit: int = 200) -> dict:
     """Return entities + relations for 3D graph visualization."""
     try:
         from brain_core.neo4j_client import run_query, is_healthy
+
         if not is_healthy():
             return {"nodes": [], "links": [], "backend": "unavailable"}
         nodes = run_query(
@@ -4285,6 +4795,7 @@ def get_lessons(agent: str = "system", limit: int = 20):
     """Query failure lessons for an agent."""
     try:
         import failure_memory
+
         lessons = failure_memory.get_similar_lessons("", agent_id=agent, limit=limit)
         return {"agent": agent, "total": len(lessons), "lessons": lessons}
     except Exception as e:
@@ -4292,13 +4803,33 @@ def get_lessons(agent: str = "system", limit: int = 20):
 
 
 @app.get("/brain/usage", tags=["brain"], dependencies=[Depends(verify_bearer)])
-def brain_usage(days: int = Query(default=30, ge=1, le=365)):
-    """LLM dispatch usage stats for budget monitoring."""
+def brain_usage(days: int = Query(default=7, ge=1, le=365)):
+    """Usage stats — LLM dispatch budget + brain tool adoption.
+
+    Returns a dict with two sections:
+      llm:      cost + token budget stats from openclaw_dispatch (per Jenna/Liz/etc)
+      adoption: per-actor + per-tool counts from action_audit (M7-WS8 adoption counter)
+
+    Both sections use the same `days` window. Either can fail independently; the
+    response returns what's available and surfaces errors in-band.
+    """
+    out: dict = {"window_days": days}
+
     try:
         import openclaw_dispatch
-        return openclaw_dispatch.get_usage_stats(days=days)
+
+        out["llm"] = openclaw_dispatch.get_usage_stats(days=days)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        out["llm"] = {"error": str(e)[:200]}
+
+    try:
+        from brain_core.atoms_store import action_audit_usage
+
+        out["adoption"] = action_audit_usage(since_days=days)
+    except Exception as e:
+        out["adoption"] = {"error": str(e)[:200]}
+
+    return out
 
 
 @app.get("/brain/timetravel", tags=["brain"], dependencies=[Depends(verify_bearer)])
@@ -4317,7 +4848,8 @@ def timetravel(
         if q:
             # Search with as_of filter
             payload = search_unified.search_all(
-                q, limit,
+                q,
+                limit,
                 sources=["rag", "canonical"],
                 include_history=True,  # include superseded for historical accuracy
                 include_obsolete=True,
@@ -4382,6 +4914,7 @@ def knowledge_changes(
 ) -> dict:
     try:
         import temporal_reasoning
+
         return temporal_reasoning.knowledge_diff(since, until)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"temporal diff failed: {e}")
@@ -4389,11 +4922,14 @@ def knowledge_changes(
 
 @app.get("/brain/evolution", tags=["brain"], dependencies=[Depends(verify_bearer)])
 def preference_evolution(
-    topic: str = Query(..., min_length=2, max_length=200, description="Topic to trace (e.g. 'frontend framework')"),
+    topic: str = Query(
+        ..., min_length=2, max_length=200, description="Topic to trace (e.g. 'frontend framework')"
+    ),
     limit: int = Query(default=20, ge=1, le=100),
 ) -> dict:
     try:
         import temporal_reasoning
+
         timeline = temporal_reasoning.preference_evolution(topic, limit=limit)
         return {"topic": topic, "timeline": timeline, "count": len(timeline)}
     except Exception as e:
@@ -4410,6 +4946,7 @@ class SessionContextRequest(BaseModel):
 @contextmanager
 def _session_conn():
     import sqlite3
+
     db = BRAIN_DIR / "logs" / "autonomy.db"
     conn = sqlite3.connect(str(db))
     try:
@@ -4458,6 +4995,7 @@ def set_session_context(session_id: Annotated[str, PathParam()], req: SessionCon
     """Set a per-session key/value for an agent."""
     try:
         from datetime import datetime as _dt2, timezone as _tz2
+
         with _session_conn() as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO session_context (session_id, agent, key, value, updated_at) VALUES (?, ?, ?, ?, ?)",
@@ -4478,6 +5016,7 @@ def code_find(
     """Search the code collection only — function-level results from indexed repos."""
     try:
         from search import get_collections, vector_search, get_embedding
+
         cols = get_collections()
         col_id = cols.get("code")
         if not col_id:
@@ -4490,16 +5029,18 @@ def code_find(
         dists = (data.get("distances") or [[]])[0]
         results = []
         for i, d, m, dist in zip(ids, docs, metas, dists):
-            results.append({
-                "id": i,
-                "score": round(max(0.0, 1 - float(dist)) * 100, 2),
-                "file_path": (m or {}).get("file_path", ""),
-                "function_name": (m or {}).get("function_name", ""),
-                "signature": (m or {}).get("signature", ""),
-                "language": (m or {}).get("language", ""),
-                "line_start": (m or {}).get("line_start", 0),
-                "snippet": (d or "")[:600],
-            })
+            results.append(
+                {
+                    "id": i,
+                    "score": round(max(0.0, 1 - float(dist)) * 100, 2),
+                    "file_path": (m or {}).get("file_path", ""),
+                    "function_name": (m or {}).get("function_name", ""),
+                    "signature": (m or {}).get("signature", ""),
+                    "language": (m or {}).get("language", ""),
+                    "line_start": (m or {}).get("line_start", 0),
+                    "snippet": (d or "")[:600],
+                }
+            )
         return {"query": q, "total": len(results), "results": results}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)[:200])
@@ -4522,6 +5063,7 @@ def sync_todos(req: TodoWriteRequest) -> dict:
     """Sync TodoWrite state from Claude Code into brain."""
     try:
         from datetime import datetime as _dt3, timezone as _tz3
+
         with _session_conn() as conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS todos (
@@ -4584,6 +5126,7 @@ def discover_skills(q: str = "", agent: str | None = None, limit: int = 20) -> d
     """Search OpenClaw + Claude Code skills via Neo4j skill graph."""
     try:
         from neo4j_client import run_query
+
         if q:
             rows = run_query(
                 "MATCH (s:Skill) WHERE toLower(s.description) CONTAINS toLower($q) OR toLower(s.name) CONTAINS toLower($q) "
@@ -4640,24 +5183,64 @@ def search_quality() -> dict:
 @app.get("/brain/tools", tags=["mcp"], dependencies=[Depends(verify_bearer)])
 def brain_tools() -> dict:
     """MCP-compatible tool discovery — lists all brain capabilities for external AI tools."""
-    return {"tools": [
-        {"name": "brain_recall", "description": "Search Chris's knowledge base (use brain_recall_v2 instead)", "endpoint": "GET /recall?q={query}&n={limit}", "deprecated": True},
-        {"name": "brain_recall_v2", "description": "Search with RRF fusion, reranking, graph, time decay. Primary search endpoint.", "endpoint": "GET /recall/v2?q={query}&n={limit}"},
-        {"name": "brain_store", "description": "Store a memory/fact/preference", "endpoint": "POST /memory"},
-        {"name": "brain_decide", "description": "Get a preference-grounded decision recommendation", "endpoint": "POST /brain/decide"},
-        {"name": "brain_reason", "description": "Deep multi-step reasoning with evidence", "endpoint": "POST /brain/reason"},
-        {"name": "brain_ingest", "description": "Manually ingest a document or URL into the knowledge base", "endpoint": "POST /brain/ingest"},
-        {"name": "brain_trace", "description": "Trace provenance/relation chains from a canonical note", "endpoint": "GET /brain/trace/{note_id}"},
-        {"name": "brain_health", "description": "System health check", "endpoint": "GET /brain/health"},
-        {"name": "brain_focus", "description": "Get/set working context", "endpoint": "GET/POST /brain/focus"},
-        {"name": "brain_proactive", "description": "Current proactive insights and alerts", "endpoint": "GET /brain/proactive"},
-    ]}
+    return {
+        "tools": [
+            {
+                "name": "brain_recall",
+                "description": "Search Chris's knowledge base (use brain_recall_v2 instead)",
+                "endpoint": "GET /recall?q={query}&n={limit}",
+                "deprecated": True,
+            },
+            {
+                "name": "brain_recall_v2",
+                "description": "Search with RRF fusion, reranking, graph, time decay. Primary search endpoint.",
+                "endpoint": "GET /recall/v2?q={query}&n={limit}",
+            },
+            {
+                "name": "brain_store",
+                "description": "Store a memory/fact/preference",
+                "endpoint": "POST /memory",
+            },
+            {
+                "name": "brain_decide",
+                "description": "Get a preference-grounded decision recommendation",
+                "endpoint": "POST /brain/decide",
+            },
+            {
+                "name": "brain_reason",
+                "description": "Deep multi-step reasoning with evidence",
+                "endpoint": "POST /brain/reason",
+            },
+            {
+                "name": "brain_ingest",
+                "description": "Manually ingest a document or URL into the knowledge base",
+                "endpoint": "POST /brain/ingest",
+            },
+            {
+                "name": "brain_trace",
+                "description": "Trace provenance/relation chains from a canonical note",
+                "endpoint": "GET /brain/trace/{note_id}",
+            },
+            {"name": "brain_health", "description": "System health check", "endpoint": "GET /brain/health"},
+            {
+                "name": "brain_focus",
+                "description": "Get/set working context",
+                "endpoint": "GET/POST /brain/focus",
+            },
+            {
+                "name": "brain_proactive",
+                "description": "Current proactive insights and alerts",
+                "endpoint": "GET /brain/proactive",
+            },
+        ]
+    }
 
 
 @app.get("/brain/accuracy", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
 def brain_accuracy(domain: str | None = None) -> dict:
     try:
         from brain_core.task_queue import task_queue
+
         return task_queue.get_domain_accuracy(domain=domain)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)[:200])
@@ -4667,6 +5250,7 @@ def brain_accuracy(domain: str | None = None) -> dict:
 def brain_outcomes(domain: str | None = None, limit: int = 50, offset: int = 0) -> dict:
     try:
         from brain_core.task_queue import task_queue
+
         outcomes = task_queue.list_outcomes(domain=domain, limit=limit, offset=offset)
         return {"outcomes": outcomes, "total": len(outcomes)}
     except Exception as e:
@@ -4675,12 +5259,15 @@ def brain_outcomes(domain: str | None = None, limit: int = 50, offset: int = 0) 
 
 @app.get("/brain/procedures", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
 def list_procedures(
-    task_type: str | None = Query(default=None, description="Filter by task type (e.g. 'deploy', 'git_workflow')"),
+    task_type: str | None = Query(
+        default=None, description="Filter by task type (e.g. 'deploy', 'git_workflow')"
+    ),
     source: str | None = Query(default=None, description="Filter by source (extraction, shell, manual)"),
     limit: int = Query(default=10, ge=1, le=50),
 ) -> dict:
     try:
         from brain_core.task_queue import task_queue
+
         procedures = task_queue.get_procedures(task_type=task_type, source=source, limit=limit)
         return {"procedures": procedures, "total": len(procedures)}
     except Exception as e:
@@ -4722,6 +5309,7 @@ def brain_health() -> dict:
     # Probe Neo4j
     try:
         from brain_core.neo4j_client import is_healthy as _neo4j_ok
+
         services["neo4j"] = "up" if _neo4j_ok() else "down"
     except Exception:
         services["neo4j"] = "down"
@@ -4730,9 +5318,13 @@ def brain_health() -> dict:
     collections: dict[str, int] = {}
     try:
         from brain_core.indexer import chroma_api
+
         cols = chroma_api("GET", "/api/v2/tenants/default_tenant/databases/default_database/collections")
         for c in cols:
-            cnt = chroma_api("GET", f"/api/v2/tenants/default_tenant/databases/default_database/collections/{c['id']}/count")
+            cnt = chroma_api(
+                "GET",
+                f"/api/v2/tenants/default_tenant/databases/default_database/collections/{c['id']}/count",
+            )
             collections[c["name"]] = int(cnt) if isinstance(cnt, (int, str)) else -1
     except Exception:
         alerts.append("Cannot read collection counts")
@@ -4798,6 +5390,7 @@ def brain_eval_history(limit: int = 50) -> list:
 def get_schema_versions() -> dict:
     """Show current schema versions for all components."""
     from brain_core.schema_versions import CURRENT_VERSIONS, get_version
+
     return {
         "components": {
             component: {
@@ -4815,6 +5408,7 @@ def get_schema_versions() -> dict:
 def self_heal_status(limit: int = 20) -> dict:
     """Show recent healing actions."""
     from brain_core.self_heal import recent_actions, BRAIN_AUTO_HEAL_ENABLED
+
     return {
         "enabled": BRAIN_AUTO_HEAL_ENABLED,
         "recent_actions": recent_actions(limit),
@@ -4836,6 +5430,7 @@ class HealSignalRequest(BaseModel):
 def emit_heal_signal(req: HealSignalRequest) -> dict:
     """Manually emit a healing signal (for testing + external triggers)."""
     from brain_core.self_heal import HealingSignal, dispatch
+
     signal = HealingSignal(**req.model_dump())
     return dispatch(signal)
 
@@ -4859,6 +5454,7 @@ def main() -> None:
         sys.exit(2)
 
     import uvicorn
+
     sys.stderr.write(
         f"brain-server (FastAPI) v2.0 listening on http://{LISTEN_HOST}:{LISTEN_PORT}\n"
         f"  in-process search: rag={search_unified._RAG_IN_PROCESS} canonical={search_unified._CANONICAL_IN_PROCESS}\n"

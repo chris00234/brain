@@ -34,10 +34,10 @@ except ImportError as e:
     log.error(f"migrations_brain_db import failed: {e}")
     raise
 
-# Always register at version 3 — migrations are idempotent and safe to run on
-# every startup. Without this, a brain restart after a manual migrate would hit
-# downgrade-refused on subsequent restarts (db v3 vs code v0).
-CURRENT_VERSIONS["brain_db"] = 4
+# Always register at the latest version — migrations are idempotent and safe
+# to run on every startup. Without this, a brain restart after a manual migrate
+# would hit downgrade-refused on subsequent restarts (db v3 vs code v0).
+CURRENT_VERSIONS["brain_db"] = 5
 
 
 def _safe_int(v: object, default: int = 0) -> int:
@@ -391,5 +391,37 @@ def _create_web_search_tables() -> dict:
             "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'web_%' ORDER BY name"
         ).fetchall()
         return {"created": [r[0] for r in rows]}
+    finally:
+        conn.close()
+
+
+# ──────────────────────────────────────────────────────────────────────
+# brain_db@5 — Phase M7 WS8: per-actor adoption tracking on action_audit
+# ──────────────────────────────────────────────────────────────────────
+
+
+@migration("brain_db", 4, 5)
+def _add_action_audit_actor() -> dict:
+    """Add actor + tool columns to action_audit so per-agent adoption can be
+    measured. Idempotent — checks pragma table_info first. Backfills existing
+    rows with actor='unknown', tool=route.
+    """
+    conn = _connect_brain_db()
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(action_audit)").fetchall()}
+        if "actor" not in cols:
+            conn.execute("ALTER TABLE action_audit ADD COLUMN actor TEXT NOT NULL DEFAULT 'unknown'")
+        if "tool" not in cols:
+            conn.execute("ALTER TABLE action_audit ADD COLUMN tool TEXT NOT NULL DEFAULT ''")
+            conn.execute("UPDATE action_audit SET tool = route WHERE tool = ''")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_action_audit_actor_ts " "ON action_audit(actor, created_at)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_action_audit_tool_ts " "ON action_audit(tool, created_at)"
+        )
+        conn.commit()
+        final_cols = {r[1] for r in conn.execute("PRAGMA table_info(action_audit)").fetchall()}
+        return {"columns": sorted(final_cols)}
     finally:
         conn.close()

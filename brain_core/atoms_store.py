@@ -137,6 +137,8 @@ CREATE INDEX IF NOT EXISTS idx_prov_child  ON provenance(child_kind,  child_id);
 CREATE TABLE IF NOT EXISTS action_audit (
   id                  INTEGER PRIMARY KEY AUTOINCREMENT,
   route               TEXT NOT NULL,
+  tool                TEXT NOT NULL DEFAULT '',
+  actor               TEXT NOT NULL DEFAULT 'unknown',
   query_text          TEXT,
   retrieved_atom_ids  TEXT NOT NULL DEFAULT '[]',
   retrieved_chroma_ids TEXT,
@@ -148,6 +150,8 @@ CREATE TABLE IF NOT EXISTS action_audit (
 );
 CREATE INDEX IF NOT EXISTS idx_action_audit_session ON action_audit(session_id);
 CREATE INDEX IF NOT EXISTS idx_action_audit_pending ON action_audit(outcome) WHERE outcome IS NULL;
+CREATE INDEX IF NOT EXISTS idx_action_audit_actor_ts ON action_audit(actor, created_at);
+CREATE INDEX IF NOT EXISTS idx_action_audit_tool_ts  ON action_audit(tool,  created_at);
 """
 
 
@@ -483,23 +487,32 @@ def insert_action_audit(
     *,
     route: str,
     query_text: str | None,
+    tool: str | None = None,
+    actor: str | None = None,
     retrieved_atom_ids: list[str] | None = None,
     retrieved_chroma_ids: list[str] | None = None,
     session_id: str | None = None,
     db_path: Path | None = None,
 ) -> int | None:
-    """Record a retrieval event for closed-loop feedback. Best-effort."""
+    """Record a retrieval event for closed-loop feedback. Best-effort.
+
+    `tool` is the logical tool name (e.g. 'brain_recall'); `route` is the raw
+    HTTP path. `actor` is the originating agent (jenna, liz, ellie, sage,
+    market, claude-code, mcp, unknown).
+    """
     if not BRAIN_ATOMS_ENABLED:
         return None
     try:
         with _conn(db_path) as conn:
             cur = conn.execute(
                 "INSERT INTO action_audit "
-                "(route, query_text, retrieved_atom_ids, retrieved_chroma_ids, "
-                " session_id, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                "(route, tool, actor, query_text, retrieved_atom_ids, "
+                " retrieved_chroma_ids, session_id, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     route,
+                    tool or route.split("?")[0],
+                    actor or "unknown",
                     query_text,
                     json.dumps(retrieved_atom_ids or []),
                     json.dumps(retrieved_chroma_ids or []) if retrieved_chroma_ids else None,
@@ -511,3 +524,63 @@ def insert_action_audit(
             return cur.lastrowid
     except sqlite3.Error:
         return None
+
+
+def action_audit_usage(
+    since_days: int = 7,
+    db_path: Path | None = None,
+) -> dict:
+    """Return per-actor and per-tool usage counts over the last N days.
+
+    Returns {
+      "window_days": 7,
+      "total": int,
+      "by_actor":  [{"actor": ..., "count": int}, ...],
+      "by_tool":   [{"tool": ..., "count": int}, ...],
+      "by_actor_tool": [{"actor": ..., "tool": ..., "count": int}, ...],
+    }
+    """
+    if not BRAIN_ATOMS_ENABLED:
+        return {"enabled": 0}
+    try:
+        with _conn(db_path) as conn:
+            cutoff = datetime.now(UTC).timestamp() - since_days * 86400
+            cutoff_iso = datetime.fromtimestamp(cutoff, UTC).isoformat(timespec="seconds")
+            total = conn.execute(
+                "SELECT COUNT(*) FROM action_audit WHERE created_at >= ?",
+                (cutoff_iso,),
+            ).fetchone()[0]
+            by_actor = [
+                {"actor": r[0], "count": r[1]}
+                for r in conn.execute(
+                    "SELECT actor, COUNT(*) FROM action_audit "
+                    "WHERE created_at >= ? GROUP BY actor ORDER BY 2 DESC",
+                    (cutoff_iso,),
+                ).fetchall()
+            ]
+            by_tool = [
+                {"tool": r[0], "count": r[1]}
+                for r in conn.execute(
+                    "SELECT tool, COUNT(*) FROM action_audit "
+                    "WHERE created_at >= ? GROUP BY tool ORDER BY 2 DESC",
+                    (cutoff_iso,),
+                ).fetchall()
+            ]
+            by_actor_tool = [
+                {"actor": r[0], "tool": r[1], "count": r[2]}
+                for r in conn.execute(
+                    "SELECT actor, tool, COUNT(*) FROM action_audit "
+                    "WHERE created_at >= ? GROUP BY actor, tool ORDER BY 3 DESC",
+                    (cutoff_iso,),
+                ).fetchall()
+            ]
+            return {
+                "enabled": 1,
+                "window_days": since_days,
+                "total": total,
+                "by_actor": by_actor,
+                "by_tool": by_tool,
+                "by_actor_tool": by_actor_tool,
+            }
+    except sqlite3.Error as e:
+        return {"enabled": 1, "error": f"sqlite_error:{e}"}

@@ -22,11 +22,22 @@ except Exception:
     SECRET = ""
 
 
-def _brain_request(method: str, path: str, body: dict | None = None) -> dict | str:
-    """Make an authenticated request to the brain API."""
+def _brain_request(method: str, path: str, body: dict | None = None, actor: str | None = None) -> dict | str:
+    """Make an authenticated request to the brain API.
+
+    `actor` (M7-WS8): the calling agent name — propagated as both `x-agent`
+    header (preferred) and `?actor=` query param fallback. This feeds the
+    `action_audit` table so /brain/usage can show per-agent adoption counts.
+    """
     data = json.dumps(body).encode() if body else None
+    if actor and method == "GET" and "?" in path:
+        path = path + "&actor=" + urllib.parse.quote(actor)
+    elif actor and method == "GET":
+        path = path + "?actor=" + urllib.parse.quote(actor)
     req = urllib.request.Request(f"{BRAIN_URL}{path}", data=data, method=method)
     req.add_header("Authorization", f"Bearer {SECRET}")
+    if actor:
+        req.add_header("x-agent", actor)
     if data:
         req.add_header("Content-Type", "application/json")
     try:
@@ -207,6 +218,9 @@ def handle_tools_call(params):
     name = params.get("name", "")
     args = params.get("arguments", {})
 
+    # M7-WS8: resolve the calling agent once and thread it through every tool
+    actor = args.get("agent") or args.get("from_agent") or "mcp"
+
     if name == "brain_recall":
         q = args["query"]
         n = args.get("limit", 5)
@@ -214,41 +228,41 @@ def handle_tools_call(params):
         path = f"/recall/v2?q={urllib.parse.quote(q)}&n={n}&expand=true"
         if col:
             path += f"&collection={col}"
-        result = _brain_request("GET", path)
+        result = _brain_request("GET", path, actor=actor)
 
     elif name == "brain_store":
         result = _brain_request("POST", "/memory", {
             "content": args["content"],
             "category": args.get("category", "fact"),
-            "agent": args.get("agent", "mcp"),
+            "agent": actor,
             "source": "mcp",
-        })
+        }, actor=actor)
 
     elif name == "brain_decide":
         result = _brain_request("POST", "/brain/decide", {
             "situation": args["situation"],
             "options": args.get("options", []),
-            "agent": args.get("agent", "mcp"),
-        })
+            "agent": actor,
+        }, actor=actor)
 
     elif name == "brain_reason":
         result = _brain_request("POST", "/brain/reason", {
             "question": args["question"],
-            "agent": args.get("agent", "mcp"),
-        })
+            "agent": actor,
+        }, actor=actor)
 
     elif name == "brain_ingest":
         result = _brain_request("POST", "/brain/ingest", {
             "content": args["content"],
             "source": args.get("source", "mcp_ingest"),
-        })
+        }, actor=actor)
 
     elif name == "brain_focus":
         result = _brain_request("POST", "/brain/focus", {
             "content": args["content"],
             "category": "focus",
-            "agent": args.get("agent", "mcp"),
-        })
+            "agent": actor,
+        }, actor=actor)
 
     elif name == "brain_message":
         result = _brain_request("POST", "/brain/messages", {
@@ -257,35 +271,35 @@ def handle_tools_call(params):
             "content": args["content"],
             "message_type": args.get("message_type", "info"),
             "priority": 5,
-        })
+        }, actor=actor)
 
     elif name == "brain_changes":
         since = urllib.parse.quote(args.get("since", "7d"))
         until = urllib.parse.quote(args.get("until", "now"))
-        result = _brain_request("GET", f"/brain/changes?since={since}&until={until}")
+        result = _brain_request("GET", f"/brain/changes?since={since}&until={until}", actor=actor)
 
     elif name == "brain_evolution":
         topic = urllib.parse.quote(args["topic"])
-        result = _brain_request("GET", f"/brain/evolution?topic={topic}")
+        result = _brain_request("GET", f"/brain/evolution?topic={topic}", actor=actor)
 
     elif name == "brain_procedures":
         params = f"limit={args.get('limit', 5)}"
         if args.get("task_type"):
             params += f"&task_type={urllib.parse.quote(args['task_type'])}"
-        result = _brain_request("GET", f"/brain/procedures?{params}")
+        result = _brain_request("GET", f"/brain/procedures?{params}", actor=actor)
 
     elif name == "brain_outcome":
         result = _brain_request("POST", "/brain/tasks/" + urllib.parse.quote(args["task_id"]) + ("/complete" if args["success"] else "/reject"), {
             "result": args.get("notes", ""),
-            "agent": args.get("agent", "mcp"),
-        })
+            "agent": actor,
+        }, actor=actor)
 
     elif name == "brain_search_web":
         result = _brain_request("POST", "/web/search", {
             "query": args["query"],
             "limit": args.get("limit", 10),
-            "agent": args.get("agent", "mcp"),
-        })
+            "agent": actor,
+        }, actor=actor)
 
     else:
         result = {"error": f"Unknown tool: {name}"}
