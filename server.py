@@ -1155,6 +1155,7 @@ def recall_v2(
     expand: bool = False,
     rerank: bool = True,
     decay: bool = True,
+    iterative: bool = False,
     since: str | None = None,
     until: str | None = None,
     entity: str | None = None,
@@ -1181,7 +1182,7 @@ def recall_v2(
         raise HTTPException(status_code=400, detail="q parameter required")
 
     # Response cache — identical queries within 30s return cached
-    cache_key = f"{q}:{n}:{hyde}:{expand}:{rerank}:{decay}:{collection}:{domain}:{since}:{until}:{entity}:{source_type}:{include_history}:{include_obsolete}:{as_of}"
+    cache_key = f"{q}:{n}:{hyde}:{expand}:{rerank}:{decay}:{iterative}:{collection}:{domain}:{since}:{until}:{entity}:{source_type}:{include_history}:{include_obsolete}:{as_of}"
     cached = _recall_cache_get(cache_key)
     if cached:
         return cached
@@ -1407,6 +1408,71 @@ def recall_v2(
     timing["total_ms"] = int((time.time() - t_start) * 1000)
     timing["result_count"] = min(n, len(fused))
     timing["candidate_count"] = total_candidates
+
+    # ── Phase M9: CRAG iterative retrieval (opt-in via ?iterative=true) ──
+    # If the caller asked for iterative recall, score the result confidence
+    # and trigger one query expansion + retry on low confidence. Capped at
+    # 1 retry to bound latency. The retry recurses into recall_v2 with
+    # iterative=False so it's a strict single-shot, no infinite loop.
+    if iterative and fused:
+        try:
+            from brain_core.crag import (
+                expand_query as _crag_expand_query,
+            )
+            from brain_core.crag import (
+                score_confidence as _crag_score,
+            )
+            from brain_core.crag import (
+                should_iterate as _crag_should_iterate,
+            )
+
+            t_crag = time.time()
+            confidence_report = _crag_score(fused[: max(n, 5)])
+            crag_telemetry: dict[str, Any] = {
+                "first_hop_confidence": confidence_report.score,
+                "first_hop_components": confidence_report.components,
+                "iterated": False,
+            }
+            if _crag_should_iterate(confidence_report):
+                rewritten = _crag_expand_query(q, fused[:3])
+                if rewritten and rewritten != q:
+                    crag_telemetry["expanded_query"] = rewritten
+                    # Recurse with iterative=False to prevent loops
+                    second_hop = recall_v2(
+                        request,
+                        q=rewritten,
+                        n=n,
+                        hyde=hyde,
+                        expand=expand,
+                        rerank=rerank,
+                        decay=decay,
+                        iterative=False,
+                        since=since,
+                        until=until,
+                        entity=entity,
+                        collection=collection,
+                        domain=domain,
+                        source_type=source_type,
+                        include_history=include_history,
+                        include_obsolete=include_obsolete,
+                        as_of=as_of,
+                        background=background,
+                    )
+                    second_results = second_hop.results
+                    second_report = _crag_score(second_results[: max(n, 5)])
+                    crag_telemetry["second_hop_confidence"] = second_report.score
+                    crag_telemetry["iterated"] = True
+                    # Pick the higher-confidence result set
+                    if second_report.score > confidence_report.score:
+                        fused = second_results
+                        crag_telemetry["selected"] = "second_hop"
+                    else:
+                        crag_telemetry["selected"] = "first_hop"
+            timing["crag_ms"] = int((time.time() - t_crag) * 1000)
+            timing["crag"] = crag_telemetry
+        except Exception as _crag_err:  # noqa: BLE001 — CRAG must never break recall
+            log.warning("crag iterative path failed: %s", _crag_err)
+            timing["crag_error"] = str(_crag_err)[:200]
 
     _metrics_buf.record_search_latency(timing["total_ms"], timing)
 
