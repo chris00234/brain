@@ -12,8 +12,12 @@
 		<string>true</string>
 		<key>BRAIN_AUTO_HEAL_SOURCES</key>
 		<string>slo_monitor</string>
+		<key>BRAIN_CROSS_ENCODER_ADAPTIVE</key>
+		<string>false</string>
 		<key>BRAIN_CROSS_ENCODER_ENABLED</key>
 		<string>true</string>
+		<key>BRAIN_EMBED_MODEL</key>
+		<string>blaifa/multilingual-e5-large-instruct</string>
 		<key>BRAIN_EPISODIC_BINDING_ENABLED</key>
 		<string>true</string>
 		<key>BRAIN_MMR_DIVERSITY_ENABLED</key>

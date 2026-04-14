@@ -1,15 +1,21 @@
 """brain_core/temporal_router.py - Phase D temporal query routing.
 
-The biggest single accuracy win available. Extended track is at 68.2% because
-606 timestamp/temporal queries hit plain RRF instead of the temporal_reasoning
-path. This module:
+Module split across two layers:
 
-1. Detects temporal intent (ISO/Korean/English/relative dates).
-2. Extracts since/until anchors from natural language.
-3. Routes to direct raw_events lookup for exact-timestamp queries
-   (bypasses vector search entirely — the 27.5pt gap closer).
+1. Pure functions for parsing — `extract_temporal_intent` and
+   `_parse_anchor` are stateless regex over the query string. No I/O,
+   no allocation beyond the returned dict, target <1 ms.
 
-Pure functions, no IO outside raw_events query. Hot-path target <30 ms p99.
+2. `lookup_raw_events` performs the only I/O in this module: a single
+   read against `brain.db/raw_events` for exact-timestamp queries that
+   bypass the vector search path entirely. Best-effort — sqlite errors
+   return [] without raising.
+
+Phase D status: the routing infrastructure landed but the in-process fan-out
+into `_search_*` was reverted as net-negative on the extended eval track
+(67.5% vs 68.2% baseline). The module remains importable for future use
+cases (raw_events summarization, temporal_reasoning callers) but is not
+on the /recall/v2 hot path today.
 """
 
 from __future__ import annotations
