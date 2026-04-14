@@ -37,7 +37,7 @@ except ImportError as e:
 # Always register at version 3 — migrations are idempotent and safe to run on
 # every startup. Without this, a brain restart after a manual migrate would hit
 # downgrade-refused on subsequent restarts (db v3 vs code v0).
-CURRENT_VERSIONS["brain_db"] = 3
+CURRENT_VERSIONS["brain_db"] = 4
 
 
 def _safe_int(v: object, default: int = 0) -> int:
@@ -337,3 +337,59 @@ def _backfill_atoms() -> dict:
         "canonical_inserted": canonical_inserted,
         "errors": errors,
     }
+
+
+# ──────────────────────────────────────────────────────────────────────
+# brain_db@4 — Phase M6: SearXNG learning loop tables
+# ──────────────────────────────────────────────────────────────────────
+
+
+_M6_DDL = """
+CREATE TABLE IF NOT EXISTS web_search_attempts (
+  id     TEXT PRIMARY KEY,
+  query  TEXT NOT NULL,
+  ts     TEXT NOT NULL,
+  agent  TEXT NOT NULL DEFAULT 'unknown',
+  intent TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_web_search_attempts_ts ON web_search_attempts(ts);
+
+CREATE TABLE IF NOT EXISTS web_search_results (
+  attempt_id TEXT NOT NULL REFERENCES web_search_attempts(id) ON DELETE CASCADE,
+  rank       INTEGER NOT NULL,
+  url        TEXT NOT NULL,
+  domain     TEXT NOT NULL DEFAULT '',
+  title      TEXT NOT NULL DEFAULT '',
+  snippet    TEXT NOT NULL DEFAULT '',
+  chosen     INTEGER NOT NULL DEFAULT 0,
+  outcome    TEXT,
+  PRIMARY KEY (attempt_id, rank)
+);
+CREATE INDEX IF NOT EXISTS idx_web_search_results_domain ON web_search_results(domain);
+CREATE INDEX IF NOT EXISTS idx_web_search_results_outcome ON web_search_results(outcome) WHERE outcome IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS web_source_trust (
+  domain       TEXT PRIMARY KEY,
+  n_used       INTEGER NOT NULL DEFAULT 0,
+  n_correct    INTEGER NOT NULL DEFAULT 0,
+  score        REAL NOT NULL DEFAULT 0.5,
+  last_updated TEXT NOT NULL
+);
+"""
+
+
+@migration("brain_db", 3, 4)
+def _create_web_search_tables() -> dict:
+    """Add web_search_attempts/results/source_trust tables for Phase M6
+    SearXNG learning loop. Idempotent (CREATE TABLE IF NOT EXISTS).
+    """
+    conn = _connect_brain_db()
+    try:
+        conn.executescript(_M6_DDL)
+        conn.commit()
+        rows = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'web_%' ORDER BY name"
+        ).fetchall()
+        return {"created": [r[0] for r in rows]}
+    finally:
+        conn.close()

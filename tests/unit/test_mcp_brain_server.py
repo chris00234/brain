@@ -27,6 +27,7 @@ EXPECTED_TOOLS = {
     "brain_evolution",
     "brain_procedures",
     "brain_outcome",
+    "brain_search_web",  # Phase M6: SearXNG-backed web search with brain learning
 }
 
 
@@ -79,7 +80,7 @@ def test_initialize_returns_server_info():
     assert "version" in server_info
 
 
-def test_tools_list_exposes_all_eleven_brain_tools():
+def test_tools_list_exposes_all_brain_tools():
     replies = _send_jsonrpc(
         [
             {
@@ -103,7 +104,7 @@ def test_tools_list_exposes_all_eleven_brain_tools():
     extra = names - EXPECTED_TOOLS
     assert not missing, f"missing tools: {missing}"
     assert not extra, f"unexpected tools (drift?): {extra}"
-    assert len(tools) == 11
+    assert len(tools) == len(EXPECTED_TOOLS)
 
 
 def test_tools_have_valid_input_schema():

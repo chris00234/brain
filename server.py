@@ -123,6 +123,9 @@ JOB_REGISTRY: dict[str, list[str]] = {
     # schedule entry was missing prior to this commit, so failed envelopes
     # silently piled up in pending/.
     "outbox_drain":       [_py, f"{_bd}/cli/outbox_drain.py"],
+    # Phase M6: weekly trust score recompute for web_source_trust table —
+    # aggregates per-domain useful/wrong outcomes from web_search_results.
+    "web_source_trust_recompute": [_py, "-c", f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from web_search import recompute_domain_trust; import json; print(json.dumps(recompute_domain_trust()))"],
     "reindex":            ["/bin/zsh", f"{_bd}/cli/reindex.sh"],
     # Maintenance
     "log_rotation":       [_py, f"{_bd}/brain_core/maintenance.py", "all_cleanup"],
@@ -3638,6 +3641,53 @@ def eval_proposal_stats() -> dict:
         from brain_core.eval_proposals import stats
 
         return stats()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)[:200])
+
+
+# ── Phase M6: SearXNG-backed web search with brain learning ──────────────
+class WebSearchRequest(BaseModel):
+    query: str = Field(..., min_length=1, max_length=500)
+    limit: int = Field(default=10, ge=1, le=50)
+    agent: str = Field(default="mcp", max_length=50)
+
+
+@app.post("/web/search", tags=["web"], dependencies=[Depends(verify_bearer)])
+@limiter.limit("60/minute")
+def web_search(request: Request, req: WebSearchRequest) -> dict:
+    """Hit SearXNG and return ranked results with per-domain trust scores.
+
+    Logs the attempt + per-result rows to brain.db so the
+    web_source_trust_recompute job can learn from outcomes via /recall/feedback.
+    """
+    try:
+        from brain_core.web_search import searxng_query
+
+        results = searxng_query(req.query, n=req.limit, agent=req.agent)
+        return {"items": results, "total": len(results), "query": req.query}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)[:200])
+
+
+class WebSearchOutcomeRequest(BaseModel):
+    attempt_id: str = Field(..., min_length=1, max_length=50)
+    rank: int = Field(..., ge=1, le=100)
+    useful: bool
+
+
+@app.post("/web/search/outcome", tags=["web"], dependencies=[Depends(verify_bearer)])
+@limiter.limit("120/minute")
+def web_search_outcome(request: Request, req: WebSearchOutcomeRequest) -> dict:
+    """Mark a single search result as useful (True) or wrong (False)."""
+    try:
+        from brain_core.web_search import mark_result_outcome
+
+        ok = mark_result_outcome(req.attempt_id, req.rank, useful=req.useful)
+        if not ok:
+            raise HTTPException(status_code=404, detail="result not found")
+        return {"status": "recorded", "attempt_id": req.attempt_id, "rank": req.rank}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)[:200])
 

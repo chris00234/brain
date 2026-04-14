@@ -234,6 +234,16 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         misfire_grace=120,
     ),
 
+    # Phase M6: weekly web_source_trust recompute — aggregates per-domain
+    # useful/wrong outcomes from web_search_results into the trust score table.
+    ScheduledJob(
+        name="web_source_trust_recompute",
+        description="Phase M6: recompute per-domain web search trust scores (Sun 5:15)",
+        trigger=CronTrigger(day_of_week="sun", hour=5, minute=15),
+        agent="system",
+        misfire_grace=900,
+    ),
+
     ScheduledJob(
         name="content_quality_slo",
         description="Daily content quality SLO check (4:00am, after eval_run)",

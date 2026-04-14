@@ -207,13 +207,11 @@ def test_concurrent_reinforce_no_lost_updates(enabled_atoms):
 
     assert not errors, f"reinforce raised: {errors}"
     conn = sqlite3.connect(str(enabled_atoms.BRAIN_DB))
-    row = conn.execute(
-        "SELECT reinforcement_count FROM atoms WHERE chroma_id='race:1'"
-    ).fetchone()
+    row = conn.execute("SELECT reinforcement_count FROM atoms WHERE chroma_id='race:1'").fetchone()
     conn.close()
-    assert row[0] == n_threads, (
-        f"expected reinforcement_count={n_threads}, got {row[0]} (lost updates from race)"
-    )
+    assert (
+        row[0] == n_threads
+    ), f"expected reinforcement_count={n_threads}, got {row[0]} (lost updates from race)"
 
 
 def test_concurrent_mark_superseded_atomic(enabled_atoms):
@@ -249,19 +247,13 @@ def test_concurrent_mark_superseded_atomic(enabled_atoms):
     assert not errors, f"mark_superseded raised: {errors}"
     conn = sqlite3.connect(str(enabled_atoms.BRAIN_DB))
     conn.row_factory = sqlite3.Row
-    parent = conn.execute(
-        "SELECT superseded_by FROM atoms WHERE chroma_id='race:parent'"
-    ).fetchone()
+    parent = conn.execute("SELECT superseded_by FROM atoms WHERE chroma_id='race:parent'").fetchone()
     # The winning child's atom_id should equal the parent.superseded_by
     winning_child_id = parent["superseded_by"]
     assert winning_child_id is not None, "parent never got superseded_by set"
     # And THAT child's supersedes should point back at the parent
-    parent_atom_id = conn.execute(
-        "SELECT id FROM atoms WHERE chroma_id='race:parent'"
-    ).fetchone()[0]
-    winner = conn.execute(
-        "SELECT supersedes FROM atoms WHERE id = ?", (winning_child_id,)
-    ).fetchone()
+    parent_atom_id = conn.execute("SELECT id FROM atoms WHERE chroma_id='race:parent'").fetchone()[0]
+    winner = conn.execute("SELECT supersedes FROM atoms WHERE id = ?", (winning_child_id,)).fetchone()
     conn.close()
     assert winner is not None and winner["supersedes"] == parent_atom_id, (
         "winning child's supersedes pointer doesn't match parent — race produced "

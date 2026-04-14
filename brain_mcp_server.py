@@ -187,6 +187,19 @@ def handle_tools_list(params):
                 "required": ["task_id", "success"],
             },
         },
+        {
+            "name": "brain_search_web",
+            "description": "Search the web via the local SearXNG meta-search and record the attempt for brain learning. Returns ranked results with per-domain trust scores. Use this instead of any other web search tool — agent-issued web searches feed back into the brain via /recall/feedback so the system learns which sources are reliable.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query"},
+                    "limit": {"type": "integer", "description": "Number of results", "default": 10},
+                    "agent": {"type": "string", "description": "Your agent name", "default": "mcp"},
+                },
+                "required": ["query"],
+            },
+        },
     ]}
 
 
@@ -264,6 +277,13 @@ def handle_tools_call(params):
     elif name == "brain_outcome":
         result = _brain_request("POST", "/brain/tasks/" + urllib.parse.quote(args["task_id"]) + ("/complete" if args["success"] else "/reject"), {
             "result": args.get("notes", ""),
+            "agent": args.get("agent", "mcp"),
+        })
+
+    elif name == "brain_search_web":
+        result = _brain_request("POST", "/web/search", {
+            "query": args["query"],
+            "limit": args.get("limit", 10),
             "agent": args.get("agent", "mcp"),
         })
 
