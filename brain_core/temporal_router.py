@@ -34,8 +34,13 @@ _ISO_DATE = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})(?:[T\s](\d{2}):(\d{2})(?::(\d
 _KOREAN_MONTH_DAY = re.compile(r"\b(\d{1,2})\s*월\s*(\d{1,2})\s*일")
 _KOREAN_YEAR_MONTH = re.compile(r"\b(\d{4})\s*년\s*(\d{1,2})\s*월")
 _KOREAN_FULL_DATE = re.compile(r"\b(\d{4})\s*년\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일")
+# Match only the canonical short/long forms, not arbitrary `[a-z]*` suffixes —
+# otherwise "Mayer 5" parses as "May 5" (surname false positive).
 _ENGLISH_MONTH = re.compile(
-    r"\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)(?:[a-z]*)\s+(\d{1,2})(?:,?\s+(\d{4}))?",
+    r"\b("
+    r"Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
+    r"Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?"
+    r")\b\s+(\d{1,2})(?:,?\s+(\d{4}))?",
     re.IGNORECASE,
 )
 _TIME_OF_DAY = re.compile(r"\b(\d{1,2}):(\d{2})\s*(?:UTC|PT|KST|am|pm|AM|PM)?", re.IGNORECASE)
@@ -131,12 +136,11 @@ def _parse_anchor(query: str, *, now: datetime | None = None) -> tuple[str | Non
     # 4. English month + day
     m = _ENGLISH_MONTH.search(query)
     if m:
-        # extract the month name from the literal match
-        month_word = m.group(0)[:3].lower()
+        month_word = m.group(1)[:3].lower()
         month = _ENGLISH_MONTHS.get(month_word)
         if month:
-            day = int(m.group(1))
-            year = int(m.group(2)) if m.group(2) else now.year
+            day = int(m.group(2))
+            year = int(m.group(3)) if m.group(3) else now.year
             try:
                 base = datetime(year, month, day, tzinfo=UTC)
                 return _to_iso(base), _to_iso(base + timedelta(days=1)), "point"
@@ -240,6 +244,7 @@ def lookup_raw_events(
         return []
     try:
         conn = sqlite3.connect(str(target))
+        conn.execute("PRAGMA foreign_keys=ON")
         conn.row_factory = sqlite3.Row
         try:
             sql = (

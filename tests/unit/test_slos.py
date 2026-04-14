@@ -76,9 +76,24 @@ def test_check_all_returns_six(slos_module, monkeypatch):
 
 
 def test_alert_rate_limited(slos_module, monkeypatch):
+    """Verify the rate-limit suppresses repeated alerts within the window.
+
+    Stubs the persistent brain_config store with an in-memory dict so the
+    test doesn't touch autonomy.db.
+    """
     sent: list[str] = []
+    fake_store: dict[tuple[str, str], float] = {}
     monkeypatch.setattr(slos_module, "_alert_telegram", lambda slo, actual: sent.append(slo.name) or True)
-    slos_module._alert_state.clear()
+    monkeypatch.setattr(
+        slos_module,
+        "_load_last_alert_at",
+        lambda name, sev: fake_store.get((name, sev), 0.0),
+    )
+    monkeypatch.setattr(
+        slos_module,
+        "_save_last_alert_at",
+        lambda name, sev, ts: fake_store.__setitem__((name, sev), ts),
+    )
     slo = slos_module.SLOS["breaker_open_count"]
     result = slos_module.SLOResult(slo=slo, actual=2.0, breached=True, delta=2.0)
     assert slos_module.maybe_alert(result) is True
@@ -89,8 +104,18 @@ def test_alert_rate_limited(slos_module, monkeypatch):
 def test_run_returns_summary(slos_module, monkeypatch):
     for name in slos_module.SLOS:
         monkeypatch.setitem(slos_module._MEASUREMENTS, name, lambda: 0.0)
+    fake_store: dict[tuple[str, str], float] = {}
     monkeypatch.setattr(slos_module, "_alert_telegram", lambda slo, actual: True)
-    slos_module._alert_state.clear()
+    monkeypatch.setattr(
+        slos_module,
+        "_load_last_alert_at",
+        lambda name, sev: fake_store.get((name, sev), 0.0),
+    )
+    monkeypatch.setattr(
+        slos_module,
+        "_save_last_alert_at",
+        lambda name, sev, ts: fake_store.__setitem__((name, sev), ts),
+    )
     summary = slos_module.run()
     assert summary["checked"] == 6
     assert "results" in summary

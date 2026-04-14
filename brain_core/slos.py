@@ -20,6 +20,7 @@ import logging
 import sqlite3
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -207,7 +208,7 @@ def _measure_eval_holdout_growth() -> float:
         return 0.0
 
 
-_MEASUREMENTS: dict[str, callable] = {
+_MEASUREMENTS: dict[str, Callable[[], float]] = {
     "recall_v2_p95_ms": _measure_recall_v2_p95,
     "recall_v2_content_hit_pct": _measure_recall_v2_content_hit,
     "breaker_open_count": _measure_breaker_open_count,
@@ -255,7 +256,67 @@ def check_all() -> list[SLOResult]:
 
 # ─── Alert dispatch (rate-limited Telegram) ─────────────────────────────
 
-_alert_state: dict[tuple[str, str], float] = {}
+# Rate-limit state is persisted to autonomy.db/brain_config so it survives
+# brain-server restarts. An in-memory dict gets wiped on every launchd
+# kickstart, which would defeat the 30-minute suppression during crash loops.
+_ALERT_KEY_PREFIX = "slo_alert."
+
+
+def _ensure_brain_config_schema() -> None:
+    AUTONOMY_DB.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(AUTONOMY_DB))
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS brain_config (
+              key TEXT PRIMARY KEY,
+              value TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              updated_by TEXT DEFAULT 'system'
+            )
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _load_last_alert_at(slo_name: str, severity: str) -> float:
+    key = f"{_ALERT_KEY_PREFIX}{slo_name}.{severity}.last_at"
+    try:
+        _ensure_brain_config_schema()
+        conn = sqlite3.connect(str(AUTONOMY_DB))
+        try:
+            row = conn.execute(
+                "SELECT value FROM brain_config WHERE key = ?", (key,)
+            ).fetchone()
+            return float(row[0]) if row else 0.0
+        finally:
+            conn.close()
+    except (sqlite3.Error, ValueError):
+        return 0.0
+
+
+def _save_last_alert_at(slo_name: str, severity: str, ts: float) -> None:
+    key = f"{_ALERT_KEY_PREFIX}{slo_name}.{severity}.last_at"
+    try:
+        _ensure_brain_config_schema()
+        conn = sqlite3.connect(str(AUTONOMY_DB))
+        try:
+            from datetime import UTC, datetime
+
+            conn.execute(
+                "INSERT INTO brain_config (key, value, updated_at, updated_by) "
+                "VALUES (?, ?, ?, 'slos') "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+                (key, f"{ts:.3f}", datetime.now(UTC).isoformat(timespec="seconds")),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        pass
 
 
 def _alert_telegram(slo: SLO, actual: float) -> bool:
@@ -299,15 +360,17 @@ def _alert_telegram(slo: SLO, actual: float) -> bool:
 
 
 def maybe_alert(result: SLOResult) -> bool:
-    """Rate-limited alert dispatch. Returns True if alert was sent."""
+    """Rate-limited alert dispatch. Returns True if alert was sent.
+
+    Rate-limit state is persisted in brain_config so it survives restarts.
+    """
     if not result.breached:
         return False
-    key = (result.slo.name, result.slo.severity)
     now = time.time()
-    last_at = _alert_state.get(key, 0.0)
+    last_at = _load_last_alert_at(result.slo.name, result.slo.severity)
     if now - last_at < ALERT_RATE_LIMIT_S:
         return False
-    _alert_state[key] = now
+    _save_last_alert_at(result.slo.name, result.slo.severity, now)
     return _alert_telegram(result.slo, result.actual)
 
 

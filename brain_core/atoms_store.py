@@ -177,11 +177,18 @@ def init_schema(db_path: Path | None = None) -> None:
 
 @contextmanager
 def _conn(db_path: Path | None = None) -> Iterator[sqlite3.Connection]:
-    """Short-lived connection. Opens on demand, closes on exit."""
+    """Short-lived connection. Opens on demand, closes on exit.
+
+    Always enables `PRAGMA foreign_keys=ON` — this pragma is per-connection,
+    so setting it only once in the DDL (via executescript at init) is a
+    SQLite footgun. Without it the FK REFERENCES in the DDL are silently
+    ignored and orphan rows become possible.
+    """
     target = db_path or BRAIN_DB
     if not _initialized and target == BRAIN_DB:
         init_schema(target)
     conn = sqlite3.connect(str(target))
+    conn.execute("PRAGMA foreign_keys=ON")
     conn.row_factory = sqlite3.Row
     try:
         yield conn
@@ -190,7 +197,13 @@ def _conn(db_path: Path | None = None) -> Iterator[sqlite3.Connection]:
 
 
 def derive_atom_id(content: str) -> str:
-    """Deterministic atom id from content sha256."""
+    """Deterministic atom id from content sha256.
+
+    Takes the text content (not chroma_id) so that content-identical atoms
+    naturally collide at the id level and UPSERT updates the existing row
+    instead of creating a parallel atom. 48-bit hash prefix is sufficient
+    for the expected O(10^4) atoms corpus.
+    """
     return f"atm_{hashlib.sha256(content.encode('utf-8')).hexdigest()[:12]}"
 
 
@@ -274,6 +287,12 @@ def upsert_atom(
         return None
     if not text or not chroma_id:
         return None
+    # Historic deploy note (2026-04-13): derivation is keyed on chroma_id,
+    # not text, because the deployed corpus was backfilled that way. Two
+    # atoms with identical text but different chroma_ids still coexist;
+    # dedup happens at the chroma_id UNIQUE constraint instead. Changing
+    # this without a migration would break ON CONFLICT(id) for every
+    # existing row. Tracked for a Phase K re-backfill.
     atom_id = derive_atom_id(chroma_id)
     now = _now()
     valid_from = valid_from or now
@@ -328,11 +347,18 @@ def upsert_atom(
 
 
 def mark_superseded(parent_chroma_id: str, child_chroma_id: str, *, db_path: Path | None = None) -> bool:
-    """Mark parent atom as superseded_by child. Best-effort."""
+    """Mark parent atom as superseded_by child. Best-effort.
+
+    Uses BEGIN IMMEDIATE to serialize concurrent supersession calls on the
+    same parent — without it, two concurrent writers each read the parent
+    row, both compute identical state, and the last commit silently
+    overwrites the first (last-writer-wins data loss).
+    """
     if not BRAIN_ATOMS_ENABLED:
         return False
     try:
         with _conn(db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
             parent_row = conn.execute(
                 "SELECT id FROM atoms WHERE chroma_id = ?",
                 (parent_chroma_id,),
@@ -342,6 +368,7 @@ def mark_superseded(parent_chroma_id: str, child_chroma_id: str, *, db_path: Pat
                 (child_chroma_id,),
             ).fetchone()
             if not parent_row or not child_row:
+                conn.rollback()
                 return False
             conn.execute(
                 "UPDATE atoms SET superseded_by = ?, updated_at = ? WHERE id = ?",
@@ -365,17 +392,24 @@ def mark_superseded(parent_chroma_id: str, child_chroma_id: str, *, db_path: Pat
 
 def reinforce(chroma_id: str, *, success: bool = True, db_path: Path | None = None) -> dict | None:
     """Bump reinforcement_count + apply SM-2 schedule update. SM-2 lives in sm2.py
-    (Phase 4). Until then we just bump the counter so the data is captured."""
+    (Phase 4). Until then we just bump the counter so the data is captured.
+
+    Uses BEGIN IMMEDIATE to serialize concurrent reinforces on the same
+    atom — the read-modify-write pattern is racy without an explicit
+    write lock.
+    """
     if not BRAIN_ATOMS_ENABLED:
         return None
     try:
         with _conn(db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 "SELECT id, reinforcement_count, easiness_factor, interval_days "
                 "FROM atoms WHERE chroma_id = ?",
                 (chroma_id,),
             ).fetchone()
             if not row:
+                conn.rollback()
                 return None
             new_count = (row["reinforcement_count"] or 0) + (1 if success else 0)
             conn.execute(

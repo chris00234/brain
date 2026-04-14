@@ -49,7 +49,9 @@ def _safe_int(v: object, default: int = 0) -> int:
 
 def _connect_brain_db() -> sqlite3.Connection:
     BRAIN_DB.parent.mkdir(parents=True, exist_ok=True)
-    return sqlite3.connect(str(BRAIN_DB))
+    conn = sqlite3.connect(str(BRAIN_DB))
+    conn.execute("PRAGMA foreign_keys=ON")
+    return conn
 
 
 @migration("brain_db", 0, 1)

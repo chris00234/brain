@@ -3490,8 +3490,10 @@ class DenylistEntryRequest(BaseModel):
 def add_denylist_entry(req: DenylistEntryRequest) -> dict:
     try:
         import sqlite3
+        from datetime import UTC as _UTC
         from datetime import datetime as _dt
 
+        from brain_core.autonomy import invalidate_levels_cache
         from brain_core.config import AUTONOMY_DB
 
         conn = sqlite3.connect(str(AUTONOMY_DB))
@@ -3506,11 +3508,12 @@ def add_denylist_entry(req: DenylistEntryRequest) -> dict:
                 "INSERT INTO brain_config (key, value, updated_at, updated_by) "
                 "VALUES (?, '1', ?, 'api') "
                 "ON CONFLICT(key) DO UPDATE SET value='1', updated_at=excluded.updated_at",
-                (f"denylist.{req.prefix}", _dt.utcnow().isoformat(timespec="seconds")),
+                (f"denylist.{req.prefix}", _dt.now(_UTC).isoformat(timespec="seconds")),
             )
             conn.commit()
         finally:
             conn.close()
+        invalidate_levels_cache()
         return {"status": "added", "prefix": req.prefix}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)[:200])
@@ -3521,6 +3524,7 @@ def remove_denylist_entry(req: DenylistEntryRequest) -> dict:
     try:
         import sqlite3
 
+        from brain_core.autonomy import invalidate_levels_cache
         from brain_core.config import AUTONOMY_DB
 
         conn = sqlite3.connect(str(AUTONOMY_DB))
@@ -3533,6 +3537,7 @@ def remove_denylist_entry(req: DenylistEntryRequest) -> dict:
             conn.close()
         if cur.rowcount == 0:
             raise HTTPException(status_code=404, detail="prefix not found in soft denylist")
+        invalidate_levels_cache()
         return {"status": "removed", "prefix": req.prefix}
     except HTTPException:
         raise
@@ -3662,6 +3667,7 @@ def list_atoms(
             params.append(int(canonical))
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
         conn = sqlite3.connect(str(BRAIN_DB))
+        conn.execute("PRAGMA foreign_keys=ON")
         conn.row_factory = sqlite3.Row
         try:
             rows = conn.execute(
@@ -3729,6 +3735,7 @@ def get_atom_detail(atom_id: str) -> dict:
         if not BRAIN_ATOMS_ENABLED:
             raise HTTPException(status_code=503, detail="atoms not enabled")
         conn = sqlite3.connect(str(BRAIN_DB))
+        conn.execute("PRAGMA foreign_keys=ON")
         conn.row_factory = sqlite3.Row
         try:
             row = conn.execute("SELECT * FROM atoms WHERE id = ?", (atom_id,)).fetchone()

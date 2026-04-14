@@ -50,7 +50,7 @@ _cache_lock = threading.Lock()
 @dataclass(frozen=True)
 class BreakerSnapshot:
     kind: str
-    state: str  # closed | open | half_open
+    state: str  # closed | open | half_open | half_open_probing
     failures: int
     trip_count: int
     opened_at: float | None
@@ -66,6 +66,16 @@ class BreakerSnapshot:
     @property
     def is_half_open(self) -> bool:
         return self.state == "half_open"
+
+    @property
+    def is_probing(self) -> bool:
+        """Another caller is currently running the single-flight probe."""
+        return self.state == "half_open_probing"
+
+    @property
+    def blocks_new_callers(self) -> bool:
+        """True if a new caller should be denied (open OR probe-in-flight)."""
+        return self.state in ("open", "half_open_probing")
 
     @property
     def is_closed(self) -> bool:
@@ -183,71 +193,79 @@ def record_result(kind: str, *, ok: bool, error: str = "") -> BreakerSnapshot:
     """Record an action outcome and update the breaker state machine.
 
     Success → reset failures, close. Failure → bump counter; if at threshold,
-    open with the next backoff tier.
+    open with the next backoff tier. `half_open` + failure always re-opens
+    with the next backoff tier (not the stale prior tier), fixing the
+    half_open ↔ open zero-cooldown loop.
+
+    Uses BEGIN IMMEDIATE to serialize concurrent writers on the same kind —
+    the read-modify-write pattern is racy without an explicit write lock.
     """
     conn = _connect()
     try:
+        conn.execute("BEGIN IMMEDIATE")
         row = conn.execute("SELECT * FROM heal_breakers WHERE kind = ?", (kind,)).fetchone()
         snapshot = _row_to_snapshot(kind, row)
         now = time.time()
 
+        # State transitions
         if ok:
+            # Success: full reset regardless of prior state (closed / half_open / open)
             new_state = "closed"
             new_failures = 0
+            new_trip_count = 0
             new_opened_at = None
+            new_reset_after = BACKOFF_TIERS_S[0]
             new_reason = ""
+        elif snapshot.is_half_open:
+            # Half-open probe failure: always escalate to next backoff tier.
+            # This is the fix for the half_open ↔ open zero-cooldown loop —
+            # previously the stale opened_at/reset_after_s were reused.
+            new_state = "open"
+            new_failures = snapshot.failures + 1
+            new_trip_count = snapshot.trip_count + 1
+            new_opened_at = now
+            tier_idx = min(new_trip_count - 1, len(BACKOFF_TIERS_S) - 1)
+            new_reset_after = BACKOFF_TIERS_S[tier_idx]
+            new_reason = (error[:200] if error else snapshot.reason) or "half_open_probe_failed"
         else:
             new_failures = snapshot.failures + 1
-            if new_failures >= CB_THRESHOLD or snapshot.is_half_open:
+            if new_failures >= CB_THRESHOLD:
+                # Threshold crossed: open with next tier
                 new_state = "open"
+                new_trip_count = snapshot.trip_count + 1
                 new_opened_at = now
-                tier_idx = min(snapshot.trip_count, len(BACKOFF_TIERS_S) - 1)
+                tier_idx = min(new_trip_count - 1, len(BACKOFF_TIERS_S) - 1)
                 new_reset_after = BACKOFF_TIERS_S[tier_idx]
             else:
-                new_state = snapshot.state if snapshot.state != "half_open" else "open"
+                # Still closed, just bump failure count
+                new_state = snapshot.state
+                new_trip_count = snapshot.trip_count
                 new_opened_at = snapshot.opened_at
                 new_reset_after = snapshot.reset_after_s
             new_reason = error[:200] if error else snapshot.reason
 
-        new_trip_count = snapshot.trip_count
-        if not ok and new_state == "open":
-            new_trip_count += 1
-        if ok:
-            new_trip_count = 0
-
-        if not ok:
-            conn.execute(
-                "INSERT INTO heal_breakers (kind, state, failures, trip_count, opened_at, "
-                " last_failure_at, last_action_at, reset_after_s, reason) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(kind) DO UPDATE SET "
-                " state=excluded.state, failures=excluded.failures, "
-                " trip_count=excluded.trip_count, opened_at=excluded.opened_at, "
-                " last_failure_at=excluded.last_failure_at, "
-                " last_action_at=excluded.last_action_at, "
-                " reset_after_s=excluded.reset_after_s, reason=excluded.reason",
-                (
-                    kind,
-                    new_state,
-                    new_failures,
-                    new_trip_count,
-                    new_opened_at,
-                    now,
-                    now,
-                    new_reset_after if not ok else snapshot.reset_after_s,
-                    new_reason,
-                ),
-            )
-        else:
-            conn.execute(
-                "INSERT INTO heal_breakers (kind, state, failures, trip_count, opened_at, "
-                " last_failure_at, last_action_at, reset_after_s, reason) "
-                "VALUES (?, 'closed', 0, 0, NULL, ?, ?, ?, '') "
-                "ON CONFLICT(kind) DO UPDATE SET "
-                " state='closed', failures=0, trip_count=0, opened_at=NULL, "
-                " last_action_at=excluded.last_action_at, reason=''",
-                (kind, snapshot.last_failure_at, now, BACKOFF_TIERS_S[0]),
-            )
+        conn.execute(
+            "INSERT INTO heal_breakers (kind, state, failures, trip_count, opened_at, "
+            " last_failure_at, last_action_at, reset_after_s, reason) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(kind) DO UPDATE SET "
+            " state=excluded.state, failures=excluded.failures, "
+            " trip_count=excluded.trip_count, opened_at=excluded.opened_at, "
+            " last_failure_at=excluded.last_failure_at, "
+            " last_action_at=excluded.last_action_at, "
+            " reset_after_s=excluded.reset_after_s, reason=excluded.reason",
+            (
+                kind,
+                new_state,
+                new_failures,
+                new_trip_count,
+                new_opened_at,
+                now if not ok else snapshot.last_failure_at,
+                now,
+                new_reset_after,
+                new_reason,
+            ),
+        )
         conn.commit()
 
         row = conn.execute("SELECT * FROM heal_breakers WHERE kind = ?", (kind,)).fetchone()
@@ -258,6 +276,36 @@ def record_result(kind: str, *, ok: bool, error: str = "") -> BreakerSnapshot:
     with _cache_lock:
         _snapshot_cache[kind] = (time.time(), result)
     return result
+
+
+def try_claim_probe(kind: str) -> bool:
+    """Atomic single-flight for half_open probes.
+
+    Returns True if this caller wins the exclusive right to run the next
+    action against a half_open breaker; False if another caller already
+    claimed it or the breaker isn't half_open. Wins are marked by
+    transitioning state from 'half_open' → 'half_open_probing' with a
+    compare-and-swap UPDATE. `record_result()` will then clear it back
+    to 'closed' (success) or 'open' (failure).
+
+    This fixes the bypass where every concurrent caller saw half_open
+    via the 5s cache and all passed the gate.
+    """
+    conn = _connect()
+    try:
+        cur = conn.execute(
+            "UPDATE heal_breakers SET state='half_open_probing', "
+            "last_action_at=? "
+            "WHERE kind=? AND state='half_open'",
+            (time.time(), kind),
+        )
+        conn.commit()
+        claimed = cur.rowcount > 0
+    finally:
+        conn.close()
+    if claimed:
+        invalidate_cache(kind)
+    return claimed
 
 
 def reset(kind: str) -> BreakerSnapshot:

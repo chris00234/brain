@@ -19,7 +19,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from datetime import time as dtime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -27,7 +27,7 @@ from zoneinfo import ZoneInfo
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 try:
-    from breakers import peek_breaker
+    from breakers import peek_breaker, try_claim_probe
     from config import AUTONOMY_DB
     from default_levels import (
         DEFAULT_LEVELS,
@@ -49,10 +49,15 @@ except ImportError:
     def peek_breaker(_kind: str) -> None:
         return None
 
+    def try_claim_probe(_kind: str) -> bool:
+        return False
+
 
 _LEVEL_CACHE_TTL_S = 15.0
 _level_cache_stamp = 0.0
 _level_cache: dict[str, str] = {}
+_soft_deny_cache_stamp = 0.0
+_soft_deny_cache: tuple[str, ...] = ()
 _cache_lock = threading.Lock()
 
 
@@ -128,9 +133,43 @@ def _resolve_level_cached() -> dict[str, str]:
 
 
 def invalidate_levels_cache() -> None:
-    global _level_cache_stamp
+    global _level_cache_stamp, _soft_deny_cache_stamp
     with _cache_lock:
         _level_cache_stamp = 0.0
+        _soft_deny_cache_stamp = 0.0
+
+
+def _load_soft_denylist() -> tuple[str, ...]:
+    """Pull denylist.<prefix>=1 rows from brain_config."""
+    _ensure_brain_config_schema()
+    prefixes: list[str] = []
+    conn = sqlite3.connect(str(AUTONOMY_DB))
+    try:
+        for row in conn.execute(
+            "SELECT key, value FROM brain_config WHERE key LIKE 'denylist.%'"
+        ):
+            key, value = row[0], row[1]
+            if value == "1":
+                prefix = key[len("denylist.") :]
+                if prefix:
+                    prefixes.append(prefix)
+    finally:
+        conn.close()
+    return tuple(prefixes)
+
+
+def _resolve_soft_denylist_cached() -> tuple[str, ...]:
+    global _soft_deny_cache_stamp, _soft_deny_cache
+    now = time.monotonic()
+    with _cache_lock:
+        if _soft_deny_cache and (now - _soft_deny_cache_stamp) < _LEVEL_CACHE_TTL_S:
+            return _soft_deny_cache
+        try:
+            _soft_deny_cache = _load_soft_denylist()
+        except sqlite3.Error:
+            _soft_deny_cache = ()
+        _soft_deny_cache_stamp = now
+        return _soft_deny_cache
 
 
 def set_level(kind: str, level: str, *, updated_by: str = "system") -> None:
@@ -148,7 +187,7 @@ def set_level(kind: str, level: str, *, updated_by: str = "system") -> None:
             (
                 f"autonomy.{kind}.level",
                 level,
-                datetime.utcnow().isoformat(timespec="seconds"),
+                datetime.now(UTC).isoformat(timespec="seconds"),
                 updated_by,
             ),
         )
@@ -248,7 +287,7 @@ def authorize(
             kind=kind,
         )
 
-    # (c) hardcoded deny list
+    # (c) hardcoded deny list (security floor — not overridable)
     if any(kind.startswith(p) for p in DENY_PREFIXES):
         return AuthorizationDecision(
             allowed=False,
@@ -256,6 +295,19 @@ def authorize(
             requires_ack=False,
             notify_lag_s=0,
             reason="denylist",
+            breaker_state=breaker_state,
+            kind=kind,
+        )
+
+    # (c.2) soft deny list from brain_config (operator-managed via /brain/denylist/add)
+    soft_denies = _resolve_soft_denylist_cached()
+    if soft_denies and any(kind.startswith(p) for p in soft_denies):
+        return AuthorizationDecision(
+            allowed=False,
+            level="L0",
+            requires_ack=False,
+            notify_lag_s=0,
+            reason="soft_denylist",
             breaker_state=breaker_state,
             kind=kind,
         )
@@ -274,6 +326,31 @@ def authorize(
                 breaker_state=breaker_state,
                 kind=kind,
             )
+        if snapshot.is_probing:
+            # Another caller already claimed the single-flight probe.
+            return AuthorizationDecision(
+                allowed=False,
+                level="L0",
+                requires_ack=False,
+                notify_lag_s=0,
+                reason="breaker_probe_in_flight",
+                breaker_state=breaker_state,
+                kind=kind,
+            )
+        if snapshot.is_half_open:
+            # Half-open: exactly ONE caller wins the atomic claim.
+            # Losers see probe_in_flight on the next peek.
+            if not try_claim_probe(kind):
+                return AuthorizationDecision(
+                    allowed=False,
+                    level="L0",
+                    requires_ack=False,
+                    notify_lag_s=0,
+                    reason="breaker_probe_lost",
+                    breaker_state="half_open_probing",
+                    kind=kind,
+                )
+            breaker_state = "half_open_probing"
 
     # (e) level lookup with brain_config override
     levels = _resolve_level_cached()

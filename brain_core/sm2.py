@@ -95,18 +95,24 @@ def _promote_tier(atom: dict) -> str | None:
 def apply_quality(chroma_id: str, quality: int, *, db_path: Path | None = None) -> dict | None:
     """Run SM-2 + tier promotion against an atom and persist. Best-effort.
 
+    Uses BEGIN IMMEDIATE to serialize concurrent reviews on the same atom.
+    Without it, two simultaneous quality grades would both read the same
+    state and the later commit would silently lose the earlier update.
+
     Returns the updated atom dict or None if disabled / not found.
     """
     if not BRAIN_ATOMS_ENABLED or _conn is None:
         return None
     try:
         with _conn(db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 "SELECT id, easiness_factor, interval_days, reinforcement_count, "
                 "tier, canonical FROM atoms WHERE chroma_id = ?",
                 (chroma_id,),
             ).fetchone()
             if not row:
+                conn.rollback()
                 return None
             state = schedule(
                 easiness_factor=row["easiness_factor"],
