@@ -20,6 +20,7 @@ import sys
 import threading
 import atexit
 from concurrent.futures import ThreadPoolExecutor as _TPE
+
 _search_bg_pool = _TPE(max_workers=2, thread_name_prefix="search_bg")
 _search_fanout_pool = _TPE(max_workers=6, thread_name_prefix="search_fanout")
 # Shared single-worker pool for Neo4j timeout-wrapped calls in _graph_entity_boost.
@@ -43,12 +44,14 @@ import temporal  # noqa: E402
 # Failures fall back to subprocess so the existing CLI path keeps working.
 try:
     import search as _rag_search  # noqa: E402
+
     _RAG_IN_PROCESS = True
 except Exception:
     _RAG_IN_PROCESS = False
 
 try:
     from config import BRAIN_DIR, OBSIDIAN_VAULT, ONTOLOGY_GRAPH
+
     _PIPELINE_DIR = BRAIN_DIR / "pipeline"
     KNOWLEDGE_SEARCH = _PIPELINE_DIR / "search_memory.py"
     RAG_SEARCH = BRAIN_DIR / "brain_core" / "search.py"
@@ -64,6 +67,7 @@ if str(_PIPELINE_DIR) not in sys.path:
     sys.path.insert(0, str(_PIPELINE_DIR))
 try:
     import search_memory as _canonical_search  # noqa: E402
+
     _CANONICAL_IN_PROCESS = True
 except Exception:
     _CANONICAL_IN_PROCESS = False
@@ -72,7 +76,7 @@ SOURCE_TRUST = {
     "canonical": 1.0,
     "distilled": 0.9,
     "knowledge": 0.9,
-    "personal": 0.85,   # notes, calendar, tasks, messages (unified)
+    "personal": 0.85,  # notes, calendar, tasks, messages (unified)
     "experience": 0.85,
     "semantic_memory": 0.8,
     "context": 0.75,
@@ -84,7 +88,9 @@ try:
     from tokenizer import tokenize
 except ImportError:
     import re as _re
-    _TOKEN_RE = _re.compile(r'[a-z0-9_\-]{2,}')
+
+    _TOKEN_RE = _re.compile(r"[a-z0-9_\-]{2,}")
+
     def tokenize(text):
         return set(_TOKEN_RE.findall((text or "").lower()))
 
@@ -121,7 +127,10 @@ def load_ontology():
         for frm, to in relations:
             adjacency.setdefault(frm, []).append(to)
             adjacency.setdefault(to, []).append(frm)
-        result = entities, {id_to_name.get(k, k): [id_to_name.get(v, v) for v in vs] for k, vs in adjacency.items()}
+        result = (
+            entities,
+            {id_to_name.get(k, k): [id_to_name.get(v, v) for v in vs] for k, vs in adjacency.items()},
+        )
         _ontology_cache = result
         _ontology_cache_ts = now
         return result
@@ -136,6 +145,7 @@ def expand_with_ontology(query, adjacency):
     # Also expand via entity graph (Zep/Graphiti pattern)
     try:
         from entity_graph import expand_with_entities
+
         entity_expansions = expand_with_entities(query)
         expansions.extend(entity_expansions)
     except Exception:
@@ -146,8 +156,15 @@ def expand_with_ontology(query, adjacency):
     return query
 
 
-_ALL_COLLECTIONS = ["knowledge", "experience", "context", "semantic_memory",
-                    "obsidian", "canonical", "personal"]
+_ALL_COLLECTIONS = [
+    "knowledge",
+    "experience",
+    "context",
+    "semantic_memory",
+    "obsidian",
+    "canonical",
+    "personal",
+]
 
 
 def search_rag(query, limit, where=None, collections=None):
@@ -164,17 +181,18 @@ def search_rag(query, limit, where=None, collections=None):
 
     if _RAG_IN_PROCESS:
         try:
-            return _rag_search.hybrid_search(query, cols, limit, use_keyword=True, where=where, deduplicate=False)
+            return _rag_search.hybrid_search(
+                query, cols, limit, use_keyword=True, where=where, deduplicate=False
+            )
         except Exception:
             return []
 
     # Fallback: subprocess (legacy path). Use the running Python (sys.executable)
     # so dependency resolution matches the parent — brain_server's venv Python.
     collection_arg = ",".join(cols)
-    cmd = [sys.executable, str(RAG_SEARCH),
-           query, '-c', collection_arg, '-n', str(limit), '--json']
+    cmd = [sys.executable, str(RAG_SEARCH), query, "-c", collection_arg, "-n", str(limit), "--json"]
     if where:
-        cmd.extend(['--where', json.dumps(where)])
+        cmd.extend(["--where", json.dumps(where)])
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         if result.returncode != 0 or not result.stdout.strip():
@@ -200,13 +218,23 @@ def search_canonical(query, limit, domain=None):
             return []
 
     # Fallback: subprocess (legacy path). Use sys.executable to match parent venv.
-    cmd = [sys.executable, str(KNOWLEDGE_SEARCH),
-           query, '--limit', str(limit), '--include-rag', '--rag-limit', '0', '--json']
+    cmd = [
+        sys.executable,
+        str(KNOWLEDGE_SEARCH),
+        query,
+        "--limit",
+        str(limit),
+        "--include-rag",
+        "--rag-limit",
+        "0",
+        "--json",
+    ]
     if domain:
-        cmd.extend(['--domain', domain])
+        cmd.extend(["--domain", domain])
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30,
-                                cwd=str(KNOWLEDGE_SEARCH.parent))
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=30, cwd=str(KNOWLEDGE_SEARCH.parent)
+        )
         if result.returncode != 0 or not result.stdout.strip():
             return []
         payload = json.loads(result.stdout)
@@ -312,6 +340,7 @@ def deduplicate(results, max_jaccard_window: int = 80):
     instead of O(n^2) for large result sets.
     """
     import hashlib as _hl
+
     unique = []
     seen_hashes: set[str] = set()
     seen_tokens: list[set[str]] = []
@@ -326,7 +355,9 @@ def deduplicate(results, max_jaccard_window: int = 80):
         is_dup = False
         if content_toks:
             # Only compare against the most recent `max_jaccard_window` entries.
-            window = seen_tokens[-max_jaccard_window:] if len(seen_tokens) > max_jaccard_window else seen_tokens
+            window = (
+                seen_tokens[-max_jaccard_window:] if len(seen_tokens) > max_jaccard_window else seen_tokens
+            )
             for prev_toks in window:
                 if not prev_toks:
                     continue
@@ -363,6 +394,7 @@ def _graph_entity_boost(query: str, results: list[dict]) -> set[str]:
         return set()
     try:
         from entity_graph import _use_neo4j
+
         if not _use_neo4j():
             return set()
         from neo4j_client import run_query as _rq
@@ -425,12 +457,18 @@ def _graph_entity_boost(query: str, results: list[dict]) -> set[str]:
 
 
 _RELATIONAL_PATTERNS = re.compile(
-    r'(?:depends?\s+on|who\s+(?:uses?|owns?|runs?)|which\s+service|what\s+(?:service|depends)|runs?\s+on|connects?\s+to)', re.I)
+    r"(?:depends?\s+on|who\s+(?:uses?|owns?|runs?)|which\s+service|what\s+(?:service|depends)|runs?\s+on|connects?\s+to)",
+    re.I,
+)
 _TEMPORAL_PATTERNS = re.compile(
-    r'(?:when\s+did|last\s+(?:week|month|year)|yesterday|this\s+(?:week|month)|days?\s+ago|\bhow\s+recent)', re.I)
+    r"(?:when\s+did|last\s+(?:week|month|year)|yesterday|this\s+(?:week|month)|days?\s+ago|\bhow\s+recent)",
+    re.I,
+)
 _PREFERENCE_PATTERNS = re.compile(
-    r'(?:(?:does|what)\s+(?:chris\s+)?prefer|convention|coding\s+standard|(?:chris|he)\s+(?:likes?|always|never))', re.I)
-_CAPITALIZED_WORD = re.compile(r'\b[A-Z][a-zA-Z0-9_-]{1,}\b')
+    r"(?:(?:does|what)\s+(?:chris\s+)?prefer|convention|coding\s+standard|(?:chris|he)\s+(?:likes?|always|never))",
+    re.I,
+)
+_CAPITALIZED_WORD = re.compile(r"\b[A-Z][a-zA-Z0-9_-]{1,}\b")
 
 
 def _is_entity_query(query: str) -> bool:
@@ -454,6 +492,7 @@ def _prefetch_graph_neighbors(query: str, limit: int = 5) -> list[dict]:
     """
     try:
         from entity_graph import expand_with_entities
+
         neighbors = expand_with_entities(query, limit=limit)
     except Exception:
         return []
@@ -565,6 +604,7 @@ def _dedup_by_content_hash(results: list[dict]) -> list[dict]:
     if not results:
         return results
     import hashlib
+
     seen: dict[str, dict] = {}
     for r in results:
         if not isinstance(r, dict):
@@ -578,10 +618,22 @@ def _dedup_by_content_hash(results: list[dict]) -> list[dict]:
     return list(seen.values())
 
 
-def search_all(query, limit=5, sources=None, domain=None, original_query=None,
-               where=None, collections=None, entity=None, explain=False,
-               source_type=None, include_history=False, include_obsolete=False,
-               as_of=None, session_id=None):
+def search_all(
+    query,
+    limit=5,
+    sources=None,
+    domain=None,
+    original_query=None,
+    where=None,
+    collections=None,
+    entity=None,
+    explain=False,
+    source_type=None,
+    include_history=False,
+    include_obsolete=False,
+    as_of=None,
+    session_id=None,
+):
     """Unified search across all sources.
 
     Phase 1B/1C/1D filters (applied to semantic_memory by default):
@@ -637,10 +689,17 @@ def search_all(query, limit=5, sources=None, domain=None, original_query=None,
             # but flood the vector space with query-like language that crowds out
             # canonical answers. Exclude them by default; callers who want them
             # can pass source_type explicitly.
-            _raw_exclude = {"type": {"$nin": [
-                "raw-openclaw_session", "raw-claude_code_session",
-                "raw-browser", "raw-git_activity", "raw-screen_time",
-            ]}}
+            _raw_exclude = {
+                "type": {
+                    "$nin": [
+                        "raw-openclaw_session",
+                        "raw-claude_code_session",
+                        "raw-browser",
+                        "raw-git_activity",
+                        "raw-screen_time",
+                    ]
+                }
+            }
             if local_where:
                 local_where = {"$and": [local_where, _raw_exclude]}
             else:
@@ -716,7 +775,10 @@ def search_all(query, limit=5, sources=None, domain=None, original_query=None,
         if collections:
             return []
         t0 = time.time()
-        res = [normalize_canonical_result(r, query=relevance_query) for r in search_canonical(query, limit, domain=domain)]
+        res = [
+            normalize_canonical_result(r, query=relevance_query)
+            for r in search_canonical(query, limit, domain=domain)
+        ]
         source_timing["canonical_ms"] = int((time.time() - t0) * 1000)
         return res
 
@@ -746,6 +808,7 @@ def search_all(query, limit=5, sources=None, domain=None, original_query=None,
         t0 = time.time()
         try:
             from entity_graph import graph_search
+
             res = graph_search(query, limit=3)
         except Exception:
             res = []
@@ -756,6 +819,7 @@ def search_all(query, limit=5, sources=None, domain=None, original_query=None,
         t0 = time.time()
         try:
             from fts_index import search_fts
+
             res = search_fts(query, limit=limit)
         except Exception:
             res = []
@@ -803,15 +867,19 @@ def search_all(query, limit=5, sources=None, domain=None, original_query=None,
     # Entity filter
     if entity:
         ent_lower = entity.lower()
+
         def matches(r):
-            haystack = " ".join([
-                str(r.get("metadata", {}).get("agent", "")),
-                str(r.get("metadata", {}).get("service", "")),
-                str(r.get("path", "")),
-                str(r.get("title", "")),
-                str(r.get("content", ""))[:200],
-            ]).lower()
+            haystack = " ".join(
+                [
+                    str(r.get("metadata", {}).get("agent", "")),
+                    str(r.get("metadata", {}).get("service", "")),
+                    str(r.get("path", "")),
+                    str(r.get("title", "")),
+                    str(r.get("content", ""))[:200],
+                ]
+            ).lower()
             return ent_lower in haystack
+
         rag_results[:] = [r for r in rag_results if matches(r)]
         canonical_results[:] = [r for r in canonical_results if matches(r)]
         obsidian_results[:] = [r for r in obsidian_results if matches(r)]
@@ -825,7 +893,19 @@ def search_all(query, limit=5, sources=None, domain=None, original_query=None,
     # RRF fusion across sources with trust-based weights
     try:
         from rrf import rrf_fuse
-        source_lists = [l for l in [rag_results, canonical_results, obsidian_results, graph_results, fts_results, graph_prefetch_results] if l]
+
+        source_lists = [
+            l
+            for l in [
+                rag_results,
+                canonical_results,
+                obsidian_results,
+                graph_results,
+                fts_results,
+                graph_prefetch_results,
+            ]
+            if l
+        ]
         trust_weights = []
         if rag_results:
             trust_weights.append(0.9 * _intent_boost.get("rag", 1.0))
@@ -844,7 +924,14 @@ def search_all(query, limit=5, sources=None, domain=None, original_query=None,
         else:
             all_results = []
     except ImportError:
-        all_results = rag_results + canonical_results + obsidian_results + graph_results + fts_results + graph_prefetch_results
+        all_results = (
+            rag_results
+            + canonical_results
+            + obsidian_results
+            + graph_results
+            + fts_results
+            + graph_prefetch_results
+        )
         all_results.sort(key=lambda x: (x["score"], x["trust_tier"]), reverse=True)
 
     unique = deduplicate(all_results)
@@ -856,12 +943,26 @@ def search_all(query, limit=5, sources=None, domain=None, original_query=None,
     # so its boost survives. Rerank replaces r["score"] with rerank_score on
     # line ~730, which would erase the activation boost if we applied it here.
 
+    # M7-WS3: HippoRAG2 query-to-triple linking. Embeds the query and matches
+    # against pre-embedded entity-rel-entity triples in Neo4j. Returns a set
+    # of entity names that are graph-linked to the query — we use this to
+    # boost results whose content mentions any linked entity. Module-level
+    # gate via BRAIN_TRIPLE_LINK_ENABLED env var (default off until measured).
+    linked_entities: set[str] = set()
+    try:
+        from triple_link import get_query_linked_entities
+
+        linked_entities = get_query_linked_entities(relevance_query)
+    except Exception:
+        pass
+
     # Apply rerank + time_decay. Clamp rerank_score to [0,100] so downstream
     # trust_score and time_decay multipliers stay in a well-defined range —
     # rerank_score is base*relevance*...*boost and can exceed 100, which
     # makes the final score scale undefined.
     try:
         from rerank import rerank as _rerank
+
         unique = _rerank(relevance_query, unique, top_k=limit * 10)
         for r in unique:
             raw = r.get("rerank_score", r.get("score", 0))
@@ -872,6 +973,18 @@ def search_all(query, limit=5, sources=None, domain=None, original_query=None,
             r["score"] = max(0.0, min(100.0, raw_f))
     except ImportError:
         pass
+
+    # M7-WS3: apply linked-entity boost AFTER rerank (mirrors spreading
+    # activation pattern below). +5pt bonus per matched entity, capped at
+    # +15pt total, so it tiebreaks but never overrides cross-encoder.
+    if linked_entities:
+        for r in unique:
+            content_lower = (r.get("content") or r.get("title") or "").lower()
+            matched = sum(1 for e in linked_entities if e and e in content_lower)
+            if matched > 0:
+                bonus = min(15.0, 5.0 * matched)
+                r["score"] = min(100.0, float(r.get("score", 0)) + bonus)
+                r["triple_link_matches"] = matched
 
     # Cross-encoder rerank runs in server.py recall_v2 handler (post-RRF).
 
@@ -892,6 +1005,7 @@ def search_all(query, limit=5, sources=None, domain=None, original_query=None,
     if BRAIN_SPREADING_ACTIVATION_ENABLED and len(unique) >= 2:
         try:
             from spreading_activation import warm_session, boost_results_by_activation
+
             # Confidence skip: don't perturb a clear top-1.
             # Proportional threshold handles any upstream score range.
             top1 = float(unique[0].get("score", 0))
@@ -938,6 +1052,7 @@ def search_all(query, limit=5, sources=None, domain=None, original_query=None,
     if BRAIN_SALIENCE_RANKING_ENABLED and unique:
         import math as _math
         from datetime import datetime as _dt, timezone as _tz
+
         SALIENCE_BONUS_MAX = 10.0  # bounded — tiebreaks, doesn't dominate
         RECENCY_HALFLIFE_DAYS = 90.0
 
@@ -988,6 +1103,7 @@ def search_all(query, limit=5, sources=None, domain=None, original_query=None,
 
     try:
         from time_decay import apply_to_results
+
         unique = apply_to_results(unique)
         unique.sort(key=lambda x: x.get("score", 0), reverse=True)
     except ImportError:
@@ -1058,10 +1174,13 @@ def search_all(query, limit=5, sources=None, domain=None, original_query=None,
             if top1 > 0 and top3 > 0 and (top3 / top1) >= 0.90:
                 import sqlite3 as _sql
                 from pathlib import Path as _P
+
                 db_path = _P("/Users/chrischo/server/brain/logs/autonomy.db")
                 if db_path.exists():
                     top_n = unique[:limit]
-                    top_ids = [r.get("id") or r.get("path", "") for r in top_n if r.get("id") or r.get("path")]
+                    top_ids = [
+                        r.get("id") or r.get("path", "") for r in top_n if r.get("id") or r.get("path")
+                    ]
                     if top_ids:
                         _conn = _sql.connect(str(db_path))
                         try:
@@ -1077,7 +1196,7 @@ def search_all(query, limit=5, sources=None, domain=None, original_query=None,
                                     f"SELECT memory_id FROM episode_membership WHERE episode_id IN ({ep_placeholders})",
                                     ep_ids,
                                 ).fetchall()
-                                peer_set = {pid for pid, in peer_rows}
+                                peer_set = {pid for (pid,) in peer_rows}
                                 top_id_set = set(top_ids)
                                 # Floor: peer score after boost must remain
                                 # below the lowest top-N score, so peers can
@@ -1127,13 +1246,10 @@ def search_all(query, limit=5, sources=None, domain=None, original_query=None,
         # Run MMR only if the nth result is >= 85% of top-1 (ambiguous spread).
         # Non-positive scores disable the skip entirely — fall through to run
         # MMR, which is the correct behavior when the whole top-N is weak.
-        _mmr_should_run = (
-            _top_score > 0
-            and _nth_score > 0
-            and (_nth_score / _top_score) >= 0.85
-        )
+        _mmr_should_run = _top_score > 0 and _nth_score > 0 and (_nth_score / _top_score) >= 0.85
     if _mmr_should_run:
         from tokenizer import tokenize as _tok
+
         # Pre-tokenize once per result to avoid O(n^2) re-tokenization
         token_cache: list[set[str]] = []
         for r in unique:
@@ -1183,7 +1299,7 @@ def search_all(query, limit=5, sources=None, domain=None, original_query=None,
 
     # Conflict flagging: mark results that may contradict each other
     for i, r1 in enumerate(final_results):
-        for r2 in final_results[i+1:]:
+        for r2 in final_results[i + 1 :]:
             if r1.get("collection") == r2.get("collection"):
                 continue
             t1 = tokenize(r1.get("content", "")[:300])
@@ -1218,6 +1334,7 @@ def search_all(query, limit=5, sources=None, domain=None, original_query=None,
     # Track memory access for lifecycle management (fire-and-forget, non-blocking)
     try:
         from entity_graph import track_access
+
         access_ids = [r.get("id") or r.get("path", "") for r in final_results if r.get("id") or r.get("path")]
         if access_ids:
             _search_bg_pool.submit(track_access, access_ids)
@@ -1228,15 +1345,20 @@ def search_all(query, limit=5, sources=None, domain=None, original_query=None,
     # Rate-limited: only every 5th query to reduce Neo4j write traffic.
     with _cooccurrence_lock:
         _cooccurrence_counter[0] += 1
-        _should_reinforce = (_cooccurrence_counter[0] % 5 == 0)
+        _should_reinforce = _cooccurrence_counter[0] % 5 == 0
     if _should_reinforce:
         try:
+
             def _reinforce_cooccurrence():
                 from entity_graph import _use_neo4j
+
                 if not _use_neo4j():
                     return
                 from neo4j_client import run_query as _rq, run_write as _rw
-                result_text = " ".join((r.get("content", "") + " " + r.get("title", ""))[:200] for r in final_results[:5]).lower()
+
+                result_text = " ".join(
+                    (r.get("content", "") + " " + r.get("title", ""))[:200] for r in final_results[:5]
+                ).lower()
                 if len(result_text) < 50:
                     return
                 matched = _rq(
@@ -1248,9 +1370,10 @@ def search_all(query, limit=5, sources=None, domain=None, original_query=None,
                     return
                 pairs_done = 0
                 for i, a in enumerate(names[:5]):
-                    for b in names[i+1:5]:
+                    for b in names[i + 1 : 5]:
                         if a != b and pairs_done < 3:
                             from datetime import datetime as _dt, timezone as _tz
+
                             _rw(
                                 # Use separate MATCH clauses to avoid cartesian product warning.
                                 "MATCH (s:Entity {name: $a}) "
@@ -1263,6 +1386,7 @@ def search_all(query, limit=5, sources=None, domain=None, original_query=None,
                                 {"a": a, "b": b, "now": _dt.now(_tz.utc).isoformat(timespec="seconds")},
                             )
                             pairs_done += 1
+
             _search_bg_pool.submit(_reinforce_cooccurrence)
         except Exception:
             pass
@@ -1284,7 +1408,10 @@ def search_all(query, limit=5, sources=None, domain=None, original_query=None,
 
     try:
         import hooks
-        hooks.fire("on_search", query=query, result_count=len(final_results), latency_ms=sum(source_timing.values()))
+
+        hooks.fire(
+            "on_search", query=query, result_count=len(final_results), latency_ms=sum(source_timing.values())
+        )
     except Exception:
         pass
 
@@ -1295,21 +1422,36 @@ def main():
     parser = argparse.ArgumentParser(description="Unified Search Gateway")
     parser.add_argument("query", help="Search query")
     parser.add_argument("-n", "--limit", type=int, default=5, help="Number of results")
-    parser.add_argument("--source", default="rag,canonical,obsidian",
-                        help="Sources to search (comma-separated: rag,canonical,obsidian)")
-    parser.add_argument("--domain", default=None,
-                        choices=["chris", "projects", "infra", "decisions", "incidents"],
-                        help="Filter canonical notes by domain")
-    parser.add_argument("--since", default=None,
-                        help="Temporal lower bound (e.g. '2026-04-01', '7d', 'last tuesday', 'yesterday')")
-    parser.add_argument("--until", default=None,
-                        help="Temporal upper bound (e.g. '2026-04-07', 'today')")
-    parser.add_argument("--entity", default=None,
-                        help="Filter to results mentioning this entity (agent, service, path, or content)")
-    parser.add_argument("--collection", default=None,
-                        help="Restrict to a specific ChromaDB collection (e.g. messages, notes, calendar, tasks, experience)")
-    parser.add_argument("--explain", action="store_true",
-                        help="Include applied filters in the result payload")
+    parser.add_argument(
+        "--source",
+        default="rag,canonical,obsidian",
+        help="Sources to search (comma-separated: rag,canonical,obsidian)",
+    )
+    parser.add_argument(
+        "--domain",
+        default=None,
+        choices=["chris", "projects", "infra", "decisions", "incidents"],
+        help="Filter canonical notes by domain",
+    )
+    parser.add_argument(
+        "--since",
+        default=None,
+        help="Temporal lower bound (e.g. '2026-04-01', '7d', 'last tuesday', 'yesterday')",
+    )
+    parser.add_argument("--until", default=None, help="Temporal upper bound (e.g. '2026-04-07', 'today')")
+    parser.add_argument(
+        "--entity",
+        default=None,
+        help="Filter to results mentioning this entity (agent, service, path, or content)",
+    )
+    parser.add_argument(
+        "--collection",
+        default=None,
+        help="Restrict to a specific ChromaDB collection (e.g. messages, notes, calendar, tasks, experience)",
+    )
+    parser.add_argument(
+        "--explain", action="store_true", help="Include applied filters in the result payload"
+    )
     parser.add_argument("--json", action="store_true", help="JSON output")
     args = parser.parse_args()
 
@@ -1327,7 +1469,10 @@ def main():
 
     search_limit = args.limit * 3 if (start_dt or end_dt) else args.limit
     payload = search_all(
-        expanded_query, search_limit, sources, args.domain,
+        expanded_query,
+        search_limit,
+        sources,
+        args.domain,
         original_query=args.query,
         where=where,
         collections=collections,
@@ -1335,9 +1480,9 @@ def main():
         explain=args.explain,
     )
     if (start_dt or end_dt) and isinstance(payload, dict):
-        payload["results"] = temporal.filter_by_created_at(
-            payload.get("results", []), start_dt, end_dt
-        )[:args.limit]
+        payload["results"] = temporal.filter_by_created_at(payload.get("results", []), start_dt, end_dt)[
+            : args.limit
+        ]
     payload["original_query"] = args.query
     if expanded_query != args.query:
         payload["expanded_query"] = expanded_query
@@ -1364,5 +1509,5 @@ def main():
         print(f"  {r['content'][:200]}...")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

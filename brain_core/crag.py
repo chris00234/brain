@@ -23,7 +23,6 @@ existing callers see no behavior change.
 
 from __future__ import annotations
 
-import contextlib
 import logging
 import statistics
 from collections.abc import Callable
@@ -227,12 +226,21 @@ def expand_query(
         )
         return result.text if result.ok else ""
 
-    with contextlib.suppress(Exception), concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+    # M7-WS7 M4 fix: do NOT use `with executor as ex:` — the context manager's
+    # __exit__ blocks until in-flight work completes, which means a stuck Jenna
+    # dispatch would freeze the entire /recall/v2 request even after the
+    # wall-clock timeout fires. Use a manual executor and `shutdown(wait=False,
+    # cancel_futures=True)` instead so timeout actually unblocks the caller.
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    try:
         fut = ex.submit(_do_dispatch)
         try:
             raw = fut.result(timeout=timeout_s)
         except concurrent.futures.TimeoutError:
             log.warning("expand_query wall-clock budget exceeded (%.1fs)", timeout_s)
+            raw = ""
+        except Exception as _exc:
+            log.warning("expand_query dispatch failed: %s", _exc)
             raw = ""
         if raw:
             candidate = raw.strip().strip('"').strip("'").strip()
@@ -240,6 +248,8 @@ def expand_query(
                 if len(candidate) > 500:
                     candidate = candidate[:500]
                 rewritten = candidate
+    finally:
+        ex.shutdown(wait=False, cancel_futures=True)
     return rewritten
 
 

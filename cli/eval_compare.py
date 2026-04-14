@@ -13,6 +13,7 @@ Usage:
   eval_compare.py --expand         # add &expand=true to v2
   eval_compare.py --hyde --expand  # both
 """
+
 from __future__ import annotations
 
 import argparse
@@ -44,17 +45,55 @@ def _get(path: str, token: str) -> dict:
 import re as _re_eval
 
 _WORD_RE = _re_eval.compile(r"[\w가-힣]+", _re_eval.UNICODE)
-_STOP = {"the", "a", "an", "is", "are", "was", "were", "to", "of", "in", "on",
-         "for", "with", "by", "at", "and", "or", "but", "how", "what", "why",
-         "does", "do", "did", "will", "that", "this", "it", "as", "be", "he",
-         "she", "they", "we", "you", "from", "which", "not"}
+_STOP = {
+    "the",
+    "a",
+    "an",
+    "is",
+    "are",
+    "was",
+    "were",
+    "to",
+    "of",
+    "in",
+    "on",
+    "for",
+    "with",
+    "by",
+    "at",
+    "and",
+    "or",
+    "but",
+    "how",
+    "what",
+    "why",
+    "does",
+    "do",
+    "did",
+    "will",
+    "that",
+    "this",
+    "it",
+    "as",
+    "be",
+    "he",
+    "she",
+    "they",
+    "we",
+    "you",
+    "from",
+    "which",
+    "not",
+}
 
 
 def _signif_tokens(text: str) -> set[str]:
     return {t for t in _WORD_RE.findall(text.lower()) if len(t) >= 2 and t not in _STOP}
 
 
-def _expected_hit(results: list[dict], expected_source: str, expected_content: str) -> tuple[bool, bool, int, bool]:
+def _expected_hit(
+    results: list[dict], expected_source: str, expected_content: str
+) -> tuple[bool, bool, int, bool]:
     """Returns (hit_source_top5, hit_content_strict, hit_at_rank, hit_content_loose).
 
     - hit_content_strict: literal lowercased substring of expected_content in content
@@ -99,7 +138,9 @@ def _expected_hit(results: list[dict], expected_source: str, expected_content: s
     return hit_source, hit_content_strict, rank, hit_content_loose
 
 
-def run_eval(use_v2: bool, hyde: bool, expand: bool, token: str, cases: list[dict], n_results: int = 5) -> dict:
+def run_eval(
+    use_v2: bool, hyde: bool, expand: bool, iterative: bool, token: str, cases: list[dict], n_results: int = 5
+) -> dict:
     hits_source = 0
     hits_content_strict = 0
     hits_content_loose = 0
@@ -118,6 +159,8 @@ def run_eval(use_v2: bool, hyde: bool, expand: bool, token: str, cases: list[dic
                 params["hyde"] = "true"
             if expand:
                 params["expand"] = "true"
+            if iterative:
+                params["iterative"] = "true"
             path = "/recall/v2?" + urllib.parse.urlencode(params)
         else:
             path = "/recall?" + urllib.parse.urlencode({"q": q, "n": str(n_results)})
@@ -138,14 +181,16 @@ def run_eval(use_v2: bool, hyde: bool, expand: bool, token: str, cases: list[dic
         if rank > 0:
             ranks.append(rank)
 
-        per_test.append({
-            "query": q,
-            "hit_source": hs,
-            "hit_content": hc_strict,
-            "hit_content_loose": hc_loose,
-            "rank": rank,
-            "latency_ms": int(dt),
-        })
+        per_test.append(
+            {
+                "query": q,
+                "hit_source": hs,
+                "hit_content": hc_strict,
+                "hit_content_loose": hc_loose,
+                "rank": rank,
+                "latency_ms": int(dt),
+            }
+        )
 
     total = len(cases)
     return {
@@ -163,10 +208,19 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Compare /recall vs /recall/v2")
     parser.add_argument("--hyde", action="store_true")
     parser.add_argument("--expand", action="store_true")
+    parser.add_argument(
+        "--iterative",
+        action="store_true",
+        help="Phase M9 CRAG iterative retrieval — pass ?iterative=true to /recall/v2",
+    )
     parser.add_argument("--limit", type=int, default=0, help="Only run first N cases (0 = all)")
     parser.add_argument("--json", action="store_true")
-    parser.add_argument("--eval-set", type=Path, default=DEFAULT_EVAL_SET,
-                        help="Path to eval_set.json (default: cli/eval_set.json)")
+    parser.add_argument(
+        "--eval-set",
+        type=Path,
+        default=DEFAULT_EVAL_SET,
+        help="Path to eval_set.json (default: cli/eval_set.json)",
+    )
     args = parser.parse_args()
 
     if not SECRET_FILE.exists():
@@ -176,26 +230,29 @@ def main() -> int:
 
     cases = json.loads(args.eval_set.read_text())
     if args.limit > 0:
-        cases = cases[:args.limit]
+        cases = cases[: args.limit]
 
     if not args.json:
         print(f"Running {len(cases)} eval cases against /recall and /recall/v2...")
-    baseline = run_eval(use_v2=False, hyde=False, expand=False, token=token, cases=cases)
-    v2 = run_eval(use_v2=True, hyde=args.hyde, expand=args.expand, token=token, cases=cases)
+    baseline = run_eval(use_v2=False, hyde=False, expand=False, iterative=False, token=token, cases=cases)
+    v2 = run_eval(
+        use_v2=True, hyde=args.hyde, expand=args.expand, iterative=args.iterative, token=token, cases=cases
+    )
 
-    mode = "basic"
-    if args.hyde and args.expand:
-        mode = "hyde+expand"
-    elif args.hyde:
-        mode = "hyde"
-    elif args.expand:
-        mode = "expand"
+    mode_parts = []
+    if args.hyde:
+        mode_parts.append("hyde")
+    if args.expand:
+        mode_parts.append("expand")
+    if args.iterative:
+        mode_parts.append("iterative")
+    mode = "+".join(mode_parts) if mode_parts else "basic"
 
     report = {
         "cases": len(cases),
         "v2_mode": mode,
         "baseline": {k: v for k, v in baseline.items() if k != "per_test"},
-        "v2":       {k: v for k, v in v2.items() if k != "per_test"},
+        "v2": {k: v for k, v in v2.items() if k != "per_test"},
     }
 
     if args.json:
