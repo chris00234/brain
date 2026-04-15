@@ -258,6 +258,7 @@ JOB_REGISTRY: dict[str, list[str]] = {
     "reindex": ["/bin/zsh", f"{_bd}/cli/reindex.sh"],
     # Maintenance
     "log_rotation": [_py, f"{_bd}/brain_core/maintenance.py", "all_cleanup"],
+    "embed_cache_prune": [_py, f"{_bd}/brain_core/embed_cache.py"],
     "chroma_integrity": [_py, f"{_bd}/brain_core/maintenance.py", "chroma_integrity"],
     "canonical_index": [
         "/bin/bash",
@@ -376,6 +377,7 @@ class MetricsResponse(BaseModel):
     uptime_sec: int
     profile_loaded: bool
     routes: dict[str, Any] = Field(default_factory=dict)
+    phase_latency: dict[str, Any] = Field(default_factory=dict)
     jobs: dict[str, Any] = Field(default_factory=dict)
     dispatch: dict[str, Any] = Field(default_factory=dict)
     memory_writes_1h: int = 0
@@ -385,6 +387,7 @@ class MetricsResponse(BaseModel):
     last_backup_at: str = ""
     last_backup_ok: bool = True
     embed_cache: dict[str, Any] = Field(default_factory=dict)
+    ce_cache: dict[str, Any] = Field(default_factory=dict)
 
 
 class CaptureRequest(BaseModel):
@@ -1054,12 +1057,21 @@ def metrics() -> MetricsResponse:
     except Exception:
         embed_cache = {}
 
+    # Cross-encoder score cache stats
+    try:
+        from cross_encoder_model import cache_stats as _ce_stats
+
+        ce_cache = _ce_stats()
+    except Exception:
+        ce_cache = {}
+
     return MetricsResponse(
         collection_counts=counts,
         total_chunks=total,
         uptime_sec=int(time.time() - SERVER_START),
         profile_loaded=_profile_cache.get() is not None,
         routes=buf["routes"],
+        phase_latency=buf.get("phase_latency", {}),
         jobs=buf["jobs"],
         dispatch=buf["dispatch"],
         memory_writes_1h=buf["memory_writes_1h"],
@@ -1069,6 +1081,7 @@ def metrics() -> MetricsResponse:
         last_backup_at=buf.get("last_backup_at", ""),
         last_backup_ok=buf.get("last_backup_ok", True),
         embed_cache=embed_cache,
+        ce_cache=ce_cache,
     )
 
 

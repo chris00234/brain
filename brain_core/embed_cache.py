@@ -109,3 +109,85 @@ def cache_put(key: str, embedding: list[float]) -> None:
                 pass
     except Exception:
         pass
+
+
+def prune_old(max_age_days: int = 60, max_rows: int = 25_000) -> dict:
+    """Two-tier cleanup: legacy + age-based + size-cap LRU + VACUUM.
+
+    1. Legacy rows (created_at IS NULL OR ''): added before the `created_at`
+       column existed. Oldest by definition — delete all.
+    2. Age-based: delete rows with created_at < now - max_age_days.
+    3. Size cap: if still > max_rows, delete oldest by created_at ASC.
+    4. VACUUM to reclaim disk pages (outside the transaction).
+
+    Zero quality risk: a deleted entry becomes a cache miss on next query
+    and re-embeds via Ollama (~65ms). Pruned entries will rarely be
+    re-queried — that's why they aged out.
+
+    Returns dict with counts + disk size before/after.
+    """
+    from datetime import datetime, timezone, timedelta
+    result = {
+        "legacy_deleted": 0, "aged_deleted": 0, "lru_deleted": 0,
+        "rows_before": 0, "rows_after": 0,
+        "bytes_before": 0, "bytes_after": 0,
+    }
+    try:
+        conn = _get_conn()
+        result["bytes_before"] = EMBED_CACHE_DB.stat().st_size if EMBED_CACHE_DB.exists() else 0
+        result["rows_before"] = conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
+
+        with _lock:
+            cur = conn.execute("DELETE FROM embeddings WHERE created_at IS NULL OR created_at = ''")
+            result["legacy_deleted"] = cur.rowcount
+
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat(timespec="seconds")
+            cur = conn.execute("DELETE FROM embeddings WHERE created_at < ?", (cutoff,))
+            result["aged_deleted"] = cur.rowcount
+
+            remaining = conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
+            if remaining > max_rows:
+                excess = remaining - max_rows
+                cur = conn.execute(
+                    "DELETE FROM embeddings WHERE hash IN "
+                    "(SELECT hash FROM embeddings ORDER BY created_at ASC LIMIT ?)",
+                    (excess,),
+                )
+                result["lru_deleted"] = cur.rowcount
+
+            conn.commit()
+
+        # VACUUM outside the data lock — needs exclusive DB lock and can't
+        # run inside a transaction. WAL checkpoint first to fold pending
+        # writes into the main DB so VACUUM sees them.
+        try:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            conn.execute("VACUUM")
+        except Exception as e:
+            log.warning("embed_cache.prune_old VACUUM failed (non-fatal): %s", e)
+
+        result["rows_after"] = conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
+        result["bytes_after"] = EMBED_CACHE_DB.stat().st_size if EMBED_CACHE_DB.exists() else 0
+
+        log.info(
+            "embed_cache.prune_old: legacy=%d aged=%d lru=%d rows=%d->%d size=%.1fMB->%.1fMB",
+            result["legacy_deleted"], result["aged_deleted"], result["lru_deleted"],
+            result["rows_before"], result["rows_after"],
+            result["bytes_before"] / 1048576, result["bytes_after"] / 1048576,
+        )
+    except Exception as e:
+        log.warning("embed_cache.prune_old failed: %s", e)
+        result["error"] = str(e)[:200]
+    return result
+
+
+if __name__ == "__main__":
+    # One-shot runner so cron/scheduler can invoke without importing:
+    #   python3 /Users/chrischo/server/brain/brain_core/embed_cache.py
+    import argparse
+    parser = argparse.ArgumentParser(description="Prune embed_cache.db")
+    parser.add_argument("--max-age-days", type=int, default=60)
+    parser.add_argument("--max-rows", type=int, default=25_000)
+    args = parser.parse_args()
+    out = prune_old(max_age_days=args.max_age_days, max_rows=args.max_rows)
+    print(json.dumps(out, indent=2))

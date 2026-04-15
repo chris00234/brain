@@ -387,6 +387,13 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         agent="system",
     ),
     ScheduledJob(
+        name="embed_cache_prune",
+        description="Prune embed cache: drop legacy rows, age >60d, cap 25k (daily 4:05am)",
+        trigger=CronTrigger(hour=4, minute=5),
+        agent="system",
+        misfire_grace=900,
+    ),
+    ScheduledJob(
         name="fts_rebuild",
         description="Nightly SQLite FTS5 keyword index rebuild (4:15am)",
         trigger=CronTrigger(hour=4, minute=15),
