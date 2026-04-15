@@ -161,20 +161,34 @@ SLOS: dict[str, SLO] = {
 
 
 def _measure_recall_v2_p95() -> float:
-    """Read p95 latency from metrics_history.db (most recent point)."""
+    """Read p95 latency for /recall/v2 from the latest metrics_snapshots row.
+
+    The payload is a JSON dict produced by metrics_buffer.snapshot() with
+    shape {"routes": {"/recall/v2": {"p95_ms": float, ...}, ...}, ...}.
+    Falls back to /recall (v1) if v2 has no samples yet.
+    """
     try:
         if not METRICS_DB.exists():
             return 0.0
         conn = sqlite3.connect(str(METRICS_DB))
         try:
             row = conn.execute(
-                "SELECT route_p95 FROM route_metrics "
-                "WHERE route = '/recall/v2' ORDER BY timestamp DESC LIMIT 1"
+                "SELECT payload FROM metrics_snapshots "
+                "ORDER BY id DESC LIMIT 1"
             ).fetchone()
-            return float(row[0]) if row else 0.0
+            if not row:
+                return 0.0
+            payload = json.loads(row[0])
+            routes = payload.get("routes", {})
+            v2 = routes.get("/recall/v2") or {}
+            p95 = v2.get("p95_ms")
+            if p95 is None or v2.get("count", 0) == 0:
+                v1 = routes.get("/recall") or {}
+                p95 = v1.get("p95_ms", 0.0)
+            return float(p95 or 0.0)
         finally:
             conn.close()
-    except sqlite3.Error:
+    except (sqlite3.Error, json.JSONDecodeError, ValueError, TypeError):
         return 0.0
 
 

@@ -10,7 +10,10 @@ Usage:
 
 import json
 import os
+import select
+import signal
 import sys
+import time
 import urllib.parse
 import urllib.request
 
@@ -390,12 +393,86 @@ def handle_tools_call(params):
     return {"content": [{"type": "text", "text": text[:4000]}]}
 
 
-# MCP stdio transport — read JSON-RPC from stdin, write to stdout
+# MCP stdio transport — read JSON-RPC from stdin, write to stdout.
+#
+# Self-reap lifecycle (added 2026-04-15 after 35-subprocess leak incident):
+#
+# The openclaw gateway spawns this script as a stdio MCP bridge and tracks it
+# in SessionMcpRuntimeManager. Runtimes are only disposed on explicit session
+# reset (get-reply-*.js:2939) — sessions that end normally, or gateway
+# restarts that abandon the fd, leave the child running with its stdin pipe
+# held open from the parent's side. A blocking `for line in sys.stdin` never
+# sees EOF. Children accumulated to 35+ on one machine.
+#
+# Three belt-and-suspenders checks here, all tunable via env so the gateway
+# can override if it ever fixes the upstream leak:
+#   1. IDLE_TIMEOUT_S — no request for N seconds → exit. Next tool call
+#      respawns fresh. Default 10 minutes.
+#   2. MAX_LIFETIME_S — hard cap on total uptime. Catches anything that
+#      somehow stays "active" without being useful. Default 1 hour.
+#   3. Parent-death detection — if our original parent died and we got
+#      reparented to launchd (PID 1), we're an orphan. Exit immediately.
+IDLE_TIMEOUT_S = int(os.environ.get("BRAIN_MCP_IDLE_TIMEOUT_S", "600"))
+MAX_LIFETIME_S = int(os.environ.get("BRAIN_MCP_MAX_LIFETIME_S", "3600"))
+POLL_INTERVAL_S = 30.0  # how often to re-check lifecycle conditions
+
+
+def _log(msg: str) -> None:
+    """Log to stderr. stdout is reserved for the MCP JSON-RPC response stream."""
+    sys.stderr.write(f"[brain_mcp_server pid={os.getpid()}] {msg}\n")
+    sys.stderr.flush()
+
+
+def _handle_signal(signum, _frame):
+    _log(f"signal {signum} received, exiting")
+    sys.exit(0)
+
+
 def main():
-    for line in sys.stdin:
+    signal.signal(signal.SIGTERM, _handle_signal)
+    signal.signal(signal.SIGHUP, _handle_signal)
+
+    start = time.monotonic()
+    last_activity = start
+    original_parent = os.getppid()
+
+    while True:
+        now = time.monotonic()
+
+        # Lifecycle guards — checked before each read so a wedged client
+        # can't keep us alive past these limits.
+        if now - last_activity > IDLE_TIMEOUT_S:
+            _log(f"idle > {IDLE_TIMEOUT_S}s, exiting")
+            return
+        if now - start > MAX_LIFETIME_S:
+            _log(f"lifetime > {MAX_LIFETIME_S}s, exiting")
+            return
+        current_parent = os.getppid()
+        if current_parent != original_parent and current_parent == 1:
+            _log(f"parent died (reparented to init), exiting")
+            return
+
+        # Non-blocking wait on stdin. If no input within POLL_INTERVAL_S,
+        # loop around and re-check lifecycle guards.
+        try:
+            ready, _, _ = select.select([sys.stdin], [], [], POLL_INTERVAL_S)
+        except (OSError, ValueError):
+            # stdin closed hard — exit cleanly.
+            _log("stdin select failed, exiting")
+            return
+        if not ready:
+            continue
+
+        line = sys.stdin.readline()
+        if not line:  # EOF — parent closed its write end
+            _log("stdin EOF, exiting")
+            return
         line = line.strip()
         if not line:
             continue
+
+        last_activity = time.monotonic()
+
         try:
             msg = json.loads(line)
         except json.JSONDecodeError:
