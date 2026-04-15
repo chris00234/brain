@@ -22,6 +22,7 @@ import argparse
 import hashlib
 import json
 import logging
+import os
 import re
 import sys
 import threading
@@ -213,7 +214,12 @@ def expand_query(query):
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import atexit as _atexit
-_hybrid_pool = ThreadPoolExecutor(max_workers=6, thread_name_prefix="hybrid")
+# Pool size is tunable but a bump to 16 showed zero rag_ms delta — Chroma is
+# CPU-bound under the current workload, not pool-bound. Keeping the knob so
+# future workload shifts (heavier bilingual fan-out) can rescale without a
+# code change.
+_HYBRID_POOL_SIZE = int(os.getenv("BRAIN_HYBRID_POOL_SIZE", "6"))
+_hybrid_pool = ThreadPoolExecutor(max_workers=_HYBRID_POOL_SIZE, thread_name_prefix="hybrid")
 _atexit.register(_hybrid_pool.shutdown, wait=False)
 
 

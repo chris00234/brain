@@ -82,7 +82,7 @@ def rerank_with_cross_encoder(query: str, results: list[dict], top_k: int = 20) 
     # Normalize to [0, 1] via sigmoid
     ce_normalized = [_sigmoid(s) for s in filled_scores]
 
-    # Blend 40% original × 60% CE (CE × 100 to match RRF score scale)
+    # Blend 20% original × 80% CE (CE × 100 to match RRF score scale)
     for r, ce_norm in zip(subset, ce_normalized):
         original = float(r.get("score", 0))
         blended = original * 0.2 + ce_norm * 100 * 0.8

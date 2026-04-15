@@ -47,6 +47,25 @@ class RouteStats:
 
 
 @dataclass
+class PhaseStats:
+    """Rolling latency window for a single /recall pipeline phase.
+
+    Populated from the source_timings dict the server handler passes into
+    record_search_latency. Each phase is an independent rolling window so
+    p50/p95/p99 can be queried without decoding full request payloads.
+    """
+    count: int = 0
+    latencies_ms: deque = field(default_factory=lambda: deque(maxlen=HISTOGRAM_WINDOW))
+
+    def percentile(self, p: float) -> float:
+        if not self.latencies_ms:
+            return 0.0
+        sorted_lat = sorted(self.latencies_ms)
+        idx = min(len(sorted_lat) - 1, int(len(sorted_lat) * p))
+        return round(float(sorted_lat[idx]), 2)
+
+
+@dataclass
 class JobStats:
     last_success_at: str = ""
     last_failure_at: str = ""
@@ -67,9 +86,20 @@ class DispatchStats:
 
 
 class MetricsBuffer:
+    # Phase keys we track from the /recall/v2 timing dict. Unknown integer
+    # keys with an _ms suffix are also captured (forward-compatible).
+    _PHASE_KEYS = frozenset({
+        "search_ms", "expansion_ms", "hyde_ms",
+        "rag_ms", "canonical_ms", "obsidian_ms",
+        "graph_ms", "fts_ms", "graph_prefetch_ms",
+        "rrf_ms", "rerank_ms", "cross_encoder_ms",
+        "decay_ms", "enrich_ms",
+    })
+
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._routes: dict[str, RouteStats] = defaultdict(RouteStats)
+        self._phases: dict[str, PhaseStats] = defaultdict(PhaseStats)
         self._jobs: dict[str, JobStats] = defaultdict(JobStats)
         self._dispatch = DispatchStats()
         self._memory_writes: deque = deque(maxlen=1000)  # timestamps
@@ -77,19 +107,31 @@ class MetricsBuffer:
         self._last_learn_success_at: str = ""
         self._last_backup_at: str = ""
         self._last_backup_ok: bool = True
-        self._search_latencies: list[int] = []
+        self._search_latencies: deque = deque(maxlen=1000)
 
     def record_search_latency(self, total_ms: int, source_timings: dict[str, int] | None = None) -> None:
-        """Record search latency for rolling p50/p95/p99 tracking."""
+        """Record search latency and per-phase timings for p50/p95/p99 tracking."""
         with self._lock:
             self._search_latencies.append(total_ms)
-            if len(self._search_latencies) > 1000:
-                self._search_latencies = self._search_latencies[-1000:]
+            if not source_timings:
+                return
+            for key, value in source_timings.items():
+                if not isinstance(key, str) or not key.endswith("_ms"):
+                    continue
+                if key not in self._PHASE_KEYS:
+                    continue
+                try:
+                    ms = float(value)
+                except (TypeError, ValueError):
+                    continue
+                phase = self._phases[key]
+                phase.count += 1
+                phase.latencies_ms.append(ms)
 
     def search_latency_stats(self) -> dict:
         """Return p50/p95/p99 search latency from rolling window."""
         with self._lock:
-            latencies = getattr(self, '_search_latencies', [])
+            latencies = list(self._search_latencies)
             if not latencies:
                 return {"p50": 0, "p95": 0, "p99": 0, "count": 0}
             s = sorted(latencies)
@@ -99,6 +141,20 @@ class MetricsBuffer:
                 "p95": s[min(n - 1, int(n * 0.95))],
                 "p99": s[min(n - 1, int(n * 0.99))],
                 "count": n,
+            }
+
+    def phase_latency_stats(self) -> dict[str, dict[str, float]]:
+        """Return per-phase p50/p95/p99 from rolling windows."""
+        with self._lock:
+            return {
+                key: {
+                    "count": stats.count,
+                    "p50_ms": stats.percentile(0.50),
+                    "p95_ms": stats.percentile(0.95),
+                    "p99_ms": stats.percentile(0.99),
+                }
+                for key, stats in self._phases.items()
+                if stats.count > 0
             }
 
     def record_request(self, path: str, latency_ms: float, error: bool = False) -> None:
@@ -192,9 +248,21 @@ class MetricsBuffer:
                 ),
             }
 
+            phase_latency = {
+                key: {
+                    "count": stats.count,
+                    "p50_ms": stats.percentile(0.50),
+                    "p95_ms": stats.percentile(0.95),
+                    "p99_ms": stats.percentile(0.99),
+                }
+                for key, stats in self._phases.items()
+                if stats.count > 0
+            }
+
             return {
                 "started_at": self._started_at,
                 "routes": routes,
+                "phase_latency": phase_latency,
                 "jobs": jobs,
                 "memory_writes_1h": memory_writes_1h,
                 "dispatch": dispatch,

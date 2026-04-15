@@ -27,10 +27,12 @@ BASELINE_FILE = Path("/Users/chrischo/server/brain/tests/slo_baseline.json")
 STATE_FILE = Path("/Users/chrischo/server/brain/logs/slo_state.json")
 EVAL_REPORT_FILE = Path("/Users/chrischo/server/brain/logs/eval-report.json")
 
-# Default SLOs if baseline doesn't exist
+# Default SLOs if baseline doesn't exist. Values aligned to the production
+# SLO thresholds in brain_core/slos.py so the monitor and the SLO gauge don't
+# disagree on what a breach means.
 DEFAULT_SLOS = {
-    "recall_p95_ms": 500,
-    "recall_v2_p95_ms": 2000,
+    "recall_p95_ms": 350,
+    "recall_v2_p95_ms": 350,
     "memory_growth_weekly_pct": 20,
 }
 
@@ -193,8 +195,10 @@ def check_slos() -> dict:
     baseline = load_baseline()
     violations = []
 
-    # 2x baseline = violation (or absolute floor of baseline if probe too noisy)
-    recall_threshold = max(baseline["recall_p95_ms"] * 2, 100)
+    # Threshold = 2x baseline, floor at baseline itself. Baselines default to
+    # the slos.py production SLO (350ms) so monitor breaches align with the
+    # SLO gauge's notion of a breach.
+    recall_threshold = max(baseline["recall_p95_ms"] * 2, baseline["recall_p95_ms"])
     recall_p95 = current["recall"]["p95"]
     if current["recall"]["samples"] >= 5 and recall_p95 > recall_threshold:
         violations.append({
@@ -204,7 +208,7 @@ def check_slos() -> dict:
             "threshold": recall_threshold,
         })
 
-    v2_threshold = max(baseline["recall_v2_p95_ms"] * 2, 500)
+    v2_threshold = max(baseline["recall_v2_p95_ms"] * 2, baseline["recall_v2_p95_ms"])
     v2_p95 = current["recall_v2"]["p95"]
     if current["recall_v2"]["samples"] >= 2 and v2_p95 > v2_threshold:
         violations.append({
