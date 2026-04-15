@@ -160,32 +160,40 @@ SLOS: dict[str, SLO] = {
 # ─── Measurement functions ──────────────────────────────────────────────
 
 
-def _measure_recall_v2_p95() -> float:
-    """Read p95 latency for /recall/v2 from the latest metrics_snapshots row.
+_RECALL_MIN_SAMPLES = 30  # guard against cold-boot snapshots with a handful of warmup hits
 
-    The payload is a JSON dict produced by metrics_buffer.snapshot() with
-    shape {"routes": {"/recall/v2": {"p95_ms": float, ...}, ...}, ...}.
-    Falls back to /recall (v1) if v2 has no samples yet.
+
+def _measure_recall_v2_p95() -> float:
+    """Read p95 latency for /recall/v2 from metrics_snapshots.
+
+    Walks snapshots newest-first and returns the first p95 backed by at least
+    `_RECALL_MIN_SAMPLES` samples. Falls back to /recall (v1) within the same
+    row before advancing to the next snapshot. Returns 0.0 when no qualifying
+    snapshot exists (0 < 350 target = no spurious breach) — keeps the gauge
+    silent until real warmup data lands rather than paging on 7 cold hits.
     """
     try:
         if not METRICS_DB.exists():
             return 0.0
         conn = sqlite3.connect(str(METRICS_DB))
         try:
-            row = conn.execute(
+            rows = conn.execute(
                 "SELECT payload FROM metrics_snapshots "
-                "ORDER BY id DESC LIMIT 1"
-            ).fetchone()
-            if not row:
-                return 0.0
-            payload = json.loads(row[0])
-            routes = payload.get("routes", {})
-            v2 = routes.get("/recall/v2") or {}
-            p95 = v2.get("p95_ms")
-            if p95 is None or v2.get("count", 0) == 0:
+                "ORDER BY id DESC LIMIT 20"
+            ).fetchall()
+            for (payload_str,) in rows:
+                try:
+                    payload = json.loads(payload_str)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                routes = payload.get("routes", {}) or {}
+                v2 = routes.get("/recall/v2") or {}
+                if v2.get("count", 0) >= _RECALL_MIN_SAMPLES and v2.get("p95_ms") is not None:
+                    return float(v2["p95_ms"])
                 v1 = routes.get("/recall") or {}
-                p95 = v1.get("p95_ms", 0.0)
-            return float(p95 or 0.0)
+                if v1.get("count", 0) >= _RECALL_MIN_SAMPLES and v1.get("p95_ms") is not None:
+                    return float(v1["p95_ms"])
+            return 0.0
         finally:
             conn.close()
     except (sqlite3.Error, json.JSONDecodeError, ValueError, TypeError):

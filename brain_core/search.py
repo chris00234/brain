@@ -214,11 +214,14 @@ def expand_query(query):
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import atexit as _atexit
-# Pool size is tunable but a bump to 16 showed zero rag_ms delta — Chroma is
-# CPU-bound under the current workload, not pool-bound. Keeping the knob so
-# future workload shifts (heavier bilingual fan-out) can rescale without a
-# code change.
-_HYBRID_POOL_SIZE = int(os.getenv("BRAIN_HYBRID_POOL_SIZE", "6"))
+# Pool sized to cover the typical fan-out in one wave:
+# 7 _ALL_COLLECTIONS × up to 2 bilingual variants = up to 14 tasks.
+# Earlier note said "bump to 16 showed zero rag_ms delta" — that was measured
+# against a single-query workload where the wave structure wasn't the
+# bottleneck. Under the current formula (lower candidate_n, cheaper per call)
+# the wave effect dominates, so sizing the pool to absorb a full fan-out in
+# one wave is the win. Env var still overrides.
+_HYBRID_POOL_SIZE = int(os.getenv("BRAIN_HYBRID_POOL_SIZE", "14"))
 _hybrid_pool = ThreadPoolExecutor(max_workers=_HYBRID_POOL_SIZE, thread_name_prefix="hybrid")
 _atexit.register(_hybrid_pool.shutdown, wait=False)
 
@@ -245,7 +248,13 @@ def hybrid_search(query, collections, limit=5, use_keyword=True, where=None, ded
         for emb in embeddings:
             tasks.append((col_name, col_id, emb))
 
-    candidate_n = max(80, limit * 10)
+    # Formerly max(80, limit*10). Default /recall/v2 passes limit=20 → candidate_n=200
+    # per (collection, variant) call — 14 calls × 200 = 2800 raw results just to
+    # keep 10. HNSW cost scales with the fetch count, so 80% of that is waste.
+    # Cut to max(25, limit*3): 20→60 per call, 840 raw for default — RRF + CE
+    # rerank still see the same top layer where the answers live. Eval gates the
+    # cut; bump back up if stable content_hit moves.
+    candidate_n = max(25, limit * 3)
 
     def _query_one(task):
         col_name, col_id, emb = task

@@ -295,9 +295,18 @@ def check_decision_contradictions() -> list[ProactiveInsight]:
 
 
 def check_eval_trends() -> list[ProactiveInsight]:
-    """Read last 7 eval-history entries, flag 3+ consecutive accuracy drops."""
+    """Read last 7 eval-history entries, flag 3+ consecutive accuracy drops.
+
+    Reads the stable-track history (eval-history-stable.jsonl), which is the
+    canonical regression gate after the two-track migration (2026-04-13). The
+    legacy single-file history (eval-history.jsonl) has been frozen since the
+    two-track move so it must not be used here — it would fire forever on the
+    last drop chain it captured.
+    """
     insights = []
-    eval_path = BRAIN_LOGS_DIR / "eval-history.jsonl"
+    eval_path = BRAIN_LOGS_DIR / "eval-history-stable.jsonl"
+    if not eval_path.exists():
+        eval_path = BRAIN_LOGS_DIR / "eval-history.jsonl"  # legacy fallback
     if not eval_path.exists():
         return []
 

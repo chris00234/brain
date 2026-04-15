@@ -9,13 +9,18 @@ from http_pool import http_json
 
 CHROMA_API = "http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections"
 
-# Recommended ef_search per collection based on size + precision needs
+# Recommended ef_search per collection based on size + precision needs.
+# Tuned 2026-04-15 for /recall/v2 latency budget — canonical/sem_mem/experience
+# dropped to hit the 350ms p95 target while stable eval content_hit held at
+# baseline 95.7%. The live Chroma metadata was updated via PUT at the same
+# time; these values are the source of truth for fresh-machine / restore-from-
+# backup paths and the nightly hnsw_tune adaptive job.
 SETTINGS = {
-    "canonical": 200,       # small, high-precision
+    "canonical": 120,       # was 200; 4301 chunks, 200 was overkill
     "knowledge": 100,       # medium
-    "experience": 100,      # medium
+    "experience": 75,       # was 100; 4775 chunks, speed-prioritized
     "context": 100,
-    "semantic_memory": 150, # medium, high-precision
+    "semantic_memory": 100, # was 150
     "obsidian": 50,         # large, speed-prioritized
     "notes": 50,
     "messages": 50,

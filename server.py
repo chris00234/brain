@@ -893,6 +893,24 @@ async def lifespan(app: FastAPI):
         brain_scheduler.start(_dispatch_job)
     except Exception as e:
         _log_failure(f"scheduler start failed: {e}", route="lifespan")
+    # Periodic metrics snapshot persistence so SLO reader always sees fresh
+    # route/phase latency data. Without this the only snapshot is the one
+    # written on shutdown — a cold-boot row with 0-7 samples was poisoning
+    # recall_v2_p95_ms for 9+ hours after each restart.
+    def _persist_metrics_snapshot() -> None:
+        try:
+            _metrics_buf.persist_to_sqlite(str(BRAIN_DIR / "logs" / "metrics_history.db"))
+        except Exception as e:
+            log.warning("metrics_persist_failed", error=str(e))
+    try:
+        brain_scheduler.schedule_inprocess(
+            _persist_metrics_snapshot,
+            name="metrics_persist",
+            seconds=300,
+            description="Persist metrics_buf snapshot every 5 min (for SLO reader)",
+        )
+    except Exception as e:
+        log.warning("metrics_persist_register_failed", error=str(e))
     global _cached_secret
     _cached_secret = _load_secret()
     _prewarm_caches()
@@ -1595,9 +1613,11 @@ def recall_v2(
                 # Only rerank the top window — tail stays ordered by stage 1.
                 # cross_encoder_rerank overwrites `score` with a blend of the
                 # stage-1 score (which already includes trust_boost) and CE signal.
-                # top_k=20 is sufficient for n≤10 responses — the tail was
-                # wasted CE compute (~60% overhead per review).
-                fused = rerank_with_cross_encoder(q, fused, top_k=20)
+                # top_k cut 20→14: for n≤10 responses the extra 6 rerank slots
+                # almost never reshuffle the final top, and MPS batch time scales
+                # linearly with pair count — ~30ms p95 saved on single queries and
+                # a lot more under concurrent load where .predict() serializes.
+                fused = rerank_with_cross_encoder(q, fused, top_k=14)
                 timing["cross_encoder_ms"] = int((time.time() - t_ce) * 1000)
             except Exception as _ce_err:
                 log.warning("cross-encoder rerank failed, stage-1 result stands: %s", _ce_err)

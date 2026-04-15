@@ -748,6 +748,30 @@ class BrainScheduler:
         if self._scheduler.running:
             self._scheduler.shutdown(wait=True)
 
+    def schedule_inprocess(
+        self,
+        func: Callable[[], None],
+        name: str,
+        seconds: int,
+        description: str = "",
+    ) -> None:
+        """Register an in-process callable on a fixed interval.
+
+        Bypasses the subprocess dispatcher so callers can observe or mutate
+        in-process state (e.g. metrics_buf snapshot persistence). The callable
+        runs on the FastAPI event loop thread via APScheduler's job executor;
+        keep it fast and non-blocking.
+        """
+        self._scheduler.add_job(
+            func,
+            trigger=IntervalTrigger(seconds=seconds),
+            id=name,
+            name=description or name,
+            replace_existing=True,
+            misfire_grace_time=min(seconds, 60),
+            coalesce=True,
+        )
+
     def _tick_executor(self) -> None:
         """In-process task executor tick. Runs every 30s.
 
