@@ -143,7 +143,6 @@ JOB_REGISTRY: dict[str, list[str]] = {
     "active_contacts_ingest": [_py, f"{_bd}/ingest/active_contacts.py"],
     # Synthesis
     "daily_synthesis": [_py, f"{_bd}/synthesis/daily.py"],
-    "daily_reflection": [_py, f"{_bd}/synthesis/reflection.py"],
     "weekly_synthesis": [_py, f"{_bd}/synthesis/weekly.py"],
     "monthly_synthesis": [_py, f"{_bd}/synthesis/monthly.py"],
     "brain_reflect": [_py, f"{_bd}/synthesis/reflect.py"],

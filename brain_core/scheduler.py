@@ -134,12 +134,6 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         agent="jenna",
     ),
     ScheduledJob(
-        name="daily_reflection",
-        description="Send reflection Q to Chris via Telegram",
-        trigger=CronTrigger(hour=22, minute=3),
-        agent="jenna",
-    ),
-    ScheduledJob(
         name="weekly_synthesis",
         description="Weekly arc (Sage, Sunday 4:15am)",
         trigger=CronTrigger(day_of_week="sun", hour=4, minute=15),
