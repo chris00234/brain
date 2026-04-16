@@ -241,6 +241,59 @@ def handle_tools_list(params):
                 },
             },
             {
+                "name": "brain_wm_set",
+                "description": "Set a session working-memory key (per-session scratch buffer). Replaces per-agent SCRATCH.md. Use durable=true to promote to atoms on session end.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "session_id": {"type": "string"},
+                        "agent": {"type": "string"},
+                        "key": {"type": "string"},
+                        "value": {"type": "string"},
+                        "durable": {"type": "boolean", "default": False},
+                    },
+                    "required": ["session_id", "agent", "key", "value"],
+                },
+            },
+            {
+                "name": "brain_wm_get",
+                "description": "Get a session working-memory key. Returns the stored value or an error.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "session_id": {"type": "string"},
+                        "agent": {"type": "string"},
+                        "key": {"type": "string"},
+                    },
+                    "required": ["session_id", "agent", "key"],
+                },
+            },
+            {
+                "name": "brain_wm_list",
+                "description": "List all session working-memory keys for a (session_id, agent) pair.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "session_id": {"type": "string"},
+                        "agent": {"type": "string"},
+                    },
+                    "required": ["session_id", "agent"],
+                },
+            },
+            {
+                "name": "brain_ingest_image",
+                "description": "Caption an image via Gemini 2.5 Flash and index it in brain. Send either a local path or base64-encoded bytes. Future text queries about the image will retrieve it from the knowledge collection. Use this when Chris shares a screenshot/photo and you want brain to understand + remember it.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Absolute local path to the image file"},
+                        "base64_data": {"type": "string", "description": "Alternative: base64-encoded image bytes"},
+                        "mime_type": {"type": "string", "default": "image/png"},
+                        "prompt": {"type": "string", "description": "Optional: custom captioning prompt"},
+                    },
+                },
+            },
+            {
                 "name": "brain_search_web",
                 "description": "Search the web via the local SearXNG meta-search and record the attempt for brain learning. Returns ranked results with per-domain trust scores. Use this instead of any other web search tool — agent-issued web searches feed back into the brain via /recall/feedback so the system learns which sources are reliable.",
                 "inputSchema": {
@@ -369,6 +422,45 @@ def handle_tools_call(params):
             + ("/complete" if args["success"] else "/reject"),
             {
                 "result": args.get("notes", ""),
+                "agent": actor,
+            },
+            actor=actor,
+        )
+
+    elif name == "brain_wm_set":
+        result = _brain_request(
+            "POST",
+            "/brain/wm",
+            {
+                "session_id": args.get("session_id", ""),
+                "agent": args.get("agent", actor),
+                "key": args.get("key", ""),
+                "value": args.get("value", ""),
+                "durable": bool(args.get("durable", False)),
+            },
+            actor=actor,
+        )
+
+    elif name == "brain_wm_get":
+        sid = urllib.parse.quote(args.get("session_id", ""), safe="")
+        agt = urllib.parse.quote(args.get("agent", actor), safe="")
+        key = urllib.parse.quote(args.get("key", ""), safe="")
+        result = _brain_request("GET", f"/brain/wm/{sid}/{agt}/{key}", actor=actor)
+
+    elif name == "brain_wm_list":
+        sid = urllib.parse.quote(args.get("session_id", ""), safe="")
+        agt = urllib.parse.quote(args.get("agent", actor), safe="")
+        result = _brain_request("GET", f"/brain/wm/{sid}/{agt}", actor=actor)
+
+    elif name == "brain_ingest_image":
+        result = _brain_request(
+            "POST",
+            "/brain/ingest/image",
+            {
+                "path": args.get("path"),
+                "base64_data": args.get("base64_data"),
+                "mime_type": args.get("mime_type", "image/png"),
+                "prompt": args.get("prompt"),
                 "agent": actor,
             },
             actor=actor,

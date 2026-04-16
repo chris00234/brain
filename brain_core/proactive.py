@@ -642,6 +642,12 @@ def _dispatch_urgent(insights: list[ProactiveInsight]) -> None:
             thinking="low",
             timeout=60,
             degraded_placeholder="[Proactive alert dispatch failed — check logs]",
+            backlog_kind="telegram",
+            backlog_payload={
+                "body": message,
+                "severity": "urgent",
+                "source": "proactive_urgent",
+            },
         )
         if not result.ok:
             log.warning("urgent dispatch failed: %s", result.error)

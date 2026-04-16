@@ -130,7 +130,14 @@ def check_chroma_integrity() -> dict:
     try:
         sys.path.insert(0, str(Path(__file__).parent))
         from openclaw_dispatch import dispatch
-        dispatch(agent="jenna", message=msg, thinking="off", timeout=30)
+        dispatch(
+            agent="jenna",
+            message=msg,
+            thinking="off",
+            timeout=30,
+            backlog_kind="telegram",
+            backlog_payload={"body": msg, "severity": "urgent", "source": "chroma_integrity"},
+        )
     except Exception:
         pass
 

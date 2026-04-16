@@ -3,19 +3,23 @@
   "v2_mode": "basic",
   "baseline": {
     "total": 138,
-    "hit_source_pct": 89.1,
-    "hit_content_pct": 95.7,
-    "hit_content_loose_pct": 95.7,
-    "mean_rank": 1.69,
-    "mean_latency_ms": 181.0
-  },
-  "v2": {
-    "total": 138,
     "hit_source_pct": 91.3,
     "hit_content_pct": 95.7,
     "hit_content_loose_pct": 95.7,
-    "mean_rank": 1.6,
-    "mean_latency_ms": 327.0
+    "mean_rank": 1.5,
+    "mrr": 0.719,
+    "ndcg5": 0.763,
+    "mean_latency_ms": 165.0
   },
-  "baseline_written_at": "2026-04-13T13:50:52"
+  "v2": {
+    "total": 138,
+    "hit_source_pct": 90.6,
+    "hit_content_pct": 96.4,
+    "hit_content_loose_pct": 96.4,
+    "mean_rank": 1.73,
+    "mrr": 0.664,
+    "ndcg5": 0.719,
+    "mean_latency_ms": 289.0
+  },
+  "baseline_written_at": "2026-04-15T15:37:18"
 }

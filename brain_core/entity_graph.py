@@ -187,7 +187,19 @@ def _use_neo4j() -> bool:
 # ---------------------------------------------------------------------------
 
 def extract_and_store_entities(memory_content: str, memory_id: str = "") -> int:
-    """Extract entities + relations from memory content via Sage, store in graph."""
+    """Extract entities + relations from memory content via Sage, store in graph.
+
+    Return values:
+      >= 0 — success (may be 0 if Sage returned no entities for short/opaque
+             content, or if all relations were malformed)
+      -1   — LLM dispatch failed (rate-limited, breaker open, timeout,
+             parse error). Caller should treat as "retryable" — this is
+             the signal the llm_backlog handler uses to keep the entry
+             pending instead of marking it done (CR8 fix 2026-04-14).
+
+    Text shorter than 30 chars returns 0 (nothing to extract) — NOT -1,
+    since there's no LLM work to retry for stubs.
+    """
     if len(memory_content) < 30:
         return 0
 
@@ -201,9 +213,17 @@ def extract_and_store_entities(memory_content: str, memory_id: str = "") -> int:
             f'"relations": [{{"source": "...", "relationship": "uses|depends_on|created|manages|part_of|related_to", "target": "..."}}]}}\n\n'
             f"Max 5 entities, 5 relations. Only extract clearly stated facts."
         )
+        # NOTE: tried session_id="brain_mech_sage" isolation — OpenClaw
+        # silently remaps unknown string IDs to the agent's main session,
+        # so isolation requires valid UUID format + deeper OpenClaw config
+        # work. Leaving main-session routing until that's investigated.
         result = dispatch(agent="sage", message=prompt, thinking="low", timeout=30)
-        if not result.ok or not result.text:
-            return 0
+        # CR8 fix: distinguish LLM failure from "LLM ran, no entities".
+        # result.ok=False means transport/rate-limit/breaker — retryable.
+        if not result.ok:
+            return -1
+        if not result.text:
+            return -1  # empty response also counts as retryable failure
 
         import re
         text = result.text.strip()
@@ -212,6 +232,8 @@ def extract_and_store_entities(memory_content: str, memory_id: str = "") -> int:
         try:
             data = json.loads(text.strip())
         except json.JSONDecodeError:
+            # Parse error with a non-empty response = LLM confused, not
+            # degraded. Mark done so we don't retry forever on bad output.
             return 0
 
         entities = data.get("entities", [])
@@ -254,7 +276,11 @@ def extract_and_store_entities(memory_content: str, memory_id: str = "") -> int:
 
     except Exception as e:
         log.debug("entity extraction failed: %s", e)
-        return 0
+        # CR8: exception during the LLM call or Neo4j write = retryable.
+        # Backlog handler will requeue. Import errors / config errors
+        # obviously aren't retryable but we can't distinguish cleanly;
+        # 5 retries in backlog caps the cost either way.
+        return -1
 
 
 from collections import OrderedDict as _OrderedDict
@@ -384,17 +410,27 @@ def _neo4j_store_entities(entities: list, relations: list, now: str, memory_id: 
     from neo4j_client import run_write, run_query
     created = 0
     entity_names: dict[str, str] = {}
+    # MR1 fix (2026-04-14): map raw LLM-proposed name → canonical name used
+    # in entity_names. Relations from the LLM reference the RAW name but
+    # after alias resolution the entity_names dict is keyed on the canonical.
+    # Without this map, relations whose source/target got aliased were
+    # silently dropped. Now relations look up via raw_to_canonical to find
+    # the correct entity_names key.
+    raw_to_canonical: dict[str, str] = {}
 
     for ent in entities[:5]:
-        name = (ent.get("name") or "").strip().lower()
+        raw_name = (ent.get("name") or "").strip().lower()
         etype = ent.get("type", "concept")
-        if not name or len(name) < 2 or len(name) > 50:
+        if not raw_name or len(raw_name) < 2 or len(raw_name) > 50:
             continue  # skip empty, too short, or full-sentence names
         # Check if name is an alias of an existing entity
-        canonical = resolve_entity(name)
-        if canonical and canonical != name:
+        canonical = resolve_entity(raw_name)
+        if canonical and canonical != raw_name:
             # Name is a known alias — merge into existing entity instead
             name = canonical
+        else:
+            name = raw_name
+        raw_to_canonical[raw_name] = name
         eid = f"ent_{uuid.uuid4().hex[:12]}"
             # Classify memory class based on entity type (MemOS pattern)
         # permanent: infra facts, services, people — never decay
@@ -417,9 +453,12 @@ def _neo4j_store_entities(entities: list, relations: list, now: str, memory_id: 
         entity_names[name] = result[0]["id"] if result else eid
 
     for rel in relations[:5]:
-        src = (rel.get("source") or "").strip().lower()
-        tgt = (rel.get("target") or "").strip().lower()
+        raw_src = (rel.get("source") or "").strip().lower()
+        raw_tgt = (rel.get("target") or "").strip().lower()
         rel_type = rel.get("relationship", "related_to")
+        # Resolve raw names to their canonical forms for entity_names lookup
+        src = raw_to_canonical.get(raw_src, raw_src)
+        tgt = raw_to_canonical.get(raw_tgt, raw_tgt)
         if src not in entity_names or tgt not in entity_names or src == tgt:
             continue
         rid = f"rel_{uuid.uuid4().hex[:12]}"
@@ -439,6 +478,29 @@ def _neo4j_store_entities(entities: list, relations: list, now: str, memory_id: 
             "  r.last_confirmed_at = $now",
             {"src": src, "tgt": tgt, "rid": rid, "rel_type": rel_type, "now": now, "mid": memory_id},
         )
+
+    # Phase B (2026-04-14): MENTIONS edges from the memory's MemoryAccess
+    # node to every extracted Entity. Enables memory-level spreading
+    # activation: "show me memories that mention entity X" becomes a
+    # single graph traversal. Previously MemoryAccess was structurally
+    # isolated — a stats-only node with no edges.
+    if memory_id and entity_names:
+        for ent_name in entity_names:
+            try:
+                run_write(
+                    "MERGE (m:MemoryAccess {memory_id: $mid}) "
+                    "  ON CREATE SET m.utility_score = 0.5, m.access_count = 0, "
+                    "    m.first_accessed_at = $now, m.last_accessed_at = $now, "
+                    "    m.memory_class = 'unknown' "
+                    "MERGE (e:Entity {name: $name}) "
+                    "MERGE (m)-[r:MENTIONS]->(e) "
+                    "  ON CREATE SET r.created_at = $now, r.confidence = 0.8",
+                    {"mid": memory_id, "name": ent_name, "now": now},
+                )
+            except Exception:
+                # Best-effort — never break the main store path on an
+                # edge-write hiccup.
+                pass
 
     log.info("neo4j: stored %d entities, %d relations", len(entity_names), len(relations[:5]))
     return created
@@ -575,13 +637,27 @@ def reinforce_memory(memory_id: str, success: bool) -> None:
     if _use_neo4j():
         try:
             from neo4j_client import run_write
+            # v3 bugfix (2026-04-14): was MATCH-only, which silently no-op'd
+            # whenever the memory_id wasn't already in MemoryAccess. The bulk
+            # of reinforce_memory calls pass chroma_ids like
+            # 'semantic_memory:abc123' but the 8631 existing MemoryAccess
+            # nodes use file paths from a different ingest path entirely —
+            # the two id namespaces never intersected, so utility_score was
+            # frozen at 0.5 for everything. MERGE creates-or-updates so
+            # every reinforce call now lands whether the node existed or not.
+            now_iso = _now()
             run_write(
-                "MATCH (m:MemoryAccess {memory_id: $mid}) "
-                "SET m.utility_score = CASE "
-                "  WHEN m.utility_score + $delta > 1.0 THEN 1.0 "
-                "  WHEN m.utility_score + $delta < 0.0 THEN 0.0 "
-                "  ELSE m.utility_score + $delta END",
-                {"mid": memory_id, "delta": delta},
+                "MERGE (m:MemoryAccess {memory_id: $mid}) "
+                "ON CREATE SET m.utility_score = 0.5 + $delta, "
+                "  m.access_count = 1, m.first_accessed_at = $now, "
+                "  m.last_accessed_at = $now, m.memory_class = 'unknown' "
+                "ON MATCH SET m.utility_score = CASE "
+                "  WHEN coalesce(m.utility_score, 0.5) + $delta > 1.0 THEN 1.0 "
+                "  WHEN coalesce(m.utility_score, 0.5) + $delta < 0.0 THEN 0.0 "
+                "  ELSE coalesce(m.utility_score, 0.5) + $delta END, "
+                "  m.access_count = coalesce(m.access_count, 0) + 1, "
+                "  m.last_accessed_at = $now",
+                {"mid": memory_id, "delta": delta, "now": now_iso},
             )
         except Exception:
             pass
@@ -612,6 +688,40 @@ def reinforce_memory(memory_id: str, success: bool) -> None:
             "POST",
             f"http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col}/update",
             {"ids": [memory_id], "metadatas": [{"trust_score": str(round(new_ts, 3))}]},
+        )
+    except Exception:
+        pass
+
+
+def reinforce_memory_neo4j_only(memory_id: str, success: bool) -> None:
+    """Neo4j-only MemRL reinforcement — skips Chroma trust_score and SM-2.
+
+    Exists to close the double-boost bug in memory_lifecycle.reinforce_on_access:
+    that function already writes Chroma trust_score directly (so calling full
+    reinforce_memory would bump it twice per access). It also shouldn't drive
+    SM-2 spaced repetition — retrieval hits are not explicit review events.
+
+    Only touches the Neo4j MemoryAccess.utility_score used by graph ranking.
+    Best-effort, no-op when Neo4j is disabled or unreachable.
+    """
+    if not _use_neo4j():
+        return
+    delta = 0.1 if success else -0.05
+    try:
+        from neo4j_client import run_write
+        now_iso = _now()
+        run_write(
+            "MERGE (m:MemoryAccess {memory_id: $mid}) "
+            "ON CREATE SET m.utility_score = 0.5 + $delta, "
+            "  m.access_count = 1, m.first_accessed_at = $now, "
+            "  m.last_accessed_at = $now, m.memory_class = 'unknown' "
+            "ON MATCH SET m.utility_score = CASE "
+            "  WHEN coalesce(m.utility_score, 0.5) + $delta > 1.0 THEN 1.0 "
+            "  WHEN coalesce(m.utility_score, 0.5) + $delta < 0.0 THEN 0.0 "
+            "  ELSE coalesce(m.utility_score, 0.5) + $delta END, "
+            "  m.access_count = coalesce(m.access_count, 0) + 1, "
+            "  m.last_accessed_at = $now",
+            {"mid": memory_id, "delta": delta, "now": now_iso},
         )
     except Exception:
         pass

@@ -193,6 +193,84 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         trigger=CronTrigger(hour=4, minute=45),
         agent="system",
     ),
+    # v3 Phase 1.8: scan action_audit for /recall/active misses and queue
+    # intent_route candidates into eval_proposals for the weekly route learner.
+    ScheduledJob(
+        name="intent_miss_scan",
+        description="v3: scan active_recall misses via correction regex (daily 3:28am)",
+        trigger=CronTrigger(hour=3, minute=28),
+        agent="system",
+        misfire_grace=900,
+    ),
+    # v3 Phase 2: continuous executive cortex. Every 60s, runs the
+    # perceive → reflect → decide → act → journal cycle. Hard 10s wall-clock
+    # budget per tick. Every action gated by autonomy.authorize().
+    # Rate-limited 3x/hour per (kind, subject) pair.
+    ScheduledJob(
+        name="brain_loop_tick",
+        description="v3: brain_loop executive cortex tick (every 60s)",
+        trigger=IntervalTrigger(seconds=60),
+        agent="system",
+        misfire_grace=30,
+    ),
+    # v3 Phase 4.5: canonical design drift detector. Catches divergence between
+    # ~/design-standard/DESIGN.md and ~/server/knowledge/canonical/design/personal_standard.md
+    # before Chris's next frontend work depends on stale context.
+    ScheduledJob(
+        name="canonical_design_drift",
+        description="v3: weekly design source vs canonical mirror SHA check (Sun 05:30)",
+        trigger=CronTrigger(day_of_week="sun", hour=5, minute=30),
+        agent="system",
+        misfire_grace=900,
+    ),
+    # v3 F41: nightly entity extraction reconciliation. The hot-path bg
+    # pool (atoms_store._submit_bg_extract) drops extractions when the 64-
+    # inflight cap is hit to protect Neo4j+Ollama under burst. This job
+    # catches those drops by finding fresh atoms with no atom_entity rows
+    # and re-running extraction serially.
+    ScheduledJob(
+        name="entity_reconcile",
+        description="v3: nightly catch-up for atoms with missing entity extraction (02:55)",
+        trigger=CronTrigger(hour=2, minute=55),
+        agent="system",
+        misfire_grace=1800,
+    ),
+    # v3 llm_backlog: unified catch-up for LLM work dropped during quota
+    # outage or circuit-breaker-open windows. Runs every 30 min. Aborts
+    # immediately if llm.dispatch breaker is still open (fast path — no
+    # retries against unavailable LLM). brain_loop also fires this on the
+    # breaker_closed transition for event-driven catch-up within 60 s of
+    # quota returning.
+    ScheduledJob(
+        name="llm_backlog_drain",
+        description="v3: LLM backlog catch-up queue drain (every 30 min)",
+        trigger=IntervalTrigger(minutes=30),
+        agent="system",
+        misfire_grace=300,
+    ),
+    # v3 Phase 6: live state snapshot — captures docker/launchd/goals/commits/sessions
+    # current state every 10 minutes so "what's running" queries return reality,
+    # not historical atoms. Written to ~/server/knowledge/canonical/live_state/*.md,
+    # surfaced via active_recall's live_state intent route.
+    ScheduledJob(
+        name="live_state_snapshot",
+        description="v3: snapshot current docker/launchd/goals/commits/sessions state (every 10min)",
+        trigger=IntervalTrigger(minutes=10),
+        agent="system",
+        misfire_grace=120,
+    ),
+    # v3 Phase 6: weekly entity canonicalization. Walks Neo4j entities,
+    # embeds names, merges cross-language duplicates above cosine 0.92.
+    # Runs Sunday 06:45 (after daily entity extraction settled) with dry-run
+    # only — writes proposals to eval_proposals for Chris's review. Apply
+    # manually via cli/canonicalize_entities.py --apply.
+    ScheduledJob(
+        name="canonicalize_entities_dryrun",
+        description="v3: weekly entity dedup proposal scan (Sun 06:45, dry-run)",
+        trigger=CronTrigger(day_of_week="sun", hour=6, minute=45),
+        agent="system",
+        misfire_grace=900,
+    ),
     ScheduledJob(
         name="lora_ab_gate",
         description="Phase 7: weekly LoRA A/B gate + deploy (Sun 9:30am)",
@@ -320,8 +398,10 @@ JOB_SCHEDULE: list[ScheduledJob] = [
     ),
     ScheduledJob(
         name="auto_resolve_contradictions",
-        description="Weekly auto-resolve stale/low-confidence contradictions (Sun 6:00am)",
-        trigger=CronTrigger(day_of_week="sun", hour=6, minute=0),
+        description="Daily auto-resolve stale/low-confidence contradictions (6:00am) — "
+                    "v3 bumped from weekly to daily after finding 20-item pending "
+                    "backlog that should have been closed overnight",
+        trigger=CronTrigger(hour=6, minute=0),
         agent="system",
         misfire_grace=900,
     ),
@@ -436,6 +516,62 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         name="lint_memory",
         description="Weekly memory lint pass (Sunday 5:30am)",
         trigger=CronTrigger(day_of_week="sun", hour=5, minute=30),
+        agent="system",
+        misfire_grace=900,
+    ),
+    ScheduledJob(
+        name="canonical_lint",
+        description="Weekly structural lint: orphan canonical notes (Sunday 5:45am)",
+        trigger=CronTrigger(day_of_week="sun", hour=5, minute=45),
+        agent="system",
+        misfire_grace=900,
+    ),
+    ScheduledJob(
+        name="entity_pages",
+        description="Weekly entity page generator — Sage synthesizes one hot entity per run (Sunday 4:30am)",
+        trigger=CronTrigger(day_of_week="sun", hour=4, minute=30),
+        agent="sage",
+        misfire_grace=1800,
+    ),
+    ScheduledJob(
+        name="answer_canonicalize",
+        description="Nightly query→canonical promoter (03:15am, before canonical_pipeline at 02:00 of the next day)",
+        trigger=CronTrigger(hour=3, minute=15),
+        agent="system",
+        misfire_grace=900,
+    ),
+    ScheduledJob(
+        name="canonical_compaction",
+        description="Weekly compaction candidate clustering report (Sunday 6:00am, after canonical_lint)",
+        trigger=CronTrigger(day_of_week="sun", hour=6, minute=0),
+        agent="system",
+        misfire_grace=1800,
+    ),
+    ScheduledJob(
+        name="graph_rebuild_mentions",
+        description="Weekly rebuild of atom→entity MENTIONS edges in Neo4j (Sunday 3:30am)",
+        trigger=CronTrigger(day_of_week="sun", hour=3, minute=30),
+        agent="system",
+        misfire_grace=1800,
+    ),
+    ScheduledJob(
+        name="graph_backfill_co_mention",
+        description="Weekly co-occurrence RELATES_TO backfill from shared MemoryAccess (Sunday 3:40am)",
+        trigger=CronTrigger(day_of_week="sun", hour=3, minute=40),
+        agent="system",
+        misfire_grace=900,
+    ),
+    ScheduledJob(
+        name="canonical_merge_draft",
+        description="Weekly top-3 compaction cluster Sage drafts (Sunday 6:15am, after compaction report)",
+        trigger=CronTrigger(day_of_week="sun", hour=6, minute=15),
+        agent="sage",
+        misfire_grace=1800,
+    ),
+    ScheduledJob(
+        name="canonical_quality_filter_report",
+        description="Weekly quality filter dry-run report (Sunday 6:35am, review only)",
+        trigger=CronTrigger(day_of_week="sun", hour=6, minute=35),
         agent="system",
         misfire_grace=900,
     ),

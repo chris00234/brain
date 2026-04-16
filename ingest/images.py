@@ -189,23 +189,34 @@ def _ocr_image(image_path: Path) -> str:
 
 
 def _vision_dispatch(image_path: Path) -> str | None:
-    """Optional fallback: dispatch image to OpenClaw Sage for vision captioning.
+    """Generate a rich caption via brain_core.vision_llm (Gemini 2.5 Flash).
 
-    Disabled by default. Even when enabled, openclaw_dispatch is text-only
-    today — sending an image requires Sage's MODEL.json to support a
-    file-path-or-url image attachment convention. Until that's wired, this
-    function logs a warning and returns None so the caller falls back to
-    OCR-only.
+    v3 (2026-04-14): previously gated by BRAIN_IMAGE_VISION_DISPATCH and
+    returned None because openclaw_dispatch couldn't carry image bytes.
+    Now uses vision_llm.describe_image() which calls Gemini REST directly
+    (no SDK, no dependency bloat). Daily cap + content-hash cache enforced
+    inside vision_llm.
+
+    Returns the caption text or None on failure. Callers should fall back
+    to OCR-only when None.
     """
-    if os.environ.get("BRAIN_IMAGE_VISION_DISPATCH", "").lower() not in {"1", "true", "yes"}:
+    try:
+        sys.path.insert(0, "/Users/chrischo/server/brain/brain_core")
+        import vision_llm
+    except ImportError:
+        log.warning("brain_core.vision_llm not importable")
         return None
 
-    log.warning(
-        "vision dispatch requested for %s but openclaw_dispatch is text-only — "
-        "no caption generated; OCR fallback used",
-        image_path.name,
-    )
-    return None
+    if not vision_llm.is_configured():
+        log.debug("vision_llm not configured (no GEMINI_API_KEY)")
+        return None
+
+    try:
+        caption = vision_llm.describe_image(image_path)
+        return caption if caption else None
+    except Exception as e:
+        log.warning("vision_llm describe_image failed for %s: %s", image_path.name, e)
+        return None
 
 
 def ingest_image(
@@ -253,7 +264,7 @@ def ingest_image(
         if vision_caption:
             caption = vision_caption
             method = "vision"
-            cost_cents = 0.5  # ~$0.005 per image with gpt-4o-mini
+            cost_cents = 0.0  # Gemini 2.5 Flash free tier (separate quota from OpenAI)
         else:
             cost_cents = 0.0
 

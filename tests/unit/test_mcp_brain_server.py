@@ -28,6 +28,12 @@ EXPECTED_TOOLS = {
     "brain_procedures",
     "brain_outcome",
     "brain_search_web",  # Phase M6: SearXNG-backed web search with brain learning
+    # Phase 5: working memory session API
+    "brain_wm_set",
+    "brain_wm_get",
+    "brain_wm_list",
+    # v3 vision support
+    "brain_ingest_image",
 }
 
 

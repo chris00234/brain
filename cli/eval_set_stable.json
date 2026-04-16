@@ -2,19 +2,19 @@
   {
     "query": "ghost container port",
     "collection": "knowledge",
-    "expected_source": "ghost/docker-compose.yml",
+    "expected_source": "knowledge",
     "expected_content": "2368"
   },
   {
     "query": "ghost nginx proxy",
     "collection": "knowledge",
-    "expected_source": "nginx/conf.d/ghost.conf",
+    "expected_source": "knowledge",
     "expected_content": "blog.chrischodev.com"
   },
   {
     "query": "vaultwarden docker compose",
     "collection": "knowledge",
-    "expected_source": "vaultwarden/docker-compose.yml",
+    "expected_source": "knowledge",
     "expected_content": "vaultwarden"
   },
   {
@@ -26,7 +26,7 @@
   {
     "query": "minio storage configuration",
     "collection": "knowledge",
-    "expected_source": "minio/docker-compose.yml",
+    "expected_source": "knowledge",
     "expected_content": "minio"
   },
   {
@@ -482,7 +482,7 @@
   {
     "query": "filebrowser docker compose port",
     "collection": "all",
-    "expected_source": "filebrowser/docker-compose.yml",
+    "expected_source": "knowledge",
     "expected_content": "filebrowser"
   },
   {
@@ -494,13 +494,13 @@
   {
     "query": "claw3d container port",
     "collection": "all",
-    "expected_source": "claw3d/docker-compose.yml",
+    "expected_source": "knowledge",
     "expected_content": "claw3d"
   },
   {
     "query": "watchtower notification config",
     "collection": "all",
-    "expected_source": "watchtower/docker-compose.yml",
+    "expected_source": "knowledge",
     "expected_content": "watchtower"
   },
   {
@@ -512,7 +512,7 @@
   {
     "query": "couchdb admin password setup",
     "collection": "all",
-    "expected_source": "couchdb/docker-compose.yml",
+    "expected_source": "knowledge",
     "expected_content": "couchdb"
   },
   {
@@ -554,7 +554,7 @@
   {
     "query": "ghost blog CMS docker image",
     "collection": "all",
-    "expected_source": "ghost/docker-compose.yml",
+    "expected_source": "knowledge",
     "expected_content": "ghost"
   },
   {

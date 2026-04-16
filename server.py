@@ -50,6 +50,7 @@ sys.path.insert(0, _BRAIN_CORE)
 import search_unified  # noqa: E402
 import temporal  # noqa: E402
 import boot_context  # noqa: E402
+import active_recall  # noqa: E402  — v3 thalamus / per-turn attention
 import learn  # noqa: E402
 import hyde as _hyde  # noqa: E402
 import rerank as _rerank  # noqa: E402
@@ -199,6 +200,51 @@ JOB_REGISTRY: dict[str, list[str]] = {
         "-c",
         f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from autonomy_proposer import run; import json; print(json.dumps(run()))",
     ],
+    # v3 Phase 1.8: active_recall miss detection (daily 03:28)
+    "intent_miss_scan": [
+        _py,
+        "-c",
+        f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from intent_miss_scan import run; import json; print(json.dumps(run()))",
+    ],
+    # v3 Phase 2: continuous executive cortex tick (every 60s).
+    "brain_loop_tick": [
+        _py,
+        "-c",
+        f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from brain_loop import run; import json; print(json.dumps(run()))",
+    ],
+    # v3 Phase 4.5: canonical design drift check (weekly Sun 05:30).
+    "canonical_design_drift": [
+        _py,
+        "-c",
+        f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from canonical_design_drift import run; import json; print(json.dumps(run()))",
+    ],
+    # v3 F41: nightly entity-extraction reconciliation (nightly 02:55).
+    # Catches atoms whose hot-path entity extraction was dropped by the
+    # bounded bg pool during ingest bursts.
+    "entity_reconcile": [
+        _py,
+        "-c",
+        f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from entity_reconcile import run; import json; print(json.dumps(run()))",
+    ],
+    # v3 llm_backlog drain (every 30 min) — unified catch-up for LLM work
+    # that was dropped during quota outage.
+    "llm_backlog_drain": [
+        _py,
+        "-c",
+        f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from llm_backlog import run; import json; print(json.dumps(run()))",
+    ],
+    # v3 Phase 6: live state snapshot — runs every 10 min.
+    "live_state_snapshot": [
+        _py,
+        "-c",
+        f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from live_state_snapshot import run; import json; print(json.dumps(run(), ensure_ascii=False))",
+    ],
+    # v3 Phase 6: weekly entity canonicalization proposal (dry-run only).
+    "canonicalize_entities_dryrun": [
+        _py,
+        f"{_bd}/cli/canonicalize_entities.py",
+        "--threshold", "0.92",
+    ],
     "lora_ab_gate": [_py, f"{_bd}/cli/lora_ab_gate.py"],
     # Phase C: eval auto-growth pipeline (run after lora_ab_gate but before sm2_nightly)
     "eval_holdout_promote": [
@@ -268,6 +314,18 @@ JOB_REGISTRY: dict[str, list[str]] = {
     "stale_cleanup": [_py, f"{_bd}/brain_core/maintenance.py", "stale_cleanup"],
     "memory_observability": [_py, f"{_bd}/pipeline/memory_observability.py"],
     "lint_memory": [_py, f"{_bd}/pipeline/lint_memory.py"],
+    "canonical_lint": [_py, f"{_bd}/synthesis/canonical_lint.py"],
+    "entity_pages": [_py, f"{_bd}/synthesis/entity_pages.py", "--limit", "1"],
+    "answer_canonicalize": [_py, f"{_bd}/synthesis/answer_canonicalize.py"],
+    "canonical_compaction": [_py, f"{_bd}/synthesis/canonical_compaction.py"],
+    "graph_rebuild_mentions": [
+        "/bin/bash",
+        "-c",
+        f"BRAIN_ATOMS_ENABLED=true {_py} {_bd}/cli/rebuild_atom_entity.py",
+    ],
+    "graph_backfill_co_mention": [_py, f"{_bd}/cli/backfill_co_mention.py"],
+    "canonical_merge_draft": [_py, f"{_bd}/synthesis/canonical_merge_draft.py", "--limit", "3"],
+    "canonical_quality_filter_report": [_py, f"{_bd}/synthesis/canonical_quality_filter.py", "--dry-run"],
     "near_dedup": [
         _py,
         "-c",
@@ -467,6 +525,62 @@ class RecallV2Response(BaseModel):
     time_decay_applied: bool = True
     latency_ms: int = 0
     timing: dict[str, Any] = Field(default_factory=dict)
+
+
+class RecallActiveRequest(BaseModel):
+    """Per-turn active recall payload. POSTed by claude_boot.sh and OpenClaw
+    before_prompt_build plugin on every user turn."""
+    prompt: str = Field(..., max_length=8000)
+    session_id: str = Field(default="anon", max_length=128)
+    turn_idx: int = Field(default=0, ge=0, le=100000)
+    agent: str = Field(default="claude", max_length=32)
+    cwd: str | None = Field(default=None, max_length=512)
+    seen_hashes: list[str] | None = Field(default=None, max_length=200)
+
+
+class InjectionBlockModel(BaseModel):
+    id: str
+    title: str
+    content: str
+    source: str
+    score: float
+    priority: str
+    path: str | None = None
+
+
+class RecallActiveResponse(BaseModel):
+    blocks: list[InjectionBlockModel] = Field(default_factory=list)
+    intent: str | None = None
+    total_tokens: int = 0
+    latency_ms: int = 0
+    new_since_last_turn: bool = False
+    degraded: bool = False
+
+
+class ImageIngestRequest(BaseModel):
+    """Live image ingest payload. Either `path` (local file, preferred) or
+    `base64_data` + optional `mime_type`. Also supports `prompt` override
+    to steer the caption."""
+    path: str | None = Field(default=None, max_length=512)
+    base64_data: str | None = Field(default=None, max_length=30_000_000)  # ~22MB base64 = 16MB raw
+    mime_type: str = Field(default="image/png", max_length=32)
+    prompt: str | None = Field(default=None, max_length=500)
+    agent: str = Field(default="claude", max_length=32)
+
+
+class WorkingMemorySetRequest(BaseModel):
+    session_id: str = Field(..., max_length=128)
+    agent: str = Field(..., max_length=32)
+    key: str = Field(..., max_length=200)
+    value: str = Field(..., max_length=10000)
+    durable: bool = Field(default=False)
+
+
+class WorkingMemoryItem(BaseModel):
+    key: str
+    value: str
+    durable: bool = False
+    updated_at: str
 
 
 class SearchFeedbackRequest(BaseModel):
@@ -1426,6 +1540,7 @@ def recall_v2(
     include_history: bool = Query(default=False),
     include_obsolete: bool = Query(default=False),
     as_of: str | None = Query(default=None, max_length=20),
+    canonical_first: bool = Query(default=False),
     background: BackgroundTasks = None,
 ) -> RecallV2Response:
     """Enhanced recall with HyDE, query expansion, reranking, time decay.
@@ -1438,12 +1553,16 @@ def recall_v2(
       since/until = temporal range (same as /recall)
       entity/collection/domain = filter passthrough
       source_type = filter personal collection results by type (note|message|event|reminder)
+      canonical_first = Karpathy llm-wiki mode — query the canonical truth
+          layer only (skips experience/obsidian/semantic_memory). Use when
+          you want wiki-as-truth semantics. Fall back to a regular query
+          without this flag if canonical is sparse.
     """
     if not q.strip():
         raise HTTPException(status_code=400, detail="q parameter required")
 
     # Response cache — identical queries within 30s return cached
-    cache_key = f"{q}:{n}:{hyde}:{expand}:{rerank}:{decay}:{iterative}:{collection}:{domain}:{since}:{until}:{entity}:{source_type}:{include_history}:{include_obsolete}:{as_of}"
+    cache_key = f"{q}:{n}:{hyde}:{expand}:{rerank}:{decay}:{iterative}:{collection}:{domain}:{since}:{until}:{entity}:{source_type}:{include_history}:{include_obsolete}:{as_of}:{canonical_first}"
     cached = _recall_cache_get(cache_key)
     if cached:
         return cached
@@ -1475,11 +1594,13 @@ def recall_v2(
     all_payloads: list[dict] = []
     from concurrent.futures import ThreadPoolExecutor as _VariantPool, as_completed as _as_completed
 
+    _sources = ["canonical"] if canonical_first else ["rag", "canonical", "obsidian"]
+
     def _run_variant(v_query):
         return search_unified.search_all(
             v_query,
             n * search_n_mult,
-            sources=["rag", "canonical", "obsidian"],
+            sources=_sources,
             domain=domain,
             original_query=q,
             where=where,
@@ -1988,6 +2109,243 @@ def search_feedback(req: SearchFeedbackRequest):
     return {"status": "recorded", "eval_proposal_id": proposal_id}
 
 
+# ── Routes: /brain/ingest/image — live image captioning (v3 vision) ─────
+@app.post("/brain/ingest/image", tags=["memory"], dependencies=[Depends(verify_bearer)])
+@limiter.limit("20/minute")
+def ingest_image_route(request: Request, req: ImageIngestRequest) -> dict:
+    """Live image ingest. Caller submits a file path OR base64 bytes; brain
+    sends the image to Gemini 2.5 Flash for captioning (via brain_core.vision_llm),
+    then indexes the caption + path in the knowledge Chroma collection for
+    text-query retrieval.
+
+    This is the path Chris asked about: "openclaw에서 사진 보내면 이해하는 것처럼
+    brain도 하게". Backed by vision_llm.describe_image() with a 50/day cap
+    and per-image content hash cache.
+
+    Fail modes:
+      - no GEMINI_API_KEY → 503
+      - neither path nor base64 → 400
+      - Gemini quota / network failure → 502 with degraded flag
+    """
+    import base64 as _b64
+
+    sys.path.insert(0, "/Users/chrischo/server/brain/brain_core")
+    try:
+        import vision_llm
+    except ImportError:
+        raise HTTPException(status_code=503, detail="vision_llm unavailable")
+
+    if not vision_llm.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="vision_llm not configured (missing GEMINI_API_KEY)",
+        )
+
+    # Resolve image bytes
+    image_bytes: bytes | None = None
+    image_path_str: str | None = None
+    if req.path:
+        p = Path(req.path).expanduser()
+        if not p.exists():
+            raise HTTPException(status_code=400, detail=f"path not found: {req.path}")
+        if not p.is_file():
+            raise HTTPException(status_code=400, detail=f"not a file: {req.path}")
+        try:
+            image_bytes = p.read_bytes()
+            image_path_str = str(p)
+        except OSError as e:
+            raise HTTPException(status_code=400, detail=f"read failed: {e}")
+    elif req.base64_data:
+        try:
+            image_bytes = _b64.b64decode(req.base64_data)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"base64 decode failed: {e}")
+        image_path_str = None
+    else:
+        raise HTTPException(status_code=400, detail="must provide either 'path' or 'base64_data'")
+
+    if not image_bytes:
+        raise HTTPException(status_code=400, detail="empty image")
+
+    # Caption via Gemini
+    try:
+        caption = vision_llm.describe_image(
+            Path(image_path_str) if image_path_str else image_bytes,
+            prompt=req.prompt,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"vision_llm failed: {e}")
+
+    if not caption:
+        raise HTTPException(
+            status_code=502,
+            detail="vision_llm returned empty caption (quota / model error)",
+        )
+
+    # Hash for dedup + metadata
+    import hashlib as _hashlib
+    image_hash = _hashlib.sha256(image_bytes).hexdigest()
+    doc_id = f"image/{image_hash[:16]}"
+    doc_text = f"[Image caption]\n{caption}"
+    if image_path_str:
+        doc_text += f"\n\nPath: {image_path_str}"
+
+    # Index into knowledge collection (consistent with batch ingest path)
+    try:
+        col_id = _get_col_id("knowledge")
+        if not col_id:
+            raise HTTPException(status_code=503, detail="knowledge collection unavailable")
+        embedding = _get_embedding(doc_text[:4000])
+        if not embedding:
+            raise HTTPException(status_code=502, detail="embedding failed")
+        _chroma_api(
+            "POST",
+            f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/upsert",
+            {
+                "ids": [doc_id],
+                "documents": [doc_text],
+                "embeddings": [embedding],
+                "metadatas": [{
+                    "type": "image_caption",
+                    "image_hash": image_hash,
+                    "path": image_path_str or "",
+                    "mime_type": req.mime_type,
+                    "agent": req.agent,
+                    "captioned_by": "gemini-2.5-flash",
+                    "captioned_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                }],
+            },
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"chroma upsert failed: {e}")
+
+    return {
+        "status": "ingested",
+        "id": doc_id,
+        "image_hash": image_hash,
+        "caption": caption,
+        "indexed_in": "knowledge",
+    }
+
+
+# ── Routes: /brain/wm/* — session working memory (v3 plan) ──────────────
+@app.post("/brain/wm", tags=["memory"], dependencies=[Depends(verify_bearer)])
+@limiter.limit("120/minute")
+def wm_set_route(request: Request, req: WorkingMemorySetRequest) -> dict:
+    """Set a session working-memory key. Backed by autonomy.db::session_context.
+
+    If durable=True, the key is preserved via wm_consolidate() on SessionEnd
+    and promoted to an atom (tier=episodic). Otherwise it expires with the session.
+    """
+    # Layer A — test data gate. Test sessions can still use session_context
+    # for their own scratch but durable=True is rejected so nothing leaks
+    # to the atom truth layer on consolidation.
+    from brain_core import test_gate
+    if req.durable:
+        is_test, reason = test_gate.is_test_context(
+            session_id=req.session_id,
+            content=req.value,
+            agent=req.agent,
+        )
+        if is_test:
+            raise HTTPException(
+                status_code=400,
+                detail=f"test_data_blocked (durable): {reason}. Use durable=False "
+                       f"for test session writes.",
+            )
+
+    from brain_core import working_memory
+    return working_memory.wm_set(
+        req.session_id, req.agent, req.key, req.value, durable=req.durable
+    )
+
+
+@app.get("/brain/wm/{session_id}/{agent}/{key:path}", tags=["memory"],
+         dependencies=[Depends(verify_bearer)])
+@limiter.limit("600/minute")
+def wm_get_route(
+    request: Request,
+    session_id: Annotated[str, PathParam()],
+    agent: Annotated[str, PathParam()],
+    key: Annotated[str, PathParam()],
+) -> dict:
+    from brain_core import working_memory
+    value = working_memory.wm_get(session_id, agent, key)
+    if value is None:
+        raise HTTPException(status_code=404, detail=f"wm key not found")
+    return {"session_id": session_id, "agent": agent, "key": key, "value": value}
+
+
+@app.get("/brain/wm/{session_id}/{agent}", tags=["memory"],
+         dependencies=[Depends(verify_bearer)])
+@limiter.limit("600/minute")
+def wm_list_route(
+    request: Request,
+    session_id: Annotated[str, PathParam()],
+    agent: Annotated[str, PathParam()],
+) -> dict:
+    from brain_core import working_memory
+    return {
+        "session_id": session_id,
+        "agent": agent,
+        "keys": working_memory.wm_list(session_id, agent),
+    }
+
+
+@app.delete("/brain/wm/{session_id}/{agent}/{key:path}", tags=["memory"],
+            dependencies=[Depends(verify_bearer)])
+@limiter.limit("120/minute")
+def wm_delete_route(
+    request: Request,
+    session_id: Annotated[str, PathParam()],
+    agent: Annotated[str, PathParam()],
+    key: Annotated[str, PathParam()],
+) -> dict:
+    from brain_core import working_memory
+    ok = working_memory.wm_delete(session_id, agent, key)
+    return {"deleted": ok}
+
+
+@app.post("/brain/wm/{session_id}/consolidate", tags=["memory"],
+          dependencies=[Depends(verify_bearer)])
+@limiter.limit("30/minute")
+def wm_consolidate_route(request: Request, session_id: Annotated[str, PathParam()]) -> dict:
+    """SessionEnd handler: promote durable:* keys to atoms + delete the rest."""
+    from brain_core import working_memory
+    promoted = working_memory.wm_consolidate(session_id)
+    return {"session_id": session_id, "promoted": promoted}
+
+
+# ── Routes: /recall/active — per-turn thalamus (v3 plan) ─────────────────
+@app.post(
+    "/recall/active",
+    response_model=RecallActiveResponse,
+    tags=["recall"],
+    dependencies=[Depends(verify_bearer)],
+)
+@limiter.limit("3000/minute")
+def recall_active(request: Request, req: RecallActiveRequest) -> dict:
+    """Per-turn attention gating. Called from claude_boot.sh (UserPromptSubmit)
+    and OpenClaw before_prompt_build plugin on EVERY user turn.
+
+    Returns intent-routed canonical guarantees + semantic hits + proactive
+    alerts + doorbell messages, dedup'd against session_context['recall_seen'].
+
+    Fail-open: any internal failure returns degraded=True with empty blocks
+    rather than a 500. Hook scripts must never block the user's prompt.
+    """
+    return active_recall.build_injection(
+        prompt=req.prompt,
+        session_id=req.session_id,
+        turn_idx=req.turn_idx,
+        agent=req.agent,
+        cwd=req.cwd,
+        seen_hashes=req.seen_hashes,
+    )
+
+
 # ── Routes: /brain/reason/multihop — LangGraph-style multi-hop reasoning ──
 class MultiHopReasonRequest(BaseModel):
     question: str = Field(..., min_length=5, max_length=1000)
@@ -2126,7 +2484,7 @@ _THINK_CACHE_TTL = 60
 @app.post(
     "/chris/think", response_model=ThinkResponse, tags=["decide"], dependencies=[Depends(verify_bearer)]
 )
-def chris_think(req: ThinkRequest) -> ThinkResponse:
+def chris_think(req: ThinkRequest, background: BackgroundTasks = None) -> ThinkResponse:
     """Ask Chris's second brain a decision question. Answers in first-person voice.
 
     Pipeline:
@@ -2190,6 +2548,24 @@ def chris_think(req: ThinkRequest) -> ThinkResponse:
         if len(_think_cache) > 64:
             oldest = min(_think_cache, key=lambda k: _think_cache[k][0])
             _think_cache.pop(oldest, None)
+
+    # Phase 3 (llm-wiki): record first-person decisions as answer candidates
+    # for nightly canonicalization. Run in background so SQLite contention
+    # doesn't add latency to the hot path.
+    if background is not None:
+        def _record_candidate():
+            try:
+                import answer_candidates as _ac
+                _ac.record(
+                    source_route="/chris/think",
+                    query=req.question,
+                    answer=answer,
+                    agent="chris",
+                    reason=req.context,
+                )
+            except Exception:
+                pass
+        background.add_task(_record_candidate)
 
     return response
 
@@ -2460,6 +2836,23 @@ def learn_route(request: Request, req: LearnRequest, background: BackgroundTasks
     The pipeline (extract → distill via Jenna → embed → contradiction-check) is fire-and-forget
     so the caller (Claude Code SessionEnd hook, OpenClaw agent, iOS Shortcut) never blocks.
     """
+    # MR2 fix (2026-04-14): test_gate check. Previously /learn had no
+    # test-data filter — test harnesses that submitted transcripts
+    # ended up with extracted candidates written to semantic_memory
+    # unguarded. Uses source + agent + transcript as signal.
+    try:
+        from brain_core import test_gate
+        is_test, reason = test_gate.is_test_context(
+            source=req.source,
+            content=req.transcript,
+            agent=req.agent,
+        )
+        if is_test:
+            raise HTTPException(status_code=400, detail=f"test_data_blocked:{reason}")
+    except HTTPException:
+        raise
+    except Exception:
+        pass  # test_gate import fail = don't block the path
     candidates = learn.extract_candidates(req.transcript)
     background.add_task(_run_learn_pipeline, req.transcript, req.source, req.agent)
     return LearnResponse(candidates=len(candidates))
@@ -2738,6 +3131,22 @@ def create_memory(request: Request, req: MemoryCreateRequest) -> MemoryEntry:
         if inferred:
             req.agent = inferred
 
+    # Layer A — test data gate. Reject test harness writes so brain's truth
+    # layer never gets polluted by verification runs. Deterministic regex.
+    from brain_core import test_gate
+    is_test, reason = test_gate.is_test_context(
+        source=req.source,
+        content=req.content,
+        agent=req.agent,
+    )
+    if is_test:
+        raise HTTPException(
+            status_code=400,
+            detail=f"test_data_blocked: {reason}. Brain refuses to ingest test "
+                   f"fixtures into semantic_memory. Use a scratch collection or "
+                   f"session_context if you need test persistence.",
+        )
+
     col_id = _memory_collection_id()
     if not col_id:
         raise HTTPException(status_code=503, detail="semantic_memory collection unavailable")
@@ -2863,38 +3272,38 @@ def create_memory(request: Request, req: MemoryCreateRequest) -> MemoryEntry:
     except Exception:
         pass
 
-    # Phase 3 atoms-truth-layer mirror + Phase 6 30-word discipline.
-    # Best-effort, gated by BRAIN_ATOMS_ENABLED.
+    # CR7 fix (2026-04-14): atoms mirror + v3 Brain Hygiene pipeline is now
+    # a shared helper (ingest_mirror.mirror_memory) so /memory/batch, /learn,
+    # and wm_consolidate can reuse the exact same block. Previously only
+    # POST /memory went through the hygiene pipeline — batch was an
+    # implicit bypass. HR4 fix: log errors instead of bare-except swallow.
     try:
-        from atoms_gate import enforce as _atoms_enforce
-        from atoms_store import mark_superseded, upsert_atom
-
-        atom_text, atom_status, atom_quality = _atoms_enforce(
-            req.content[:2000],
-            allow_redistill=False,  # POST /memory is sync — don't block on Jenna here
-        )
-        upsert_atom(
-            text=atom_text,
+        from ingest_mirror import mirror_memory
+        from atoms_store import mark_superseded
+        _mr = mirror_memory(
+            content=req.content,
             chroma_id=mem_id,
-            kind=req.category or "fact",
+            category=req.category or "fact",
+            agent=req.agent,
+            source=req.source,
+            operation=operation,
             confidence=req.confidence,
-            tier="episodic",
-            distilled_by="manual",
-            collection_hint="semantic_memory",
-            quality_score=atom_quality,
-            valid_from=now_iso,
-            provenance={
-                "agent": req.agent,
-                "source": req.source,
-                "operation": operation,
-                "atoms_gate_status": atom_status,
-            },
             parent_atom_id=req.parent_atom_id,
+            now_iso=now_iso,
+            allow_redistill=False,  # POST /memory is sync — don't block on Jenna
         )
+        if _mr.error:
+            log.warning(
+                "atoms_mirror_failed mem_id=%s error=%s warnings=%s",
+                mem_id, _mr.error, _mr.warnings,
+            )
+        elif _mr.warnings:
+            log.info("atoms_mirror_warnings mem_id=%s warnings=%s", mem_id, _mr.warnings)
+
         if operation == "UPDATE" and supersede_target:
             mark_superseded(supersede_target, mem_id)
-    except Exception:
-        pass
+    except Exception as _e:
+        log.warning("atoms_mirror_outer_exception mem_id=%s error=%s", mem_id, str(_e)[:200])
 
     response_meta = dict(metadata)
     response_meta["operation"] = operation
@@ -3124,6 +3533,35 @@ def create_memory_batch(request: Request, req: MemoryBatchRequest) -> dict:
                 _metrics_buf.record_memory_write()
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"batch upsert failed: {e}")
+
+    # CR7 fix (2026-04-14): run the atoms-mirror + hygiene pipeline for
+    # every batched write. Previously batch bypassed atoms_store entirely,
+    # so batched memories had no hygiene fields, no topic supersession,
+    # and no llm_backlog catch-up — an implicit Layer A bypass.
+    try:
+        from ingest_mirror import mirror_memory
+        for mem_id_w, mem_req_w, op_w, meta_w in zip(
+            ids_to_upsert, req.memories, operations, metas_to_upsert
+        ):
+            _mr = mirror_memory(
+                content=mem_req_w.content,
+                chroma_id=mem_id_w,
+                category=mem_req_w.category or "fact",
+                agent=mem_req_w.agent,
+                source=mem_req_w.source,
+                operation=op_w,
+                confidence=mem_req_w.confidence,
+                parent_atom_id=None,
+                now_iso=meta_w.get("created_at", ""),
+                allow_redistill=False,
+            )
+            if _mr.error:
+                log.warning(
+                    "atoms_mirror_batch_failed mem_id=%s error=%s",
+                    mem_id_w, _mr.error,
+                )
+    except Exception as _e:
+        log.warning("atoms_mirror_batch_outer error=%s", str(_e)[:200])
 
     # Fire hooks for stored memories
     try:
@@ -4759,9 +5197,56 @@ def brain_ingest(request: Request, req: BrainIngestRequest) -> dict:
         raise HTTPException(status_code=500, detail=str(e)[:200])
 
 
+_INDEX_SKIP_NAMES = {"index.md", "_index.md", "_identity.md", "_state.md", "_profile.md"}
+_INDEX_BOILERPLATE = {
+    "review this proposed canonical note.",
+    "review this proposed canonical note",
+    "## statement",
+    "## source summary",
+    "## summary",
+    "## observations",
+}
+_INDEX_MANUAL_OPEN = "<!-- manual-edit-above -->"
+_INDEX_MANUAL_CLOSE = "<!-- manual-edit-below -->"
+
+
+def _index_extract_summary(meta: dict, body: str) -> str:
+    ps = (meta.get("provenance_summary") or "").strip()
+    if ps and len(ps) > 20 and "review this proposed" not in ps.lower():
+        return ps[:140]
+    for raw in body.splitlines():
+        line = raw.strip().lstrip("- ").lstrip("* ").strip()
+        if not line or line.startswith("#") or line.startswith("<!--"):
+            continue
+        if line.lower() in _INDEX_BOILERPLATE:
+            continue
+        return line[:140]
+    return ""
+
+
+def _index_preserve_manual_block(existing_path: Path) -> str | None:
+    if not existing_path.exists():
+        return None
+    try:
+        text = existing_path.read_text()
+    except Exception:
+        return None
+    if _INDEX_MANUAL_OPEN not in text or _INDEX_MANUAL_CLOSE not in text:
+        return None
+    start = text.index(_INDEX_MANUAL_OPEN)
+    end = text.index(_INDEX_MANUAL_CLOSE) + len(_INDEX_MANUAL_CLOSE)
+    return text[start:end]
+
+
 @app.post("/brain/index/rebuild", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
 def rebuild_canonical_index() -> dict:
-    """Rebuild the canonical knowledge index (navigable map of all canonical notes)."""
+    """Rebuild canonical/index.md + index.json sidecar.
+
+    Skips immutable profile files and .bak backups, extracts summaries from
+    frontmatter provenance_summary (falling back to the first non-boilerplate
+    body line), groups by domain, and preserves any manual-edit block between
+    <!-- manual-edit-above --> and <!-- manual-edit-below --> markers.
+    """
     try:
         knowledge_dir = BRAIN_DIR.parent / "knowledge"
         canonical_dir = knowledge_dir / "canonical"
@@ -4772,6 +5257,10 @@ def rebuild_canonical_index() -> dict:
 
         entries = []
         for md_file in sorted(canonical_dir.rglob("*.md")):
+            if md_file.name in _INDEX_SKIP_NAMES or md_file.name.endswith(".bak"):
+                continue
+            if any(part.endswith(".bak") for part in md_file.parts):
+                continue
             try:
                 text = md_file.read_text()
                 lines = text.splitlines()
@@ -4785,52 +5274,159 @@ def rebuild_canonical_index() -> dict:
                 if end_idx is None:
                     continue
                 meta = _json.loads("\n".join(lines[1:end_idx]))
-                title = meta.get("title", md_file.stem)
-                note_id = meta.get("id", "")
-                domain = meta.get("domain", "")
-                status = meta.get("status", "")
-                confidence = meta.get("confidence", 0)
-                # Extract first meaningful line of body as summary
-                body_lines = [l.strip() for l in lines[end_idx + 1 :] if l.strip() and not l.startswith("#")]
-                summary = body_lines[0][:120] if body_lines else ""
+                if meta.get("type") != "canonical":
+                    continue
+                if meta.get("status") != "active":
+                    continue
+                body = "\n".join(lines[end_idx + 1 :])
                 entries.append(
                     {
-                        "id": note_id,
-                        "title": title,
-                        "domain": domain,
-                        "status": status,
-                        "confidence": confidence,
-                        "summary": summary,
+                        "id": meta.get("id", ""),
+                        "title": meta.get("title", md_file.stem),
+                        "domain": meta.get("domain", "") or "other",
+                        "subtype": meta.get("subtype", ""),
+                        "status": meta.get("status", ""),
+                        "confidence": meta.get("confidence", 0),
+                        "summary": _index_extract_summary(meta, body),
+                        "updated_at": meta.get("updated_at", ""),
                         "path": str(md_file.relative_to(knowledge_dir)),
                     }
                 )
             except Exception:
                 continue
 
-        # Write index.md
-        index_lines = [
-            f"# Canonical Knowledge Index\n",
-            f"Generated: {datetime.now(timezone.utc).isoformat(timespec='seconds')}\n",
-            f"Total: {len(entries)} notes\n\n",
-        ]
         by_domain: dict[str, list] = {}
         for e in entries:
-            by_domain.setdefault(e["domain"] or "other", []).append(e)
-        for domain in sorted(by_domain):
-            index_lines.append(f"## {domain} ({len(by_domain[domain])})\n")
-            for e in sorted(by_domain[domain], key=lambda x: x["title"]):
-                index_lines.append(f"- **{e['title']}** (`{e['id']}`) — {e['summary']}\n")
-            index_lines.append("\n")
+            by_domain.setdefault(e["domain"], []).append(e)
 
         index_path = canonical_dir / "index.md"
-        index_path.write_text("".join(index_lines))
+        json_path = canonical_dir / "index.json"
+        manual_block = _index_preserve_manual_block(index_path)
+
+        header = [
+            "# Canonical Knowledge Index",
+            f"Generated: {datetime.now(timezone.utc).isoformat(timespec='seconds')}",
+            f"Total: {len(entries)} active canonical notes across {len(by_domain)} domains",
+            "",
+        ]
+        if manual_block:
+            header.append(manual_block)
+            header.append("")
+        else:
+            header.extend([_INDEX_MANUAL_OPEN, _INDEX_MANUAL_CLOSE, ""])
+
+        body_lines: list[str] = []
+        for domain in sorted(by_domain):
+            body_lines.append(f"## {domain} ({len(by_domain[domain])})")
+            for e in sorted(by_domain[domain], key=lambda x: x["title"].lower()):
+                summary = e["summary"] or "_no summary_"
+                body_lines.append(f"- **{e['title']}** (`{e['id']}`) — {summary}")
+            body_lines.append("")
+
+        index_path.write_text("\n".join(header + body_lines) + "\n")
+
+        json_path.write_text(
+            _json.dumps(
+                {
+                    "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    "total": len(entries),
+                    "domains": {d: len(es) for d, es in by_domain.items()},
+                    "entries": entries,
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+            + "\n"
+        )
 
         return {
             "status": "rebuilt",
             "total_notes": len(entries),
             "domains": len(by_domain),
             "path": str(index_path.relative_to(knowledge_dir)),
+            "json_path": str(json_path.relative_to(knowledge_dir)),
+            "manual_block_preserved": manual_block is not None,
         }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)[:200])
+
+
+@app.get("/brain/canonical_lint", tags=["lint"], dependencies=[Depends(verify_bearer)])
+def canonical_lint_latest() -> dict:
+    """Return the latest canonical_lint report (orphan notes, etc.)."""
+    try:
+        import json as _json
+
+        report_dir = BRAIN_DIR.parent / "knowledge" / "reports" / "canonical_lint"
+        if not report_dir.exists():
+            return {"status": "no_report", "reports": []}
+        json_reports = sorted(report_dir.glob("*.json"), reverse=True)
+        if not json_reports:
+            return {"status": "no_report", "reports": []}
+        latest = json_reports[0]
+        return {
+            "status": "ok",
+            "latest_path": latest.name,
+            "report": _json.loads(latest.read_text()),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)[:200])
+
+
+class CanonicalizeRequest(BaseModel):
+    query: str
+    answer: str
+    reason: str | None = None
+    agent: str | None = None
+    source_route: str = "mcp:brain_canonicalize"
+
+
+@app.post("/brain/canonicalize", tags=["decide"], dependencies=[Depends(verify_bearer)])
+def brain_canonicalize(req: CanonicalizeRequest) -> dict:
+    """Mark a query→answer pair as canonical-worthy.
+
+    Phase 3 (llm-wiki): agents call this when they've produced a
+    load-bearing synthesis that should be promoted through the canonical
+    pipeline. The nightly `answer_canonicalize` job scores pending
+    candidates and promotes the top N to raw/inbox/.
+    """
+    try:
+        import answer_candidates as _ac
+
+        row_id = _ac.record(
+            source_route=req.source_route,
+            query=req.query,
+            answer=req.answer,
+            agent=req.agent,
+            reason=req.reason,
+        )
+        if row_id == 0:
+            return {"status": "skipped", "reason": "answer too short or empty"}
+        return {"status": "recorded", "candidate_id": row_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)[:200])
+
+
+@app.get("/brain/answer_candidates", tags=["decide"], dependencies=[Depends(verify_bearer)])
+def answer_candidates_list(status: str = "pending", limit: int = 20) -> dict:
+    """List answer candidates. Default: recent pending."""
+    try:
+        import answer_candidates as _ac
+
+        if status == "pending":
+            items = _ac.list_pending(limit=limit)
+        else:
+            import sqlite3
+            from brain_core.config import BRAIN_DB as _BDB
+
+            with sqlite3.connect(str(_BDB)) as conn:
+                conn.row_factory = sqlite3.Row
+                rows = conn.execute(
+                    "SELECT * FROM answer_candidates WHERE status=? ORDER BY created_at DESC LIMIT ?",
+                    (status, limit),
+                ).fetchall()
+                items = [dict(r) for r in rows]
+        return {"status": "ok", "count": len(items), "items": items, "stats": _ac.stats()}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)[:200])
 
@@ -5071,8 +5667,18 @@ def graph_stats_endpoint() -> dict:
 
 
 @app.get("/brain/graph/nodes", tags=["graph"], dependencies=[Depends(verify_bearer)])
-def graph_nodes_endpoint(limit: int = 200) -> dict:
-    """Return entities + relations for 3D graph visualization."""
+def graph_nodes_endpoint(limit: int = 200, connected_only: bool = False) -> dict:
+    """Return entities + relations for 3D graph visualization.
+
+    Links are filtered to pairs whose BOTH endpoints made the top-limit
+    nodes list — prevents UI isolated-node artifacts where a node appears
+    but its relations reference off-canvas entities.
+
+    Args:
+      limit: max node count (sorted by mention_count desc).
+      connected_only: drop nodes that have no intra-view RELATES_TO link.
+          Use when Graph UI users don't want to see isolated nodes.
+    """
     try:
         from brain_core.neo4j_client import run_query, is_healthy
 
@@ -5086,14 +5692,27 @@ def graph_nodes_endpoint(limit: int = 200) -> dict:
             "ORDER BY e.mention_count DESC LIMIT $limit",
             {"limit": limit},
         )
+        node_ids = [n["id"] for n in nodes]
+        # Restrict links to both endpoints being in the returned node set —
+        # this keeps the graph visualization visually connected and removes
+        # the misleading "124/200 isolated" artifact from the prior impl
+        # where links were sorted by weight independently of which nodes
+        # were selected.
         links = run_query(
             "MATCH (s:Entity)-[r:RELATES_TO]->(t:Entity) "
+            "WHERE s.id IN $ids AND t.id IN $ids "
             "RETURN s.id AS source, t.id AS target, "
             "coalesce(r.relationship, 'related_to') AS relationship, "
             "coalesce(r.weight, 0.5) AS weight "
-            "ORDER BY r.weight DESC LIMIT $limit",
-            {"limit": limit * 3},
+            "ORDER BY r.weight DESC",
+            {"ids": node_ids},
         )
+        if connected_only:
+            linked = set()
+            for link in links:
+                linked.add(link["source"])
+                linked.add(link["target"])
+            nodes = [n for n in nodes if n["id"] in linked]
         return {"nodes": nodes, "links": links, "backend": "neo4j"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)[:200])
@@ -5163,6 +5782,12 @@ def timetravel(
                 include_history=True,  # include superseded for historical accuracy
                 include_obsolete=True,
                 as_of=date,
+                # F6: historical queries need all hygiene filters off too
+                include_provisional=True,
+                include_all_speakers=True,
+                include_session_scope=True,
+                include_low_trust=True,
+                include_expired=True,
             )
             return {
                 "date": date,

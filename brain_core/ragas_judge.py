@@ -19,8 +19,10 @@ These four together tell you not just "did we retrieve the right doc?"
 AND give it to the LLM correctly AND let the LLM answer correctly?" —
 which is the actual contract for any RAG system.
 
-Cost: 1-4 LLM dispatches per (query, answer) pair. With Sage running
-gpt-4o-mini at ~$0.0005/call, scoring 100 queries costs ~$0.05-0.2.
+Cost: 1-4 LLM dispatches per (query, answer) pair through sage via
+openclaw_dispatch. Model is whatever sage is configured with in
+~/.openclaw/openclaw.json (gpt-5.4 primary with gpt-5.3-codex-spark /
+claude-opus-4-6 fallback chain as of 2026-04-14).
 
 Default OFF — only fires when called explicitly from cli/eval_compare.py
 with --ragas. Not on the hot path.
@@ -58,7 +60,7 @@ class RagasScore:
         }
 
 
-# ── Prompts (kept short — Sage gpt-4o-mini handles structured output reliably) ──
+# ── Prompts (kept short — Sage handles structured output reliably) ──
 
 _FAITHFULNESS_PROMPT = """You are a RAG faithfulness judge. Given a question, an answer, and the retrieved context, decide what fraction of the answer's claims are directly supported by the context.
 
@@ -260,6 +262,6 @@ def aggregate(scores: list[RagasScore]) -> dict:
 def stats() -> dict:
     return {
         "metrics": ["faithfulness", "answer_relevance", "context_precision", "context_recall"],
-        "judge_model": "sage (openclaw_dispatch, gpt-4o-mini default)",
+        "judge_model": "sage (openclaw_dispatch, configured fallback chain)",
         "default_timeout_s": 30,
     }

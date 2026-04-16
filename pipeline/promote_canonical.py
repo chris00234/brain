@@ -1,9 +1,66 @@
 from __future__ import annotations
 
 import argparse
+import re
 from pathlib import Path
 
 from common import ROOT, dump_json, find_similar_canonical, iter_note_paths, parse_markdown_frontmatter, slugify, utc_now, write_markdown_frontmatter
+
+ENTITY_SKIP = {"chris cho", "chris", "daehyun", "daehyun cho", "chrischo"}
+
+
+def _load_entity_targets() -> list[tuple[list[str], str]]:
+    """Return [(search_terms, entity_id)] for every canonical/entities/ page.
+
+    Phase 4 (llm-wiki): during canonical promotion, auto-populate the
+    relations[] field with `{"type": "mentions", "target": <entity_id>}`
+    for every entity whose name or alias appears in the note body.
+    """
+    entities_dir = ROOT / "canonical" / "entities"
+    if not entities_dir.exists():
+        return []
+    out: list[tuple[list[str], str]] = []
+    for page in entities_dir.glob("*.md"):
+        try:
+            meta, _ = parse_markdown_frontmatter(page)
+        except Exception:
+            continue
+        entity_id = meta.get("id") or ""
+        if not entity_id.startswith("entity_"):
+            continue
+        names = set()
+        for name in meta.get("entities", []):
+            if isinstance(name, str) and len(name) >= 3 and name.lower() not in ENTITY_SKIP:
+                names.add(name.lower())
+        terms = [n for n in names if len(n) >= 3]
+        if terms:
+            out.append((terms, entity_id))
+    return out
+
+
+def _inject_entity_mentions(metadata: dict, body: str) -> int:
+    """Add 'mentions' relations for entity pages referenced in the body.
+    Returns the number of new relations added. Idempotent."""
+    targets = _load_entity_targets()
+    if not targets:
+        return 0
+    body_lower = body.lower()
+    existing = {
+        (rel.get("type"), rel.get("target"))
+        for rel in metadata.get("relations", [])
+        if isinstance(rel, dict)
+    }
+    added = 0
+    relations = list(metadata.get("relations", []))
+    for terms, entity_id in targets:
+        if any(term in body_lower for term in terms):
+            if ("mentions", entity_id) in existing:
+                continue
+            relations.append({"type": "mentions", "target": entity_id})
+            added += 1
+    if added:
+        metadata["relations"] = relations
+    return added
 
 
 def load_proposal(path: Path) -> tuple[dict, str]:
@@ -57,6 +114,11 @@ def main() -> int:
 
     file_name = slugify(metadata["title"]) + ".md"
     target = ROOT / "canonical" / metadata["domain"] / file_name
+
+    # Phase 4 (llm-wiki): auto-populate relations for entity mentions
+    mention_count = _inject_entity_mentions(metadata, body)
+    if mention_count:
+        print(f"  auto-linked {mention_count} entity mention(s) via relations[]")
 
     # Dedup: check if similar canonical note already exists
     existing = find_similar_canonical(metadata.get("title", ""), body)

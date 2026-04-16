@@ -80,7 +80,20 @@ def collect_canonical_notes():
 
 
 def dispatch_to_sage(prompt):
-    result = dispatch(agent="sage", message=prompt, thinking="medium", timeout=DISPATCH_TIMEOUT)
+    result = dispatch(
+        agent="sage",
+        message=prompt,
+        thinking="medium",
+        timeout=DISPATCH_TIMEOUT,
+        backlog_kind="synthesis",
+        backlog_payload={
+            "agent": "sage",
+            "prompt": prompt,
+            "thinking": "medium",
+            "timeout": DISPATCH_TIMEOUT,
+            "source": "profile_regen",
+        },
+    )
     if not result.ok:
         print(f"  ERROR: Sage dispatch failed: {result.error[:200]}", file=sys.stderr)
         return None

@@ -639,13 +639,28 @@ def search_all(
     include_obsolete=False,
     as_of=None,
     session_id=None,
+    include_provisional=False,
+    include_all_speakers=False,
+    include_session_scope=False,
+    include_low_trust=False,
+    include_expired=False,
 ):
     """Unified search across all sources.
 
     Phase 1B/1C/1D filters (applied to semantic_memory by default):
-      include_history=False — hide memories where superseded_by != ""
-      include_obsolete=False — hide memories where memory_class == "obsolete"
-      as_of=YYYY-MM-DD — filter to memories valid at that date
+      include_history=False      — hide memories where superseded_by != ""
+      include_obsolete=False     — hide memories where memory_class == "obsolete"
+      as_of=YYYY-MM-DD           — filter to memories valid at that date
+
+    v3 F6 (2026-04-14) — explicit per-filter escape hatches. Previously
+    include_history was overloaded as the single disable-all-hygiene-filters
+    flag, which made intent ambiguous. Now each of the 5 hygiene filters has
+    its own kwarg so callers say exactly what they want:
+      include_provisional=True   — include atoms still tagged provisional
+      include_all_speakers=True  — include agent:* / quoted:* speakers
+      include_session_scope=True — include session-scoped atoms
+      include_low_trust=True     — include atoms with trust_score < 0.3
+      include_expired=True       — include atoms whose valid_until is in the past
     """
     if sources is None:
         sources = ["rag", "canonical", "obsidian"]
@@ -731,7 +746,8 @@ def search_all(
                     placeholders = ",".join("?" for _ in sm_ids)
                     with _conn() as _c:
                         rows = _c.execute(
-                            f"SELECT chroma_id, tier, superseded_by, valid_from, valid_until "
+                            f"SELECT chroma_id, tier, superseded_by, valid_from, valid_until, "
+                            f"       provisional, trust_score, speaker_entity, scope "
                             f"FROM atoms WHERE chroma_id IN ({placeholders})",
                             sm_ids,
                         ).fetchall()
@@ -739,8 +755,11 @@ def search_all(
         except Exception:
             atoms_meta_map = {}
 
-        # Phase 1B/1C/1D: filter only applies to semantic_memory collection
-        # (other collections don't have supersession/temporal/tier metadata).
+        # Phase 1B/1C/1D + v3 Layer D: semantic_memory lifecycle + hygiene filters.
+        # v3 hygiene filters default STRICT per Chris's decision 3: brain
+        # defaults to Chris's trusted statements only (not agent inferences).
+        # Each filter has its own escape hatch (F6 fix 2026-04-14) — see
+        # search_all docstring.
         filtered = []
         for r in raw_results:
             if not isinstance(r, dict):
@@ -770,6 +789,44 @@ def search_all(
                         continue
                     if vu_meta and vu_meta <= as_of_date:
                         continue
+
+                # v3 Layer D: hygiene filters. Only fires when atom_row exists
+                # (post-migration-10 atoms). Pre-migration atoms don't have
+                # these fields so they pass through unfiltered — gradual
+                # rollout without breaking historical data.
+                if atom_row:
+                    # Filter 1 — provisional excluded by default
+                    if not include_provisional and atom_row.get("provisional"):
+                        continue
+                    # Filter 2 — speaker entity must be Chris (direct statement)
+                    speaker = atom_row.get("speaker_entity") or "chris"
+                    if not include_all_speakers:
+                        if speaker != "chris" and not speaker.startswith("canonical"):
+                            continue
+                    # Filter 3 — scope must be global or project (not session)
+                    atom_scope = atom_row.get("scope") or "global"
+                    if atom_scope == "session" and not include_session_scope:
+                        continue
+                    # Filter 4 — trust_score floor at 0.3
+                    ts_val = atom_row.get("trust_score")
+                    if (
+                        ts_val is not None
+                        and float(ts_val) < 0.3
+                        and not include_low_trust
+                    ):
+                        continue
+                    # Filter 5 — valid_until in the future or NULL
+                    vu_full = (atom_row.get("valid_until") or "")
+                    if vu_full and not include_expired:
+                        import datetime as _dt
+                        try:
+                            vu_dt = _dt.datetime.fromisoformat(vu_full.replace("Z", "+00:00"))
+                            if vu_dt.tzinfo is None:
+                                vu_dt = vu_dt.replace(tzinfo=_dt.timezone.utc)
+                            if vu_dt < _dt.datetime.now(_dt.timezone.utc):
+                                continue
+                        except (ValueError, TypeError):
+                            pass
             filtered.append(r)
         res = [normalize_rag_result(r) for r in filtered]
         source_timing["rag_ms"] = int((time.time() - t0) * 1000)
@@ -846,6 +903,12 @@ def search_all(
     # Reverted to source-boost-only (see _classify_intent personal/experience
     # bumps). The temporal_router module stays for future use cases.
 
+    # HR5 reverted (2026-04-14): graph/fts/graph_prefetch are always-on
+    # orthogonal sources, not opt-in via the `sources` kwarg. The default
+    # sources=["rag","canonical","obsidian"] never contained them, so
+    # HR5's filter made them silently return empty on every /recall/v2
+    # call — dropping eval from 97.1% → 95.7% content. They still honor
+    # their OWN early-return guards (collections filter, entity_query).
     search_fns = [
         (_search_rag, "rag"),
         (_search_canonical, "canonical"),

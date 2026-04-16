@@ -881,6 +881,24 @@ def reinforce_on_access(memory_ids: list[str], boost: float = 0.02) -> dict:
         )
     except Exception as e:
         return {"reinforced": 0, "reason": f"update failed: {e}"}
+
+    # v3 Layer B — bump Neo4j MemoryAccess.utility_score so the graph's
+    # MemRL ranking actually reflects usage. Uses _neo4j_only path to avoid
+    # the double-boost bug where reinforce_memory's full path re-reads and
+    # re-writes Chroma trust_score we just updated above (would add +0.04
+    # instead of +0.02 per access). The Neo4j-only path only touches
+    # MemoryAccess, not Chroma.
+    try:
+        sys.path.insert(0, str(Path(__file__).parent))
+        from entity_graph import reinforce_memory_neo4j_only
+        for mid in update_ids:
+            try:
+                reinforce_memory_neo4j_only(mid, success=True)
+            except Exception:
+                continue
+    except ImportError:
+        pass
+
     return {"reinforced": len(update_ids)}
 
 

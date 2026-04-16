@@ -98,9 +98,24 @@ Re-derive with:
 | 22:03 | `daily_reflection` | jenna | Send reflection Q to Chris via Telegram |
 | 23:17 | `reindex` (2nd run) | system | Full ChromaDB reindex (off-hours pair) |
 
+## v3 llm-wiki jobs (added 2026-04-15)
+
+| Time | Job | Owner | Purpose |
+|---|---|---|---|
+| 03:15 daily | `answer_canonicalize` | system | Score pending answer_candidates, promote top-3 to raw/inbox |
+| 03:30 (Sun) | `graph_rebuild_mentions` | system | Rebuild atom→entity MENTIONS edges in Neo4j |
+| 03:40 (Sun) | `graph_backfill_co_mention` | system | Create RELATES_TO edges from shared MemoryAccess (co-mention) |
+| 04:30 (Sun) | `entity_pages` | sage | Sage generates one canonical entity page per run from hot Neo4j entities |
+| 05:45 (Sun) | `canonical_lint` | system | Orphan notes + data gaps + missing cross-refs report |
+| 06:00 (Sun) | `canonical_compaction` | system | Cluster similar canonical notes (cosine 0.94) — report only |
+| 06:15 (Sun) | `canonical_merge_draft` | sage | Sage drafts consolidated pages from top compaction clusters |
+| 06:35 (Sun) | `canonical_quality_filter_report` | system | Dry-run audit-log archival report |
+
+**Human-reviewed (NOT auto-scheduled):** `canonical_merge_apply`, `canonical_quality_filter --apply`, `canonicalize_entities --apply`.
+
 ## Job count
 
-68 total scheduled jobs as of 2026-04-13 after Phase J. To re-derive:
+90 total scheduled jobs as of 2026-04-15 (68 v2 + 9 v3 llm-wiki + 13 interim). To re-derive:
 
 ```bash
 .venv/bin/python -c "import sys; sys.path.insert(0, 'brain_core'); from scheduler import JOB_SCHEDULE; print(len(JOB_SCHEDULE))"

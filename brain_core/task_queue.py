@@ -146,6 +146,21 @@ class TaskQueue:
             CREATE INDEX IF NOT EXISTS idx_outcomes_created_at ON outcomes(created_at);
             CREATE INDEX IF NOT EXISTS idx_procedures_task_type ON procedures(task_type);
         """)
+        # v3 plan: brain_loop goal extensions. ALTER TABLE ADD COLUMN is idempotent
+        # via try/except — SQLite rejects duplicates with OperationalError, which
+        # we ignore so re-running migrate on subsequent starts is a no-op.
+        goal_extensions = [
+            ("next_check_at",  "TEXT"),
+            ("owner_agent",    "TEXT DEFAULT 'chris'"),
+            ("brain_notes",    "TEXT DEFAULT ''"),
+            ("interventions",  "TEXT DEFAULT '[]'"),
+        ]
+        for col, col_type in goal_extensions:
+            try:
+                conn.execute(f"ALTER TABLE goals ADD COLUMN {col} {col_type}")
+            except sqlite3.OperationalError as e:
+                if "duplicate column name" not in str(e).lower():
+                    log.warning("goals ALTER ADD %s failed: %s", col, e)
         conn.commit()
 
     # ── Helpers ──────────────────────────────────────────────

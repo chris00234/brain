@@ -241,6 +241,14 @@ def main() -> None:
         thinking="low",
         timeout=DISPATCH_TIMEOUT,
         max_retries=1,
+        backlog_kind="synthesis",
+        backlog_payload={
+            "agent": AGENT,
+            "prompt": prompt,
+            "thinking": "low",
+            "timeout": DISPATCH_TIMEOUT,
+            "source": "monthly",
+        },
     )
     if parsed is None:
         sys.stderr.write("DISPATCH_FAIL agent=sage reason=dispatch_with_schema returned None\n")

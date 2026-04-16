@@ -42,12 +42,25 @@ def get_driver():
 
 
 def run_query(cypher: str, params: dict[str, Any] | None = None) -> list[dict]:
-    """Execute a read Cypher query, return list of record dicts."""
+    """Execute a Cypher query (read or write), return list of record dicts.
+
+    v3 bugfix (2026-04-14): was using `execute_read` which causes the Neo4j
+    driver to hard-reject any MERGE/CREATE/SET/DELETE at the access-mode
+    check with "Writing in read access mode not allowed". This broke the
+    entity graph write path silently — `_neo4j_store_entities` in
+    entity_graph.py uses `run_query` for MERGE, and every call failed
+    silently in the outer try/except. The graph was frozen for 3 days.
+
+    Using `execute_write` works for both reads and writes (it's a superset
+    on a single-node deployment). On a clustered Neo4j the read path should
+    still use `execute_read` to hit followers, but Chris runs single-node
+    local Neo4j so the difference is academic.
+    """
     def _work(tx):
         result = tx.run(cypher, params or {})
         return [dict(record) for record in result]
     with get_driver().session() as session:
-        return session.execute_read(_work)
+        return session.execute_write(_work)
 
 
 def run_write(cypher: str, params: dict[str, Any] | None = None) -> None:

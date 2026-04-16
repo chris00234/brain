@@ -616,48 +616,38 @@ def embed_and_store(memories: list[dict[str, Any]], source: str, agent: str) -> 
     except Exception:
         pass
 
-    # Phase 3 atoms-truth-layer mirror + Phase 6 30-word discipline.
-    # Best-effort, gated by BRAIN_ATOMS_ENABLED. Failures NEVER fail the
-    # Chroma upsert. learn.py is async-friendly so we allow Jenna re-distill.
+    # HR3 fix (2026-04-14): use shared ingest_mirror helper so /learn
+    # gets the full v3 Brain Hygiene pipeline (classifier, topic
+    # supersession, llm_backlog catch-up). Previously /learn called
+    # upsert_atom directly with no hygiene fields — topic_key was NULL
+    # so supersession never fired, speaker defaulted to 'chris' so
+    # agent-extracted content leaked into the trusted filter.
     try:
-        from atoms_gate import enforce as _atoms_enforce
-        from atoms_store import upsert_atom
-
+        from ingest_mirror import mirror_memory
         for entry in stored:
             meta = entry.get("metadata") or {}
-            atom_text, atom_status, atom_quality = _atoms_enforce(
-                entry["content"][:2000],
-                allow_redistill=True,
-            )
-            upsert_atom(
-                text=atom_text,
+            mr = mirror_memory(
+                content=entry["content"],
                 chroma_id=entry["id"],
-                kind=(meta.get("category") or "fact"),
+                category=(meta.get("category") or "fact"),
+                agent=agent,
+                source=f"learn:{source}",
+                operation="ADD",
                 confidence=float(meta.get("confidence", 0.5) or 0.5),
-                tier=(meta.get("memory_class") or "episodic"),
-                distilled_by="jenna",
-                collection_hint="semantic_memory",
-                quality_score=atom_quality,
-                provenance={
-                    "session_source": source,
-                    "agent": agent,
-                    "atoms_gate_status": atom_status,
-                },
+                now_iso=meta.get("created_at") or _now_iso(),
+                allow_redistill=True,  # async-friendly path, can re-distill
             )
-    except Exception:
-        pass
+            if mr.error:
+                log.warning("learn atoms_mirror_failed %s: %s", entry["id"], mr.error)
+    except Exception as _e:
+        log.warning("learn atoms_mirror_outer error: %s", str(_e)[:200])
 
-    # Phase 3: Extract entities into graph (fire-and-forget background thread)
-    def _bg_extract():
-        for entry in stored[:3]:
-            try:
-                from entity_graph import extract_and_store_entities
-                extract_and_store_entities(entry["content"], entry["id"])
-            except Exception:
-                pass
-    import threading
-    threading.Thread(target=_bg_extract, daemon=True).start()
-
+    # HR2 fix (2026-04-14): removed redundant daemon-thread entity
+    # extraction loop. upsert_atom already triggers _submit_bg_extract
+    # (F3 bounded pool) which handles entity extraction correctly with
+    # overflow → llm_backlog catch-up. The old daemon thread here was
+    # double-writing (2x LLM cost, 2x Neo4j load) AND bypassed the
+    # F3 bounded pool safety — arbitrary thread fan-out on bulk /learn.
     return stored
 
 

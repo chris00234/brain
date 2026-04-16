@@ -1,0 +1,260 @@
+# intent_routes.yaml — L0 canonical guarantees for per-turn active recall.
+#
+# Each intent has bilingual keyword matchers. When any keyword (EN or KO) appears
+# in a user prompt, the listed canonical_paths and always_push_queries are
+# GUARANTEED to surface in the injection blocks regardless of vector similarity
+# score. This is the layer that prevents "design standard loses to noisy hits"
+# failures.
+#
+# Routing logic lives in brain_core/active_recall.py::_match_canonical_routes.
+# Routes are loaded at service boot and re-read on canonical_embedding_refresh
+# weekly cron. Chris's edits take effect on next service restart OR next cron run.
+#
+# Phase 5 learner (autonomy_proposer) proposes additions to this file from
+# clusters of recall_miss events, writing candidates to eval_proposals for
+# Chris's Sunday audit digest review.
+
+version: 1
+updated: 2026-04-14
+
+intents:
+  frontend_design:
+    keywords_en:
+      - design
+      - frontend
+      - ui
+      - ux
+      - component
+      - aesthetic
+      - css
+      - tailwind
+      - shadcn
+      - figma
+      - layout
+      - typography
+      - color palette
+      - reference site
+    keywords_ko:
+      - 디자인
+      - 프론트엔드
+      - 프론트
+      - UI
+      - 컴포넌트
+      - 스타일
+      - 미학
+      - 룩
+      - 테일윈드
+      - 레이아웃
+      - 타이포그래피
+      - 컬러
+      - 레퍼런스
+    canonical_paths:
+      - ~/design-standard/DESIGN.md
+      - ~/server/knowledge/canonical/design/personal_standard.md
+    always_push_queries:
+      - design standard
+      - design reference URLs godly dribbble awwwards component gallery
+    priority: critical
+    max_tokens: 800
+
+  infra_homelab:
+    keywords_en:
+      - docker
+      - cloudflare
+      - homelab
+      - container
+      - orbstack
+      - compose
+      - nginx
+      - tunnel
+      - server-net
+      - launchd
+    keywords_ko:
+      - 도커
+      - 클플
+      - 홈랩
+      - 배포
+      - 컨테이너
+      - 클라우드플레어
+      - 터널
+    canonical_paths:
+      - ~/server/knowledge/canonical/infra
+    always_push_queries:
+      - homelab docker compose services
+      - cloudflare tunnel configuration
+    priority: high
+    max_tokens: 600
+
+  brain_self:
+    keywords_en:
+      - brain system
+      - scheduler
+      - cron
+      - autonomy
+      - atoms
+      - chroma
+      - neo4j
+      - boot context
+      - active recall
+      - brain_loop
+      - proactive insight
+      - action_audit
+    keywords_ko:
+      - 브레인
+      - 뇌
+      - 스케줄러
+      - 자율
+      - 아톰
+      - 액티브 리콜
+      - 능동
+    canonical_paths:
+      - ~/server/brain/RUNBOOK.md
+      - ~/server/brain/CRON_MAP.md
+      - ~/server/brain/STORAGE_MAP.md
+    always_push_queries:
+      - brain architecture v2 active recall
+    priority: high
+    max_tokens: 600
+
+  openclaw:
+    keywords_en:
+      - openclaw
+      - jenna
+      - liz
+      - ellie
+      - sage
+      - market
+      - agent workspace
+      - scratch.md
+      - progress.md
+      - heartbeat
+      - before_prompt_build
+    keywords_ko:
+      - 오픈클로
+      - 제나
+      - 리즈
+      - 엘리
+      - 세이지
+      - 마켓
+      - 에이전트
+      - 하트비트
+    canonical_paths:
+      - ~/.openclaw/openclaw.json
+      - ~/.openclaw/workspace-claude/AGENTS.md
+    always_push_queries:
+      - openclaw agent configuration heartbeat
+    priority: high
+    max_tokens: 500
+
+  chris_profile:
+    keywords_en:
+      - chris preference
+      - about me
+      - i prefer
+      - i like
+      - my convention
+      - my style
+    keywords_ko:
+      - 내 선호
+      - 내가 좋아
+      - 내 컨벤션
+      - 내 스타일
+      - 나의
+    canonical_paths:
+      - ~/server/knowledge/canonical/chris/_identity.md
+      - ~/server/knowledge/canonical/chris/_state.md
+    always_push_queries:
+      - Chris preferences
+    priority: high
+    max_tokens: 500
+
+  visual:
+    # Queries about images Chris has sent or screenshots brain has ingested.
+    # Forces the knowledge collection (which holds image captions) to be
+    # probed with image-related keywords so Chris can ask "what was that
+    # photo I sent yesterday" and get a real answer instead of text-only results.
+    keywords_en:
+      - image
+      - photo
+      - picture
+      - screenshot
+      - screengrab
+      - diagram
+      - chart
+      - visual
+      - snapshot
+      - "i sent"
+      - "this picture"
+    keywords_ko:
+      - 사진
+      - 이미지
+      - 스크린샷
+      - 그림
+      - 스샷
+      - 사진 보낸
+      - 캡처
+      - 다이어그램
+    canonical_paths: []
+    always_push_queries:
+      - image caption description
+      - screenshot ocr
+    priority: high
+    max_tokens: 800
+
+  credentials:
+    keywords_en:
+      - credential
+      - secret
+      - token
+      - api key
+      - bearer
+      - password
+      - personal_webhook_secret
+    keywords_ko:
+      - 크리덴셜
+      - 시크릿
+      - 토큰
+      - 키
+      - 패스워드
+    canonical_paths: []
+    always_push_queries:
+      - credential locations bearer secret
+    priority: critical
+    max_tokens: 400
+
+  live_state:
+    # Queries about CURRENT system reality. Bypasses historical atoms entirely
+    # by force-reading ~/server/knowledge/canonical/live_state/ which is
+    # regenerated every 10 min by the live_state_snapshot cron. Without this,
+    # "what's running on my server?" would return stale atoms from past sessions.
+    keywords_en:
+      - what is running
+      - whats running
+      - currently running
+      - active projects
+      - what is active
+      - server status
+      - right now
+      - current state
+      - live status
+      - up right now
+    keywords_ko:
+      - 지금 뭐
+      - 현재 뭐
+      - 돌아가
+      - 떠있어
+      - 떠있는
+      - 활성
+      - 활동
+      - 서버 상태
+      - 지금 뭐해
+      - 요즘 뭐
+      - 활성 프로젝트
+      - 지금 돌
+    canonical_paths:
+      - ~/server/knowledge/canonical/live_state
+    always_push_queries:
+      - live state snapshot docker services
+      - active goals focus
+    priority: critical
+    max_tokens: 1200

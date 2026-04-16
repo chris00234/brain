@@ -37,7 +37,7 @@ except ImportError as e:
 # Always register at the latest version — migrations are idempotent and safe
 # to run on every startup. Without this, a brain restart after a manual migrate
 # would hit downgrade-refused on subsequent restarts (db v3 vs code v0).
-CURRENT_VERSIONS["brain_db"] = 9
+CURRENT_VERSIONS["brain_db"] = 10
 
 
 def _safe_int(v: object, default: int = 0) -> int:
@@ -567,6 +567,75 @@ def _add_sleep_consolidation_tables() -> dict:
             ).fetchall()
         }
         return {"tables": sorted(tables)}
+    finally:
+        conn.close()
+
+
+@migration("brain_db", 9, 10)
+def _add_hygiene_fields() -> dict:
+    """v3 Brain Hygiene Stack — Layer A/D foundation.
+
+    Adds five orthogonal fields to the atoms table so the ingest gate can
+    mark atoms as provisional (untrusted until reinforced), carry a
+    speaker_entity (chris/quoted/test/agent), a topic_key (for
+    topic-based supersession), a scope (session/project/global), and a
+    separate trust_score (decays on negative feedback, independent from
+    confidence which is the probabilistic truth estimate).
+
+    Retrieval filters use these fields:
+      * provisional = 0 (exclude test/untrusted)
+      * speaker_entity = 'chris' (exclude quoted / test / agent inference)
+      * scope IN ('global', 'project') (exclude session-bound)
+      * trust_score >= 0.3 (exclude decayed)
+      * valid_until is NULL OR > now (exclude time-bounded stale)
+
+    Idempotent via PRAGMA table_info() check — re-runs on every startup
+    are no-ops after the first successful apply.
+    """
+    conn = _connect_brain_db()
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(atoms)").fetchall()}
+        additions = [
+            ("provisional",     "INTEGER NOT NULL DEFAULT 0"),
+            ("trust_score",     "REAL NOT NULL DEFAULT 0.5"),
+            ("topic_key",       "TEXT"),
+            ("speaker_entity",  "TEXT NOT NULL DEFAULT 'chris'"),
+            ("scope",           "TEXT NOT NULL DEFAULT 'global'"),
+        ]
+        added: list[str] = []
+        for col, col_type in additions:
+            if col in cols:
+                continue
+            try:
+                conn.execute(f"ALTER TABLE atoms ADD COLUMN {col} {col_type}")
+                added.append(col)
+            except sqlite3.OperationalError as e:
+                if "duplicate column name" not in str(e).lower():
+                    log.warning("atoms ALTER ADD %s failed: %s", col, e)
+        # Indexes for retrieval filters — topic_key is the hot path for
+        # topic-based supersession lookups.
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_atoms_provisional "
+            "ON atoms(provisional) WHERE provisional = 1"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_atoms_topic_key "
+            "ON atoms(topic_key) WHERE topic_key IS NOT NULL"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_atoms_speaker_scope "
+            "ON atoms(speaker_entity, scope)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_atoms_trust "
+            "ON atoms(trust_score) WHERE trust_score < 0.5"
+        )
+        conn.commit()
+        final_cols = {r[1] for r in conn.execute("PRAGMA table_info(atoms)").fetchall()}
+        return {
+            "added": added,
+            "all_columns": sorted(final_cols),
+        }
     finally:
         conn.close()
 

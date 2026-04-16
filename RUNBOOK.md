@@ -345,6 +345,82 @@ To re-enable, unset the env var or set `enabled=true`.
 
 ---
 
+## v3 llm-wiki operations (2026-04-15)
+
+### 1. Canonical restructure broke eval scores
+
+Symptom: `eval_gate.py` shows large source_hit regression after canonical consolidation.
+
+Cause: `expected_source` paths in eval sets point to canonical paths that moved to
+`canonical/archived/<domain>/`.
+
+Fix:
+```bash
+cp cli/eval_set*.json{,.pre-reshape.bak}
+.venv/bin/python -c "
+import json, os, glob
+KDIR = '/Users/chrischo/server/knowledge'
+for name in ['eval_set.json','eval_set_stable.json','eval_set_extended_v2.json']:
+    p = f'cli/{name}'; d = json.load(open(p))
+    for c in d:
+        exp = c.get('expected_source','')
+        if '/' not in exp: continue
+        if os.path.exists(os.path.join(KDIR, exp)): continue
+        base = os.path.basename(exp)
+        alts = glob.glob(f'{KDIR}/canonical/archived/**/{base}', recursive=True)
+        if alts: c['expected_source'] = alts[0].replace(KDIR+'/', '')
+    json.dump(d, open(p,'w'), indent=2, ensure_ascii=False)"
+# Then refresh baselines
+.venv/bin/python cli/eval_gate.py --eval-set cli/eval_set_stable.json --baseline cli/eval_baseline_stable.json --update-baseline --track stable
+```
+
+### 2. Compaction merge draft produces empty / "Unreadable placeholder"
+
+Cause: cluster members already moved to archived/ by a prior apply; `_find_note_by_id`
+in canonical_merge_apply can't locate them.
+
+Fix: Regenerate compaction report before drafting:
+```bash
+rm reports/canonical_compaction/$(date +%Y-%m-%d).{json,md}
+.venv/bin/python synthesis/canonical_compaction.py
+.venv/bin/python synthesis/canonical_merge_draft.py --limit 3
+```
+
+### 3. Quality filter --apply over-archives real knowledge
+
+Cause: new title patterns (JSON-body notes, reflection outputs) slip through.
+
+Recovery: Archived files are preserved — just move back:
+```bash
+mv knowledge/canonical/archived/<domain>/<file>.md knowledge/canonical/<domain>/
+# Then manually set status back to active in frontmatter
+```
+
+### 4. Graph UI shows lots of isolated nodes
+
+Cause: `/brain/graph/nodes` returning top-N nodes + top-M links independently leads
+to off-canvas endpoints.
+
+Fix: Already patched in `server.py:graph_nodes_endpoint`. Pass
+`?connected_only=true` for zero-isolated view. UI toggle also available
+(Graph.tsx: Connected/All button).
+
+### 5. canonicalize_entities --apply merges false pairs (agent names, dates)
+
+Never run without human review. Safeguards added in `cli/canonicalize_entities.py`
+(_DATE_RE, _NUMSEQ_RE, _HEX_UID_RE, _SHORT_ENUM_RE, SequenceMatcher ≥0.75 gate)
+reject the worst cases, but agent-name collisions (ellie/sage sessions) and
+version drops (next.js 16 → next.js) still pass.
+
+Manual workflow:
+```bash
+BRAIN_ATOMS_ENABLED=true .venv/bin/python cli/canonicalize_entities.py --threshold 0.92
+# Review the "Merge plan" output, reject any with different agent/version/date
+# Then apply cherry-picked pairs manually via Neo4j
+```
+
+---
+
 ## Reference
 
 - Brain entry: `~/server/brain/server.py` (FastAPI on :8791)

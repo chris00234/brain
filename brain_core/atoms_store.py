@@ -21,6 +21,7 @@ The schema_versions migration runner registers `brain_db` component (versions
 
 from __future__ import annotations
 
+import concurrent.futures
 import hashlib
 import json
 import math
@@ -92,6 +93,11 @@ CREATE TABLE IF NOT EXISTS atoms (
   valid_until         TEXT,
   provenance_json     TEXT NOT NULL DEFAULT '{}',
   parent_atom_id      TEXT,
+  provisional         INTEGER NOT NULL DEFAULT 0,
+  trust_score         REAL NOT NULL DEFAULT 0.5,
+  topic_key           TEXT,
+  speaker_entity      TEXT NOT NULL DEFAULT 'chris',
+  scope               TEXT NOT NULL DEFAULT 'global',
   created_at          TEXT NOT NULL,
   updated_at          TEXT NOT NULL
 );
@@ -103,6 +109,9 @@ CREATE INDEX IF NOT EXISTS idx_atoms_version_of  ON atoms(version_of);
 CREATE INDEX IF NOT EXISTS idx_atoms_canonical   ON atoms(canonical) WHERE canonical = 1;
 CREATE INDEX IF NOT EXISTS idx_atoms_simhash     ON atoms(simhash) WHERE simhash IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_atoms_parent_id   ON atoms(parent_atom_id) WHERE parent_atom_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_atoms_provisional ON atoms(provisional) WHERE provisional = 1;
+CREATE INDEX IF NOT EXISTS idx_atoms_topic_key   ON atoms(topic_key) WHERE topic_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_atoms_speaker_scope ON atoms(speaker_entity, scope);
 
 CREATE TABLE IF NOT EXISTS entities (
   id              TEXT PRIMARY KEY,
@@ -221,6 +230,101 @@ CREATE INDEX IF NOT EXISTS idx_eval_lifecycle_unresolved
 
 _init_lock = threading.Lock()
 _initialized = False
+
+# v3 F3 fix (2026-04-14): bounded bg pool for hot-path entity extraction.
+# Previously upsert_atom spawned an unbounded daemon Thread per atom, which
+# meant a 590-atom backfill burst would pile up 590 threads hammering
+# Neo4j+Ollama at once. Now: module-level pool with 4 workers + a semaphore
+# that drops new submissions when more than _BG_EXTRACT_INFLIGHT_MAX are
+# pending. Dropped extractions get picked up by the nightly entity
+# reconciliation cron (F41), so nothing is permanently lost.
+_BG_EXTRACT_POOL: concurrent.futures.ThreadPoolExecutor | None = None
+_BG_EXTRACT_POOL_LOCK = threading.Lock()
+_BG_EXTRACT_INFLIGHT_MAX = 64
+_BG_EXTRACT_SEM = threading.BoundedSemaphore(_BG_EXTRACT_INFLIGHT_MAX)
+_BG_EXTRACT_DROPPED = 0
+_BG_EXTRACT_DROPPED_LOCK = threading.Lock()
+
+
+def _get_bg_extract_pool() -> concurrent.futures.ThreadPoolExecutor:
+    global _BG_EXTRACT_POOL
+    if _BG_EXTRACT_POOL is None:
+        with _BG_EXTRACT_POOL_LOCK:
+            if _BG_EXTRACT_POOL is None:
+                _BG_EXTRACT_POOL = concurrent.futures.ThreadPoolExecutor(
+                    max_workers=4,
+                    thread_name_prefix="atoms_bg_extract",
+                )
+    return _BG_EXTRACT_POOL
+
+
+def _submit_bg_extract(text: str, chroma_id: str) -> bool:
+    """Schedule entity extraction on the bounded pool, drop on overflow.
+
+    Returns True if the task was submitted, False if dropped (inflight cap).
+    Dropped tasks are enqueued onto llm_backlog for the next drain cycle so
+    nothing is permanently lost — the nightly entity_reconcile cron also
+    catches these, but the backlog drain picks them up within 30 min of
+    the pool having capacity again.
+    """
+    global _BG_EXTRACT_DROPPED  # needed by both branches below
+    if not _BG_EXTRACT_SEM.acquire(blocking=False):
+        with _BG_EXTRACT_DROPPED_LOCK:
+            _BG_EXTRACT_DROPPED += 1
+        # Queue for catch-up
+        try:
+            from llm_backlog import enqueue as _backlog_enqueue
+            _backlog_enqueue("entities", {"text": text, "chroma_id": chroma_id})
+        except Exception:
+            pass
+        return False
+
+    def _run():
+        try:
+            from entity_graph import extract_and_store_entities
+            n = extract_and_store_entities(text, chroma_id)
+            # CR8 fix: -1 means LLM failure (retryable), queue backlog.
+            # Zero or positive means ran — even 0 entities is legit for
+            # short/opaque text and shouldn't re-queue.
+            if n < 0:
+                try:
+                    from llm_backlog import enqueue as _backlog_enqueue
+                    _backlog_enqueue("entities", {"text": text, "chroma_id": chroma_id})
+                except Exception:
+                    pass
+        except Exception:
+            # Extraction import or unexpected error — queue for backlog
+            # so the work isn't lost.
+            try:
+                from llm_backlog import enqueue as _backlog_enqueue
+                _backlog_enqueue("entities", {"text": text, "chroma_id": chroma_id})
+            except Exception:
+                pass
+        finally:
+            _BG_EXTRACT_SEM.release()
+
+    try:
+        _get_bg_extract_pool().submit(_run)
+        return True
+    except Exception:
+        # MR4 fix (2026-04-14): on executor shutdown / OOM, release the
+        # semaphore AND bump the dropped counter AND enqueue llm_backlog
+        # so the entity extraction task isn't silently lost.
+        _BG_EXTRACT_SEM.release()
+        with _BG_EXTRACT_DROPPED_LOCK:
+            _BG_EXTRACT_DROPPED += 1
+        try:
+            from llm_backlog import enqueue as _backlog_enqueue
+            _backlog_enqueue("entities", {"text": text, "chroma_id": chroma_id})
+        except Exception:
+            pass
+        return False
+
+
+def bg_extract_dropped_count() -> int:
+    """How many extraction tasks were dropped due to inflight cap since boot."""
+    with _BG_EXTRACT_DROPPED_LOCK:
+        return _BG_EXTRACT_DROPPED
 
 
 def _now() -> str:
@@ -349,6 +453,12 @@ def upsert_atom(
     valid_until: str | None = None,
     provenance: dict | None = None,
     parent_atom_id: str | None = None,
+    # v3 Brain Hygiene Stack fields — from ingest_classifier
+    provisional: bool = False,
+    trust_score: float = 0.5,
+    topic_key: str | None = None,
+    speaker_entity: str = "chris",
+    scope: str = "global",
     db_path: Path | None = None,
 ) -> str | None:
     """Insert or update an atom row. Returns atom id or None if disabled / failed.
@@ -389,7 +499,24 @@ def upsert_atom(
             if inserted:
                 raw_event_id = inserted
             else:
-                raw_event_id = derived_raw_id  # existing row — point atom at it
+                # HR1 fix (2026-04-14): content_hash UNIQUE collision
+                # means an existing raw_events row holds this content
+                # but may NOT have the derived id — pre-atoms-layer
+                # rows from ingest pipelines have non-deterministic
+                # event_ids (browser_xyz, gmail_abc, etc). Look up the
+                # actual id via content_hash so the FK resolves.
+                # Previously we guessed the derived id and triggered
+                # an IntegrityError on the atoms INSERT, dropping the
+                # atom silently (only visible via the SLO counter).
+                try:
+                    with _conn(db_path) as _c_lookup:
+                        row = _c_lookup.execute(
+                            "SELECT id FROM raw_events WHERE content_hash = ?",
+                            (derive_content_hash(text),),
+                        ).fetchone()
+                        raw_event_id = row["id"] if row else None
+                except sqlite3.Error:
+                    raw_event_id = None
         except sqlite3.Error:
             raw_event_id = None
     try:
@@ -399,20 +526,33 @@ def upsert_atom(
                 "(id, text, kind, confidence, tier, canonical, version_of, "
                 " distilled_by, quality_score, raw_event_id, chroma_id, "
                 " collection_hint, valid_from, valid_until, provenance_json, "
-                " parent_atom_id, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                " parent_atom_id, provisional, trust_score, topic_key, "
+                " speaker_entity, scope, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(id) DO UPDATE SET "
                 "  text=excluded.text, "
                 "  kind=excluded.kind, "
-                "  confidence=excluded.confidence, "
-                "  tier=excluded.tier, "
-                "  canonical=excluded.canonical, "
+                # CR3 fix (2026-04-14): preserve promoted tier. SM-2
+                # promotes episodic → semantic → core via apply_quality.
+                # Re-upserting with tier='episodic' (the default) would
+                # demote the atom. Only allow upward transitions AND never
+                # demote out of 'core'.
+                "  tier=CASE "
+                "    WHEN atoms.tier='core' THEN atoms.tier "
+                "    WHEN atoms.tier='semantic' AND excluded.tier='episodic' THEN atoms.tier "
+                "    ELSE excluded.tier END, "
+                # CR3 fix: canonical flag can only move 0 → 1, never 1 → 0
+                # (canonical promotion is a one-way ratchet).
+                "  canonical=MAX(atoms.canonical, excluded.canonical), "
                 "  version_of=excluded.version_of, "
                 "  distilled_by=excluded.distilled_by, "
                 "  quality_score=excluded.quality_score, "
                 "  raw_event_id=COALESCE(excluded.raw_event_id, atoms.raw_event_id), "
                 "  collection_hint=excluded.collection_hint, "
-                "  valid_from=excluded.valid_from, "
+                # CR4 fix (2026-04-14): preserve first-seen timestamp. The
+                # atom's valid_from is its learning anchor — /brain/evolution
+                # and time_decay key off it. Re-upsert must not reset.
+                "  valid_from=COALESCE(atoms.valid_from, excluded.valid_from), "
                 "  valid_until=excluded.valid_until, "
                 "  provenance_json=excluded.provenance_json, "
                 "  parent_atom_id=COALESCE(excluded.parent_atom_id, atoms.parent_atom_id), "
@@ -421,6 +561,13 @@ def upsert_atom(
                 # writes an atom_evidence ledger row in the same transaction,
                 # keeping every shift auditable and reversible.
                 "  confidence=atoms.confidence, "
+                # v3 hygiene fields — let upsert update these freely since
+                # they reflect the latest classifier decision.
+                "  provisional=excluded.provisional, "
+                "  trust_score=excluded.trust_score, "
+                "  topic_key=COALESCE(excluded.topic_key, atoms.topic_key), "
+                "  speaker_entity=excluded.speaker_entity, "
+                "  scope=excluded.scope, "
                 "  updated_at=excluded.updated_at",
                 (
                     atom_id,
@@ -439,11 +586,30 @@ def upsert_atom(
                     valid_until,
                     json.dumps(provenance or {}),
                     parent_atom_id,
+                    1 if provisional else 0,
+                    trust_score,
+                    topic_key,
+                    speaker_entity,
+                    scope,
                     now,
                     now,
                 ),
             )
             conn.commit()
+
+            # v3 Layer B — Neo4j write restoration. Every atom on the hot
+            # path triggers entity extraction → Neo4j Entity nodes +
+            # RELATES_TO edges. Without this hook, the graph was stuck at
+            # 224 entities for 620 atoms because extraction only ran from
+            # promote_canonical (nightly) and proactive.py (6h).
+            #
+            # F3 (2026-04-14): use the bounded _submit_bg_extract pool so a
+            # backfill burst can't spawn unbounded daemon threads. Drop-on-
+            # overflow is safe because the nightly entity reconciliation
+            # cron catches anything the hot path missed.
+            if text and len(text) > 40:
+                _submit_bg_extract(text[:1500], chroma_id)
+
             return atom_id
     except sqlite3.Error as exc:
         # Emit an audit event so SLO atoms_write_fail_rate_1h is observable.

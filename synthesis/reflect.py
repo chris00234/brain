@@ -163,6 +163,14 @@ def dispatch_to_sage(new_memories: list[dict], all_preferences: list[dict]) -> d
         thinking="medium",
         timeout=DISPATCH_TIMEOUT,
         max_retries=1,
+        backlog_kind="reflect",
+        backlog_payload={
+            "agent": "sage",
+            "prompt": prompt,
+            "thinking": "medium",
+            "timeout": DISPATCH_TIMEOUT,
+            "source": "brain_reflect",
+        },
     )
     if parsed is None:
         _log("ERROR dispatch_with_schema returned None")

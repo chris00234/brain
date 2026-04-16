@@ -294,3 +294,165 @@ def get_session_summaries(limit: int = MAX_SESSION_SUMMARIES) -> list[dict]:
             (SESSION_SUMMARY_CATEGORY, now_iso, limit),
         ).fetchall()
     return [_row_to_dict(r) for r in rows]
+
+
+# ── v3 session working memory (per-turn scratch, backed by session_context) ──
+# Reuses the existing session_context table (session_id, agent, key, value,
+# updated_at) that already lives in autonomy.db. This is the unified scratch
+# buffer that replaces per-agent SCRATCH.md files. Agents read/write via the
+# brain_wm_* MCP tools or the /brain/wm/* HTTP endpoints.
+#
+# "durable" flag: when a key is set with durable=True, wm_consolidate() (fired
+# on SessionEnd) promotes it to the atoms truth layer before the session_context
+# row is garbage-collected. That's how session learnings cross session boundaries.
+
+_WM_TABLE_DDL = """
+CREATE TABLE IF NOT EXISTS session_context (
+    session_id TEXT NOT NULL,
+    agent TEXT NOT NULL,
+    key TEXT NOT NULL,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (session_id, agent, key)
+);
+"""
+
+
+def _wm_ensure_schema() -> None:
+    with _conn() as conn:
+        conn.execute(_WM_TABLE_DDL)
+
+
+def wm_set(
+    session_id: str,
+    agent: str,
+    key: str,
+    value: str,
+    *,
+    durable: bool = False,
+) -> dict:
+    """Upsert a session working-memory key. If durable=True, the key name is
+    prefixed 'durable:' so wm_consolidate() can find it on SessionEnd."""
+    _wm_ensure_schema()
+    full_key = f"durable:{key}" if durable else key
+    now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with _conn() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO session_context "
+            "(session_id, agent, key, value, updated_at) VALUES (?,?,?,?,?)",
+            (session_id, agent, full_key, value, now_iso),
+        )
+    return {
+        "session_id": session_id,
+        "agent": agent,
+        "key": full_key,
+        "durable": durable,
+        "updated_at": now_iso,
+    }
+
+
+def wm_get(session_id: str, agent: str, key: str) -> str | None:
+    """Return the value for (session_id, agent, key) or None."""
+    _wm_ensure_schema()
+    with _conn() as conn:
+        # Try exact key first, then with durable: prefix
+        row = conn.execute(
+            "SELECT value FROM session_context WHERE session_id=? AND agent=? AND key=?",
+            (session_id, agent, key),
+        ).fetchone()
+        if row:
+            return row["value"]
+        row = conn.execute(
+            "SELECT value FROM session_context WHERE session_id=? AND agent=? AND key=?",
+            (session_id, agent, f"durable:{key}"),
+        ).fetchone()
+        return row["value"] if row else None
+
+
+def wm_list(session_id: str, agent: str) -> dict[str, dict]:
+    """Return {key: {value, durable, updated_at}} for every key in the session
+    belonging to the given agent."""
+    _wm_ensure_schema()
+    out: dict[str, dict] = {}
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT key, value, updated_at FROM session_context "
+            "WHERE session_id=? AND agent=? ORDER BY updated_at DESC",
+            (session_id, agent),
+        ).fetchall()
+    for r in rows:
+        raw_key = r["key"]
+        durable = raw_key.startswith("durable:")
+        display_key = raw_key[len("durable:"):] if durable else raw_key
+        out[display_key] = {
+            "value": r["value"],
+            "durable": durable,
+            "updated_at": r["updated_at"],
+        }
+    return out
+
+
+def wm_consolidate(session_id: str) -> int:
+    """SessionEnd handler: promote durable:* rows to atoms (tier=episodic) and
+    delete the rest. Called from post_session.sh.
+
+    Returns the number of rows promoted.
+    """
+    _wm_ensure_schema()
+    promoted = 0
+    # HR3 fix (2026-04-14): use shared ingest_mirror so wm_consolidate
+    # gets the full v3 Brain Hygiene pipeline. Previously durable
+    # session rows got promoted to atoms with no hygiene fields.
+    try:
+        from ingest_mirror import mirror_memory
+    except ImportError:
+        mirror_memory = None
+
+    from datetime import datetime, timezone
+    now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT agent, key, value, updated_at FROM session_context "
+            "WHERE session_id=? AND key LIKE 'durable:%'",
+            (session_id,),
+        ).fetchall()
+
+        for r in rows:
+            if mirror_memory is None:
+                continue
+            try:
+                chroma_id = f"session_wm:{session_id}:{r['agent']}:{r['key'][len('durable:'):]}"
+                result = mirror_memory(
+                    content=(r["value"] or "")[:2000],
+                    chroma_id=chroma_id,
+                    category="fact",
+                    agent=r["agent"] or "unknown",
+                    source=f"wm_consolidate:{session_id}",
+                    operation="ADD",
+                    confidence=0.7,
+                    now_iso=now_iso,
+                    allow_redistill=False,
+                )
+                if result.atom_id:
+                    promoted += 1
+            except Exception:
+                continue
+
+        # Delete all rows for this session (durable + ephemeral)
+        conn.execute(
+            "DELETE FROM session_context WHERE session_id=?",
+            (session_id,),
+        )
+    return promoted
+
+
+def wm_delete(session_id: str, agent: str, key: str) -> bool:
+    """Remove a single session_context row. Returns True if deleted."""
+    _wm_ensure_schema()
+    with _conn() as conn:
+        cur = conn.execute(
+            "DELETE FROM session_context WHERE session_id=? AND agent=? AND (key=? OR key=?)",
+            (session_id, agent, key, f"durable:{key}"),
+        )
+        return cur.rowcount > 0

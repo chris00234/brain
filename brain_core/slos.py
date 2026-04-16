@@ -450,16 +450,35 @@ def _alert_telegram(slo: SLO, actual: float) -> bool:
     TELEGRAM_CHAT_ID = "8484060831"
     TELEGRAM_ACCOUNT = "jenna-bot"
 
-    if not Path(OPENCLAW_BIN).exists():
-        log.warning("openclaw binary missing — skipping telegram alert for %s", slo.name)
-        return False
     msg = (
         f"[BRAIN SLO {slo.severity.upper()}] {slo.name}\n"
         f"target {slo.target}{slo.metric_unit} · actual {actual}{slo.metric_unit}\n"
         f"{slo.description}"
     )
+
+    def _queue_backlog(reason: str) -> None:
+        try:
+            import sys as _sys
+            _sys.path.insert(0, str(Path(__file__).parent))
+            from llm_backlog import enqueue as _backlog_enqueue
+            _backlog_enqueue(
+                "telegram",
+                {
+                    "body": msg,
+                    "severity": "urgent" if slo.severity == "critical" else "warn",
+                    "source": f"slo:{slo.name}",
+                    "failure_reason": reason,
+                },
+            )
+        except Exception:
+            pass
+
+    if not Path(OPENCLAW_BIN).exists():
+        log.warning("openclaw binary missing — skipping telegram alert for %s", slo.name)
+        _queue_backlog("openclaw_missing")
+        return False
     try:
-        subprocess.run(
+        proc = subprocess.run(
             [
                 OPENCLAW_BIN,
                 "message",
@@ -477,9 +496,18 @@ def _alert_telegram(slo: SLO, actual: float) -> bool:
             text=True,
             timeout=20,
         )
+        if proc.returncode != 0:
+            log.warning(
+                "telegram alert rc=%d stderr=%s — queuing backlog",
+                proc.returncode,
+                (proc.stderr or "")[:200],
+            )
+            _queue_backlog(f"rc={proc.returncode}")
+            return False
         return True
     except Exception as exc:
         log.warning("telegram alert dispatch failed: %s", exc)
+        _queue_backlog(f"exc:{type(exc).__name__}")
         return False
 
 

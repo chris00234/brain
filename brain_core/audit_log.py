@@ -2,11 +2,19 @@
 
 Stored in SQLite for structured queries and UI rendering.
 Every dedup/merge/conflict decision in the Brain system should call log_event().
+
+Test-isolation fix (2026-04-14): `BRAIN_AUDIT_DB` env var overrides the
+default path so pytest fixtures can redirect logging to tmp_path. Without
+this, test runs that triggered upsert_atom failures with mock DBs were
+polluting the production `logs/audit.db` and inflating the
+`atoms_write_fail_rate_1h` SLO (540 bogus failures in one hour from my
+own CR5/CR6 dev scripts).
 """
 from __future__ import annotations
 
 import contextlib
 import json
+import os
 import sqlite3
 import threading
 import uuid
@@ -18,7 +26,16 @@ try:
 except ImportError:
     BRAIN_LOGS_DIR = Path("/Users/chrischo/server/brain/logs")
 
-DB_PATH = BRAIN_LOGS_DIR / "audit.db"
+
+def _resolve_db_path() -> Path:
+    """Resolve the audit DB path, honoring BRAIN_AUDIT_DB env override."""
+    override = os.environ.get("BRAIN_AUDIT_DB")
+    if override:
+        return Path(override)
+    return BRAIN_LOGS_DIR / "audit.db"
+
+
+DB_PATH = _resolve_db_path()
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS audit_events (
@@ -46,19 +63,30 @@ _schema_initialized = False
 _schema_lock = threading.Lock()
 
 
+def _active_db_path() -> Path:
+    """Re-resolve DB path on each call so BRAIN_AUDIT_DB env overrides
+    set after module import (e.g. by pytest fixtures) take effect."""
+    override = os.environ.get("BRAIN_AUDIT_DB")
+    if override:
+        return Path(override)
+    return DB_PATH
+
+
 def _ensure_schema():
     global _schema_initialized
-    if _schema_initialized:
+    path = _active_db_path()
+    if _schema_initialized and path == DB_PATH:
         return
     with _schema_lock:
-        if _schema_initialized:
+        if _schema_initialized and path == DB_PATH:
             return
-        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(DB_PATH))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(path))
         conn.execute("PRAGMA journal_mode=WAL")
         conn.executescript(_SCHEMA)
         conn.close()
-        _schema_initialized = True
+        if path == DB_PATH:
+            _schema_initialized = True
 
 
 @contextlib.contextmanager
@@ -66,7 +94,7 @@ def _conn_ctx():
     """Short-lived connection — opens, yields, closes. Avoids thread-local
     leaks in long-running worker thread pools where threads come and go."""
     _ensure_schema()
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(_active_db_path()))
     conn.row_factory = sqlite3.Row
     try:
         yield conn

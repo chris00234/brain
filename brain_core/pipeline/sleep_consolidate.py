@@ -395,6 +395,14 @@ def _summarize_via_sage(
             message=prompt,
             thinking="off",
             timeout=SUMMARY_TIMEOUT_SEC,
+            backlog_kind="reflect",
+            backlog_payload={
+                "agent": "sage",
+                "prompt": prompt,
+                "thinking": "off",
+                "timeout": SUMMARY_TIMEOUT_SEC,
+                "source": "sleep_consolidate",
+            },
         )
         if result and getattr(result, "ok", False):
             return {"ok": True, "text": (result.text or "")[:2000]}

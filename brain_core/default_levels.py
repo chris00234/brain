@@ -35,6 +35,30 @@ DEFAULT_LEVELS: dict[str, str] = {
     # ── Advisory (read-only proposals — always safe) ─────────
     "advise.daily_brief": "L3",
     "advise.memory_lint": "L3",
+    # ── v3 brain_loop action kinds (continuous executive cortex) ─
+    # Observe-only: loop notices something and writes journal. No external effect.
+    "brain_loop.observe": "L3",
+    # Propose: write candidate to eval_proposals for weekly review.
+    "brain_loop.propose_eval_candidate": "L2",
+    # Dispatch agent for check-in on stalled goal (owner-agent goals).
+    "brain_loop.dispatch_agent_checkin": "L2",
+    # Dispatch agent for contradiction or gap investigation (usually Sage).
+    "brain_loop.dispatch_agent_investigation": "L2",
+    # Push urgent content into active Claude Code session via doorbell file.
+    "brain_loop.push_to_claude": "L2",
+    # Send urgent Telegram alert via Jenna dispatch (breaker, SLO, stalled goal).
+    "brain_loop.telegram_urgent": "L2",
+    # Self-modification: demote or promote autonomy level for an action kind.
+    # Stays L1 by default so Chris must approve until the proposer earns trust.
+    "brain_loop.self_modify_autonomy": "L1",
+    # Self-modification: patch intent_routes.yaml with a new route.
+    "brain_loop.self_modify_route": "L1",
+    # Self-modification: add or adjust scheduler job.
+    "brain_loop.self_modify_scheduler": "L1",
+    # llm_backlog drain: event-driven catch-up when llm.dispatch breaker
+    # just closed. Safe to auto-execute — it just calls handlers that
+    # already exist, no new side effects beyond what normal LLM work does.
+    "brain_loop.drain_llm_backlog": "L3",
     # ── Hard L0 (never auto-execute) ─────────────────────────
     "write.canonical": "L0",  # canonical promotion is human-only
 }
@@ -72,6 +96,20 @@ EXECUTION_WINDOWS: dict[str, list[str]] = {
     "trigger.fire": ["any"],
     "llm.dispatch": ["any"],
     "slo.remediate": ["any"],
+    # brain_loop observation/proposing is safe 24/7.
+    "brain_loop.observe": ["any"],
+    "brain_loop.propose_eval_candidate": ["any"],
+    # Loop can nudge Chris or dispatch any time (doorbell / Telegram).
+    "brain_loop.push_to_claude": ["any"],
+    "brain_loop.telegram_urgent": ["any"],
+    "brain_loop.dispatch_agent_checkin": ["any"],
+    "brain_loop.dispatch_agent_investigation": ["any"],
+    # Self-mods should only land off-hours so they're stable before Chris wakes up.
+    "brain_loop.self_modify_autonomy": ["night"],
+    "brain_loop.self_modify_route": ["night"],
+    "brain_loop.self_modify_scheduler": ["night"],
+    # Catch-up drain: event-driven, must run any time quota returns.
+    "brain_loop.drain_llm_backlog": ["any"],
 }
 
 

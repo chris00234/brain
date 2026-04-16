@@ -314,6 +314,14 @@ def main() -> None:
         thinking="low",
         timeout=DISPATCH_TIMEOUT,
         max_retries=2,  # M8 follow-up: bumped 1 → 2 for transient gateway flakes
+        backlog_kind="synthesis",
+        backlog_payload={
+            "agent": AGENT,
+            "prompt": prompt,
+            "thinking": "low",
+            "timeout": DISPATCH_TIMEOUT,
+            "source": f"daily:{target_date}",
+        },
     )
     if parsed is None:
         # M8 follow-up: soft-fail instead of hard-fail. Writing a placeholder

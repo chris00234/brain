@@ -94,11 +94,22 @@ def _ensure_usage_schema(conn):
         )
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_ts ON llm_usage(timestamp)")
-    # Add skipped_cb column for legacy DBs created before this change
-    try:
-        conn.execute("ALTER TABLE llm_usage ADD COLUMN skipped_cb INTEGER DEFAULT 0")
-    except Exception:
-        pass  # column already exists
+    # Idempotent ALTER TABLE for columns added post-initial schema.
+    # Each ADD COLUMN is in its own try so one pre-existing column doesn't
+    # block later ones. v3 (2026-04-14) adds the provider/model/cache/cost
+    # columns needed for real metering.
+    for col, col_type in (
+        ("skipped_cb",           "INTEGER DEFAULT 0"),
+        ("provider",             "TEXT NOT NULL DEFAULT ''"),
+        ("model",                "TEXT NOT NULL DEFAULT ''"),
+        ("cache_read_tokens",    "INTEGER DEFAULT 0"),
+        ("cache_write_tokens",   "INTEGER DEFAULT 0"),
+        ("cost_usd",             "REAL DEFAULT 0.0"),
+    ):
+        try:
+            conn.execute(f"ALTER TABLE llm_usage ADD COLUMN {col} {col_type}")
+        except Exception:
+            pass  # column already exists
 
 
 def _record_usage(
@@ -108,15 +119,31 @@ def _record_usage(
     prompt_tokens: int = 0,
     response_tokens: int = 0,
     skipped_cb: bool = False,
+    *,
+    provider: str = "",
+    model: str = "",
+    cache_read_tokens: int = 0,
+    cache_write_tokens: int = 0,
+    cost_usd: float = 0.0,
 ):
-    """Record a dispatch to SQLite for budget monitoring."""
+    """Record a dispatch to SQLite for budget monitoring.
+
+    v3 (2026-04-14): was recording tokens=0 and no cost because callers
+    didn't pass usage from the envelope. Now extracts from envelope.result
+    .meta.agentMeta.usage and computes cost via _estimate_cost_usd. Adds
+    provider/model/cache_read_tokens/cache_write_tokens/cost_usd columns
+    via idempotent ALTER TABLE.
+    """
     try:
         LLM_USAGE_DB.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(LLM_USAGE_DB))
         try:
             _ensure_usage_schema(conn)
             conn.execute(
-                "INSERT INTO llm_usage (timestamp, agent, duration_ms, ok, prompt_tokens, response_tokens, skipped_cb) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO llm_usage (timestamp, agent, duration_ms, ok, "
+                "prompt_tokens, response_tokens, skipped_cb, "
+                "provider, model, cache_read_tokens, cache_write_tokens, cost_usd) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     _dt.now().isoformat(),
                     agent,
@@ -125,6 +152,11 @@ def _record_usage(
                     prompt_tokens,
                     response_tokens,
                     1 if skipped_cb else 0,
+                    provider,
+                    model,
+                    cache_read_tokens,
+                    cache_write_tokens,
+                    cost_usd,
                 ),
             )
             conn.commit()
@@ -421,6 +453,68 @@ def _extract_meta(envelope: dict[str, Any]) -> tuple[str, str]:
     return provider, model
 
 
+def _extract_usage(envelope: dict[str, Any]) -> dict[str, int]:
+    """Extract token usage from envelope.result.meta.agentMeta.usage.
+
+    OpenClaw 2026.4+ exposes {input, output, cacheRead, cacheWrite, total}.
+    Returns dict with zero fallbacks so callers don't need to null-check.
+    """
+    try:
+        result = envelope.get("result") or {}
+        meta = result.get("meta") or {}
+        agent_meta = meta.get("agentMeta") or {}
+        usage = agent_meta.get("usage") or {}
+        return {
+            "input": int(usage.get("input") or 0),
+            "output": int(usage.get("output") or 0),
+            "cache_read": int(usage.get("cacheRead") or 0),
+            "cache_write": int(usage.get("cacheWrite") or 0),
+            "total": int(usage.get("total") or 0),
+        }
+    except (TypeError, ValueError, AttributeError):
+        return {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "total": 0}
+
+
+# Rough cost tables — $ per 1M tokens. Updated from OpenAI + Anthropic 2026 pricing.
+# Cache reads cost 25% of input, cache writes cost 125% of input (OpenAI prompt caching).
+_COST_TABLE = {
+    # (provider, model_prefix) → (input_per_m, output_per_m)
+    ("openai-codex", "gpt-5.4"): (15.0, 75.0),
+    ("openai-codex", "gpt-5.3"): (15.0, 75.0),
+    ("openai-codex", "gpt-5"):   (15.0, 75.0),
+    ("openai-codex", "gpt-4o"):  (5.0, 20.0),
+    ("anthropic", "claude-opus-4-6"):   (15.0, 75.0),
+    ("anthropic", "claude-sonnet-4-6"): (3.0, 15.0),
+    ("anthropic", "claude-haiku-4-5"):  (1.0, 5.0),
+    ("ollama", ""):     (0.0, 0.0),  # local, free
+    ("gemini", ""):     (0.0, 0.0),  # free tier
+}
+
+
+def _estimate_cost_usd(provider: str, model: str, usage: dict[str, int]) -> float:
+    """Rough per-call cost in USD. Returns 0 when table has no match."""
+    if not provider or not usage:
+        return 0.0
+    rates: tuple[float, float] | None = None
+    for (p, m_prefix), (in_rate, out_rate) in _COST_TABLE.items():
+        if provider == p and (not m_prefix or model.startswith(m_prefix)):
+            rates = (in_rate, out_rate)
+            break
+    if rates is None:
+        return 0.0
+    input_rate, output_rate = rates
+    # Non-cached input portion: total input minus cache_read
+    fresh_input = max(0, usage["input"] - usage["cache_read"])
+    cached_input = usage["cache_read"]
+    output = usage["output"]
+    cost = (
+        (fresh_input / 1_000_000) * input_rate
+        + (cached_input / 1_000_000) * (input_rate * 0.25)
+        + (output / 1_000_000) * output_rate
+    )
+    return round(cost, 6)
+
+
 def dispatch(
     agent: str,
     message: str,
@@ -428,6 +522,9 @@ def dispatch(
     thinking: str = "low",
     timeout: int = 60,
     degraded_placeholder: str = "",
+    session_id: str | None = None,
+    backlog_kind: str | None = None,
+    backlog_payload: dict | None = None,
 ) -> DispatchResult:
     """Dispatch to an OpenClaw agent with retry + degraded fallback.
 
@@ -439,22 +536,36 @@ def dispatch(
     timeout             : per-attempt subprocess timeout (seconds)
     degraded_placeholder: text to return in .degraded when all retries fail
                           (callers can still persist this to avoid a data gap)
+    session_id          : Optional explicit session to target. When set to a
+                          brain-owned id (e.g. 'brain_dispatch_sage'), isolates
+                          brain's mechanical dispatches from Chris's interactive
+                          Jenna Telegram session, avoiding cross-contamination
+                          of cache prefixes. Default None = agent's main session.
+    backlog_kind        : Optional llm_backlog kind — if the dispatch fails
+                          (rate-limited, circuit-breaker-open, or all retries
+                          exhausted), the work is enqueued onto llm_backlog
+                          for catch-up when LLM quota returns. One of:
+                          classify | entities | distill | synthesis |
+                          proactive | telegram | reflect.
+    backlog_payload     : Payload dict stored with the backlog entry. Must
+                          contain enough context for the kind's handler to
+                          re-run the work (e.g. prompt, out_path, severity).
     """
     global _cb_failures, _cb_open_until
     t_start = _time.time()
     result = DispatchResult(ok=False, attempts=0)
 
-    # Semantic cache check — return cached response for near-identical prompts.
-    # Opt-in via BRAIN_DISPATCH_CACHE_ENABLED (default false).
-    if BRAIN_DISPATCH_CACHE_ENABLED:
-        cached_text = _dispatch_cache_lookup(message)
-        if cached_text:
-            log.info("dispatch: semantic cache hit for agent=%s", agent)
-            return DispatchResult(ok=True, text=cached_text, error="", attempts=0, duration_ms=0)
-
     # Phase 5: persistent circuit breaker via brain_core.breakers (replaces
     # the in-memory CB). Falls back to legacy in-memory CB if breakers module
     # can't be imported.
+    #
+    # CR9 fix (2026-04-14): breaker check MUST run BEFORE cache check, so
+    # time-sensitive callers hit the enqueue-backlog path when LLM is
+    # known-down rather than getting a stale cache hit that masks the
+    # outage from their own catch-up logic. Previously cache was first
+    # and the enqueue was skipped — a Telegram alert with a cached
+    # response text would return ok=True to the caller, bypassing the
+    # intended llm_backlog behavior.
     _persistent_cb = None
     try:
         from breakers import peek_breaker as _pb
@@ -465,6 +576,7 @@ def dispatch(
         if snapshot.is_open:
             log.warning("llm.dispatch breaker open — fast-failing dispatch to %s", agent)
             _record_usage(agent, 0, ok=False, skipped_cb=True)
+            _enqueue_backlog_if_requested(backlog_kind, backlog_payload, "breaker_open")
             return DispatchResult(
                 ok=False,
                 text="",
@@ -476,12 +588,43 @@ def dispatch(
     except Exception:
         _persistent_cb = None
 
+    # Semantic cache check — return cached response for near-identical prompts.
+    # Opt-in via BRAIN_DISPATCH_CACHE_ENABLED (default false).
+    #
+    # CR9 fix (2026-04-14): cache hit MUST still record usage + heal
+    # breaker so metering + spike detection stay accurate. Previously
+    # cache returned a bare DispatchResult bypassing every bookkeeping
+    # path, so _sense_llm_usage_spike saw deflated baselines and the
+    # half-open breaker never healed from cached traffic.
+    if BRAIN_DISPATCH_CACHE_ENABLED:
+        cached_text = _dispatch_cache_lookup(message)
+        if cached_text:
+            log.info("dispatch: semantic cache hit for agent=%s", agent)
+            # Record usage with provider='cache' so spike detection sees
+            # every call (even cached) and cost metering stays accurate.
+            _record_usage(agent, 0, ok=True, provider="cache", model="cache")
+            if _persistent_cb is not None:
+                try:
+                    _persistent_cb[1]("llm.dispatch", ok=True)
+                except Exception:
+                    pass
+            return DispatchResult(
+                ok=True,
+                text=cached_text,
+                error="",
+                attempts=0,
+                duration_ms=0,
+                provider="cache",
+                model="cache",
+            )
+
     # Legacy in-memory CB (kept as fallback during cutover)
     with _cb_lock:
         if _time.monotonic() < _cb_open_until:
             log.warning("circuit breaker open — fast-failing dispatch to %s", agent)
             # Record as skipped_cb so it doesn't inflate failure counts in budget stats
             _record_usage(agent, 0, ok=False, skipped_cb=True)
+            _enqueue_backlog_if_requested(backlog_kind, backlog_payload, "breaker_open_legacy")
             return DispatchResult(
                 ok=False,
                 text="",
@@ -504,37 +647,59 @@ def dispatch(
             result.error = f"total wall time exceeded {MAX_TOTAL_SECONDS}s"
             break
         result.attempts = attempt_index + 1
-        # M9.1 fix: use Popen with preexec_fn=os.setsid so we can SIGKILL the
-        # entire process group on timeout. subprocess.run() with timeout alone
-        # only kills the immediate child — openclaw's agent subcommand spawns
-        # grandchildren (ACP gateway HTTP client) that hold the stdout pipe
-        # open, causing Python's _communicate() to block forever on pipe EOF
-        # even after the parent is SIGKILL'd. This hit eval_relabel twice,
-        # losing multi-hour runs. Process group kill is the only reliable
-        # way to tear down the whole tree.
+        # D fix (2026-04-14): replaced Popen PIPE + communicate() with tempfile
+        # redirection + wait(). The old M9.1 approach used start_new_session
+        # + killpg on timeout, but that still left a class of deadlocks where
+        # openclaw grandchildren (ACP gateway HTTP client) held the stdout
+        # pipe open AND somehow escaped the process group via their own
+        # setsid() — so killpg couldn't reach them, and Python's
+        # communicate() blocked forever waiting for pipe EOF. Reproduced
+        # twice in bulk entity extraction (backfill hung at atom ~50 both
+        # runs, 0% CPU, single idle Neo4j socket).
+        #
+        # Tempfile-based I/O eliminates the entire deadlock class: writes go
+        # to disk file descriptors, not pipes, so there's nothing for
+        # grandchildren to hold open from the parent's perspective. wait()
+        # is much simpler than communicate() — it just polls the child's
+        # exit. On timeout we still killpg the whole tree for safety, but
+        # we never depend on pipe drainage to unblock the parent.
         popen = None
+        stdout_f = None
+        stderr_f = None
         try:
+            _cmd = [
+                OPENCLAW_BIN,
+                "agent",
+                "--agent",
+                agent,
+                "--message",
+                message,
+                "--json",
+                "--thinking",
+                thinking,
+                "--timeout",
+                str(timeout),
+            ]
+            if session_id:
+                _cmd.extend(["--session-id", session_id])
+            import tempfile as _tempfile
+            stdout_f = _tempfile.TemporaryFile(mode="w+", encoding="utf-8")
+            stderr_f = _tempfile.TemporaryFile(mode="w+", encoding="utf-8")
             popen = subprocess.Popen(  # noqa: S603
-                [
-                    OPENCLAW_BIN,
-                    "agent",
-                    "--agent",
-                    agent,
-                    "--message",
-                    message,
-                    "--json",
-                    "--thinking",
-                    thinking,
-                    "--timeout",
-                    str(timeout),
-                ],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                _cmd,
+                stdout=stdout_f,
+                stderr=stderr_f,
                 text=True,
                 start_new_session=True,  # makes popen.pid a process group leader
             )
             try:
-                stdout, stderr = popen.communicate(timeout=timeout + 30)
+                popen.wait(timeout=timeout + 30)
+
+                # Rewind and read tempfiles. No pipe — no deadlock.
+                stdout_f.seek(0)
+                stdout = stdout_f.read()
+                stderr_f.seek(0)
+                stderr = stderr_f.read()
 
                 class _ProcLike:
                     pass
@@ -552,12 +717,30 @@ def dispatch(
                     _os.killpg(_os.getpgid(popen.pid), _signal.SIGKILL)
                 except (ProcessLookupError, PermissionError):
                     pass
-                # Now drain whatever's left (should unblock after group kill)
+                # Give the group 5s to die, then hard-kill the immediate child
                 try:
-                    popen.communicate(timeout=5)
+                    popen.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     popen.kill()
+                    try:
+                        popen.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        pass
                 raise e from None
+            finally:
+                # Always close tempfiles — they're unlinked on close via
+                # TemporaryFile semantics, so grandchildren holding the fd
+                # just drain into a deleted file (harmless).
+                if stdout_f is not None:
+                    try:
+                        stdout_f.close()
+                    except Exception:
+                        pass
+                if stderr_f is not None:
+                    try:
+                        stderr_f.close()
+                    except Exception:
+                        pass
         except subprocess.TimeoutExpired as e:
             result.error = f"subprocess timeout: {e}"
             _log_failure(
@@ -581,6 +764,16 @@ def dispatch(
                     result.envelope = envelope
                     result.provider, result.model = _extract_meta(envelope)
                     result.duration_ms = int((_time.time() - t_start) * 1000)
+                    # CR10 fix (2026-04-14): clear sticky error flags on
+                    # ultimate success. Previously result.rate_limited and
+                    # auth_failed were `x or y` accumulators that never
+                    # reset — so an attempt 1 rate-limited + attempt 2
+                    # success returned ok=True AND rate_limited=True.
+                    # Callers inspecting rate_limited on a success path
+                    # (e.g. future conditional backlog enqueue) would
+                    # make the wrong call.
+                    result.rate_limited = False
+                    result.auth_failed = False
                     with _cb_lock:
                         _cb_failures = 0
                     if _persistent_cb is not None:
@@ -588,7 +781,21 @@ def dispatch(
                             _persistent_cb[1]("llm.dispatch", ok=True)
                         except Exception:
                             pass
-                    _record_usage(agent, result.duration_ms, ok=True)
+                    # v3 metering: pull usage from envelope + estimate cost
+                    _usage = _extract_usage(envelope)
+                    _cost = _estimate_cost_usd(result.provider, result.model, _usage)
+                    _record_usage(
+                        agent,
+                        result.duration_ms,
+                        ok=True,
+                        prompt_tokens=_usage["input"],
+                        response_tokens=_usage["output"],
+                        provider=result.provider,
+                        model=result.model,
+                        cache_read_tokens=_usage["cache_read"],
+                        cache_write_tokens=_usage["cache_write"],
+                        cost_usd=_cost,
+                    )
                     _update_agent_stats(agent, result.duration_ms, True, result.attempts)
                     _check_struggle(agent, message, result.duration_ms, True, result.attempts)
                     if BRAIN_DISPATCH_CACHE_ENABLED:
@@ -643,7 +850,34 @@ def dispatch(
     _record_usage(agent, result.duration_ms, ok=False)
     _update_agent_stats(agent, result.duration_ms, False, result.attempts)
     _check_struggle(agent, message, result.duration_ms, False, result.attempts)
+    _enqueue_backlog_if_requested(
+        backlog_kind,
+        backlog_payload,
+        reason=(
+            "rate_limited"
+            if result.rate_limited
+            else ("auth_failed" if result.auth_failed else "exhausted")
+        ),
+    )
     return result
+
+
+def _enqueue_backlog_if_requested(
+    kind: str | None,
+    payload: dict | None,
+    reason: str,
+) -> None:
+    """Stamp this failed dispatch onto llm_backlog so the work gets re-tried
+    when quota returns. Best-effort — swallows all errors."""
+    if not kind:
+        return
+    try:
+        from llm_backlog import enqueue as _backlog_enqueue
+        final_payload = dict(payload or {})
+        final_payload.setdefault("failure_reason", reason)
+        _backlog_enqueue(kind, final_payload)
+    except Exception:
+        pass
 
 
 def dispatch_with_schema(
@@ -653,10 +887,15 @@ def dispatch_with_schema(
     thinking: str = "low",
     timeout: int = 60,
     max_retries: int = 2,
+    backlog_kind: str | None = None,
+    backlog_payload: dict | None = None,
 ) -> dict | None:
     """Dispatch with JSON schema validation + retry on parse failure.
 
     Returns parsed dict on success, None if all retries fail.
+
+    backlog_kind / backlog_payload are passed through to dispatch() on
+    transport failure so llm_backlog catches up when quota returns.
     """
     import json as _json
     import re as _re
@@ -667,7 +906,14 @@ def dispatch_with_schema(
     for attempt in range(max_retries + 1):
         # Rebuild prompt each iteration — schema_instruction is never duplicated
         full_message = message + schema_instruction + error_suffix
-        result = dispatch(agent=agent, message=full_message, thinking=thinking, timeout=timeout)
+        result = dispatch(
+            agent=agent,
+            message=full_message,
+            thinking=thinking,
+            timeout=timeout,
+            backlog_kind=backlog_kind,
+            backlog_payload=backlog_payload,
+        )
 
         # Transport failure: dispatch already retried internally. Give up.
         if not result.ok:
