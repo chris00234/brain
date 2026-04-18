@@ -40,12 +40,67 @@ ACTIVE_AGENTS = {"jenna", "liz", "ellie", "sage", "market", "claude"}
 MIN_TEXT_LEN = 50
 MAX_EXCHANGE_CHARS = 2000  # cap per exchange before batching
 
-# Prefixes of prompts that OTHER ingest scripts dispatch to agents (Jenna mostly).
-# Skip these so the ingest doesn't re-distill its own meta-work (feedback loop).
+# 2026-04-17: expanded brain-machinery prompt filter.
+# Root cause of the reject loop: the jenna agent session is BOTH the
+# subject (ingest reads from jenna/sessions/) AND the inspector (ingest
+# dispatches to Jenna for distillation). Without filtering,
+# 95%+ of jenna's session is brain→Jenna mechanical dispatches — not
+# real Chris↔Jenna conversations. Jenna correctly rejects them all,
+# but the ingest burns LLM cycles discovering that fact every cron run.
+#
+# These prefixes cover every known brain-code → agent dispatch template
+# so they're dropped at parse time (before LLM call).
 META_INGEST_PREFIXES = (
     "You are Jenna. Review these",
     "You are Sage. Review these",
     "You are Ellie. Review these",
+    "You are extracting durable memories about Chris",  # learn.py DISTILL_PROMPT
+    "You are Chris's second brain.",                   # hyde.py HYDE_PROMPT
+    "Rewrite the following search query",              # hyde.py EXPAND_PROMPT
+    "Rewrite the query below",                         # hyde.py EXPAND_PROMPT new form
+    "[brain_loop URGENT]",                             # brain_loop._telegram_alert (pre-Bot-API)
+    "[BRAIN MEMORY NUDGE]",                            # memory_nudge (pre-migration)
+    "[BRAIN ALERT]",                                   # scheduler._alert_failure (pre-migration)
+    "[BRAIN SLO ",                                     # slos.py _alert_telegram prefix
+    "[AGENT MSG]",                                     # agent_messenger._escalate
+    "[brain_loop → ",                                  # brain_loop dispatch placeholder
+    "Classify the following",                          # atoms_gate / ingest_classifier
+    "Extract entities from",                           # entity_graph
+    "Generate a dense summary",                        # synthesis prompts
+    "Continue where you left off",                     # brain reasoning resume
+    "Return JSON array ONLY",                          # mechanical JSON extractor prompts
+    "Return JSON ONLY",                                # variant
+    "You ARE Chris",                                   # jenna persona evaluator prompts
+    "As Chris's second brain, answer",                 # synthesis.reflect prompts
+    "Today is ",                                       # daily/weekly synthesis headers
+    "Given this session transcript",                   # learn.py variant
+    "Given the following facts",                       # decide / reason prompts
+    "Score this atom",                                 # confidence_calibration eval
+    "You are Jenna, Chris's chief of staff",           # daily_synthesis prompt
+    "You are Jenna. Chris's chief of staff",           # variant
+    "Read HEARTBEAT.md",                               # jenna heartbeat
+    "System: [2",                                       # brain-forwarded system wrappers
+    "Execute this task:",                              # task_queue dispatches
+    "[BRAIN EVAL ALERT]",                              # eval_run regression alerts
+    "[BRAIN ALERT]",                                   # alerts (already above but safe)
+    "## Chris's Profile",                              # profile dump context prompts
+    "## Identity",                                     # profile section dumps
+)
+
+# 2026-04-17: assistant-side filter. Skip exchanges whose assistant reply
+# is a pure JSON extraction blob — that's the PRIOR round of this same
+# ingest pipeline talking to itself. Regex catches the top-level JSON
+# envelopes returned by learn.py distill / this file's own distillation.
+_ASSISTANT_EXTRACTION_JSON_PATTERNS = (
+    '{"keep":',           # this file's own output
+    '{"memories":',       # learn.py output
+    '{"corrections":',    # learn.py output
+    '{"topic_key":',      # ingest_classifier
+    '{"entities":',       # entity_graph
+    '{"narrative":',      # daily synthesis output
+    '[{"content":',       # classify bulk output
+    '```json\n{"keep"',   # fenced variants
+    '```json\n[',         # fenced array variants
 )
 
 
@@ -214,6 +269,21 @@ def parse_session(path: Path, offset: int = 0) -> tuple[list[dict], int, str]:
                 }
         elif role == "assistant" and pending_user:
             text = extract_assistant_text(content)
+            # Skip pure-extraction JSON replies: these are prior rounds of
+            # this same ingest pipeline talking to itself. They have no
+            # Chris-signal even if the user prompt wasn't a meta prefix.
+            # Use a whitespace-tolerant heuristic: strip ALL leading whitespace
+            # + optional fence, then check if the first token resembles a
+            # known extraction-schema key.
+            stripped = text.lstrip()
+            if stripped.startswith("```"):
+                stripped = stripped.split("\n", 1)[-1].lstrip()
+            if stripped.startswith("{") or stripped.startswith("["):
+                # Strip optional whitespace/newlines between { and first key
+                compact = "".join(stripped.split())  # removes all whitespace
+                if any(compact.startswith(p) for p in _ASSISTANT_EXTRACTION_JSON_PATTERNS):
+                    pending_user = None
+                    continue
             if len(text) >= MIN_TEXT_LEN:
                 exchanges.append(
                     {
