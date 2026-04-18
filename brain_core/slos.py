@@ -486,8 +486,12 @@ def _measure_dispatch_failure_rate_1h() -> float:
         failures_path = BRAIN_LOGS_DIR / "dispatch-failures.jsonl"
         if not failures_path.exists():
             return 0.0
-        cutoff = _dt.datetime.now(_dt.UTC) - _dt.timedelta(hours=1)
-        cutoff_iso = cutoff.isoformat()
+        # llm_usage.db stores timezone-naive strings like
+        # '2026-04-17T21:09:53.050267'. failures.jsonl uses ISO with
+        # +00:00 suffix. Normalize both to zone-stripped strings so
+        # lexical string comparison works.
+        cutoff_dt_naive = _dt.datetime.now(_dt.UTC).replace(tzinfo=None) - _dt.timedelta(hours=1)
+        cutoff_str = cutoff_dt_naive.strftime("%Y-%m-%dT%H:%M:%S")
 
         fail_count = 0
         # Tail-read: only scan last ~100KB for recent entries
@@ -505,21 +509,24 @@ def _measure_dispatch_failure_rate_1h() -> float:
                 log.debug("silenced exception in slos.py: %s", _exc)
                 continue
             ts = rec.get("timestamp", "")
-            if ts and ts >= cutoff_iso:
+            # Strip timezone for apples-to-apples compare
+            ts_naive = ts.split("+")[0].split("Z")[0] if ts else ""
+            if ts_naive and ts_naive >= cutoff_str:
                 fail_count += 1
 
-        # Total dispatches from llm_usage.db
+        # Total dispatches from llm_usage.db (column is `timestamp`)
         try:
             llm_db = BRAIN_LOGS_DIR / "llm_usage.db"
             if not llm_db.exists():
                 return 0.0
             with sqlite3.connect(str(llm_db)) as conn:
                 row = conn.execute(
-                    "SELECT COUNT(*) FROM llm_usage WHERE ts_utc >= ?",
-                    (cutoff_iso,),
+                    "SELECT COUNT(*) FROM llm_usage WHERE timestamp >= ?",
+                    (cutoff_str,),
                 ).fetchone()
             total = int(row[0] or 0) if row else 0
-        except Exception:
+        except Exception as exc:
+            log.debug("dispatch_failure_rate llm_usage query failed: %s", exc)
             total = 0
 
         if total == 0:
