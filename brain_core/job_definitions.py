@@ -18,10 +18,38 @@ JOB_SCHEDULE so callers can do either:
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
-from scheduler import ScheduledJob
+
+@dataclass
+class ScheduledJob:
+    """Declarative spec for one cron job.
+
+    Lives here (not scheduler.py) to keep job_definitions import-clean
+    as a standalone module. scheduler.py re-exports for back-compat."""
+
+    name: str  # must match a key in server.py JOB_REGISTRY
+    description: str
+    trigger: object  # CronTrigger or IntervalTrigger
+    agent: str  # owning agent (jenna|sage|ellie|market|system)
+    # 2026-04-16 fix: default dropped 3600→300 to prevent thundering-herd
+    # after brain-server restart. Previously a 50-min downtime would
+    # re-fire ~22 jobs simultaneously (every default-grace job) when the
+    # server came back up, saturating Ollama+Neo4j. 5 min is enough slack
+    # for a graceful restart; jobs that genuinely benefit from a longer
+    # replay window (weekly Sage syntheses, monthly backups) set their
+    # own misfire_grace explicitly (900, 1800).
+    misfire_grace: int = 300
+
+    def next_run_str(self, scheduler: AsyncIOScheduler) -> str:
+        job = scheduler.get_job(self.name)
+        if not job or not job.next_run_time:
+            return "none"
+        return job.next_run_time.strftime("%Y-%m-%d %H:%M:%S %Z")
 
 JOB_SCHEDULE: list[ScheduledJob] = [
     # Ingest — fixed off-hours schedule to avoid Ollama contention during work hours.

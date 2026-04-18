@@ -34,36 +34,13 @@ from apscheduler.triggers.interval import IntervalTrigger
 log = logging.getLogger("brain.scheduler")
 
 
-@dataclass
-class ScheduledJob:
-    """Declarative spec for one cron job."""
-
-    name: str  # must match a key in server.py JOB_REGISTRY
-    description: str
-    trigger: object  # CronTrigger or IntervalTrigger
-    agent: str  # owning agent (jenna|sage|ellie|market|system)
-    # 2026-04-16 fix: default dropped 3600→300 to prevent thundering-herd
-    # after brain-server restart. Previously a 50-min downtime would
-    # re-fire ~22 jobs simultaneously (every default-grace job) when the
-    # server came back up, saturating Ollama+Neo4j. 5 min is enough slack
-    # for a graceful restart; jobs that genuinely benefit from a longer
-    # replay window (weekly Sage syntheses, monthly backups) set their
-    # own misfire_grace explicitly (900, 1800).
-    misfire_grace: int = 300
-
-    def next_run_str(self, scheduler: AsyncIOScheduler) -> str:
-        job = scheduler.get_job(self.name)
-        if not job or not job.next_run_time:
-            return "none"
-        return job.next_run_time.strftime("%Y-%m-%d %H:%M:%S %Z")
-
-
-# ── Schedule ────────────────────────────────────────────────────────────
-# 2026-04-17: extracted to brain_core/job_definitions.py to keep this
-# module focused on scheduler machinery (was 1388 lines / 874 of pure
-# data). Back-compat: JOB_SCHEDULE is re-exported so every existing
-# `from scheduler import JOB_SCHEDULE` caller keeps working.
-from job_definitions import JOB_SCHEDULE  # noqa: E402
+# 2026-04-17: ScheduledJob + JOB_SCHEDULE both live in job_definitions
+# now. We re-export here so `from scheduler import ScheduledJob,
+# JOB_SCHEDULE` keeps working. Previously ScheduledJob was defined in
+# this file and job_definitions imported back — creating a circular
+# import that broke when job_definitions was imported standalone
+# (caught by tests/unit/test_brain_core_smoke.py).
+from job_definitions import JOB_SCHEDULE, ScheduledJob  # noqa: E402, F401
 
 # Historical inline entries removed (see job_definitions.py):
 # The inline list used to span ~874 lines here.
