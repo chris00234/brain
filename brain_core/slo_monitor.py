@@ -348,13 +348,17 @@ def monitor_cycle() -> dict:
         try:
             sys.path.insert(0, str(Path(__file__).resolve().parent))
             if _should_dispatch_alert(alerts):
-                from cli_llm import dispatch
+                # 2026-04-18: previously routed through cli_llm.dispatch(agent="jenna")
+                # which ran the full codex→spark→claude fallback chain for a
+                # notification whose body was fully pre-formatted. No LLM value;
+                # just 2-6s + tokens before Telegram. Direct Bot API send has
+                # its own backlog fallback on rate-limit/outage.
+                from telegram_alert import send_chris_telegram
 
-                dispatch(
-                    agent="jenna",
-                    message="BRAIN SLO ALERT:\n" + "\n".join(alerts),
-                    thinking="off",
-                    timeout=30,
+                send_chris_telegram(
+                    body="BRAIN SLO ALERT:\n" + "\n".join(alerts),
+                    source="slo_monitor",
+                    severity="warn",
                 )
                 _record_alert_dispatched(alerts)
         except Exception as e:

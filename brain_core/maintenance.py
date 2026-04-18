@@ -125,21 +125,18 @@ def check_chroma_integrity() -> dict:
         print(f"[chroma_integrity] OK — {CHROMA_DB.stat().st_size / 1024 / 1024:.1f}MB")
         return {"status": "ok", "size_mb": round(CHROMA_DB.stat().st_size / 1024 / 1024, 1)}
 
-    # Corruption detected — alert via Jenna
+    # Corruption detected — direct Telegram (no LLM; message body is fully
+    # pre-formatted). 2026-04-18: previously went through cli_llm.dispatch
+    # which ran the full codex→spark→claude fallback chain just to deliver
+    # a 100-char fixed alert. send_chris_telegram has its own backlog
+    # fallback if Telegram is rate-limited or the CLI is missing.
     msg = f"ALERT: ChromaDB integrity check FAILED: {status}. Immediate attention required."
     print(f"[chroma_integrity] {msg}")
     try:
         sys.path.insert(0, str(Path(__file__).parent))
-        from cli_llm import dispatch
+        from telegram_alert import send_chris_telegram
 
-        dispatch(
-            agent="jenna",
-            message=msg,
-            thinking="off",
-            timeout=30,
-            backlog_kind="telegram",
-            backlog_payload={"body": msg, "severity": "urgent", "source": "chroma_integrity"},
-        )
+        send_chris_telegram(body=msg, source="chroma_integrity", severity="urgent")
     except Exception:
         pass
 
