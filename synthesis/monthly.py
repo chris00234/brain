@@ -53,7 +53,7 @@ def log_failure(reason: str) -> None:
     try:
         FAILURE_LOG.parent.mkdir(parents=True, exist_ok=True)
         with FAILURE_LOG.open("a") as f:
-            f.write(json.dumps({"timestamp": datetime.now().isoformat(), "reason": reason[:500]}) + "\n")
+            f.write(json.dumps({"timestamp": datetime.now(UTC).isoformat(), "reason": reason[:500]}) + "\n")
     except Exception:
         pass
 
@@ -225,7 +225,7 @@ def main() -> None:
     if args.month:
         target_month = args.month
     else:
-        now = datetime.now()
+        now = datetime.now(UTC)
         if now.month == 1:
             target_month = f"{now.year - 1}-12"
         else:

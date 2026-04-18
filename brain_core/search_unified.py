@@ -1900,9 +1900,12 @@ def search_all(
             if best_idx < 0:
                 break
             # Early exit: marginal gain vs prev iteration too small.
+            # 2026-04-18: previously appended best_idx before breaking, so the
+            # item whose gain was BELOW threshold still made it into the
+            # selected set — off-by-one against the "stop when below threshold"
+            # intent. Now break without including it so MMR selection matches
+            # the threshold semantics.
             if prev_best is not None and (prev_best - best_score) < EARLY_EXIT_GAIN:
-                selected_idx.append(best_idx)
-                remaining_idx.remove(best_idx)
                 break
             prev_best = best_score
             selected_idx.append(best_idx)

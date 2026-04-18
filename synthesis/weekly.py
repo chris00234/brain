@@ -48,16 +48,18 @@ def log_failure(reason: str) -> None:
     try:
         FAILURE_LOG.parent.mkdir(parents=True, exist_ok=True)
         with FAILURE_LOG.open("a") as f:
-            f.write(json.dumps({"timestamp": datetime.now().isoformat(), "reason": reason[:500]}) + "\n")
+            f.write(json.dumps({"timestamp": datetime.now(UTC).isoformat(), "reason": reason[:500]}) + "\n")
     except Exception:
         pass
 
 
 def collect_week(target_week: str) -> dict:
     """Collect last 7 days of daily syntheses + recent decisions for the prompt."""
-    # target_week is like "2026-W14"; resolve to its Monday
+    # target_week is like "2026-W14"; resolve to its Monday (tz-aware UTC so
+    # the later mtime comparison on line 74 works — previously monday was
+    # naive local time and got compared to a UTC mtime, raising TypeError).
     year, w = target_week.split("-W")
-    monday = datetime.strptime(f"{year}-W{w}-1", "%G-W%V-%u")
+    monday = datetime.strptime(f"{year}-W{w}-1", "%G-W%V-%u").replace(tzinfo=UTC)
     days = [(monday + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(7)]
 
     daily_notes = []
@@ -71,7 +73,7 @@ def collect_week(target_week: str) -> dict:
         cutoff = monday - timedelta(days=14)
         for f in sorted(CANONICAL_DECISIONS.glob("*.md")):
             try:
-                if datetime.fromtimestamp(f.stat().st_mtime) >= cutoff:
+                if datetime.fromtimestamp(f.stat().st_mtime, tz=UTC) >= cutoff:
                     recent_decisions.append({"file": f.name, "content": f.read_text()[:1500]})
             except Exception:
                 continue
@@ -196,7 +198,7 @@ def main() -> None:
     parser.add_argument("--force", action="store_true", help="Re-run even if weekly arc already exists")
     args = parser.parse_args()
 
-    target_week = args.week or datetime.now().strftime("%G-W%V")
+    target_week = args.week or datetime.now(UTC).strftime("%G-W%V")
     print(f"Weekly synthesis for {target_week}")
 
     existing = WEEKLY_OUT / f"{target_week}.md"

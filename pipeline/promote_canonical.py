@@ -202,7 +202,13 @@ def deactivate_superseded(
         write_markdown_frontmatter(note_path, metadata, body)
         _mirror_supersession_to_chroma(note_path, replacement_id)
         return
-    raise SystemExit(f"Superseded note not found: {note_id}")
+    # 2026-04-18: previously raised SystemExit. With multiple --supersede IDs,
+    # one missing ID took out the whole promotion after earlier IDs had already
+    # been marked superseded on disk — leaving pointers to a replacement that
+    # would never be written. Warn + continue so the rest of the promotion
+    # completes; caller can re-run with corrected IDs.
+    print(f"[promote_canonical] WARN: superseded note not found: {note_id} (skipping)")
+    return
 
 
 def main() -> int:

@@ -175,8 +175,8 @@ JOB_SCHEDULE: list[ScheduledJob] = [
     # pass, much less for incremental.
     ScheduledJob(
         name="contextual_embed_weekly",
-        description="T2.12: re-embed canonical chunks with Anthropic-style per-doc context prefix (Sun 5:00am)",
-        trigger=CronTrigger(day_of_week="sun", hour=5, minute=0),
+        description="T2.12: re-embed canonical chunks with Anthropic-style per-doc context prefix (Sun 5:10am — staggered off community_summaries @5:00)",
+        trigger=CronTrigger(day_of_week="sun", hour=5, minute=10),
         agent="system",
         misfire_grace=1800,
     ),
@@ -220,8 +220,8 @@ JOB_SCHEDULE: list[ScheduledJob] = [
     # 2026-04-17 — LLM auto-triage for candidate eval_proposals (daily 4:20am).
     ScheduledJob(
         name="eval_proposal_triage",
-        description="CLI codex auto-approves/rejects candidate eval_proposals (daily 4:20am)",
-        trigger=CronTrigger(hour=4, minute=20),
+        description="CLI codex auto-approves/rejects candidate eval_proposals (daily 4:25am — staggered off action_audit_retention @4:20 to avoid autonomy.db lock contention)",
+        trigger=CronTrigger(hour=4, minute=25),
         agent="system",
         misfire_grace=900,
     ),
@@ -292,8 +292,8 @@ JOB_SCHEDULE: list[ScheduledJob] = [
     # before Chris's next frontend work depends on stale context.
     ScheduledJob(
         name="canonical_design_drift",
-        description="v3: weekly design source vs canonical mirror SHA check (Sun 05:30)",
-        trigger=CronTrigger(day_of_week="sun", hour=5, minute=30),
+        description="v3: weekly design source vs canonical mirror SHA check (Sun 05:25 — off db_vacuum_weekly @5:30 to avoid VACUUM lock contention)",
+        trigger=CronTrigger(day_of_week="sun", hour=5, minute=25),
         agent="system",
         misfire_grace=900,
     ),
@@ -540,8 +540,8 @@ JOB_SCHEDULE: list[ScheduledJob] = [
     ),
     ScheduledJob(
         name="embed_cache_prune",
-        description="Prune embed cache: drop legacy rows, age >60d, cap 25k (daily 4:05am)",
-        trigger=CronTrigger(hour=4, minute=5),
+        description="Prune embed cache: drop legacy rows, age >60d, cap 25k (daily 4:08am — staggered off content_quality_slo @4:05)",
+        trigger=CronTrigger(hour=4, minute=8),
         agent="system",
         misfire_grace=900,
     ),
@@ -585,8 +585,8 @@ JOB_SCHEDULE: list[ScheduledJob] = [
     ),
     ScheduledJob(
         name="memory_observability",
-        description="Weekly memory observability report (Sunday 5am)",
-        trigger=CronTrigger(day_of_week="sun", hour=5, minute=0),
+        description="Weekly memory observability report (Sunday 5:20am — staggered off community_summaries @5:00 / contextual_embed @5:10)",
+        trigger=CronTrigger(day_of_week="sun", hour=5, minute=20),
         agent="system",
         misfire_grace=900,
     ),
@@ -613,8 +613,8 @@ JOB_SCHEDULE: list[ScheduledJob] = [
     ),
     ScheduledJob(
         name="answer_canonicalize",
-        description="Nightly query→canonical promoter (03:50am — staggered off neo4j_backup at 03:15 to avoid reading while backup writes)",
-        trigger=CronTrigger(hour=3, minute=50),
+        description="Nightly query→canonical promoter (03:55am — off eval_run_extended @3:50 so canonical writes don't pollute eval scoring)",
+        trigger=CronTrigger(hour=3, minute=55),
         agent="system",
         misfire_grace=900,
     ),
@@ -702,14 +702,14 @@ JOB_SCHEDULE: list[ScheduledJob] = [
     ),
     ScheduledJob(
         name="infra_validation",
-        description="Weekly infra fact cross-check against live state (Sunday 7:15am)",
-        trigger=CronTrigger(day_of_week="sun", hour=7, minute=15),
+        description="Weekly infra fact cross-check against live state (Sunday 7:10am — staggered off raptor_build @7:15 which is heavy LLM)",
+        trigger=CronTrigger(day_of_week="sun", hour=7, minute=10),
         agent="system",
     ),
     ScheduledJob(
         name="memory_health_report",
-        description="Weekly memory health report (Sunday 7:30am)",
-        trigger=CronTrigger(day_of_week="sun", hour=7, minute=30),
+        description="Weekly memory health report (Sunday 7:35am — staggered off eval_holdout_graduate @7:30)",
+        trigger=CronTrigger(day_of_week="sun", hour=7, minute=35),
         agent="system",
     ),
     ScheduledJob(
@@ -772,8 +772,8 @@ JOB_SCHEDULE: list[ScheduledJob] = [
     ),
     ScheduledJob(
         name="trust_recompute",
-        description="Weekly cross-source corroboration trust score refresh (Sunday 7:00am)",
-        trigger=CronTrigger(day_of_week="sun", hour=7, minute=0),
+        description="Weekly cross-source corroboration trust score refresh (Sunday 7:05am — staggered off canonical_quality_triage @7:00)",
+        trigger=CronTrigger(day_of_week="sun", hour=7, minute=5),
         agent="system",
         misfire_grace=900,
     ),
@@ -790,8 +790,8 @@ JOB_SCHEDULE: list[ScheduledJob] = [
     # ~/.claude/skills/brain-learned-*. No LLM calls.
     ScheduledJob(
         name="atoms_to_skills",
-        description="Promote high-confidence atoms → domain Claude Code skills (Sun 04:55)",
-        trigger=CronTrigger(day_of_week="sun", hour=4, minute=55),
+        description="Promote high-confidence atoms → domain Claude Code skills (Sun 04:58 — staggered off llm_usage_purge @4:55)",
+        trigger=CronTrigger(day_of_week="sun", hour=4, minute=58),
         agent="system",
         misfire_grace=900,
     ),
@@ -902,8 +902,8 @@ JOB_SCHEDULE: list[ScheduledJob] = [
     # gap_detection so proposals land in the same nightly pipeline).
     ScheduledJob(
         name="schema_revision",
-        description="Weekly free-energy schema revision (Sun 08:45)",
-        trigger=CronTrigger(day_of_week="sun", hour=8, minute=45),
+        description="Weekly free-energy schema revision (Sun 08:50 — staggered off eval_holdout_promote @8:45)",
+        trigger=CronTrigger(day_of_week="sun", hour=8, minute=50),
         agent="system",
         misfire_grace=900,
     ),

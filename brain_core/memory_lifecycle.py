@@ -77,7 +77,7 @@ def log_extraction_failure(reason: str) -> None:
     try:
         EXTRACTION_FAILURE_LOG.parent.mkdir(parents=True, exist_ok=True)
         with EXTRACTION_FAILURE_LOG.open("a") as f:
-            f.write(json.dumps({"timestamp": datetime.now().isoformat(), "reason": reason[:500]}) + "\n")
+            f.write(json.dumps({"timestamp": datetime.now(UTC).isoformat(), "reason": reason[:500]}) + "\n")
     except Exception:
         pass
 

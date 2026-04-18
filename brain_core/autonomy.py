@@ -210,8 +210,20 @@ def _autopilot_enabled() -> bool:
 
 
 def _in_quiet_hours(now_local: datetime) -> bool:
-    start = dtime.fromisoformat(QUIET_HOURS["start"])  # type: ignore[arg-type]
-    end = dtime.fromisoformat(QUIET_HOURS["end"])  # type: ignore[arg-type]
+    # 2026-04-18: previously read from the static QUIET_HOURS constant
+    # (23:00-07:00), which drifted from slos.py + slo_monitor.py which both
+    # read brain_config_store with defaults 22:30-07:30. The 30-min window
+    # mismatch at each boundary let L3 autonomous actions fire 22:30-23:00
+    # and 07:00-07:30 while SLO alerts about those same actions were
+    # suppressed — alerts turned off, actions still on. Single source of
+    # truth: brain_config_store, same defaults as slos.py.
+    try:
+        start_s = brain_config_store.get("quiet_hours.start") or QUIET_HOURS["start"]
+        end_s = brain_config_store.get("quiet_hours.end") or QUIET_HOURS["end"]
+    except Exception:
+        start_s, end_s = QUIET_HOURS["start"], QUIET_HOURS["end"]
+    start = dtime.fromisoformat(start_s)
+    end = dtime.fromisoformat(end_s)
     t = now_local.time()
     if start > end:  # wraps midnight
         return t >= start or t < end

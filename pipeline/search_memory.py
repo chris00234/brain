@@ -41,12 +41,27 @@ def score_note(query: str, metadata: dict, body: str, *, filter_domain: str | No
     title_terms = set(tokenize(metadata.get("title", "")))
     body_terms = set(tokenize(body))
     entity_terms = {term.lower() for term in metadata.get("entities", [])}
-    relation_terms = {term.lower() for relation in metadata.get("relations", []) for term in relation.keys()}
+    # 2026-04-18: relations are dicts like {"type": "mentions", "target": "entity_x"}.
+    # Previous code used .keys() which pulled "type" / "target" as search terms
+    # (noise), and crashed when any relation wasn't a dict. Use .values() and
+    # guard against non-dict entries.
+    relation_terms = {
+        str(v).lower()
+        for relation in metadata.get("relations", []) or []
+        if isinstance(relation, dict)
+        for v in relation.values()
+        if v
+    }
     domain_terms = {metadata.get("domain", "").lower(), metadata.get("subtype", "").lower()}
     haystack = title_terms | body_terms | entity_terms | relation_terms | domain_terms
     query_set = set(query_terms)
 
-    score = TIER_WEIGHT[metadata["type"]]
+    # 2026-04-18: tolerate unknown note types (entity-page, consolidated-draft,
+    # etc.). Previously KeyError'd on `TIER_WEIGHT[metadata["type"]]` and took
+    # out the whole canonical search path for one stray note.
+    score = TIER_WEIGHT.get(metadata.get("type"), 0)
+    if score == 0 and metadata.get("type") not in TIER_WEIGHT:
+        return 0
 
     overlap = len(query_set & haystack)
     if overlap:

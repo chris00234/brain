@@ -236,23 +236,39 @@ def activate(query: str, top_k: int = 20) -> dict[str, float]:
     return {n: round(s / max_score, 4) for n, s in ranked}
 
 
+# 2026-04-18: thread-local sqlite pool to amortize autonomy.db connection
+# cost across the hot /recall/v2 path. Previously store_session_activation
+# and load_session_activation each opened+closed a fresh connection on every
+# recall — ~0.5ms each × 2 calls per recall × concurrent fan-out = real
+# cumulative hit under load.
+_activation_local = threading.local()
+
+
+def _activation_conn() -> sqlite3.Connection:
+    conn = getattr(_activation_local, "conn", None)
+    if conn is None:
+        ACTIVATION_DB.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(ACTIVATION_DB), check_same_thread=False)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        _activation_local.conn = conn
+    return conn
+
+
 def store_session_activation(session_id: str, activation: dict[str, float]) -> None:
     """Persist activation map for the session so follow-up queries inherit warmth."""
     if not session_id or not activation:
         return
     _ensure_table_once()
     expires = time.time() + ACTIVATION_TTL_SECONDS
-    conn = sqlite3.connect(str(ACTIVATION_DB))
-    try:
-        # Sweep expired rows on every write — keeps the table small.
-        conn.execute("DELETE FROM entity_activation WHERE expires_at < ?", (time.time(),))
-        conn.executemany(
-            "INSERT OR REPLACE INTO entity_activation (session_id, entity_name, activation, expires_at) VALUES (?, ?, ?, ?)",
-            [(session_id, n, a, expires) for n, a in activation.items()],
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    conn = _activation_conn()
+    # Sweep expired rows on every write — keeps the table small.
+    conn.execute("DELETE FROM entity_activation WHERE expires_at < ?", (time.time(),))
+    conn.executemany(
+        "INSERT OR REPLACE INTO entity_activation (session_id, entity_name, activation, expires_at) VALUES (?, ?, ?, ?)",
+        [(session_id, n, a, expires) for n, a in activation.items()],
+    )
+    conn.commit()
 
 
 def load_session_activation(session_id: str) -> dict[str, float]:
@@ -260,15 +276,12 @@ def load_session_activation(session_id: str) -> dict[str, float]:
     if not session_id:
         return {}
     _ensure_table_once()
-    conn = sqlite3.connect(str(ACTIVATION_DB))
-    try:
-        rows = conn.execute(
-            "SELECT entity_name, activation FROM entity_activation "
-            "WHERE session_id = ? AND expires_at >= ?",
-            (session_id, time.time()),
-        ).fetchall()
-    finally:
-        conn.close()
+    conn = _activation_conn()
+    rows = conn.execute(
+        "SELECT entity_name, activation FROM entity_activation "
+        "WHERE session_id = ? AND expires_at >= ?",
+        (session_id, time.time()),
+    ).fetchall()
     return {n: a for n, a in rows}
 
 

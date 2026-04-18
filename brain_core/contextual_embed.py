@@ -42,6 +42,7 @@ import logging
 import os
 import sqlite3
 import sys
+import threading
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -74,40 +75,51 @@ PREFIX_MAX_CHARS = 500  # safety truncation for generated prefixes
 JENNA_TIMEOUT_S = 40
 
 
+# 2026-04-18: thread-local connection pool so the batch `run()` (called on a
+# scheduler thread, processes 60+ docs each making 3 sqlite round-trips)
+# doesn't open/close 180 connections per weekly pass. Shares the same
+# pattern as embed_cache.py and the thread-local pool in search_unified.py.
+_audit_local = threading.local()
+
+
+def _audit_conn() -> sqlite3.Connection:
+    conn = getattr(_audit_local, "conn", None)
+    if conn is None:
+        conn = sqlite3.connect(str(BRAIN_DB), check_same_thread=False)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        _audit_local.conn = conn
+    return conn
+
+
 def _ensure_audit_table() -> None:
-    conn = sqlite3.connect(str(BRAIN_DB))
-    try:
-        conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS contextual_embed_audit (
-                doc_path         TEXT NOT NULL,
-                content_hash     TEXT NOT NULL,
-                chunk_count      INTEGER NOT NULL DEFAULT 0,
-                context_prefix   TEXT NOT NULL,
-                prefix_chars     INTEGER NOT NULL,
-                generated_at     TEXT NOT NULL,
-                model            TEXT NOT NULL DEFAULT 'jenna',
-                PRIMARY KEY (doc_path, content_hash)
-            );
-            CREATE INDEX IF NOT EXISTS idx_ctx_embed_audit_path ON contextual_embed_audit(doc_path);
-            """
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    conn = _audit_conn()
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS contextual_embed_audit (
+            doc_path         TEXT NOT NULL,
+            content_hash     TEXT NOT NULL,
+            chunk_count      INTEGER NOT NULL DEFAULT 0,
+            context_prefix   TEXT NOT NULL,
+            prefix_chars     INTEGER NOT NULL,
+            generated_at     TEXT NOT NULL,
+            model            TEXT NOT NULL DEFAULT 'jenna',
+            PRIMARY KEY (doc_path, content_hash)
+        );
+        CREATE INDEX IF NOT EXISTS idx_ctx_embed_audit_path ON contextual_embed_audit(doc_path);
+        """
+    )
+    conn.commit()
 
 
 def _last_seen_hash(doc_path: str) -> str | None:
-    conn = sqlite3.connect(str(BRAIN_DB))
-    try:
-        row = conn.execute(
-            "SELECT content_hash FROM contextual_embed_audit "
-            "WHERE doc_path = ? ORDER BY generated_at DESC LIMIT 1",
-            (doc_path,),
-        ).fetchone()
-        return row[0] if row else None
-    finally:
-        conn.close()
+    conn = _audit_conn()
+    row = conn.execute(
+        "SELECT content_hash FROM contextual_embed_audit "
+        "WHERE doc_path = ? ORDER BY generated_at DESC LIMIT 1",
+        (doc_path,),
+    ).fetchone()
+    return row[0] if row else None
 
 
 def _record_audit(
@@ -116,25 +128,22 @@ def _record_audit(
     chunk_count: int,
     prefix: str,
 ) -> None:
-    conn = sqlite3.connect(str(BRAIN_DB))
-    try:
-        conn.execute(
-            """INSERT OR REPLACE INTO contextual_embed_audit
-               (doc_path, content_hash, chunk_count, context_prefix, prefix_chars, generated_at, model)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (
-                doc_path,
-                content_hash,
-                chunk_count,
-                prefix[:PREFIX_MAX_CHARS],
-                len(prefix),
-                datetime.now(UTC).isoformat(timespec="seconds"),
-                "jenna",
-            ),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    conn = _audit_conn()
+    conn.execute(
+        """INSERT OR REPLACE INTO contextual_embed_audit
+           (doc_path, content_hash, chunk_count, context_prefix, prefix_chars, generated_at, model)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (
+            doc_path,
+            content_hash,
+            chunk_count,
+            prefix[:PREFIX_MAX_CHARS],
+            len(prefix),
+            datetime.now(UTC).isoformat(timespec="seconds"),
+            "jenna",
+        ),
+    )
+    conn.commit()
 
 
 def _list_canonical_docs() -> list[Path]:

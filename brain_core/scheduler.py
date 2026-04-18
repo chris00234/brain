@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 import os
 import sqlite3
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -61,6 +62,12 @@ class BrainScheduler:
         self._MAX_HISTORY = 20
         self._alerted_jobs: set[str] = set()
         self._pending_completions: dict[str, tuple[float, int | None]] = {}  # job_name -> (start_ts, row_id)
+        # 2026-04-18: TOCTOU between APScheduler-thread _fire() and
+        # FastAPI-handler trigger_now(), plus reaper interval thread mutating
+        # the same dicts — all racing without synchronization. A lock around
+        # the shared state is cheap (microseconds) and eliminates duplicate
+        # dispatches that otherwise slip past the "already running" guard.
+        self._state_lock = threading.RLock()
         self._db_path = Path(__file__).resolve().parent.parent / "logs" / "scheduler_history.db"
         self._load_history_from_db()
 
@@ -368,28 +375,35 @@ class BrainScheduler:
         # Skip if a prior run (scheduled or manual) is still alive. Prevents
         # two concurrent drains racing on the same `status='pending'` rows
         # with no SKIP LOCKED semantics → duplicate LLM calls / side effects.
-        if job_name in self._running_jobs:
-            old_pid = self._running_jobs[job_name]
-            try:
-                os.kill(old_pid, 0)
-                log.info("scheduler: skip %s — already running (pid=%d)", job_name, old_pid)
-                return
-            except (ProcessLookupError, PermissionError):
-                self._running_jobs.pop(job_name, None)  # stale, fall through
+        # 2026-04-18: hold _state_lock across the check-then-reserve so _fire
+        # and trigger_now can't both slip past the guard simultaneously.
+        # Hold lock across check + dispatch + reservation so trigger_now
+        # cannot slip between the "not running" decision and the pid store.
+        # Dispatcher is a subprocess.Popen fire-and-forget (fast), so the
+        # critical section is microseconds, not seconds.
+        with self._state_lock:
+            if job_name in self._running_jobs:
+                old_pid = self._running_jobs[job_name]
+                try:
+                    os.kill(old_pid, 0)
+                    log.info("scheduler: skip %s — already running (pid=%d)", job_name, old_pid)
+                    return
+                except (ProcessLookupError, PermissionError):
+                    self._running_jobs.pop(job_name, None)  # stale, fall through
 
-        start_ts = time.time()
-        started = datetime.now().isoformat(timespec="seconds")
-        pid = -1
-        error = None
-        try:
-            if self._dispatcher is None:
-                raise RuntimeError("dispatcher not registered")
-            pid = self._dispatcher(job_name)
-            if pid > 0:
-                self._running_jobs[job_name] = pid
-        except Exception as e:
-            error = str(e)[:200]
-            log.warning("job %s dispatch failed: %s", job_name, error)
+            start_ts = time.time()
+            started = datetime.now().isoformat(timespec="seconds")
+            pid = -1
+            error = None
+            try:
+                if self._dispatcher is None:
+                    raise RuntimeError("dispatcher not registered")
+                pid = self._dispatcher(job_name)
+                if pid > 0:
+                    self._running_jobs[job_name] = pid
+            except Exception as e:
+                error = str(e)[:200]
+                log.warning("job %s dispatch failed: %s", job_name, error)
 
         entry = {
             "started_at": started,
@@ -462,18 +476,20 @@ class BrainScheduler:
         """Run a job immediately (manual trigger). Returns pid."""
         if self._dispatcher is None:
             raise RuntimeError("scheduler not started")
-        # Check if already running
-        if job_name in self._running_jobs:
-            old_pid = self._running_jobs[job_name]
-            try:
-                os.kill(old_pid, 0)  # check if process exists
-                raise ValueError(f"{job_name} already running (pid={old_pid})")
-            except (ProcessLookupError, PermissionError):
-                del self._running_jobs[job_name]  # stale entry, clean up
-        start_ts = time.time()
-        pid = self._dispatcher(job_name)
-        if pid > 0:
-            self._running_jobs[job_name] = pid
+        # 2026-04-18: lock the check-then-reserve block so _fire and
+        # trigger_now can't both dispatch on a stale "not running" check.
+        with self._state_lock:
+            if job_name in self._running_jobs:
+                old_pid = self._running_jobs[job_name]
+                try:
+                    os.kill(old_pid, 0)  # check if process exists
+                    raise ValueError(f"{job_name} already running (pid={old_pid})")
+                except (ProcessLookupError, PermissionError):
+                    del self._running_jobs[job_name]  # stale entry, clean up
+            start_ts = time.time()
+            pid = self._dispatcher(job_name)
+            if pid > 0:
+                self._running_jobs[job_name] = pid
         entry = {
             "started_at": datetime.now().isoformat(timespec="seconds"),
             "pid": pid,

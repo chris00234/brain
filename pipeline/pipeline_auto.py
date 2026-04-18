@@ -246,7 +246,13 @@ def main():
                     item["merged_into"] = existing.name
                 else:
                     write_markdown_frontmatter(target, metadata, body)
-                if target.exists() or (existing and existing.exists()):
+                # 2026-04-18: previous guard was `target.exists() or existing.exists()`.
+                # On the merge branch the write goes to `existing` — but if `target`
+                # happened to exist from a prior run, the OR short-circuited True and
+                # the proposal got deleted even when the merge write to `existing`
+                # silently failed. Check the branch we actually wrote to.
+                wrote_to = existing if (existing and existing.exists()) else target
+                if wrote_to and wrote_to.exists():
                     proposal_path.unlink()
                 promoted.append(item)
             else:

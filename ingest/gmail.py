@@ -375,11 +375,16 @@ def main() -> None:
     print(f"Gmail ingest — IMAP {IMAP_HOST}, days_back={args.days_back}")
 
     print("[1/4] IMAP pull + heuristic pre-filter...")
+    # 2026-04-18: load state ONCE at entry and keep it through the run.
+    # Previous code called load_state() twice (line ~381 + ~434) which, if a
+    # concurrent gmail_ingest run advanced last_uid in between, would rewind
+    # the watermark with the older local value and cause duplicate processing
+    # of already-seen emails. Single load, then guarded write.
+    state = load_state()
     candidates, new_max_uid = fetch_candidates(args.days_back, args.lookback)
     print(f"  {len(candidates)} candidates after pre-filter")
     if not candidates:
-        if new_max_uid > load_state().get("last_uid", 0):
-            state = load_state()
+        if new_max_uid > state.get("last_uid", 0):
             state["last_uid"] = new_max_uid
             save_state(state)
         print("Nothing to classify.")
@@ -430,8 +435,9 @@ def main() -> None:
 
     # Save state AFTER successful dispatch + write — not before.
     # Don't advance watermark if any batch failed (would skip those emails permanently)
+    # 2026-04-18: reuse the state dict loaded at entry; avoid second load_state()
+    # which could pull a competitor run's higher last_uid and rewind it.
     if not any_batch_failed:
-        state = load_state()
         state["last_uid"] = new_max_uid
         save_state(state)
     else:

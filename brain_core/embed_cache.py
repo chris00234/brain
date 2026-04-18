@@ -51,7 +51,13 @@ def _get_conn() -> sqlite3.Connection:
     if conn is None:
         EMBED_CACHE_DB.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(EMBED_CACHE_DB), check_same_thread=False)
+        # 2026-04-18: explicit autocommit. Python's sqlite3 opens implicit
+        # transactions before DML by default, which makes `VACUUM` in
+        # prune_old() fail silently ("cannot VACUUM from within a transaction").
+        # fts_index._get_conn uses the same pattern.
+        conn.isolation_level = None
         conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
         conn.execute("PRAGMA wal_autocheckpoint=1000")
         conn.execute("PRAGMA cache_size=-16000")
         conn.execute("CREATE TABLE IF NOT EXISTS embeddings (hash TEXT PRIMARY KEY, embedding BLOB)")

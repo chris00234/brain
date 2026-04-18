@@ -220,7 +220,12 @@ def check_slos() -> dict:
     # Threshold = 2x baseline, floor at baseline itself. Baselines default to
     # the slos.py production SLO (350ms) so monitor breaches align with the
     # SLO gauge's notion of a breach.
-    recall_threshold = max(baseline["recall_p95_ms"] * 2, baseline["recall_p95_ms"])
+    # 2026-04-18: previous `max(x*2, x)` was a no-op (x*2 is always >= x).
+    # Intent was "2x baseline, floored at the production SLO target so we
+    # don't breach tighter than the alert gauge". Align with slos.py's
+    # recall_v2_p95_ms=500 so the probe and SLO agree on what counts as
+    # "bad enough to remediate".
+    recall_threshold = max(baseline["recall_p95_ms"] * 2, 500)
     recall_p95 = current["recall"]["p95"]
     if current["recall"]["samples"] >= 5 and recall_p95 > recall_threshold:
         violations.append(
@@ -232,7 +237,7 @@ def check_slos() -> dict:
             }
         )
 
-    v2_threshold = max(baseline["recall_v2_p95_ms"] * 2, baseline["recall_v2_p95_ms"])
+    v2_threshold = max(baseline["recall_v2_p95_ms"] * 2, 500)
     v2_p95 = current["recall_v2"]["p95"]
     if current["recall_v2"]["samples"] >= 2 and v2_p95 > v2_threshold:
         violations.append(

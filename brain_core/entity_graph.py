@@ -70,7 +70,13 @@ CREATE INDEX IF NOT EXISTS idx_memory_access_last ON memory_access(last_accessed
 
 def _init_db() -> None:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(str(DB_PATH)) as conn:
+    # 2026-04-18: sqlite3's `with` commits/rolls back but does NOT close the
+    # connection. If any statement below raises (e.g. UNIQUE index creation
+    # with residual duplicates), the connection leaks for the process
+    # lifetime — and this is called at module import time, so the leak
+    # can never be reclaimed. Use try/finally to guarantee close.
+    conn = sqlite3.connect(str(DB_PATH))
+    try:
         conn.execute("PRAGMA journal_mode=WAL")
         # Create base tables first (no UNIQUE index yet)
         conn.executescript(
@@ -132,6 +138,9 @@ def _init_db() -> None:
         conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_rel_unique ON entity_relations(source_entity, relationship, target_entity)"
         )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 try:
