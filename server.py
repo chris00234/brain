@@ -959,6 +959,37 @@ def _load_secret() -> str | None:
     return SECRET_FILE.read_text().strip()
 
 
+def _safe_http_detail(kind: str, exc: Exception, *, route: str = "?") -> str:
+    """Return a user-safe HTTPException detail string.
+
+    Logs the full exception server-side with an err_id; callers embed the
+    err_id in the returned message so Chris can correlate. Internal details
+    (SQL schema, file paths, stack frames, secrets embedded in error text)
+    never reach the HTTP response.
+
+    Usage:
+        raise HTTPException(
+            status_code=502,
+            detail=_safe_http_detail("chroma get", e, route=request.url.path),
+        )
+    """
+    import uuid as _uuid
+
+    err_id = _uuid.uuid4().hex[:12]
+    try:
+        log.warning(
+            "HTTP error kind=%s route=%s err_id=%s exc_type=%s exc=%s",
+            kind,
+            route,
+            err_id,
+            type(exc).__name__,
+            str(exc)[:500],
+        )
+    except Exception:
+        pass
+    return f"{kind} failed (err_id={err_id})"
+
+
 def _log_failure(reason: str, route: str = "?") -> None:
     try:
         FAILURE_LOG.parent.mkdir(parents=True, exist_ok=True)
@@ -2777,7 +2808,7 @@ def search_feedback(req: SearchFeedbackRequest):
                 + "\n"
             )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"feedback log write failed: {e}")
+        raise HTTPException(status_code=500, detail=_safe_http_detail("feedback log write", e))
 
     # Reinforce memory if it's a semantic_memory result.
     # 2026-04-16 fix: result_id is a raw Chroma UUID, not prefixed with
@@ -2883,7 +2914,7 @@ def ingest_image_route(request: Request, req: ImageIngestRequest) -> dict:
         try:
             image_bytes = _b64.b64decode(req.base64_data)
         except Exception as e:
-            raise HTTPException(status_code=400, detail=f"base64 decode failed: {e}")
+            raise HTTPException(status_code=400, detail=_safe_http_detail("base64 decode", e))
         image_path_str = None
     else:
         raise HTTPException(status_code=400, detail="must provide either 'path' or 'base64_data'")
@@ -2898,7 +2929,7 @@ def ingest_image_route(request: Request, req: ImageIngestRequest) -> dict:
             prompt=req.prompt,
         )
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"vision_llm failed: {e}")
+        raise HTTPException(status_code=502, detail=_safe_http_detail("vision_llm", e))
 
     if not caption:
         raise HTTPException(
@@ -2946,7 +2977,7 @@ def ingest_image_route(request: Request, req: ImageIngestRequest) -> dict:
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"chroma upsert failed: {e}")
+        raise HTTPException(status_code=502, detail=_safe_http_detail("chroma upsert", e))
 
     return {
         "status": "ingested",
@@ -3112,7 +3143,7 @@ def brain_reason_multihop(request: Request, req: MultiHopReasonRequest):
         result = reasoning_loop.run_reasoning(req.question, max_hops=req.max_hops)
         return result
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"reasoning failed: {e}")
+        raise HTTPException(status_code=500, detail=_safe_http_detail("reasoning", e))
 
 
 @app.post("/brain/reason/multihop/{thread_id}/resume", tags=["recall"], dependencies=[Depends(verify_bearer)])
@@ -3126,7 +3157,7 @@ def brain_reason_multihop_resume(request: Request, thread_id: Annotated[str, Pat
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"resume failed: {e}")
+        raise HTTPException(status_code=500, detail=_safe_http_detail("resume", e))
 
 
 # ── Routes: /chris/think — decision endpoint in Chris's first-person voice ──
@@ -3735,7 +3766,7 @@ def list_memory(
         try:
             res = _chroma_api("POST", f"{_col_base}/get", fetch_body)
         except Exception as e:
-            raise HTTPException(status_code=502, detail=f"chroma get failed: {e}")
+            raise HTTPException(status_code=502, detail=_safe_http_detail("chroma get", e))
 
         # Get real total count from ChromaDB (not just len of capped fetch)
         try:
@@ -3875,7 +3906,7 @@ def export_memory() -> list[dict]:
                 break
             offset += page_size
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"chroma get failed: {e}")
+        raise HTTPException(status_code=502, detail=_safe_http_detail("chroma get", e))
     return all_results
 
 
@@ -3893,7 +3924,7 @@ def get_memory(mem_id: Annotated[str, PathParam()]) -> MemoryEntry:
             {"ids": [mem_id], "include": ["documents", "metadatas"]},
         )
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"chroma get failed: {e}")
+        raise HTTPException(status_code=502, detail=_safe_http_detail("chroma get", e))
     ids = res.get("ids") or []
     if not ids:
         raise HTTPException(status_code=404, detail=f"memory '{mem_id}' not found")
@@ -4046,7 +4077,7 @@ def create_memory(request: Request, req: MemoryCreateRequest) -> MemoryEntry:
             },
         )
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"chroma upsert failed: {e}")
+        raise HTTPException(status_code=502, detail=_safe_http_detail("chroma upsert", e))
 
     _metrics_buf.record_memory_write()
     # Fire hook (Phase 6A)
@@ -4350,7 +4381,7 @@ def create_memory_batch(request: Request, req: MemoryBatchRequest) -> dict:
             for _ in ids_to_upsert:
                 _metrics_buf.record_memory_write()
         except Exception as e:
-            raise HTTPException(status_code=502, detail=f"batch upsert failed: {e}")
+            raise HTTPException(status_code=502, detail=_safe_http_detail("batch upsert", e))
 
     # CR7 fix (2026-04-14): run the atoms-mirror + hygiene pipeline for
     # every batched write. Previously batch bypassed atoms_store entirely,
@@ -4474,7 +4505,7 @@ def patch_memory(mem_id: Annotated[str, PathParam()], req: MemoryPatchRequest) -
             upsert_body,
         )
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"chroma upsert failed: {e}")
+        raise HTTPException(status_code=502, detail=_safe_http_detail("chroma upsert", e))
     return MemoryEntry(id=mem_id, content=new_content, metadata=new_meta)
 
 
@@ -4570,7 +4601,7 @@ def brain_consolidate_trigger() -> dict:
         pid = brain_scheduler.trigger_now("sleep_consolidate")
         return {"status": "dispatched", "job": "sleep_consolidate", "pid": pid}
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"consolidate dispatch failed: {e}")
+        raise HTTPException(status_code=502, detail=_safe_http_detail("consolidate dispatch", e))
 
 
 @app.delete("/memory/{mem_id}", tags=["memory"], dependencies=[Depends(verify_bearer)])
@@ -4585,7 +4616,7 @@ def delete_memory(mem_id: Annotated[str, PathParam()]) -> dict:
             {"ids": [mem_id]},
         )
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"chroma delete failed: {e}")
+        raise HTTPException(status_code=502, detail=_safe_http_detail("chroma delete", e))
     return {"status": "deleted", "id": mem_id}
 
 
@@ -4608,7 +4639,7 @@ def resolve_contradiction(
             {"ids": [contra_id], "include": ["metadatas"]},
         )
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"chroma get failed: {e}")
+        raise HTTPException(status_code=502, detail=_safe_http_detail("chroma get", e))
 
     ids = res.get("ids") or []
     if not ids:

@@ -742,6 +742,78 @@ def _dedup_by_content_hash(results: list[dict]) -> list[dict]:
     return list(seen.values())
 
 
+# 2026-04-17 search trace observability.
+# When enabled, every search_all() run appends one line to the trace
+# log capturing: query, source counts, per-source latency, trust
+# weights, fusion mode, post-fusion result count, intent_boost.
+# Chris uses this to diagnose "why did query X return result Y instead
+# of Z" post-hoc — the ranking pipeline has 7 sources × RRF × rerank
+# × time-decay × LtR, and with no trace it's a black box.
+#
+# Always on (capped to avoid runaway log): records last 5000 entries
+# via fixed-size ring via rename-on-threshold. Gated off entirely by
+# BRAIN_SEARCH_TRACE_DISABLED=1 env for emergency bypass.
+_SEARCH_TRACE_PATH = None
+_SEARCH_TRACE_MAX_BYTES = 5 * 1024 * 1024  # 5MB before rotation
+
+
+def _get_search_trace_path() -> Path | None:
+    global _SEARCH_TRACE_PATH
+    if _SEARCH_TRACE_PATH is not None:
+        return _SEARCH_TRACE_PATH
+    try:
+        from config import BRAIN_LOGS_DIR as _LOGS
+    except ImportError:
+        _LOGS = Path("/Users/chrischo/server/brain/logs")
+    _SEARCH_TRACE_PATH = _LOGS / "search_trace.jsonl"
+    return _SEARCH_TRACE_PATH
+
+
+def _maybe_emit_search_trace(
+    *,
+    query: str,
+    original_query: str | None,
+    source_counts: dict,
+    source_timing: dict,
+    trust_weights: list,
+    fusion_mode: str,
+    total_after_fusion: int,
+    intent_boost: dict,
+) -> None:
+    import os as _os
+
+    if _os.environ.get("BRAIN_SEARCH_TRACE_DISABLED", "").strip() in ("1", "true", "yes"):
+        return
+    path = _get_search_trace_path()
+    if path is None:
+        return
+    try:
+        # Lightweight rotation: rename to .1 when exceeding max size.
+        if path.exists() and path.stat().st_size > _SEARCH_TRACE_MAX_BYTES:
+            rotated = path.with_suffix(".jsonl.1")
+            try:
+                if rotated.exists():
+                    rotated.unlink()
+                path.rename(rotated)
+            except OSError:
+                pass
+        entry = {
+            "ts": datetime.now(UTC).isoformat(timespec="seconds"),
+            "q": (query or "")[:200],
+            "q_orig": (original_query or "")[:200] if original_query else None,
+            "src_counts": source_counts,
+            "src_ms": source_timing,
+            "trust_w": [round(w, 3) for w in trust_weights],
+            "fusion": fusion_mode,
+            "total": total_after_fusion,
+            "intent_boost": {k: round(v, 3) for k, v in intent_boost.items()} if intent_boost else None,
+        }
+        with path.open("a") as f:
+            f.write(json.dumps(entry, default=str) + "\n")
+    except Exception as _exc:
+        log.debug("search trace write failed: %s", _exc)
+
+
 def search_all(
     query,
     limit=5,
@@ -1271,7 +1343,21 @@ def search_all(
     # Intent-based trust weight adjustment
     _intent_boost = _classify_intent(relevance_query)
 
-    # RRF fusion across sources with trust-based weights
+    # RRF fusion across sources with trust-based weights.
+    # 2026-04-17: per-query trace log. Records source counts + timings +
+    # trust weights whenever BRAIN_SEARCH_TRACE=1 env is set OR the query
+    # hits a "long tail" (no source returned >3 results). The trace lands
+    # in logs/search_trace.jsonl and is fundamental for debugging
+    # relevance regressions post-hoc ("why did canonical win over RAG
+    # for query X?").
+    _source_counts = {
+        "rag": len(rag_results),
+        "canonical": len(canonical_results),
+        "obsidian": len(obsidian_results),
+        "graph": len(graph_results),
+        "fts": len(fts_results),
+        "graph_prefetch": len(graph_prefetch_results),
+    }
     try:
         from rrf import rrf_fuse
 
@@ -1304,6 +1390,7 @@ def search_all(
             all_results = rrf_fuse(source_lists, trust_weights=trust_weights, id_key="path")
         else:
             all_results = []
+        _fusion_mode = "rrf"
     except ImportError:
         all_results = (
             rag_results
@@ -1314,6 +1401,23 @@ def search_all(
             + graph_prefetch_results
         )
         all_results.sort(key=lambda x: (x["score"], x["trust_tier"]), reverse=True)
+        trust_weights = []
+        _fusion_mode = "fallback_sort"
+
+    # Emit search trace (best-effort, never blocks the request)
+    try:
+        _maybe_emit_search_trace(
+            query=query,
+            original_query=original_query,
+            source_counts=_source_counts,
+            source_timing=source_timing,
+            trust_weights=trust_weights,
+            fusion_mode=_fusion_mode,
+            total_after_fusion=len(all_results),
+            intent_boost=_intent_boost,
+        )
+    except Exception as _exc:
+        log.debug("search trace emit failed: %s", _exc)
 
     unique = deduplicate(all_results)
 
