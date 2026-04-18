@@ -409,14 +409,10 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         misfire_grace=120,
     ),
     # Phase J2: HNSW ef_search adaptive tuning (weekly Sunday 4:15am, off-hours)
-    # Advisory only — writes hnsw:search_ef metadata, picked up on next collection load.
-    ScheduledJob(
-        name="hnsw_tune",
-        description="Phase J2: adaptive HNSW ef_search tuning based on measured p95 (Sun 4:15am)",
-        trigger=CronTrigger(day_of_week="sun", hour=4, minute=15),
-        agent="system",
-        misfire_grace=900,
-    ),
+    # Removed 2026-04-17: duplicate of `hnsw_adaptive` (Sun 4:50am), both
+    # called the same adaptive_tune() function 35 minutes apart on the
+    # same Ollama/ChromaDB. Keeping hnsw_adaptive since it uses the CLI
+    # entry point (--adaptive flag) consistent with the tuner's module.
     # Phase 2D: SessionEnd outbox replay — every 5 min, drains any envelopes
     # the inline post_session.sh hook missed. CRON_MAP and RUNBOOK already
     # documented this cadence; the schedule entry was missing until 2026-04-13.
@@ -871,10 +867,12 @@ JOB_SCHEDULE: list[ScheduledJob] = [
     # 1994). Applies small confidence decrements to atoms that consistently
     # lose top-rank competitions on the same query cue. Runs 3:55am —
     # between answer_canonicalize (03:50) and focus_aggregate (04:35).
+    # 2026-04-17: shifted 03:55 → 03:58 to deconflict with sleep_consolidate
+    # (also at 03:55) — both are Ollama-heavy and were contending for GPU.
     ScheduledJob(
         name="retrieval_inhibition",
-        description="Nightly Bjork-style inhibition of consistent retrieval losers (03:55am)",
-        trigger=CronTrigger(hour=3, minute=55),
+        description="Nightly Bjork-style inhibition of consistent retrieval losers (03:58am)",
+        trigger=CronTrigger(hour=3, minute=58),
         agent="system",
         misfire_grace=600,
     ),

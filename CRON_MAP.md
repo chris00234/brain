@@ -1,198 +1,255 @@
-# Brain v2 — Cron Map
+# Brain Scheduler Cron Map
 
-Visual schedule of every recurring job in the brain process.
-All times are local (`America/Los_Angeles`). Source of truth: `brain_core/scheduler.py`.
+> **Auto-regenerated 2026-04-18T04:38:16+00:00** from `brain_core/scheduler.py`.
+> Do not hand-edit; run `python /tmp/regen_cron_map.py > CRON_MAP.md` to refresh.
 
-This file is **derived from `JOB_SCHEDULE`**. Last regenerated 2026-04-13.
-Re-derive with:
-```bash
-.venv/bin/python -c "import sys; sys.path.insert(0,'brain_core'); from scheduler import JOB_SCHEDULE; print(len(JOB_SCHEDULE))"
-```
+**Total jobs**: 108
+**Default `misfire_grace`**: 300s (5min). Heavy nightly jobs override to 900s (15min). Changed 2026-04-16 from 3600s to prevent thundering herd after brain-server restart.
 
-## Hourly intervals
+## Jobs by owning agent
 
-| Cadence | Job | Owner | Purpose |
-|---|---|---|---|
-| 5 min | `slos_check` | system | SLO budget check + Telegram alert on breach (Phase E1) |
-| 5 min | `outbox_drain` | system | SessionEnd outbox replay (Phase 2D) |
-| 1 h | `obsidian_sync` | jenna | Obsidian vault ↔ CouchDB pull |
-| 1 h (:30) | `slo_monitor` | system | Hourly SLO check with Telegram alerts on 3+ violations |
+### ellie (3 jobs)
 
-## Nightly window (00:00 – 05:00)
+| Name | Trigger | Misfire Grace | Description |
+|------|---------|---------------|-------------|
+| `git_activity_ingest` | `cron(hour=1, minute=45)` | 300s | Git commit history distillation via Ellie → raw/inbox (1:45am, after gmail_ingest) |
+| `healthcheck` | `cron(hour=9, minute=0)` | 300s | System + service health capture |
+| `shell_ingest` | `cron(hour=2, minute=15)` | 300s | Shell history → experience collection |
 
-| Time | Job | Owner | Purpose |
-|---|---|---|---|
-| 00:35,03:35,06:35,19:35,21:35,23:35 | `openclaw_sessions_ingest` | jenna | OpenClaw agent session distillation → raw/inbox |
-| 01:15 | `claude_code_sessions_ingest` | jenna | Claude Code session distillation → raw/inbox |
-| 01:30 | `gmail_ingest` | jenna | Gmail signal classifier → raw/inbox |
-| 01:45 | `git_activity_ingest` | ellie | Git commit history distillation → raw/inbox |
-| 02:00 | `canonical_pipeline` | system | Inbox → distilled → canonical promotion (daily) |
-| 02:15 | `shell_ingest` | ellie | Shell history → experience collection |
-| 02:30 | `browser_ingest` | sage | Browser history → experience collection |
-| 02:30 (Sun) | `memory_lifecycle` | system | Age-out + promote durable semantic memories |
-| 02:45 | `brain_reflect` | sage | Sage pattern/contradiction pass over last 7d |
-| 02:50 | `graph_consolidation` | system | Nightly graph sleep: decay, prune, promote, cluster |
-| 03:05 | `entity_resolution` | system | Embedding-similarity entity merge (auto >0.95, review 0.90–0.95) |
-| 03:10 (Sun) | `stale_cleanup` | system | Weekly incremental stale doc cleanup |
-| 03:15 | `neo4j_backup` | system | Nightly Neo4j data backup to MinIO (14d retention) |
-| 03:17,23:17 | `reindex` | system | Full ChromaDB reindex (2× daily, off-hours) |
-| 03:18 | `episode_binder` | system | Daily episode clustering + Hebbian boost |
-| 03:20 (Sun) | `near_dedup` | system | Weekly retroactive near-duplicate scan |
-| 03:25 | `code_index_refresh` | system | Daily incremental code function indexer |
-| **03:25** | **`sm2_nightly`** | **system** | **SM-2 nightly: seed next_review_at + obsolete stale atoms** |
-| **03:30** | **`eval_run`** | **system** | **Stable-track eval (138 queries) — strict 5pt gate, heal dispatch** |
-| 03:35 (Sun) | `chroma_integrity` | system | Weekly PRAGMA integrity_check on ChromaDB SQLite |
-| 03:45 | `memory_consolidation` | system | Nightly memory tier promotion/demotion |
-| **03:50** | **`eval_run_extended`** | **system** | **Extended-track eval (606 queries) — trend only, no heal** |
-| 04:00 (1st) | `active_contacts_ingest` | jenna | Monthly active iMessage contacts → raw/inbox |
-| 04:00 | `log_rotation` | system | Truncate job/server logs >3d or >512KB |
-| 04:00 (Sun) | `profile_regen` | sage | Sage regenerates Chris profile from canonical |
-| 04:05 | `content_quality_slo` | system | Daily content quality SLO check (after eval_run) |
-| 04:10 (15th) | `memory_pruning` | system | Monthly atrophied-memory dry-run |
-| 04:15 | `fts_rebuild` | system | Nightly SQLite FTS5 keyword index rebuild |
-| **04:15 (Sun)** | **`hnsw_tune`** | **system** | **Phase J2: adaptive HNSW ef_search tuning** |
-| 04:15 (15th) | `memory_pruning_active` | system | Monthly REAL atrophied-memory pruning |
-| 04:15 (Sun) | `weekly_synthesis` | sage | Weekly arc synthesis |
-| 04:20 (1st) | `event_compressor` | system | Monthly event compression for old experience events |
-| 04:30 (1st) | `backup_verify` | system | Monthly backup restore smoke test |
-| 04:35 | `focus_aggregate` | system | Daily energy/focus data layer aggregation |
-| 04:35 (Sun) | `screen_time_ingest` | sage | Screen Time daily patterns → raw/inbox |
-| **04:45** | **`autonomy_proposer`** | **system** | **Phase 7: surface autonomy promote/demote proposals** |
-| 04:45 (Sun) | `canonical_index` | system | Rebuild canonical knowledge index.md |
-| 04:50 (Sun) | `hnsw_adaptive` | system | Weekly adaptive HNSW ef_search tuning |
-| 04:55 (Sun) | `llm_usage_purge` | system | Weekly purge of llm_usage.db >90 days |
+### jenna (8 jobs)
 
-## Morning window (05:00 – 09:00)
+| Name | Trigger | Misfire Grace | Description |
+|------|---------|---------------|-------------|
+| `active_contacts_ingest` | `cron(day=1, hour=4, minute=0)` | 300s | Active iMessage contacts via Jenna → raw/inbox (monthly) |
+| `claude_code_sessions_ingest` | `cron(hour=1, minute=15)` | 300s | Claude Code session distillation via Jenna → raw/inbox |
+| `daily_synthesis` | `cron(hour=21, minute=0)` | 300s | Daily narrative + reflection Q (Jenna) |
+| `eval_holdout_audit` | `cron(day_of_week=sun, hour=9, minute=15)` | 900s | Phase C2: Telegram digest of >=14d stuck candidates only (Sun 9:15am) |
+| `gmail_ingest` | `cron(hour=1, minute=30)` | 300s | Gmail signal classifier → raw/inbox |
+| `obsidian_sync` | `interval(1:00:00)` | 300s | Obsidian vault ↔ CouchDB pull |
+| `openclaw_sessions_ingest` | `cron(hour=0,3,6,19,21,23, minute=35)` | 300s | OpenClaw agent session distillation via Jenna → raw/inbox (6×/day off-peak, respects 9am-6pm no-Ollama rule) |
+| `personal_ingest` | `cron(hour=6,14,22, minute=0)` | 300s | Apple Notes + iMessage + Calendar + Reminders → ChromaDB (3x daily off-peak) |
 
-| Time | Job | Owner | Purpose |
-|---|---|---|---|
-| 05:00 | `ghost_blog_ingest` | market | Ghost blog posts via Admin API → knowledge collection |
-| 05:00 (Sun) | `memory_observability` | system | Weekly memory observability report |
-| 05:00 (1st) | `monthly_synthesis` | sage | Monthly arc synthesis |
-| 05:30 (Sun) | `lint_memory` | system | Weekly memory lint pass |
-| 05:45 (Sun) | `memory_leak_detector` | system | Weekly memory leak detection |
-| 06:00 (Sun) | `auto_resolve_contradictions` | system | Weekly auto-resolve stale/low-confidence contradictions |
-| 06:00,14:00,22:00 | `personal_ingest` | jenna | Apple Notes + iMessage + Calendar + Reminders → ChromaDB |
-| 06:10 (Sun) | `supersession_chain_cleanup` | system | Weekly cleanup of orphaned supersession chains |
-| 06:15 (Sun) | `stale_superseded_cleanup` | system | Weekly stale superseded memory cleanup |
-| 06:30 (Sun) | `feedback_aggregate` | system | Weekly search feedback aggregation |
-| 06:45 (Sun) | `memory_nudge` | system | Weekly memory review nudge |
-| 07:00 (Sun) | `trust_recompute` | system | Weekly cross-source corroboration trust score refresh |
-| 07:15 (Sun) | `infra_validation` | system | Weekly infra fact cross-check against live state |
-| 07:30,13:30,19:30,01:30 | `proactive_check` | sage | Proactive insights — schedule gaps, contradictions, trends |
-| 07:30 (Sun) | `memory_health_report` | system | Weekly memory health report |
-| 07:45 (Sun) | `skill_extract` | system | Weekly skill graph indexing |
-| 08:00 | `proactive_insights` | system | Daily proactive insights surfacing (PST) |
-| 08:00 (Sun) | `training_pairs_generate` | system | Weekly LoRA training pair generation from feedback |
-| **08:45 (Sun)** | **`eval_holdout_promote`** | **system** | **Phase C1: novelty-score eval candidates, promote top-N** |
-| 09:00 (Sun) | `gap_detection` | system | Weekly knowledge gap detection from recall failures |
-| 09:00 | `healthcheck` | ellie | System + service health capture |
-| **09:15 (Sun)** | **`eval_holdout_audit`** | **jenna** | **Phase C2: Telegram digest of pending eval candidates** |
-| **09:30 (Sun)** | **`lora_ab_gate`** | **system** | **Phase 7: weekly LoRA A/B gate + deploy** |
+### market (1 jobs)
 
-## Evening window
+| Name | Trigger | Misfire Grace | Description |
+|------|---------|---------------|-------------|
+| `ghost_blog_ingest` | `cron(hour=5, minute=0)` | 300s | Ghost blog posts via Admin API → knowledge collection |
 
-| Time | Job | Owner | Purpose |
-|---|---|---|---|
-| 21:00 | `daily_synthesis` | jenna | Daily narrative + reflection Q |
-| 22:03 | `daily_reflection` | jenna | Send reflection Q to Chris via Telegram |
-| 23:17 | `reindex` (2nd run) | system | Full ChromaDB reindex (off-hours pair) |
+### sage (12 jobs)
 
-## v3 llm-wiki jobs (added 2026-04-15)
+| Name | Trigger | Misfire Grace | Description |
+|------|---------|---------------|-------------|
+| `brain_reflect` | `cron(hour=2, minute=45)` | 900s | Nightly Sage pattern/contradiction pass over last 7d of semantic_memory |
+| `browser_ingest` | `cron(hour=2, minute=30)` | 300s | Browser history → experience collection |
+| `canonical_merge_draft` | `cron(day_of_week=sun, hour=6, minute=15)` | 1800s | Weekly top-3 compaction cluster Sage drafts (Sunday 6:15am, after compaction report) |
+| `community_summaries` | `cron(day_of_week=sun, hour=5, minute=0)` | 1800s | M8.5: Louvain community detection on entity graph + Sage summary per cluster (Sun 5:00am) |
+| `dream_replay` | `cron(day_of_week=sun, hour=8, minute=30)` | 1800s | Weekly REM-like generative conjecture synthesis (Sun 08:30) |
+| `entity_pages` | `cron(day_of_week=sun, hour=4, minute=30)` | 1800s | Weekly entity page generator — Sage synthesizes one hot entity per run (Sunday 4:30am) |
+| `monthly_synthesis` | `cron(day=1, hour=5, minute=0)` | 300s | Monthly arc (Sage, 1st of month 5am) |
+| `proactive_check` | `cron(hour=7,13,19,1, minute=30)` | 300s | Proactive insights — schedule gaps, contradictions, trends (4x daily) |
+| `profile_regen` | `cron(day_of_week=sun, hour=4, minute=0)` | 300s | Sage regenerates Chris profile from canonical knowledge (Sunday 4am) |
+| `raptor_build` | `cron(day_of_week=sun, hour=7, minute=15)` | 1800s | Weekly RAPTOR hierarchical summary tree (Sun 07:15) |
+| `screen_time_ingest` | `cron(day_of_week=sun, hour=4, minute=35)` | 300s | Screen Time daily patterns via Sage → raw/inbox (weekly) |
+| `weekly_synthesis` | `cron(day_of_week=sun, hour=4, minute=15)` | 300s | Weekly arc (Sage, Sunday 4:15am) |
 
-| Time | Job | Owner | Purpose |
-|---|---|---|---|
-| 03:15 daily | `answer_canonicalize` | system | Score pending answer_candidates, promote top-3 to raw/inbox |
-| 03:30 (Sun) | `graph_rebuild_mentions` | system | Rebuild atom→entity MENTIONS edges in Neo4j |
-| 03:40 (Sun) | `graph_backfill_co_mention` | system | Create RELATES_TO edges from shared MemoryAccess (co-mention) |
-| 04:30 (Sun) | `entity_pages` | sage | Sage generates one canonical entity page per run from hot Neo4j entities |
-| 05:45 (Sun) | `canonical_lint` | system | Orphan notes + data gaps + missing cross-refs report |
-| 06:00 (Sun) | `canonical_compaction` | system | Cluster similar canonical notes (cosine 0.94) — report only |
-| 06:15 (Sun) | `canonical_merge_draft` | sage | Sage drafts consolidated pages from top compaction clusters |
-| 06:35 (Sun) | `canonical_quality_filter_report` | system | Dry-run audit-log archival report |
+### system (84 jobs)
 
-**Human-reviewed (NOT auto-scheduled):** `canonical_merge_apply`, `canonical_quality_filter --apply`, `canonicalize_entities --apply`.
+| Name | Trigger | Misfire Grace | Description |
+|------|---------|---------------|-------------|
+| `action_audit_retention` | `cron(hour=4, minute=20)` | 900s | Prune action_audit rows older than 90d (daily 4:20am) |
+| `answer_canonicalize` | `cron(hour=3, minute=50)` | 900s | Nightly query→canonical promoter (03:50am — staggered off neo4j_backup at 03:15 to avoid reading while backup writes) |
+| `atoms_to_skills` | `cron(day_of_week=sun, hour=4, minute=55)` | 900s | Promote high-confidence atoms → domain Claude Code skills (Sun 04:55) |
+| `auto_resolve_contradictions` | `cron(hour=6, minute=0)` | 900s | Daily auto-resolve stale/low-confidence contradictions (6:00am) — v3 bumped from weekly to daily after finding 20-ite... |
+| `autonomy_proposer` | `cron(hour=4, minute=45)` | 300s | Phase 7: surface autonomy level promote/demote proposals (4:45am) |
+| `backup_verify` | `cron(day=1, hour=4, minute=30)` | 900s | Monthly backup restore smoke test (1st of month, 4:30am) |
+| `brain_loop_tick` | `interval(0:01:00)` | 30s | v3: brain_loop executive cortex tick (every 60s) |
+| `canonical_compaction` | `cron(day_of_week=sun, hour=6, minute=0)` | 1800s | Weekly compaction candidate clustering report (Sunday 6:00am, after canonical_lint) |
+| `canonical_design_drift` | `cron(day_of_week=sun, hour=5, minute=30)` | 900s | v3: weekly design source vs canonical mirror SHA check (Sun 05:30) |
+| `canonical_index` | `cron(day_of_week=sun, hour=4, minute=45)` | 300s | Rebuild canonical knowledge index.md (weekly Sunday 4:45am, no LLM) |
+| `canonical_lint` | `cron(day_of_week=sun, hour=5, minute=45)` | 900s | Weekly structural lint: orphan canonical notes (Sunday 5:45am) |
+| `canonical_pipeline` | `cron(hour=2,7,22, minute=0)` | 900s | Automated canonical promotion (3× daily: 02:00 / 07:00 / 22:00 PT) |
+| `canonical_quality_filter_report` | `cron(day_of_week=sun, hour=6, minute=35)` | 900s | Weekly quality filter dry-run report (Sunday 6:35am, review only) |
+| `canonical_quality_triage` | `cron(day_of_week=sun, hour=7, minute=0)` | 1800s | LLM classifies score=2 canonical_quality items as archive/keep/uncertain |
+| `canonicalize_entities_dryrun` | `cron(day_of_week=sun, hour=6, minute=45)` | 900s | v3: weekly entity dedup proposal scan (Sun 06:45, dry-run) |
+| `chroma_integrity` | `cron(day_of_week=sun, hour=3, minute=35)` | 300s | Weekly PRAGMA integrity_check on ChromaDB SQLite (Sun 3:35am) |
+| `code_index_refresh` | `cron(hour=3, minute=35)` | 1200s | Daily incremental code function indexer (3:35am — staggered off sm2_nightly at 03:25) |
+| `confidence_calibration` | `cron(day_of_week=sun, hour=4, minute=10)` | 900s | Weekly Platt calibration of atoms.confidence vs eval outcomes (Sun 04:10) |
+| `content_quality_slo` | `cron(hour=4, minute=5)` | 300s | Daily content quality SLO check (4:00am, after eval_run) |
+| `contextual_embed_weekly` | `cron(day_of_week=sun, hour=5, minute=0)` | 1800s | T2.12: re-embed canonical chunks with Anthropic-style per-doc context prefix (Sun 5:00am) |
+| `db_vacuum_weekly` | `cron(day_of_week=sun, hour=5, minute=30)` | 1800s | Weekly VACUUM + ANALYZE on brain.db/autonomy.db/llm_usage.db (Sun 5:30am) |
+| `embed_cache_prune` | `cron(hour=4, minute=5)` | 900s | Prune embed cache: drop legacy rows, age >60d, cap 25k (daily 4:05am) |
+| `embed_finetune` | `cron(day_of_week=sat, hour=23, minute=30)` | 3600s | Phase N3: weekly LoRA training on accumulated feedback pairs (Sat 23:30) |
+| `entity_reconcile` | `cron(hour=2, minute=55)` | 1800s | v3: nightly catch-up for atoms with missing entity extraction (02:55) |
+| `entity_resolution` | `cron(hour=3, minute=5)` | 900s | Nightly entity merge: embedding similarity + co-occurrence (3:05am) |
+| `episode_binder` | `cron(hour=3, minute=18)` | 900s | Daily episode clustering + Hebbian boost (3:18am, after entity_resolution) |
+| `eval_holdout_graduate` | `cron(day_of_week=sun, hour=7, minute=30)` | 900s | Phase N3: auto-graduate consistently-passing holdout candidates (Sun 7:30am) |
+| `eval_holdout_promote` | `cron(day_of_week=sun, hour=8, minute=45)` | 900s | Phase C1: novelty-score eval candidates, promote top-N to pending file (Sun 8:45am) |
+| `eval_proposal_triage` | `cron(hour=4, minute=20)` | 900s | CLI codex auto-approves/rejects candidate eval_proposals (daily 4:20am) |
+| `eval_run` | `cron(hour=3, minute=30)` | 900s | Stable-track eval (daily 3:30am) — strict 5pt gate, heal on regression |
+| `eval_run_extended` | `cron(hour=3, minute=50)` | 900s | Extended-track eval (daily 3:50am) — trend only, no heal, 10pt threshold |
+| `event_compressor` | `cron(day=1, hour=4, minute=20)` | 1800s | Monthly event compression for old experience events (1st of month, 4:20am) |
+| `feedback_aggregate` | `cron(day_of_week=sun, hour=6, minute=30)` | 900s | Weekly search feedback aggregation (Sun 6:30am) |
+| `focus_aggregate` | `cron(hour=4, minute=35)` | 600s | Daily energy/focus data layer aggregation (4:35am) |
+| `fts_rebuild` | `cron(hour=4, minute=15)` | 900s | Nightly SQLite FTS5 keyword index rebuild (4:15am) |
+| `gap_detection` | `cron(day_of_week=sun, hour=9, minute=0)` | 900s | Weekly knowledge gap detection from recall failures (Sunday 9:00am) |
+| `graph_backfill_co_mention` | `cron(day_of_week=sun, hour=3, minute=40)` | 900s | Weekly co-occurrence RELATES_TO backfill from shared MemoryAccess (Sunday 3:40am) |
+| `graph_consolidation` | `cron(hour=2, minute=50)` | 900s | Nightly graph sleep: decay, prune, promote, cluster (2:50am) |
+| `graph_rebuild_mentions` | `cron(day_of_week=sun, hour=3, minute=30)` | 1800s | Weekly rebuild of atom→entity MENTIONS edges in Neo4j (Sunday 3:30am) |
+| `habituation_prune` | `cron(hour=3, minute=20)` | 300s | Drop attention_queue rows with shown_count ≥ 300 (daily 3:20am) |
+| `hnsw_adaptive` | `cron(day_of_week=sun, hour=4, minute=50)` | 900s | Weekly adaptive HNSW ef_search tuning (Sunday 4:50am) |
+| `image_ingest` | `cron(hour=5, minute=45)` | 1800s | M7-WS2b: scan ~/Pictures/brain-ingest, OCR via Docling, embed captions → knowledge |
+| `infra_validation` | `cron(day_of_week=sun, hour=7, minute=15)` | 300s | Weekly infra fact cross-check against live state (Sunday 7:15am) |
+| `intent_miss_scan` | `cron(hour=3, minute=28)` | 900s | v3: scan active_recall misses via correction regex (daily 3:28am) |
+| `lint_memory` | `cron(day_of_week=sun, hour=5, minute=35)` | 900s | Weekly memory lint pass (Sunday 5:35am — staggered off canonical_design_drift at 05:30) |
+| `live_state_snapshot` | `interval(0:10:00)` | 120s | v3: snapshot current docker/launchd/goals/commits/sessions state (every 10min) |
+| `llm_backlog_drain` | `interval(0:30:00)` | 300s | v3: LLM backlog catch-up queue drain (every 30 min) |
+| `llm_usage_purge` | `cron(day_of_week=sun, hour=4, minute=55)` | 900s | Weekly purge of llm_usage.db >90 days (Sun 4:55am) |
+| `llm_usage_retention` | `cron(day=1, hour=4, minute=30)` | 1800s | Roll up llm_usage older than 90d into llm_usage_monthly (1st of month 4:30am) |
+| `log_rotation` | `cron(hour=4, minute=0)` | 300s | Truncate job/server logs >3d or >512KB (keeps last 100 lines) |
+| `lora_ab_gate` | `cron(day_of_week=sun, hour=9, minute=30)` | 1800s | Phase 7: weekly LoRA A/B gate + deploy (Sun 9:30am) |
+| `ltr_train` | `cron(day_of_week=sun, hour=4, minute=20)` | 900s | Weekly LogisticRegression LtR fit on recall feedback (Sun 04:20) |
+| `memory_consolidation` | `cron(hour=3, minute=45)` | 900s | Nightly memory tier promotion/demotion (3:45am, Phase 1D) |
+| `memory_health_report` | `cron(day_of_week=sun, hour=7, minute=30)` | 300s | Weekly memory health report (Sunday 7:30am) |
+| `memory_leak_detector` | `cron(day_of_week=sun, hour=5, minute=50)` | 900s | Weekly memory leak detection (Sunday 5:50am — staggered off canonical_lint at 05:45) |
+| `memory_lifecycle` | `cron(day_of_week=sun, hour=2, minute=30)` | 300s | Age out + promote durable semantic memories (Sunday 2:30am) |
+| `memory_nudge` | `cron(day_of_week=sun, hour=6, minute=50)` | 900s | Weekly memory review nudge (Sunday 6:50am — staggered off canonicalize_entities_dryrun at 06:45) |
+| `memory_observability` | `cron(day_of_week=sun, hour=5, minute=0)` | 900s | Weekly memory observability report (Sunday 5am) |
+| `memory_pruning` | `cron(day=15, hour=4, minute=10)` | 1800s | Monthly atrophied-memory dry-run (15th 4:10am) |
+| `memory_pruning_active` | `cron(day=15, hour=4, minute=15)` | 1800s | Monthly REAL atrophied-memory pruning (15th 4:15am, dry_run=False) |
+| `near_dedup` | `cron(day_of_week=sun, hour=3, minute=20)` | 300s | Weekly retroactive near-duplicate scan of semantic_memory (Sun 3:20am) |
+| `neo4j_backup` | `cron(hour=3, minute=15)` | 300s | Nightly Neo4j data backup to MinIO (14-day retention) |
+| `outbox_drain` | `interval(0:05:00)` | 120s | Phase 2D: drain SessionEnd outbox envelopes (every 5 min) |
+| `pdf_ingest` | `cron(hour=5, minute=30)` | 1800s | M7-WS2a: scan ~/Documents/PDFs, parse via Docling, embed → knowledge |
+| `proactive_insights` | `cron(hour=8, minute=0)` | 900s | Daily proactive insights surfacing (8:00am PST) |
+| `prune_raw_orphaned` | `cron(month=1,4,7,10, day=1, hour=4, minute=25)` | 1800s | Quarterly raw/orphaned prune (180d retention; 1st of Jan/Apr/Jul/Oct @ 04:25) |
+| `re_examine_rejected` | `cron(day=2, hour=4, minute=30)` | 1800s | Monthly rejected-proposal re-examination (2nd of month @ 04:30) |
+| `reindex` | `cron(hour=3,23, minute=17)` | 900s | Full ChromaDB reindex (2x daily, off-hours) |
+| `retrieval_inhibition` | `cron(hour=3, minute=58)` | 600s | Nightly Bjork-style inhibition of consistent retrieval losers (03:58am) |
+| `schema_learner` | `cron(day_of_week=sun, hour=4, minute=40)` | 900s | CLS spectral clustering on atom coactivation → compaction candidates (Sun 04:40) |
+| `schema_revision` | `cron(day_of_week=sun, hour=8, minute=45)` | 900s | Weekly free-energy schema revision (Sun 08:45) |
+| `session_rotate` | `cron(day_of_week=sun, hour=4, minute=30)` | 900s | Weekly: archive old agent session checkpoints; alert on oversized live sessions (Sun 4:30am) |
+| `skill_extract` | `cron(day_of_week=sun, hour=7, minute=45)` | 900s | Weekly skill graph indexing (Sunday 7:45am) |
+| `skill_materialize_cleanup` | `cron(hour=4, minute=10)` | 900s | T2.10: archive orphaned/stale auto-* SKILL.md files; enforce MAX_AUTO_SKILLS cap (daily 4:10am) |
+| `sleep_consolidate` | `cron(hour=3, minute=55)` | 900s | CLS sleep consolidation: coactivation + A-MEM + promotion (3:55am, Phase N4) |
+| `slo_monitor` | `cron(minute=30)` | 300s | Hourly SLO check with Telegram alerts on 3+ violations |
+| `slos_check` | `interval(0:05:00)` | 120s | Phase E1: SLO budget check + Telegram alert on breach (every 5 min) |
+| `sm2_nightly` | `cron(hour=3, minute=25)` | 900s | SM-2 nightly: seed next_review_at + obsolete stale atoms (3:25am) |
+| `stale_cleanup` | `cron(day_of_week=sun, hour=3, minute=10)` | 300s | Weekly incremental stale doc cleanup across collections (Sun 3:10am) |
+| `stale_superseded_cleanup` | `cron(day_of_week=sun, hour=6, minute=20)` | 900s | Weekly stale superseded memory cleanup (Sun 6:20am — staggered off canonical_merge_draft at 06:15) |
+| `supersession_chain_cleanup` | `cron(day_of_week=sun, hour=6, minute=10)` | 300s | Weekly cleanup of orphaned supersession chains (Sun 6:10am) |
+| `training_pairs_generate` | `cron(day_of_week=sun, hour=8, minute=0)` | 900s | Weekly training pair generation from feedback (Sunday 8:00am) |
+| `trust_recompute` | `cron(day_of_week=sun, hour=7, minute=0)` | 900s | Weekly cross-source corroboration trust score refresh (Sunday 7:00am) |
+| `web_source_trust_recompute` | `cron(day_of_week=sun, hour=5, minute=15)` | 900s | Phase M6: recompute per-domain web search trust scores (Sun 5:15) |
 
-## Job count
+## All jobs alphabetical
 
-90 total scheduled jobs as of 2026-04-15 (68 v2 + 9 v3 llm-wiki + 13 interim). To re-derive:
-
-```bash
-.venv/bin/python -c "import sys; sys.path.insert(0, 'brain_core'); from scheduler import JOB_SCHEDULE; print(len(JOB_SCHEDULE))"
-```
-
-## Maintenance windows
-
-- **No heavy Ollama/Chroma jobs between 9am–6pm PST** (work hours rule).
-  Enforced by `brain_core/autonomy.py` `EXECUTION_WINDOWS["heal.reindex"] = ["night"]`.
-- **Quiet hours**: 23:00–07:00 PT. L3 actions get auto-demoted to L2 unless
-  in the exception list (`heal.log_rotate`, `heal.vacuum_embed_cache`).
-- **Reindex 2× daily**: 03:17 + 23:17 (off-hours).
-- **Personal ingest 3× daily**: 06:00, 14:00, 22:00.
-
-## Failure handling
-
-- Every job has `misfire_grace=900` (15 min) by default; heavy jobs use 1800.
-- Failed jobs land in `scheduler_failures` on `/brain/health`.
-- Repeated failures trigger the persistent breaker for the action_kind
-  (e.g. `heal.reindex`) and back off 5m → 15m → 1h → 4h.
-- See RUNBOOK.md §2 for recovery.
-
-## 2026-04-16 Tier 1/2/3 additions
-
-New jobs registered in this session. Regenerate the full table from
-`JOB_SCHEDULE` when possible; this appendix documents only the deltas.
-
-| Time | Job | Owner | Purpose | Tier |
-|---|---|---|---|---|
-| 03:35 | `code_index_refresh` | system | Was 03:25 — staggered off `sm2_nightly` collision | T1 |
-| 03:50 | `answer_canonicalize` | system | Was 03:15 — staggered off `neo4j_backup` | T1 |
-| 03:55 | `retrieval_inhibition` | system | Bjork retrieval-induced inhibition nightly | T3 #4 |
-| 05:35 (Sun) | `lint_memory` | system | Was 05:30 — staggered off `canonical_design_drift` | T1 |
-| 05:50 (Sun) | `memory_leak_detector` | system | Was 05:45 — staggered off `canonical_lint` | T1 |
-| 06:20 (Sun) | `stale_superseded_cleanup` | system | Was 06:15 — staggered off `canonical_merge_draft` | T1 |
-| 06:50 (Sun) | `memory_nudge` | system | Was 06:45 — staggered off `canonicalize_entities_dryrun` | T1 |
-| 04:10 (Sun) | `confidence_calibration` | system | Platt-scale atoms.confidence vs eval outcomes | T3 #3 |
-| 07:15 (Sun) | `raptor_build` | sage | Hierarchical summary tree over canonical (Sarthi 2024) | T3 #9 |
-| 08:30 (Sun) | `dream_replay` | sage | REM-like generative conjectures across distant entities | T3 #7 |
-| 08:45 (Sun) | `schema_revision` | system | Friston free-energy schema-drift proposals | T3 #5 |
-| 04:25 (Jan/Apr/Jul/Oct 1st) | `prune_raw_orphaned` | system | Quarterly 180d prune of raw/orphaned/ | T2 |
-| 04:30 (2nd of month) | `re_examine_rejected` | system | Monthly rejected-proposal re-examination | T2 |
-
-### Interval-based additions
-- 15 s in-process: `completion_reaper` — polls subprocess PIDs, closes `_pending_completions` (T1)
-
-### SLO additions
-- `atoms_write_throughput_1h` — higher-is-better floor (≥5 writes/hr) to detect stuck writers (T1)
-
-### New endpoints
-- `GET /brain/doubt` — low-confidence atoms + unresolved contradictions + stale canonical (T3 #8)
-- `POST /brain/consolidate` — on-demand sleep consolidation trigger (T3 #8)
-- `GET /recall/stream` — SSE streaming recall with keepalive + fused terminator (T3 #13)
-
-### New MCP cognitive verbs
-- `brain_forget` — DELETE /memory/{id} wrapper (T3 #8)
-- `brain_consolidate` — POST /brain/consolidate wrapper (T3 #8)
-- `brain_doubt` — GET /brain/doubt wrapper (T3 #8)
-
-### New DB migration
-- `brain_db@10→11` — adds `retrieval_competition` table for Bjork inhibition log (T3 #4)
-
-### Environment flags added
-- `BRAIN_SELF_RAG_ENABLED` (default false) — toggles Jenna-backed Self-RAG critique in CRAG path (T3 #11)
-
-## 2026-04-17 Phase 3/4 additions
-
-| Time | Job | Owner | Purpose |
-|---|---|---|---|
-| 04:20 (Sun) | `ltr_train` | system | Weekly sklearn LogisticRegression fit over recall-feedback.jsonl (learned-to-rank blend) |
-
-### Env flags (2026-04-17)
-- `BRAIN_LTR_ENABLED` (default false) — toggles learned-to-rank LogisticRegression blend in `search_unified.py`
-- `BRAIN_FINETUNE_ENABLED` (default false) — required to run `cli/brain_finetune.py`
-
-### Recall response shape (2026-04-17)
-- `meta_note: str | None` added to `RecallV2Response`. Populated only when top-1 triggers an uncertainty heuristic. See `AGENT_HARNESS.md` §4.1.
-
-### Data bootstrap
-- `cli/bootstrap_feedback_from_eval.py` seeded `search-feedback.jsonl` with ~5k labeled pairs (4808 canonical + 126 eval positives, 20 eval negatives) on 2026-04-17. Idempotent — safe to rerun.
+| Name | Trigger | Agent | Misfire Grace |
+|------|---------|-------|---------------|
+| `action_audit_retention` | `cron(hour=4, minute=20)` | system | 900s |
+| `active_contacts_ingest` | `cron(day=1, hour=4, minute=0)` | jenna | 300s |
+| `answer_canonicalize` | `cron(hour=3, minute=50)` | system | 900s |
+| `atoms_to_skills` | `cron(day_of_week=sun, hour=4, minute=55)` | system | 900s |
+| `auto_resolve_contradictions` | `cron(hour=6, minute=0)` | system | 900s |
+| `autonomy_proposer` | `cron(hour=4, minute=45)` | system | 300s |
+| `backup_verify` | `cron(day=1, hour=4, minute=30)` | system | 900s |
+| `brain_loop_tick` | `interval(0:01:00)` | system | 30s |
+| `brain_reflect` | `cron(hour=2, minute=45)` | sage | 900s |
+| `browser_ingest` | `cron(hour=2, minute=30)` | sage | 300s |
+| `canonical_compaction` | `cron(day_of_week=sun, hour=6, minute=0)` | system | 1800s |
+| `canonical_design_drift` | `cron(day_of_week=sun, hour=5, minute=30)` | system | 900s |
+| `canonical_index` | `cron(day_of_week=sun, hour=4, minute=45)` | system | 300s |
+| `canonical_lint` | `cron(day_of_week=sun, hour=5, minute=45)` | system | 900s |
+| `canonical_merge_draft` | `cron(day_of_week=sun, hour=6, minute=15)` | sage | 1800s |
+| `canonical_pipeline` | `cron(hour=2,7,22, minute=0)` | system | 900s |
+| `canonical_quality_filter_report` | `cron(day_of_week=sun, hour=6, minute=35)` | system | 900s |
+| `canonical_quality_triage` | `cron(day_of_week=sun, hour=7, minute=0)` | system | 1800s |
+| `canonicalize_entities_dryrun` | `cron(day_of_week=sun, hour=6, minute=45)` | system | 900s |
+| `chroma_integrity` | `cron(day_of_week=sun, hour=3, minute=35)` | system | 300s |
+| `claude_code_sessions_ingest` | `cron(hour=1, minute=15)` | jenna | 300s |
+| `code_index_refresh` | `cron(hour=3, minute=35)` | system | 1200s |
+| `community_summaries` | `cron(day_of_week=sun, hour=5, minute=0)` | sage | 1800s |
+| `confidence_calibration` | `cron(day_of_week=sun, hour=4, minute=10)` | system | 900s |
+| `content_quality_slo` | `cron(hour=4, minute=5)` | system | 300s |
+| `contextual_embed_weekly` | `cron(day_of_week=sun, hour=5, minute=0)` | system | 1800s |
+| `daily_synthesis` | `cron(hour=21, minute=0)` | jenna | 300s |
+| `db_vacuum_weekly` | `cron(day_of_week=sun, hour=5, minute=30)` | system | 1800s |
+| `dream_replay` | `cron(day_of_week=sun, hour=8, minute=30)` | sage | 1800s |
+| `embed_cache_prune` | `cron(hour=4, minute=5)` | system | 900s |
+| `embed_finetune` | `cron(day_of_week=sat, hour=23, minute=30)` | system | 3600s |
+| `entity_pages` | `cron(day_of_week=sun, hour=4, minute=30)` | sage | 1800s |
+| `entity_reconcile` | `cron(hour=2, minute=55)` | system | 1800s |
+| `entity_resolution` | `cron(hour=3, minute=5)` | system | 900s |
+| `episode_binder` | `cron(hour=3, minute=18)` | system | 900s |
+| `eval_holdout_audit` | `cron(day_of_week=sun, hour=9, minute=15)` | jenna | 900s |
+| `eval_holdout_graduate` | `cron(day_of_week=sun, hour=7, minute=30)` | system | 900s |
+| `eval_holdout_promote` | `cron(day_of_week=sun, hour=8, minute=45)` | system | 900s |
+| `eval_proposal_triage` | `cron(hour=4, minute=20)` | system | 900s |
+| `eval_run` | `cron(hour=3, minute=30)` | system | 900s |
+| `eval_run_extended` | `cron(hour=3, minute=50)` | system | 900s |
+| `event_compressor` | `cron(day=1, hour=4, minute=20)` | system | 1800s |
+| `feedback_aggregate` | `cron(day_of_week=sun, hour=6, minute=30)` | system | 900s |
+| `focus_aggregate` | `cron(hour=4, minute=35)` | system | 600s |
+| `fts_rebuild` | `cron(hour=4, minute=15)` | system | 900s |
+| `gap_detection` | `cron(day_of_week=sun, hour=9, minute=0)` | system | 900s |
+| `ghost_blog_ingest` | `cron(hour=5, minute=0)` | market | 300s |
+| `git_activity_ingest` | `cron(hour=1, minute=45)` | ellie | 300s |
+| `gmail_ingest` | `cron(hour=1, minute=30)` | jenna | 300s |
+| `graph_backfill_co_mention` | `cron(day_of_week=sun, hour=3, minute=40)` | system | 900s |
+| `graph_consolidation` | `cron(hour=2, minute=50)` | system | 900s |
+| `graph_rebuild_mentions` | `cron(day_of_week=sun, hour=3, minute=30)` | system | 1800s |
+| `habituation_prune` | `cron(hour=3, minute=20)` | system | 300s |
+| `healthcheck` | `cron(hour=9, minute=0)` | ellie | 300s |
+| `hnsw_adaptive` | `cron(day_of_week=sun, hour=4, minute=50)` | system | 900s |
+| `image_ingest` | `cron(hour=5, minute=45)` | system | 1800s |
+| `infra_validation` | `cron(day_of_week=sun, hour=7, minute=15)` | system | 300s |
+| `intent_miss_scan` | `cron(hour=3, minute=28)` | system | 900s |
+| `lint_memory` | `cron(day_of_week=sun, hour=5, minute=35)` | system | 900s |
+| `live_state_snapshot` | `interval(0:10:00)` | system | 120s |
+| `llm_backlog_drain` | `interval(0:30:00)` | system | 300s |
+| `llm_usage_purge` | `cron(day_of_week=sun, hour=4, minute=55)` | system | 900s |
+| `llm_usage_retention` | `cron(day=1, hour=4, minute=30)` | system | 1800s |
+| `log_rotation` | `cron(hour=4, minute=0)` | system | 300s |
+| `lora_ab_gate` | `cron(day_of_week=sun, hour=9, minute=30)` | system | 1800s |
+| `ltr_train` | `cron(day_of_week=sun, hour=4, minute=20)` | system | 900s |
+| `memory_consolidation` | `cron(hour=3, minute=45)` | system | 900s |
+| `memory_health_report` | `cron(day_of_week=sun, hour=7, minute=30)` | system | 300s |
+| `memory_leak_detector` | `cron(day_of_week=sun, hour=5, minute=50)` | system | 900s |
+| `memory_lifecycle` | `cron(day_of_week=sun, hour=2, minute=30)` | system | 300s |
+| `memory_nudge` | `cron(day_of_week=sun, hour=6, minute=50)` | system | 900s |
+| `memory_observability` | `cron(day_of_week=sun, hour=5, minute=0)` | system | 900s |
+| `memory_pruning` | `cron(day=15, hour=4, minute=10)` | system | 1800s |
+| `memory_pruning_active` | `cron(day=15, hour=4, minute=15)` | system | 1800s |
+| `monthly_synthesis` | `cron(day=1, hour=5, minute=0)` | sage | 300s |
+| `near_dedup` | `cron(day_of_week=sun, hour=3, minute=20)` | system | 300s |
+| `neo4j_backup` | `cron(hour=3, minute=15)` | system | 300s |
+| `obsidian_sync` | `interval(1:00:00)` | jenna | 300s |
+| `openclaw_sessions_ingest` | `cron(hour=0,3,6,19,21,23, minute=35)` | jenna | 300s |
+| `outbox_drain` | `interval(0:05:00)` | system | 120s |
+| `pdf_ingest` | `cron(hour=5, minute=30)` | system | 1800s |
+| `personal_ingest` | `cron(hour=6,14,22, minute=0)` | jenna | 300s |
+| `proactive_check` | `cron(hour=7,13,19,1, minute=30)` | sage | 300s |
+| `proactive_insights` | `cron(hour=8, minute=0)` | system | 900s |
+| `profile_regen` | `cron(day_of_week=sun, hour=4, minute=0)` | sage | 300s |
+| `prune_raw_orphaned` | `cron(month=1,4,7,10, day=1, hour=4, minute=25)` | system | 1800s |
+| `raptor_build` | `cron(day_of_week=sun, hour=7, minute=15)` | sage | 1800s |
+| `re_examine_rejected` | `cron(day=2, hour=4, minute=30)` | system | 1800s |
+| `reindex` | `cron(hour=3,23, minute=17)` | system | 900s |
+| `retrieval_inhibition` | `cron(hour=3, minute=58)` | system | 600s |
+| `schema_learner` | `cron(day_of_week=sun, hour=4, minute=40)` | system | 900s |
+| `schema_revision` | `cron(day_of_week=sun, hour=8, minute=45)` | system | 900s |
+| `screen_time_ingest` | `cron(day_of_week=sun, hour=4, minute=35)` | sage | 300s |
+| `session_rotate` | `cron(day_of_week=sun, hour=4, minute=30)` | system | 900s |
+| `shell_ingest` | `cron(hour=2, minute=15)` | ellie | 300s |
+| `skill_extract` | `cron(day_of_week=sun, hour=7, minute=45)` | system | 900s |
+| `skill_materialize_cleanup` | `cron(hour=4, minute=10)` | system | 900s |
+| `sleep_consolidate` | `cron(hour=3, minute=55)` | system | 900s |
+| `slo_monitor` | `cron(minute=30)` | system | 300s |
+| `slos_check` | `interval(0:05:00)` | system | 120s |
+| `sm2_nightly` | `cron(hour=3, minute=25)` | system | 900s |
+| `stale_cleanup` | `cron(day_of_week=sun, hour=3, minute=10)` | system | 300s |
+| `stale_superseded_cleanup` | `cron(day_of_week=sun, hour=6, minute=20)` | system | 900s |
+| `supersession_chain_cleanup` | `cron(day_of_week=sun, hour=6, minute=10)` | system | 300s |
+| `training_pairs_generate` | `cron(day_of_week=sun, hour=8, minute=0)` | system | 900s |
+| `trust_recompute` | `cron(day_of_week=sun, hour=7, minute=0)` | system | 900s |
+| `web_source_trust_recompute` | `cron(day_of_week=sun, hour=5, minute=15)` | system | 900s |
+| `weekly_synthesis` | `cron(day_of_week=sun, hour=4, minute=15)` | sage | 300s |

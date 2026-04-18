@@ -252,8 +252,8 @@ def dedup_semantic_memory() -> int:
     CHROMA = "http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections"
 
     # Find collection ID
-    resp = urllib.request.urlopen(CHROMA, timeout=10)
-    cols = json.loads(resp.read())
+    with urllib.request.urlopen(CHROMA, timeout=10) as resp:
+        cols = json.loads(resp.read())
     col_id = None
     for c in cols:
         if c.get("name") == "semantic_memory":
@@ -269,7 +269,8 @@ def dedup_semantic_memory() -> int:
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    data = json.loads(urllib.request.urlopen(req, timeout=30).read())
+    with urllib.request.urlopen(req, timeout=30) as _resp:
+        data = json.loads(_resp.read())
     ids = data.get("ids", [])
     docs = data.get("documents", [])
 
@@ -299,7 +300,8 @@ def dedup_semantic_memory() -> int:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        urllib.request.urlopen(req, timeout=15)
+        with urllib.request.urlopen(req, timeout=15):
+            pass
     print(f"  semantic_memory: removed {len(dupe_ids)} content duplicates")
     return len(dupe_ids)
 
@@ -318,8 +320,8 @@ def dedup_semantic_near_duplicates() -> dict:
 
     # Find collection ID
     try:
-        resp = urllib.request.urlopen(CHROMA, timeout=10)
-        cols = json.loads(resp.read())
+        with urllib.request.urlopen(CHROMA, timeout=10) as resp:
+            cols = json.loads(resp.read())
     except Exception as e:
         return {"status": "error", "reason": str(e)}
 
@@ -342,7 +344,8 @@ def dedup_semantic_near_duplicates() -> dict:
         method="POST",
     )
     try:
-        data = json.loads(urllib.request.urlopen(req, timeout=60).read())
+        with urllib.request.urlopen(req, timeout=60) as _resp:
+            data = json.loads(_resp.read())
     except Exception as e:
         return {"status": "error", "reason": str(e)}
 
@@ -424,7 +427,8 @@ def dedup_semantic_near_duplicates() -> dict:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        urllib.request.urlopen(req, timeout=15)
+        with urllib.request.urlopen(req, timeout=15):
+            pass
 
     print(f"  semantic_memory near-dedup: removed {len(delete_list)} near-duplicates from {len(ids)} entries")
 

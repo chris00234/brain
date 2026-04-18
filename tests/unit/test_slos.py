@@ -23,9 +23,14 @@ def slos_module():
 def test_slo_count(slos_module):
     # 6 base + 4 N-series watchers + 1 stuck-writer throughput (2026-04-16)
     # + 1 calibration_brier_drift_7d (2026-04-17 W5 — silent miscalibration detector)
-    assert len(slos_module.SLOS) == 12
+    # + 3 incident-response SLOs (2026-04-17: dispatch_failure_rate_1h,
+    #   agent_session_max_mb, logs_dir_total_mb)
+    assert len(slos_module.SLOS) == 15
     assert "atoms_write_throughput_1h" in slos_module.SLOS
     assert "calibration_brier_drift_7d" in slos_module.SLOS
+    assert "dispatch_failure_rate_1h" in slos_module.SLOS
+    assert "agent_session_max_mb" in slos_module.SLOS
+    assert "logs_dir_total_mb" in slos_module.SLOS
 
 
 def test_recall_v2_p95_lower_is_better(slos_module):

@@ -167,7 +167,8 @@ def heal_eval_regression(signal: HealingSignal) -> dict:
             method="POST",
             headers={"Authorization": f"Bearer {secret}"},
         )
-        urllib.request.urlopen(req, timeout=10)
+        with urllib.request.urlopen(req, timeout=10):
+            pass
         result = "triggered"
         if suggestions:
             result += f" (also: {','.join(suggestions)})"
@@ -197,7 +198,8 @@ def heal_slo_latency(signal: HealingSignal) -> dict:
                 method="POST",
                 headers={"Authorization": f"Bearer {secret}"},
             )
-            urllib.request.urlopen(req, timeout=5)
+            with urllib.request.urlopen(req, timeout=5):
+                pass
             return {"action": "vacuum_embed_cache", "result": "triggered"}
         except Exception as e:
             return {"action": "vacuum_embed_cache", "result": f"failed: {e}"}
@@ -212,7 +214,8 @@ def heal_slo_latency(signal: HealingSignal) -> dict:
                 method="POST",
                 headers={"Authorization": f"Bearer {secret}"},
             )
-            urllib.request.urlopen(req, timeout=5)
+            with urllib.request.urlopen(req, timeout=5):
+                pass
             return {"action": "trigger_reindex", "result": "triggered"}
         except Exception as e:
             return {"action": "trigger_reindex", "result": f"failed: {e}"}
@@ -234,7 +237,8 @@ def heal_memory_growth(signal: HealingSignal) -> dict:
                 method="POST",
                 headers={"Authorization": f"Bearer {secret}"},
             )
-            urllib.request.urlopen(req, timeout=5)
+            with urllib.request.urlopen(req, timeout=5):
+                pass
         return {"action": "consolidate_and_dedup", "result": "triggered"}
     except Exception as e:
         return {"action": "consolidate_and_dedup", "result": f"failed: {e}"}

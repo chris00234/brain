@@ -23,12 +23,25 @@ existing callers see no behavior change.
 
 from __future__ import annotations
 
+import atexit
+import concurrent.futures
 import logging
 import statistics
 from collections.abc import Callable
 from dataclasses import dataclass
 
 log = logging.getLogger("brain.crag")
+
+
+# 2026-04-17: previously a fresh ThreadPoolExecutor was created per
+# expand_query() call and shut down with wait=False, leaving worker
+# threads running when the next call created another executor. Under
+# concurrent /recall/v2 traffic threads accumulated. Single shared
+# module-level pool reuses the same two workers across all calls.
+_expand_pool = concurrent.futures.ThreadPoolExecutor(
+    max_workers=2, thread_name_prefix="crag_expand"
+)
+atexit.register(_expand_pool.shutdown, wait=False)
 
 
 # Confidence thresholds — calibrated against actual production score distributions
@@ -230,30 +243,24 @@ def expand_query(
         )
         return result.text if result.ok else ""
 
-    # M7-WS7 M4 fix: do NOT use `with executor as ex:` — the context manager's
-    # __exit__ blocks until in-flight work completes, which means a stuck Jenna
-    # dispatch would freeze the entire /recall/v2 request even after the
-    # wall-clock timeout fires. Use a manual executor and `shutdown(wait=False,
-    # cancel_futures=True)` instead so timeout actually unblocks the caller.
-    ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    # 2026-04-17: submit to shared module-level pool (see top of file).
+    # Timeout still unblocks the caller; the background thread finishes
+    # on its own in the shared pool without blocking us.
+    fut = _expand_pool.submit(_do_dispatch)
     try:
-        fut = ex.submit(_do_dispatch)
-        try:
-            raw = fut.result(timeout=timeout_s)
-        except concurrent.futures.TimeoutError:
-            log.warning("expand_query wall-clock budget exceeded (%.1fs)", timeout_s)
-            raw = ""
-        except Exception as _exc:
-            log.warning("expand_query dispatch failed: %s", _exc)
-            raw = ""
-        if raw:
-            candidate = raw.strip().strip('"').strip("'").strip()
-            if candidate and candidate != query:
-                if len(candidate) > 500:
-                    candidate = candidate[:500]
-                rewritten = candidate
-    finally:
-        ex.shutdown(wait=False, cancel_futures=True)
+        raw = fut.result(timeout=timeout_s)
+    except concurrent.futures.TimeoutError:
+        log.warning("expand_query wall-clock budget exceeded (%.1fs)", timeout_s)
+        raw = ""
+    except Exception as _exc:
+        log.warning("expand_query dispatch failed: %s", _exc)
+        raw = ""
+    if raw:
+        candidate = raw.strip().strip('"').strip("'").strip()
+        if candidate and candidate != query:
+            if len(candidate) > 500:
+                candidate = candidate[:500]
+            rewritten = candidate
     return rewritten
 
 

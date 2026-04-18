@@ -34,7 +34,12 @@ from pathlib import Path
 
 log = logging.getLogger("brain.raw_events_fts")
 
-BRAIN_DB = Path("/Users/chrischo/server/brain/logs/brain.db")
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:
+    from config import BRAIN_DB
+except ImportError:
+    BRAIN_DB = Path("/Users/chrischo/server/brain/logs/brain.db")
 
 # FTS5 reserved syntax that would cause parse errors if the user types it
 _FTS5_RESERVED = re.compile(r"\b(AND|OR|NOT|NEAR)\b", re.IGNORECASE)

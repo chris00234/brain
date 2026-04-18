@@ -41,7 +41,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 log = logging.getLogger("brain.claude_session")
 
-BRAIN_DB = Path("/Users/chrischo/server/brain/logs/brain.db")
+try:
+    from config import BRAIN_DB
+except ImportError:
+    BRAIN_DB = Path("/Users/chrischo/server/brain/logs/brain.db")
 SESSION_TTL_SECONDS = 600  # 10 min — heartbeat extends
 
 # Kinds that benefit from Claude-in-session handling.

@@ -25,9 +25,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 log = logging.getLogger("brain.db_maintenance")
 
-BRAIN_DB = Path("/Users/chrischo/server/brain/logs/brain.db")
-AUTONOMY_DB = Path("/Users/chrischo/server/brain/logs/autonomy.db")
-LLM_USAGE_DB = Path("/Users/chrischo/server/brain/logs/llm_usage.db")
+try:
+    from config import AUTONOMY_DB, BRAIN_DB, BRAIN_LOGS_DIR
+
+    LLM_USAGE_DB = BRAIN_LOGS_DIR / "llm_usage.db"
+except ImportError:
+    BRAIN_DB = Path("/Users/chrischo/server/brain/logs/brain.db")
+    AUTONOMY_DB = Path("/Users/chrischo/server/brain/logs/autonomy.db")
+    LLM_USAGE_DB = Path("/Users/chrischo/server/brain/logs/llm_usage.db")
 
 # Retention policies
 ACTION_AUDIT_RETENTION_DAYS = 90

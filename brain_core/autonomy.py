@@ -237,7 +237,85 @@ def _execution_window_check(kind: str, now_local: datetime) -> tuple[bool, str]:
     return True, ""
 
 
-def authorize(
+# ── Audit logging (2026-04-17) ─────────────────────────────
+# Every authorize() decision is recorded so we can post-mortem "why was
+# this denied?" / "why did the gate let this through?" weeks later.
+# Schema is lazy — creates on first write so older brain_core/ imports
+# still work.
+import sqlite3 as _sqlite3_audit
+
+_audit_schema_ready = False
+
+
+def _ensure_audit_schema() -> None:
+    global _audit_schema_ready
+    if _audit_schema_ready:
+        return
+    try:
+        conn = _sqlite3_audit.connect(str(AUTONOMY_DB), timeout=5)
+        try:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS autonomy_decisions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts_utc TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    level TEXT NOT NULL,
+                    allowed INTEGER NOT NULL,
+                    reason TEXT NOT NULL,
+                    breaker_state TEXT NOT NULL,
+                    context_json TEXT
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_autonomy_decisions_ts "
+                "ON autonomy_decisions(ts_utc DESC)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_autonomy_decisions_kind "
+                "ON autonomy_decisions(kind, ts_utc DESC)"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        _audit_schema_ready = True
+    except Exception as exc:
+        log.debug("autonomy_decisions schema init failed: %s", exc)
+
+
+def _record_decision(decision: AuthorizationDecision, context: dict | None) -> None:
+    """Best-effort insert into autonomy_decisions. Never raises."""
+    try:
+        _ensure_audit_schema()
+        import json as _json
+
+        ts = datetime.now(ZoneInfo("UTC")).isoformat(timespec="seconds")
+        ctx_json = _json.dumps(context, default=str)[:1000] if context else None
+        conn = _sqlite3_audit.connect(str(AUTONOMY_DB), timeout=2)
+        try:
+            conn.execute(
+                "INSERT INTO autonomy_decisions "
+                "(ts_utc, kind, level, allowed, reason, breaker_state, context_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    ts,
+                    decision.kind,
+                    decision.level,
+                    1 if decision.allowed else 0,
+                    decision.reason,
+                    decision.breaker_state,
+                    ctx_json,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as exc:
+        log.debug("autonomy decision audit write failed: %s", exc)
+
+
+def _authorize_core(
     kind: str,
     *,
     context: dict | None = None,
@@ -425,3 +503,20 @@ def authorize(
         breaker_state=breaker_state,
         kind=kind,
     )
+
+
+def authorize(
+    kind: str,
+    *,
+    context: dict | None = None,
+    now: datetime | None = None,
+) -> AuthorizationDecision:
+    """Public entrypoint: run the gate and record the decision.
+
+    Keeps the _authorize_core logic pure / side-effect-free for testing,
+    and layers persistent audit logging on top. Every gate decision is
+    written to autonomy_decisions for post-mortem. Write is best-effort;
+    DB issues never block the decision itself."""
+    decision = _authorize_core(kind, context=context, now=now)
+    _record_decision(decision, context)
+    return decision

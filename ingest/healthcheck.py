@@ -121,8 +121,8 @@ def get_collection_counts() -> dict[str, int | str]:
     import urllib.request
 
     try:
-        resp = urllib.request.urlopen(CHROMA_API, timeout=10)
-        cols = json.loads(resp.read())
+        with urllib.request.urlopen(CHROMA_API, timeout=10) as resp:
+            cols = json.loads(resp.read())
     except Exception as e:
         return {"_error": str(e)}
 
@@ -133,8 +133,8 @@ def get_collection_counts() -> dict[str, int | str]:
         if not cid or not name:
             continue
         try:
-            resp = urllib.request.urlopen(f"{CHROMA_API}/{cid}/count", timeout=10)
-            counts[name] = int(resp.read().strip())
+            with urllib.request.urlopen(f"{CHROMA_API}/{cid}/count", timeout=10) as resp:
+                counts[name] = int(resp.read().strip())
         except Exception:
             counts[name] = -1
     return counts
@@ -145,8 +145,8 @@ def get_collection_id(name: str) -> str | None:
     import urllib.request
 
     try:
-        resp = urllib.request.urlopen(CHROMA_API, timeout=10)
-        cols = json.loads(resp.read())
+        with urllib.request.urlopen(CHROMA_API, timeout=10) as resp:
+            cols = json.loads(resp.read())
         for c in cols:
             if c.get("name") == name:
                 return c.get("id")
@@ -279,8 +279,8 @@ def check_ollama_embedding() -> list[str]:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        resp = urllib.request.urlopen(req, timeout=20)
-        body = json.loads(resp.read())
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            body = json.loads(resp.read())
         emb = body.get("embedding") or []
         if not emb or len(emb) < 100:
             return [f"❌ Ollama embedding returned {len(emb)} dims (expected 1024)"]
@@ -306,7 +306,8 @@ def check_chroma_write() -> list[str]:
             method="POST",
         )
         try:
-            urllib.request.urlopen(req, timeout=10)
+            with urllib.request.urlopen(req, timeout=10):
+                pass
         except urllib.error.HTTPError as e:
             # 409 = already exists, fine
             if e.code not in (409, 400):
@@ -331,7 +332,8 @@ def check_chroma_write() -> list[str]:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        urllib.request.urlopen(upsert_req, timeout=10)
+        with urllib.request.urlopen(upsert_req, timeout=10):
+            pass
         # Delete the probe to avoid filling the collection
         del_req = urllib.request.Request(
             f"{CHROMA_API}/{col_id}/delete",
@@ -339,7 +341,8 @@ def check_chroma_write() -> list[str]:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        urllib.request.urlopen(del_req, timeout=10)
+        with urllib.request.urlopen(del_req, timeout=10):
+            pass
         return []
     except Exception as e:
         return [f"❌ ChromaDB write probe failed: {e}"]
@@ -373,8 +376,8 @@ def check_recall_vector() -> list[str]:
             f"{BRAIN_URL}/recall?q=homelab&n=3",
             headers={"Authorization": f"Bearer {secret}"},
         )
-        resp = urllib.request.urlopen(req, timeout=20)
-        body = json.loads(resp.read())
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            body = json.loads(resp.read())
         if not body.get("results"):
             return ["⚠️ /recall returned 0 results for 'homelab' probe"]
         return []
@@ -396,7 +399,8 @@ def check_recall_vector_temporal() -> list[str]:
             f"{BRAIN_URL}/recall?q=homelab&since={week_ago}&until={today}&n=3",
             headers={"Authorization": f"Bearer {secret}"},
         )
-        urllib.request.urlopen(req, timeout=20)
+        with urllib.request.urlopen(req, timeout=20):
+            pass
         return []
     except urllib.error.HTTPError as e:
         return [f"❌ /recall with since/until returned HTTP {e.code} (ChromaDB where bug?)"]
@@ -417,8 +421,8 @@ def check_content_integrity() -> list[str]:
         if not col_id:
             continue
         try:
-            count_resp = urllib.request.urlopen(f"{CHROMA_API}/{col_id}/count", timeout=5)
-            total = int(count_resp.read().strip())
+            with urllib.request.urlopen(f"{CHROMA_API}/{col_id}/count", timeout=5) as count_resp:
+                total = int(count_resp.read().strip())
             if total == 0:
                 continue
             # Fetch a page to sample from. We avoid query_embeddings because that
@@ -437,8 +441,8 @@ def check_content_integrity() -> list[str]:
                 headers={"Content-Type": "application/json"},
                 method="POST",
             )
-            resp = urllib.request.urlopen(req, timeout=10)
-            body = json.loads(resp.read())
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                body = json.loads(resp.read())
             docs = body.get("documents") or []
             metas = body.get("metadatas") or []
             sample = list(zip(docs, metas, strict=False))

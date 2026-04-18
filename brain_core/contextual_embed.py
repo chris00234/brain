@@ -51,7 +51,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 log = logging.getLogger("brain.contextual_embed")
 
 KNOWLEDGE_CANONICAL_DIR = Path("/Users/chrischo/server/knowledge/canonical")
-BRAIN_DB = Path("/Users/chrischo/server/brain/logs/brain.db")
+try:
+    from config import BRAIN_DB
+except ImportError:
+    BRAIN_DB = Path("/Users/chrischo/server/brain/logs/brain.db")
 CANONICAL_COLLECTION = "canonical"
 
 # Anthropic's recommended prompt pattern, adapted slightly for per-doc summaries

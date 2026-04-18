@@ -360,17 +360,27 @@ def create_trigger(
     return result
 
 
+_UPDATABLE_COLUMNS: frozenset[str] = frozenset(
+    {"enabled", "cooldown_seconds", "description", "condition_config", "action_template"}
+)
+
+
 def update_trigger(trigger_id: str, **fields: object) -> dict | None:
     """Patch a trigger. Allowed fields: enabled, cooldown_seconds, description,
     condition_config, action_template. Returns updated row or None if missing."""
-    allowed = {"enabled", "cooldown_seconds", "description", "condition_config", "action_template"}
-    updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
+    updates = {k: v for k, v in fields.items() if k in _UPDATABLE_COLUMNS and v is not None}
     if not updates:
         return get_trigger(trigger_id)
     _init_db()
     set_clauses = []
     params: list[object] = []
     for k, v in updates.items():
+        # Defense-in-depth: re-validate the column name at the SQL-building
+        # site. The allowlist filter above already gates this, but if a
+        # future refactor bypasses it or a stray call uses **untrusted_dict,
+        # we still refuse to build SQL with an unknown identifier.
+        if k not in _UPDATABLE_COLUMNS:
+            raise ValueError(f"update_trigger: refusing column {k!r} (not in allowlist)")
         if k in ("condition_config", "action_template") and isinstance(v, dict):
             v = json.dumps(v)
         elif k == "enabled":

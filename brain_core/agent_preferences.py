@@ -14,7 +14,12 @@ from pathlib import Path
 
 log = logging.getLogger("brain.agent_prefs")
 
-PREFS_DB = Path("/Users/chrischo/server/brain/logs/autonomy.db")
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:
+    from config import AUTONOMY_DB as PREFS_DB
+except ImportError:
+    PREFS_DB = Path("/Users/chrischo/server/brain/logs/autonomy.db")
 
 _schema_initialized = False
 

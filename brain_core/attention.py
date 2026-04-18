@@ -41,7 +41,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 log = logging.getLogger("brain.attention")
 
-BRAIN_DB = Path("/Users/chrischo/server/brain/logs/brain.db")
+try:
+    from config import BRAIN_DB
+except ImportError:
+    BRAIN_DB = Path("/Users/chrischo/server/brain/logs/brain.db")
 
 SEVERITY_WEIGHT = {"info": 1.0, "warning": 2.0, "urgent": 4.0, "critical": 4.0}
 HABITUATION_HALF_LIFE = 3  # shows before weight halves

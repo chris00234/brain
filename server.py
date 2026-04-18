@@ -338,12 +338,8 @@ JOB_REGISTRY: dict[str, list[str]] = {
         "-c",
         f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from slos import run; import json; print(json.dumps(run()))",
     ],
-    # Phase J2: adaptive HNSW ef_search tuning (advisory — applied on next collection load)
-    "hnsw_tune": [
-        _py,
-        "-c",
-        f"import sys; sys.path.insert(0, '{_bd}/brain_core/pipeline'); sys.path.insert(0, '{_bd}/brain_core'); from hnsw_tuner import adaptive_tune; import json; print(json.dumps(adaptive_tune(dry_run=False)))",
-    ],
+    # hnsw_tune dispatcher retired 2026-04-17 — duplicate of hnsw_adaptive.
+    # See brain_core/scheduler.py for the removal rationale.
     # Phase 2D: SessionEnd outbox drainer — replays envelopes that the
     # post_session.sh fire-and-forget call missed (brain down, orphan inflight,
     # no SessionEnd at all). Documented as 5-min job in CRON_MAP/RUNBOOK; the
@@ -1256,6 +1252,30 @@ limiter = Limiter(
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(SlowAPIMiddleware)
+
+
+# 2026-04-17: generic exception handler. Prevents internal details from
+# escaping via HTTP responses on unexpected crashes. Explicit
+# HTTPException(detail=...) raises are still serialized as-is (FastAPI
+# routes them before this handler fires) — so individual endpoints that
+# carefully craft user-friendly messages keep working.
+@app.exception_handler(Exception)
+async def _generic_exception_handler(request, exc):  # type: ignore[no-untyped-def]
+    import uuid
+    from fastapi.responses import JSONResponse
+
+    err_id = uuid.uuid4().hex[:12]
+    try:
+        log.exception("unhandled exception err_id=%s path=%s", err_id, request.url.path)
+    except Exception:
+        pass
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": "Internal error",
+            "err_id": err_id,
+        },
+    )
 
 _cors_origins = os.getenv("BRAIN_CORS_ORIGINS", "").strip()
 app.add_middleware(
@@ -3529,10 +3549,39 @@ def list_jobs() -> dict:
 
 
 @app.get("/jobs/{job}/history", tags=["jobs"], dependencies=[Depends(verify_bearer)])
-def job_history(job: Annotated[str, PathParam()]) -> dict:
+def job_history(
+    job: Annotated[str, PathParam()],
+    full: Annotated[bool, Query(description="Read from scheduler_history.db instead of in-memory ring")] = False,
+    limit: Annotated[int, Query(ge=1, le=1000)] = 200,
+) -> dict:
     if job not in JOB_REGISTRY:
         raise HTTPException(status_code=404, detail=f"unknown job '{job}'")
-    return {"job": job, "history": brain_scheduler.get_history(job)}
+    if not full:
+        return {"job": job, "source": "memory", "history": brain_scheduler.get_history(job)}
+    # 2026-04-17: full history view from persistent SQLite. Chris can now
+    # see week-over-week job duration trends + failure rates. The in-memory
+    # ring buffer only kept ~20 entries per job.
+    import sqlite3 as _sqlite3_hist
+    from pathlib import Path as _Path
+    history_db = _Path("/Users/chrischo/server/brain/logs/scheduler_history.db")
+    if not history_db.exists():
+        return {"job": job, "source": "sqlite", "history": []}
+    try:
+        conn = _sqlite3_hist.connect(str(history_db), timeout=5)
+        conn.row_factory = _sqlite3_hist.Row
+        try:
+            rows = conn.execute(
+                "SELECT started_at, finished_at, duration_ms, pid, error, manual "
+                "FROM job_history WHERE job_name = ? ORDER BY id DESC LIMIT ?",
+                (job, limit),
+            ).fetchall()
+            items = [dict(r) for r in rows]
+        finally:
+            conn.close()
+    except Exception as e:
+        log.warning("job_history full query failed: %s", e)
+        items = []
+    return {"job": job, "source": "sqlite", "count": len(items), "history": items}
 
 
 @app.post("/jobs/{job}", response_model=JobResponse, tags=["jobs"], dependencies=[Depends(verify_bearer)])
@@ -7287,7 +7336,8 @@ def brain_health() -> dict:
 
     # Probe ChromaDB
     try:
-        urllib.request.urlopen("http://127.0.0.1:8000/api/v2/heartbeat", timeout=3)
+        with urllib.request.urlopen("http://127.0.0.1:8000/api/v2/heartbeat", timeout=3):
+            pass
         services["chromadb"] = "up"
     except Exception:
         services["chromadb"] = "down"
@@ -7295,7 +7345,8 @@ def brain_health() -> dict:
 
     # Probe Ollama
     try:
-        urllib.request.urlopen("http://127.0.0.1:11434/", timeout=3)
+        with urllib.request.urlopen("http://127.0.0.1:11434/", timeout=3):
+            pass
         services["ollama"] = "up"
     except Exception:
         services["ollama"] = "down"

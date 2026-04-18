@@ -798,25 +798,40 @@ def _is_backlog_drain_stuck() -> bool:
         log_path = logs_dir / "llm_backlog_drain.log"
         if not log_path.exists():
             return False
-        # Tail-read the last 3 JSON lines from the drain log
+        # Tail-read more than we need (8KB) so that even if the first
+        # line is a partial byte-boundary fragment, at least 3 complete
+        # lines remain after dropping it.
         with log_path.open("rb") as f:
             f.seek(0, 2)
             size = f.tell()
-            f.seek(max(0, size - 4096))
+            f.seek(max(0, size - 8192))
             tail = f.read().decode("utf-8", errors="ignore")
-        lines = [line for line in tail.splitlines() if line.strip().startswith("{")]
-        if len(lines) < 3:
-            return False
-        last_three = lines[-3:]
-        zero_drain_streak = 0
-        for line in last_three:
+        # Drop the first line if the window started mid-file — it may
+        # be a byte-boundary fragment that begins with '{' but is truncated.
+        raw_lines = tail.splitlines()
+        if size > 8192 and raw_lines:
+            raw_lines = raw_lines[1:]
+        candidate_lines = [line for line in raw_lines if line.strip().startswith("{")]
+
+        # Parse all candidates; a single parse failure no longer short-
+        # circuits the whole check. We only declare "stuck" when we have
+        # at least 3 successfully parsed recent records AND every one
+        # shows zero drain + positive pending.
+        parsed = []
+        for line in candidate_lines:
             try:
-                rec = _json.loads(line)
-            except Exception:
-                return False
-            if rec.get("drained", 0) == 0 and rec.get("pending_after", 0) > 0:
-                zero_drain_streak += 1
-        return zero_drain_streak >= 3
+                parsed.append(_json.loads(line))
+            except Exception as _exc:
+                log.debug("drain log line parse failed (ignored): %s", _exc)
+                continue
+        if len(parsed) < 3:
+            return False
+        last_three = parsed[-3:]
+        zero_drain_streak = sum(
+            1 for r in last_three
+            if r.get("drained", 0) == 0 and r.get("pending_after", 0) > 0
+        )
+        return zero_drain_streak == 3
     except Exception as exc:
         log.debug("_is_backlog_drain_stuck check failed: %s", exc)
         return False

@@ -44,7 +44,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 log = logging.getLogger("brain.valence")
 
-BRAIN_DB = Path("/Users/chrischo/server/brain/logs/brain.db")
+try:
+    from config import BRAIN_DB
+except ImportError:
+    BRAIN_DB = Path("/Users/chrischo/server/brain/logs/brain.db")
 
 # Boost bounds. Small so a miscalibrated valence can't torch stable eval.
 MAX_BOOST = 0.15  # +15% score bump for +1.0 valence

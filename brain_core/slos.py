@@ -202,6 +202,17 @@ SLOS: dict[str, SLO] = {
         metric_unit="MB",
         consecutive_breaches_required=1,
     ),
+    # 2026-04-17: disk watcher. logs/ grew silently (637MB embed cache
+    # sat undetected for days). Alert when total size exceeds threshold
+    # so we catch silent growth before disk fills.
+    "logs_dir_total_mb": SLO(
+        name="logs_dir_total_mb",
+        description="Total size of ~/server/brain/logs/ in MB (DBs + journals + job logs)",
+        target=2048.0,  # 2GB soft ceiling
+        severity="warning",
+        metric_unit="MB",
+        consecutive_breaches_required=1,
+    ),
 }
 
 
@@ -537,6 +548,22 @@ def _measure_dispatch_failure_rate_1h() -> float:
         return 0.0
 
 
+def _measure_logs_dir_total_mb() -> float:
+    """Sum size of all files under brain logs/ directory."""
+    try:
+        total = 0
+        for p in BRAIN_LOGS_DIR.rglob("*"):
+            if p.is_file():
+                try:
+                    total += p.stat().st_size
+                except OSError:
+                    continue
+        return round(total / (1024 * 1024), 1)
+    except Exception as exc:
+        log.debug("logs_dir_total_mb measurement failed: %s", exc)
+        return 0.0
+
+
 def _measure_agent_session_max_mb() -> float:
     """Largest live OpenClaw agent session .jsonl file size in MB."""
     try:
@@ -577,6 +604,7 @@ _MEASUREMENTS: dict[str, Callable[[], float]] = {
     "calibration_brier_drift_7d": lambda: _measure_calibration_drift(),
     "dispatch_failure_rate_1h": _measure_dispatch_failure_rate_1h,
     "agent_session_max_mb": _measure_agent_session_max_mb,
+    "logs_dir_total_mb": _measure_logs_dir_total_mb,
 }
 
 

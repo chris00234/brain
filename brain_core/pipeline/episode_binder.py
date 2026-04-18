@@ -39,7 +39,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from http_pool import http_json
 from search import get_collections
 
-AUTONOMY_DB = Path("/Users/chrischo/server/brain/logs/autonomy.db")
+try:
+    from config import AUTONOMY_DB
+except ImportError:
+    AUTONOMY_DB = Path("/Users/chrischo/server/brain/logs/autonomy.db")
 CHROMA_API = "http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections"
 
 EPISODE_WINDOW_MINUTES = 30

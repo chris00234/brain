@@ -48,8 +48,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 log = logging.getLogger("brain.predictive")
 
-AUTONOMY_DB = Path("/Users/chrischo/server/brain/logs/autonomy.db")
-BRAIN_DB = Path("/Users/chrischo/server/brain/logs/brain.db")
+try:
+    from config import AUTONOMY_DB, BRAIN_DB
+except ImportError:
+    AUTONOMY_DB = Path("/Users/chrischo/server/brain/logs/autonomy.db")
+    BRAIN_DB = Path("/Users/chrischo/server/brain/logs/brain.db")
 
 # How many recent focus items feed the query. 3 = last 3 Chris prompts + focus.
 MAX_FOCUS_ITEMS = 3

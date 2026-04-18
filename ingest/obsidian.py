@@ -115,8 +115,8 @@ def couch_request(path, method="GET", data=None):
         req = urllib.request.Request(url, headers=headers, method=method)
 
     try:
-        resp = urllib.request.urlopen(req)
-        return json.loads(resp.read())
+        with urllib.request.urlopen(req) as resp:
+            return json.loads(resp.read())
     except urllib.error.HTTPError as e:
         log_failure("couch_request", f"{method} {path} HTTP {e.code}")
         return json.loads(e.read())

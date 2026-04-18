@@ -394,7 +394,8 @@ def main():
                     method="POST",
                     headers={"Authorization": f"Bearer {secret_file.read_text().strip()}"},
                 )
-                urllib.request.urlopen(req, timeout=5).read()
+                with urllib.request.urlopen(req, timeout=5) as _resp:
+                    _resp.read()
                 print("  Triggered reindex (async).")
             except Exception as e:
                 print(f"  WARN: reindex trigger failed: {e}")

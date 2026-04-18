@@ -52,17 +52,28 @@ _last_sent: dict[tuple[str, str], float] = {}
 _lock = threading.Lock()
 
 
-def _rate_limited(source: str, severity: str) -> bool:
-    """True if (source, severity) was sent recently — caller should skip."""
+def _should_rate_limit(source: str, severity: str) -> bool:
+    """Check whether a send would be rate-limited. Does NOT stamp.
+
+    2026-04-17 fix: previously, checking the limit also burned it. If
+    the subprocess send then failed, the window was already consumed
+    and the next legitimate alert (within 5-30 min depending on
+    severity) would be silently rate-limited despite the prior
+    never-delivered. Now the stamp only happens on confirmed delivery
+    via `_mark_sent`."""
     window = _RATE_LIMITS.get(severity, 1800.0)
     key = (source, severity)
     now = time.time()
     with _lock:
         last = _last_sent.get(key, 0.0)
-        if now - last < window:
-            return True
-        _last_sent[key] = now
-        return False
+        return (now - last) < window
+
+
+def _mark_sent(source: str, severity: str) -> None:
+    """Record successful delivery timestamp. Call only after delivery."""
+    key = (source, severity)
+    with _lock:
+        _last_sent[key] = time.time()
 
 
 def _queue_backlog(body: str, source: str, severity: str, reason: str) -> None:
@@ -103,7 +114,7 @@ def send_chris_telegram(
     Returns True on delivery, False on rate-limit / send failure
     (failures are auto-queued to llm_backlog kind=telegram).
     """
-    if not bypass_rate_limit and _rate_limited(source, severity):
+    if not bypass_rate_limit and _should_rate_limit(source, severity):
         log.debug("telegram rate-limited: source=%s severity=%s", source, severity)
         return False
 
@@ -154,4 +165,6 @@ def send_chris_telegram(
         _queue_backlog(body, source, severity, f"rc={proc.returncode}")
         return False
 
+    # Only stamp the rate-limit clock on confirmed delivery
+    _mark_sent(source, severity)
     return True
