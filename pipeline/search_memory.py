@@ -213,35 +213,34 @@ _PROPOSAL_BOILERPLATE = (
 
 
 def _strip_proposal_boilerplate(body: str) -> str:
-    """2026-04-17: canonical proposal notes are structured as
-        ## Statement\n\nReview this proposed canonical note.\n\n
-        ## Source Summary\n\n# Summary\n\n<real content>\n\n
-        ## Observations\n\n- Derived from raw evidence.\n\n
-        ## Merge Suggestion\n\n<refs>
-    When the file-based search takes the first 180 chars as the summary,
-    it grabs only the stub headers — users see "## Statement Review this
-    proposed canonical note. ## Source Summary..." instead of the actual
-    claim. Strip leading stub sections to surface the substantive body.
-    Non-destructive fallback — if stripping removes everything, return
-    the original body unchanged.
+    """2026-04-18: line-based strip. Previous version treated `## Source Summary`
+    as a section header to skip entirely, which dropped the actual content
+    the section holds (shell commands, evidence, summaries). When every
+    `## ` header in a file was boilerplate, the section-skip version
+    returned empty → fell back to raw body including all stubs. Now just
+    drop the boilerplate header/stub LINES themselves and keep everything
+    else. Collapse runs of 3+ blank lines to keep output tidy.
     """
-    lines = body.splitlines()
+    _DROP_EXACT = {
+        "## Statement",
+        "## Source Summary",
+        "## Distilled Evidence",
+        "## Observations",
+        "## Merge Suggestion",
+        "Review this proposed canonical note.",
+        "Review this proposed canonical note",
+        "- Derived from raw evidence.",
+        "- Derived from raw evidence",
+    }
     out: list[str] = []
-    skip_section = False
-    for line in lines:
-        stripped = line.strip()
-        if stripped.startswith("## "):
-            header_text = stripped[3:].strip()
-            if any(bp[3:].strip() == header_text for bp in _PROPOSAL_BOILERPLATE if bp.startswith("## ")):
-                skip_section = True
-                continue
-            skip_section = False
-        if skip_section:
-            continue
-        if any(stripped.startswith(bp) for bp in _PROPOSAL_BOILERPLATE if not bp.startswith("## ")):
+    for line in body.splitlines():
+        if line.strip() in _DROP_EXACT:
             continue
         out.append(line)
     cleaned = "\n".join(out).strip()
+    import re as _re
+
+    cleaned = _re.sub(r"\n{3,}", "\n\n", cleaned)
     return cleaned if cleaned else body
 
 
@@ -255,7 +254,7 @@ def build_note_hit(score: int, path: Path, metadata: dict[str, Any], body: str) 
         "id": metadata["id"],
         "title": metadata["title"],
         "path": str(path.relative_to(ROOT)),
-        "summary": " ".join(clean_body.split())[:180],
+        "summary": " ".join(clean_body.split())[:2000],
         "metadata": {
             "domain": metadata.get("domain"),
             "subtype": metadata.get("subtype"),

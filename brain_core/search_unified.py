@@ -347,7 +347,7 @@ def normalize_canonical_result(r, query=""):
         "source_type": source_type,
         "collection": source_type,
         "title": r.get("title", ""),
-        "content": r.get("summary", "")[:400],
+        "content": r.get("summary", "")[:2000],
         "path": r.get("path", ""),
         "trust_tier": 3 if source_type == "canonical" else 2,
         "metadata": {
@@ -1668,12 +1668,25 @@ def search_all(
     # additive bonus only, no floor. Canonical still gets a meaningful
     # leg-up over vector-only hits (rerank.trust_boost 1.4× + this +8)
     # without being artificially landed into top-K when irrelevant.
+    # 2026-04-18: quality-gate the bonus. Canonical proposal-header chunks
+    # ("## Statement\n\nReview this proposed canonical note...") semantically
+    # match shell-session / decision queries but don't contain the literal
+    # content the query is really after. Extended eval content_hit@5 dropped
+    # 70.0% → 47.4% after this bonus landed unconditionally (a37c5b5) because
+    # every header chunk got +8 pushing it past raw-command chunks in top-5.
+    # See pipeline/search_memory.py:_strip_proposal_boilerplate for the
+    # filesystem-path strip that inspired this gate. Root-cause fix is to
+    # stop indexing the boilerplate at ingest time; gating here is the
+    # surgical read-time repair until that lands.
     CANON_BONUS = 8.0
     for r in unique:
         trust_tier = r.get("trust_tier", 0)
         if not isinstance(trust_tier, (int, float)):
             trust_tier = 0
         if trust_tier >= 3:
+            _head = (r.get("content") or "")[:400]
+            if "Review this proposed canonical note" in _head or _head.lstrip().startswith("## Statement"):
+                continue
             r["score"] = float(r.get("score", 0)) + CANON_BONUS
             _dbg = dict(r.get("_debug") or {})
             _dbg["canonical_trust_bonus"] = CANON_BONUS
