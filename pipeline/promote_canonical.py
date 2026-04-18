@@ -232,6 +232,11 @@ def main() -> int:
     # can reconsolidate old+new before the old version is marked stale.
     # Collects any merged bodies so the replacement note can incorporate
     # them before being written to disk.
+    # 2026-04-18: after re-reading, clear the transient reconsolidated_body /
+    # reconsolidated_at keys from the superseded note's frontmatter. They were
+    # only intended to hand the merge off to this loop — persisting them left
+    # up to 3KB of duplicated body inside every superseded note's frontmatter
+    # forever, bloating parse_note() calls and pipeline passes.
     reconsolidated_bodies: list[str] = []
     for superseded_id in args.supersede:
         deactivate_superseded(
@@ -242,9 +247,16 @@ def main() -> int:
         )
         # Re-read to see if reconsolidation produced a merged body.
         for p in iter_note_paths(ROOT / "canonical"):
-            m2, _b2 = parse_markdown_frontmatter(p)
+            m2, b2 = parse_markdown_frontmatter(p)
             if m2.get("id") == superseded_id and m2.get("reconsolidated_body"):
                 reconsolidated_bodies.append(m2["reconsolidated_body"])
+                # Strip the transient keys and rewrite so frontmatter stays lean.
+                m2.pop("reconsolidated_body", None)
+                m2.pop("reconsolidated_at", None)
+                try:
+                    write_markdown_frontmatter(p, m2, b2)
+                except Exception:
+                    pass
                 break
     # If any reconsolidation landed, prefer the most recent merged body
     # over the raw proposal body for the canonical record — ensures no

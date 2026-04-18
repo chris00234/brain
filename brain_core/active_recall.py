@@ -100,6 +100,9 @@ class InjectionBlock:
     score: float
     priority: str  # critical | high | medium | low
     path: str | None = None
+    # 2026-04-18: actual ChromaDB document id (not the local dedup hash in `id`).
+    # Needed by reinforce_on_access for the MemoryBank bump on semantic blocks.
+    memory_id: str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -110,6 +113,7 @@ class InjectionBlock:
             "score": self.score,
             "priority": self.priority,
             "path": self.path,
+            "memory_id": self.memory_id,
         }
 
 
@@ -340,6 +344,8 @@ def _semantic_blocks(
                 score=norm_score,
                 priority="high" if norm_score >= 0.6 else "medium",
                 path=r.get("path"),
+                # 2026-04-18: propagate real ChromaDB id for reinforce_on_access.
+                memory_id=r.get("id"),
             )
         )
         if len(blocks) >= limit:
@@ -628,7 +634,17 @@ def _audit(
     # Neo4j MemRL). Fire-and-forget through the shared bg pool so retrieval
     # latency stays under the 1.2s hook budget.
     try:
-        sem_ids = [b.id for b in blocks if b.source.startswith("semantic") and b.score >= 0.5][:5]
+        # 2026-04-18: previously used `b.id`, which is a local dedup hash
+        # (`_hash(f"semantic:{rid}:{title}:{content[:200]}")`) — not the
+        # ChromaDB memory_id that reinforce_on_access expects. The reinforce
+        # call found zero matches every time and silently no-op'd. MemoryBank
+        # reinforcement-on-access was dead on the active_recall path. Now
+        # uses the real ChromaDB id carried on `memory_id`.
+        sem_ids = [
+            b.memory_id
+            for b in blocks
+            if b.source.startswith("semantic") and b.score >= 0.5 and b.memory_id
+        ][:5]
         if sem_ids:
             import search_unified
             from memory_lifecycle import reinforce_on_access

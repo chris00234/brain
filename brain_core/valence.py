@@ -109,6 +109,12 @@ def record_valence(
     _ensure_schema()
     conn = sqlite3.connect(str(BRAIN_DB))
     try:
+        # 2026-04-18: wrap SELECT + UPDATE in BEGIN IMMEDIATE so two concurrent
+        # record_valence calls on the same atom_id (e.g. a session-end burst of
+        # corrections) can't lose-update each other's running average. Matches
+        # the pattern used in atoms_store.reinforce, mark_superseded, and
+        # update_atom_confidence.
+        conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
             "SELECT valence, event_count FROM atom_valence WHERE atom_id = ?", (atom_id,)
         ).fetchone()

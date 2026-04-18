@@ -15,6 +15,7 @@ Schema (brain.db / answer_candidates):
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -45,11 +46,29 @@ CREATE INDEX IF NOT EXISTS idx_answer_candidates_route
 """
 
 
+_schema_initialized = False
+_schema_lock = __import__("threading").Lock()
+
+
 def _conn() -> sqlite3.Connection:
+    """Open a fresh connection. Callers MUST close it — prefer
+    `with closing(_conn()) as conn:` to get deterministic cleanup since
+    sqlite3's `with` block commits/rolls back but does NOT close.
+    """
+    global _schema_initialized
     BRAIN_DB.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(BRAIN_DB), timeout=5)
     conn.row_factory = sqlite3.Row
-    conn.executescript(_DDL)
+    # 2026-04-18: previous version ran `executescript(_DDL)` on every _conn()
+    # call (7 callers) — CREATE-TABLE-IF-NOT-EXISTS is idempotent but the
+    # executescript implicitly commits, bumping DB write load for no reason.
+    # Initialize schema once per process, protected by a lock to avoid the
+    # read-modify-write race on the flag itself.
+    if not _schema_initialized:
+        with _schema_lock:
+            if not _schema_initialized:
+                conn.executescript(_DDL)
+                _schema_initialized = True
     return conn
 
 
@@ -70,7 +89,7 @@ def record(
     if len(answer.strip()) < 80:
         return 0  # too short to be worth canonicalizing
     now = datetime.now(UTC).isoformat(timespec="seconds")
-    with _conn() as conn:
+    with closing(_conn()) as conn, conn:
         cur = conn.execute(
             "INSERT INTO answer_candidates (created_at, source_route, agent, query, answer, reason) "
             "VALUES (?, ?, ?, ?, ?, ?)",
@@ -80,7 +99,7 @@ def record(
 
 
 def list_pending(limit: int = 50) -> list[dict]:
-    with _conn() as conn:
+    with closing(_conn()) as conn, conn:
         rows = conn.execute(
             "SELECT * FROM answer_candidates WHERE status = 'pending' " "ORDER BY created_at DESC LIMIT ?",
             (limit,),
@@ -89,14 +108,14 @@ def list_pending(limit: int = 50) -> list[dict]:
 
 
 def get(candidate_id: int) -> dict | None:
-    with _conn() as conn:
+    with closing(_conn()) as conn, conn:
         row = conn.execute("SELECT * FROM answer_candidates WHERE id = ?", (candidate_id,)).fetchone()
     return dict(row) if row else None
 
 
 def mark_promoted(candidate_id: int, promoted_path: str, score: float) -> None:
     now = datetime.now(UTC).isoformat(timespec="seconds")
-    with _conn() as conn:
+    with closing(_conn()) as conn, conn:
         conn.execute(
             "UPDATE answer_candidates SET status='promoted', promoted_path=?, "
             "score=?, processed_at=? WHERE id=?",
@@ -106,7 +125,7 @@ def mark_promoted(candidate_id: int, promoted_path: str, score: float) -> None:
 
 def mark_rejected(candidate_id: int, reason: str, score: float | None = None) -> None:
     now = datetime.now(UTC).isoformat(timespec="seconds")
-    with _conn() as conn:
+    with closing(_conn()) as conn, conn:
         conn.execute(
             "UPDATE answer_candidates SET status='rejected', rejected_reason=?, "
             "score=?, processed_at=? WHERE id=?",
@@ -116,7 +135,7 @@ def mark_rejected(candidate_id: int, reason: str, score: float | None = None) ->
 
 def mark_skipped(candidate_id: int, reason: str) -> None:
     now = datetime.now(UTC).isoformat(timespec="seconds")
-    with _conn() as conn:
+    with closing(_conn()) as conn, conn:
         conn.execute(
             "UPDATE answer_candidates SET status='skipped', rejected_reason=?, " "processed_at=? WHERE id=?",
             (reason[:500], now, candidate_id),
@@ -124,6 +143,6 @@ def mark_skipped(candidate_id: int, reason: str) -> None:
 
 
 def stats() -> dict:
-    with _conn() as conn:
+    with closing(_conn()) as conn, conn:
         rows = conn.execute("SELECT status, COUNT(*) as c FROM answer_candidates GROUP BY status").fetchall()
     return {r["status"]: r["c"] for r in rows}

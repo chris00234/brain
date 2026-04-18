@@ -360,8 +360,12 @@ def main() -> None:
                 "_(Placeholder — Jenna's synthesis dispatch failed. "
                 "Raw events are still in ChromaDB and will be re-synthesized on next run.)_"
             ),
-            "candidate_facts": [],
-            "reflection_question": None,
+            # 2026-04-18: keys must match the validator below (lines ~392+) and
+            # the downstream writers. Previous placeholder used candidate_facts
+            # and reflection_question, neither of which matches — every
+            # dispatch failure fell through to sys.exit(1) instead of soft-failing.
+            "facts_to_promote": [],
+            "tomorrow_reflection_question": None,
             "contradictions": [],
         }
     else:

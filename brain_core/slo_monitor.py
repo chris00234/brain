@@ -382,6 +382,17 @@ def monitor_cycle() -> dict:
         if not _slo_gate_allowed:
             # Record telemetry but do not raise — autonomy said no, we respect it.
             print("[slo_monitor] autonomy gate denied slo.remediate; skipping heal dispatch")
+            # 2026-04-18: previous early-return skipped save_state() on line ~448,
+            # so the consecutive-violation counters computed at lines 329-337 were
+            # discarded every cycle during quiet hours. SLOs that only breach
+            # during quiet hours never hit the >=3 alert threshold because
+            # count always reloaded as 1 on the next tick. Persist state before
+            # returning so counters survive across ticks.
+            state["last_check"] = datetime.now(UTC).isoformat()
+            try:
+                save_state(state)
+            except Exception as _exc:
+                log.debug("slo_monitor save_state on gate_denied failed: %s", _exc)
             return {"status": "gate_denied", "violations": len(violations)}
         from self_heal import HealingSignal
         from self_heal import dispatch as heal_dispatch

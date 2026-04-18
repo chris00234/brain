@@ -335,7 +335,7 @@ def expand_query(query: str, max_variants: int = 3) -> list[str]:
         from claude_session import is_session_active
 
         if is_session_active():
-            _expand_cache[query] = [query]
+            _expand_cache.set(query, [query])
             return [query]
     except Exception:
         pass

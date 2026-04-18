@@ -479,9 +479,15 @@ def drain(limit: int = DEFAULT_DRAIN_LIMIT, abort_on_breaker: bool = True) -> di
                 (limit,),
             ).fetchall()
 
+            # 2026-04-18: previously re-checked the breaker inside the per-row
+            # loop. Under FD exhaustion (see 2026-04-17 EMFILE storm), every
+            # peek_breaker() call opens a fresh SQLite connection on autonomy.db;
+            # under FD pressure it fails, _breaker_open() swallows the exception
+            # and returns False, and the drain keeps marching against a DB that's
+            # also in trouble — processing silently fails row by row. Check once
+            # at entry (already done above); trust that state for this batch.
+            # If the breaker opens mid-batch, at worst `limit` rows are attempted.
             for row in rows:
-                if abort_on_breaker and _breaker_open():
-                    break  # quota died mid-drain, stop wasting attempts
                 rid = int(row["id"])
                 kind = row["kind"]
                 try:

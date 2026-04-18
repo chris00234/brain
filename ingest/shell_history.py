@@ -65,7 +65,14 @@ COMMAND_FAMILIES = {
 
 def _classify_command(cmd: str) -> str:
     """Classify a shell command into a family. Returns family name or 'other'."""
-    stripped = cmd.strip().lstrip("sudo ").strip()
+    # 2026-04-18: previous `lstrip("sudo ")` was a character-strip, not a
+    # prefix-strip — "sshpass -p hunter2 ..." became "hpa -p hunter2 ..." and
+    # bypassed both family classification AND downstream secret-redaction
+    # patterns, leaking secrets into ChromaDB. Use removeprefix so only the
+    # literal "sudo " prefix is stripped.
+    stripped = cmd.strip()
+    if stripped.startswith("sudo "):
+        stripped = stripped[5:].strip()
     for family, pattern in COMMAND_FAMILIES.items():
         if pattern.match(stripped):
             return family

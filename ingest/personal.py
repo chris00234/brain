@@ -195,9 +195,15 @@ def add_personal_documents(collection_name, docs, skip_stale_cleanup=True):
 
         embed_text = ("\n".join(header_parts) + "\n\n" + content) if header_parts else content
 
-        # Stable ID — let updated content overwrite previous version
+        # Stable ID — let updated content overwrite previous version.
+        # 2026-04-18: switched from MD5→SHA-256 (consistency with other ingest
+        # scripts, and MD5 is cryptographically broken) and dropped the [:63]
+        # truncation from the end, which — combined with a ~9-char collection
+        # prefix — left only ~53 hex chars and raised collision risk for the
+        # fallback `f"{source}:{content}"` seed. SHA-256 hex is 64 chars;
+        # even truncated to 53 the collision space is vastly larger.
         id_seed = doc.get("stable_id") or f"{source}:{content}"
-        doc_id = f"{collection_name}:{hashlib.md5(id_seed.encode()).hexdigest()}"[:63]
+        doc_id = f"{collection_name}:{hashlib.sha256(id_seed.encode()).hexdigest()}"[:63]
 
         # Only use \r carriage-return progress in a TTY; in logfiles it creates
         # one giant unreadable line. (Bug fix 2026-04-12.)

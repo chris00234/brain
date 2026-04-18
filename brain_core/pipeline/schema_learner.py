@@ -103,9 +103,14 @@ def _pick_k(eigenvalues, n_nodes: int) -> int:
     gaps = np.diff(nontrivial)
     if len(gaps) == 0:
         return K_MIN
-    # Offset by count of zero eigenvalues skipped so index maps back to k
+    # Offset by count of zero eigenvalues skipped so index maps back to k.
+    # 2026-04-18 fix: previous `+ 2` over-counted by one. argmax on gaps[:n-1]
+    # returns index i of the largest jump between nontrivial[i] and nontrivial[i+1],
+    # so the eigengap indicates k = n_zero + i + 1 clusters (eigenvalues
+    # {0..n_zero-1, nontrivial[0..i]} span the signal subspace). Was
+    # systematically over-fragmenting canonical compaction clusters by 1.
     n_zero = len(sorted_vals) - len(nontrivial)
-    k = int(np.argmax(gaps)) + n_zero + 2
+    k = int(np.argmax(gaps)) + n_zero + 1
     return max(K_MIN, min(k, min(K_MAX, max(2, n_nodes // MIN_CLUSTER_SIZE))))
 
 

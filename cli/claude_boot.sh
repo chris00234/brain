@@ -61,7 +61,24 @@ TURN_IDX=$(cat "$TURN_FILE" 2>/dev/null || echo 0)
 # Strip any whitespace/newlines from the counter (cat can return junk if file corrupted).
 TURN_IDX=$(printf '%s' "$TURN_IDX" | tr -d '[:space:]')
 [ -z "$TURN_IDX" ] && TURN_IDX=0
+# 2026-04-18: also reject non-numeric garbage (jq --argjson expects a raw JSON
+# number; anything else silently produces an empty REQ_BODY and the active-recall
+# block quietly skips every turn for the rest of the session).
+[[ "$TURN_IDX" =~ ^[0-9]+$ ]] || TURN_IDX=0
 echo $((TURN_IDX + 1)) > "$TURN_FILE"
+
+# 2026-04-18: pre-create the bearer-header tempfile once and share it across
+# both recall blocks below. Previous code called mktemp twice with separate
+# traps — the second `trap` overwrote the first, orphaning the initial
+# tempfile in /tmp/ on exit. Over time, bearer-secret tempfiles accumulated.
+SECRET_FILE_CB="$HOME/.openclaw/credentials/.personal_webhook_secret"
+HEADER_FILE_CB=""
+if [ -r "$SECRET_FILE_CB" ]; then
+  HEADER_FILE_CB=$(mktemp -t claude_boot_hdr_XXXXXX)
+  trap 'rm -f "$HEADER_FILE_CB" 2>/dev/null' EXIT HUP INT TERM
+  { printf 'Authorization: Bearer '; cat "$SECRET_FILE_CB"; printf '\n'; } > "$HEADER_FILE_CB"
+  chmod 600 "$HEADER_FILE_CB"
+fi
 
 emit_sentinel() {
   local reason="$1"
@@ -154,18 +171,9 @@ fi
 # block silently no-ops (curl returns 404 → jq returns empty → nothing printed).
 if [ -n "$PROMPT" ]; then
   # 2026-04-16 R-6: secret passed via header file to avoid process-table
-  # exposure (matches server_watchdog.sh posture). Previous `-H "Auth: Bearer $SECRET"`
-  # made the secret visible in `ps aux` for any user.
-  SECRET_FILE_CB="$HOME/.openclaw/credentials/.personal_webhook_secret"
-  if [ -r "$SECRET_FILE_CB" ]; then
-    HEADER_FILE_CB=$(mktemp -t claude_boot_hdr_XXXXXX)
-    trap 'rm -f "$HEADER_FILE_CB" 2>/dev/null' EXIT HUP INT TERM
-    { printf 'Authorization: Bearer '; cat "$SECRET_FILE_CB"; printf '\n'; } > "$HEADER_FILE_CB"
-    chmod 600 "$HEADER_FILE_CB"
-    SECRET="present"  # sentinel — actual bytes stay in HEADER_FILE_CB
-  else
-    SECRET=""
-  fi
+  # exposure. Shared tempfile + trap set up once at the top of the script.
+  SECRET=""
+  [ -n "$HEADER_FILE_CB" ] && SECRET="present"
   if [ -n "$SECRET" ]; then
     REQ_BODY=$(printf '%s' "$PAYLOAD" | jq -nc \
       --arg p "$PROMPT" \
@@ -222,18 +230,9 @@ CWD_NAME=$(basename "$CWD")
 
 if [ -n "$CWD_NAME" ] && [ "$CWD_NAME" != "~" ] && [ "$CWD_NAME" != "/" ] && [ "$CWD_NAME" != "chrischo" ]; then
   # 2026-04-16 R-6: secret passed via header file to avoid process-table
-  # exposure (matches server_watchdog.sh posture). Previous `-H "Auth: Bearer $SECRET"`
-  # made the secret visible in `ps aux` for any user.
-  SECRET_FILE_CB="$HOME/.openclaw/credentials/.personal_webhook_secret"
-  if [ -r "$SECRET_FILE_CB" ]; then
-    HEADER_FILE_CB=$(mktemp -t claude_boot_hdr_XXXXXX)
-    trap 'rm -f "$HEADER_FILE_CB" 2>/dev/null' EXIT HUP INT TERM
-    { printf 'Authorization: Bearer '; cat "$SECRET_FILE_CB"; printf '\n'; } > "$HEADER_FILE_CB"
-    chmod 600 "$HEADER_FILE_CB"
-    SECRET="present"  # sentinel — actual bytes stay in HEADER_FILE_CB
-  else
-    SECRET=""
-  fi
+  # exposure. Shared tempfile + trap set up once at the top of the script.
+  SECRET=""
+  [ -n "$HEADER_FILE_CB" ] && SECRET="present"
   if [ -n "$SECRET" ]; then
     export BRAIN_BOOT_CONTEXT="$RESULT"
     ENCODED_CWD=$(printf '%s' "$CWD_NAME" | "$BRAIN_PY" -c "import sys, urllib.parse; print(urllib.parse.quote(sys.stdin.read().strip(), safe=''))" 2>/dev/null)

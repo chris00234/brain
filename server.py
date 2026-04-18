@@ -951,12 +951,36 @@ _profile_cache = ProfileCache([IDENTITY_FILE, STATE_FILE], ttl_seconds=PROFILE_C
 
 # ── Helpers ─────────────────────────────────────────────
 _cached_secret: str | None = None
+# 2026-04-18: track mtime so we can detect rotation without reading on every
+# request. Previously the secret was loaded once at startup and the server kept
+# accepting the OLD secret indefinitely after rotation (and rejecting the new
+# one until the daemon was restarted — the opposite of expected behavior).
+_cached_secret_mtime: float = 0.0
 
 
 def _load_secret() -> str | None:
     if not SECRET_FILE.exists():
         return None
     return SECRET_FILE.read_text().strip()
+
+
+def _current_secret() -> str | None:
+    """Return the current bearer secret, auto-reloading if the file changed.
+
+    Cheap mtime check (one stat syscall, ~μs) so /recall/v2 hot path pays
+    almost nothing when the file hasn't rotated.
+    """
+    global _cached_secret, _cached_secret_mtime
+    try:
+        mtime = SECRET_FILE.stat().st_mtime
+    except FileNotFoundError:
+        _cached_secret = None
+        _cached_secret_mtime = 0.0
+        return None
+    if mtime != _cached_secret_mtime:
+        _cached_secret = _load_secret()
+        _cached_secret_mtime = mtime
+    return _cached_secret
 
 
 def _safe_http_detail(kind: str, exc: Exception, *, route: str = "?") -> str:
@@ -1072,7 +1096,9 @@ def _write_inbox(source_type: str, payload: dict) -> Path:
 # ── Auth dependency ─────────────────────────────────────
 def verify_bearer(authorization: Annotated[str | None, Header()] = None) -> None:
     """Auth dependency injected into every protected route. /healthz and /docs skip this."""
-    secret = _cached_secret
+    # 2026-04-18: use mtime-aware reload so rotation takes effect without a
+    # daemon restart. The stat() is sub-millisecond; no impact on hot path.
+    secret = _current_secret()
     if not secret:
         _log_failure("server has no secret configured")
         raise HTTPException(status_code=503, detail="server misconfigured")

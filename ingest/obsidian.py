@@ -150,13 +150,24 @@ def reconstruct_note(doc):
         # Small doc with inline data
         return doc.get("data", "")
 
-    # Fetch children chunks and concatenate
+    # Fetch children chunks and concatenate.
+    # 2026-04-18: previously silently skipped children whose fetch returned
+    # an error dict (HTTPError caught by couch_request returns `{"error": ...}`
+    # on 404/409). Notes ended up reconstructed with missing segments and
+    # indexed that way — silent data loss. Now: abort reconstruction so the
+    # caller can decide to retry next run.
     content_parts = []
     for child_id in children:
         encoded_id = urllib.parse.quote(child_id, safe="")
         child = couch_request(f"{DB_NAME}/{encoded_id}")
+        if isinstance(child, dict) and "error" in child:
+            log_failure("reconstruct_note", f"missing child {child_id[:40]}: {str(child.get('error'))[:120]}")
+            return None
         if "data" in child:
             content_parts.append(child["data"])
+        else:
+            log_failure("reconstruct_note", f"child {child_id[:40]} has no data field")
+            return None
 
     return "".join(content_parts)
 

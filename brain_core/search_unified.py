@@ -1357,10 +1357,18 @@ def search_all(
         "graph": len(graph_results),
         "fts": len(fts_results),
         "graph_prefetch": len(graph_prefetch_results),
+        # 2026-04-18: previously missing — RAPTOR hits were fetched, timed,
+        # and dropped silently. The trace log never reported RAPTOR counts,
+        # and the RRF fusion below didn't include them either.
+        "raptor": len(raptor_results),
     }
     try:
         from rrf import rrf_fuse
 
+        # 2026-04-18: raptor_results was fetched (_search_raptor populates it
+        # via the fan-out pool at line 1288) but never flowed into RRF —
+        # source_lists and trust_weights both omitted it. Every broad query
+        # wasted the RAPTOR fetch and lost the hierarchical-summary signal.
         source_lists = [
             l
             for l in [
@@ -1370,6 +1378,7 @@ def search_all(
                 graph_results,
                 fts_results,
                 graph_prefetch_results,
+                raptor_results,
             ]
             if l
         ]
@@ -1386,6 +1395,9 @@ def search_all(
             trust_weights.append(0.4)
         if graph_prefetch_results:
             trust_weights.append(0.7 * _intent_boost.get("graph", 1.0))
+        if raptor_results:
+            # canonical-derived, inherit canonical trust a shade below canonical itself.
+            trust_weights.append(0.85 * _intent_boost.get("canonical", 1.0))
         if source_lists:
             all_results = rrf_fuse(source_lists, trust_weights=trust_weights, id_key="path")
         else:
@@ -1399,6 +1411,7 @@ def search_all(
             + graph_results
             + fts_results
             + graph_prefetch_results
+            + raptor_results
         )
         all_results.sort(key=lambda x: (x["score"], x["trust_tier"]), reverse=True)
         trust_weights = []

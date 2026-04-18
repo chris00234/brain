@@ -14,6 +14,7 @@ Hot-path target: <5 ms p99 on warm cache. Implementation:
 from __future__ import annotations
 
 import contextlib
+import logging
 import os
 import sqlite3
 import sys
@@ -24,6 +25,8 @@ from datetime import datetime
 from datetime import time as dtime
 from pathlib import Path
 from zoneinfo import ZoneInfo
+
+log = logging.getLogger("brain.autonomy")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
