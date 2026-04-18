@@ -104,8 +104,8 @@ def _audit(event: dict) -> None:
     try:
         with AUDIT_LOG.open("a") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    except OSError:
-        pass
+    except OSError as _exc:
+        log.debug("silenced exception in self_modify.py: %s", _exc)
     try:
         from atoms_store import insert_action_audit
 
@@ -115,8 +115,8 @@ def _audit(event: dict) -> None:
             tool="self_modify",
             actor=event.get("actor", "brain_loop"),
         )
-    except Exception:
-        pass
+    except Exception as _exc:
+        log.debug("silenced exception in self_modify.py: %s", _exc)
 
 
 def _apply_patch(routes: dict, patch: dict) -> tuple[bool, str, dict]:
@@ -281,8 +281,8 @@ def apply_intent_route_patch(
 
         active_recall._routes_cache = None
         active_recall._routes_cache_mtime = 0.0
-    except Exception:
-        pass
+    except Exception as _exc:
+        log.debug("silenced exception in self_modify.py: %s", _exc)
 
     result = {
         "status": "applied",

@@ -253,7 +253,11 @@ def main():
                 except Exception:
                     pass
             if should_dispatch:
-                from cli_llm import dispatch as _dispatch
+                # 2026-04-17: was `cli_llm.dispatch(agent="jenna", ...)` which
+                # ignores `agent` and just runs codex exec, throwing the
+                # response away — Chris never got the Telegram nudge. Now
+                # goes through the unified direct-Bot-API alert path.
+                from telegram_alert import send_chris_telegram
 
                 msg = (
                     f"[BRAIN MEMORY NUDGE] Reviewed {len(recent)} recent memories.\n"
@@ -262,7 +266,7 @@ def main():
                     f"  Patterns extracted: {len(patterns)}\n"
                     f"Review at https://brain.chrischodev.com/memory"
                 )
-                _dispatch(agent="jenna", message=msg, thinking="off", timeout=30)
+                send_chris_telegram(msg, source="memory_nudge", severity="info")
                 DISPATCH_STATE.parent.mkdir(parents=True, exist_ok=True)
                 DISPATCH_STATE.write_text(
                     json.dumps(

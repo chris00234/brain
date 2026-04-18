@@ -57,8 +57,8 @@ def _load_api_key() -> str:
             k = k.strip()
             if k in ("GEMINI_API_KEY", "GOOGLE_API_KEY") and v:
                 return v.strip().strip('"').strip("'")
-    except OSError:
-        pass
+    except OSError as _exc:
+        log.debug("silenced exception in vision_llm.py: %s", _exc)
     return ""
 
 
@@ -95,7 +95,8 @@ def _count_today_calls() -> int:
             for line in f:
                 try:
                     rec = json.loads(line)
-                except json.JSONDecodeError:
+                except json.JSONDecodeError as _exc:
+                    log.debug("silenced exception in vision_llm.py: %s", _exc)
                     continue
                 if rec.get("date") == today:
                     n += 1
@@ -124,8 +125,8 @@ def _record_call(model: str, prompt_len: int, output_len: int, duration_ms: int)
         }
         with log_file.open("a") as f:
             f.write(json.dumps(rec) + "\n")
-    except OSError:
-        pass
+    except OSError as _exc:
+        log.debug("silenced exception in vision_llm.py: %s", _exc)
 
 
 def describe_image(
@@ -214,8 +215,8 @@ def describe_image(
         err_body = ""
         try:
             err_body = e.read().decode()[:300]
-        except Exception:
-            pass
+        except Exception as _exc:
+            log.debug("silenced exception in vision_llm.py: %s", _exc)
         log.warning("vision_llm HTTP %d: %s", e.code, err_body)
         return ""
     except Exception as e:
@@ -231,8 +232,8 @@ def describe_image(
                 if "text" in p:
                     caption = str(p["text"]).strip()
                     break
-    except (KeyError, IndexError, TypeError):
-        pass
+    except (KeyError, IndexError, TypeError) as _exc:
+        log.debug("silenced exception in vision_llm.py: %s", _exc)
 
     duration_ms = int((time.time() - t0) * 1000)
     _record_call(effective_model, len(effective_prompt), len(caption), duration_ms)

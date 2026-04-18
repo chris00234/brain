@@ -122,8 +122,8 @@ def _store_set(key: str, val: str) -> None:
         import brain_config_store
 
         brain_config_store.set(key, val, updated_by="claude_session")
-    except Exception:
-        pass
+    except Exception as _exc:
+        log.debug("silenced exception in claude_session.py: %s", _exc)
 
 
 def start_session(claude_session_id: str = "") -> dict:

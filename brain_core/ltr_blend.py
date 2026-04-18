@@ -29,11 +29,14 @@ n_samples, eval_auc}. Training script is `cli/ltr_train.py`.
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+
+log = logging.getLogger("brain.ltr_blend")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -65,8 +68,8 @@ def save_params(params: dict) -> None:
         import brain_config_store
 
         brain_config_store.set(LTR_CONFIG_KEY, json.dumps(params), updated_by="ltr_train")
-    except Exception:
-        pass
+    except Exception as _exc:
+        log.debug("silenced exception in ltr_blend.py: %s", _exc)
 
 
 def extract_features(result: dict) -> list[float]:
@@ -94,8 +97,8 @@ def extract_features(result: dict) -> list[float]:
                 dt = dt.replace(tzinfo=UTC)
             age_days = max(0.0, (datetime.now(UTC) - dt).total_seconds() / 86400.0)
             recency_norm = 1.0 / (1.0 + math.log1p(age_days) / 5.0)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log.debug("silenced exception in ltr_blend.py: %s", _exc)
     conf_raw = float(result.get("confidence_raw") or result.get("confidence") or 0.5)
     rerank = float(result.get("rerank_score") or 0.0) / 200.0  # typical rerank 0-200 range
     has_graph = 1.0 if (meta.get("graph_boost") or dbg.get("graph_boost")) else 0.0
@@ -144,6 +147,7 @@ def apply_if_enabled(results: list[dict]) -> list[dict]:
             dbg["ltr_prob"] = round(lr_score, 4)
             dbg["ltr_applied"] = True
             r["_debug"] = dbg
-        except Exception:
+        except Exception as _exc:
+            log.debug("silenced exception in ltr_blend.py: %s", _exc)
             continue
     return results

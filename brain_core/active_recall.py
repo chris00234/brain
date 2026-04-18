@@ -223,7 +223,8 @@ def _load_canonical_path(raw_path: str) -> tuple[str, str] | None:
             try:
                 body = f.read_text(errors="replace")[:2500]
                 combined_parts.append(f"#### {f.relative_to(path)}\n{body}")
-            except Exception:
+            except Exception as _exc:
+                log.debug("silenced exception in active_recall.py: %s", _exc)
                 continue
         if not combined_parts:
             return None
@@ -406,7 +407,8 @@ def _doorbell_blocks(session_id: str) -> list[InjectionBlock]:
                 continue
             try:
                 rec = json.loads(line)
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as _exc:
+                log.debug("silenced exception in active_recall.py: %s", _exc)
                 continue
             title = (rec.get("title") or "brain doorbell")[:80]
             content = (rec.get("content") or "")[:800]
@@ -632,8 +634,8 @@ def _audit(
             from memory_lifecycle import reinforce_on_access
 
             search_unified._search_bg_pool.submit(reinforce_on_access, sem_ids)
-    except Exception:
-        pass
+    except Exception as _exc:
+        log.debug("silenced exception in active_recall.py: %s", _exc)
 
 
 # ── Helpers ───────────────────────────────────────────────────────

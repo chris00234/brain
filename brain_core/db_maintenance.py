@@ -205,8 +205,8 @@ def growth_stats() -> dict:
                 stats["tables"][label] = n
             finally:
                 conn.close()
-        except Exception:
-            pass
+        except Exception as _exc:
+            log.debug("silenced exception in db_maintenance.py: %s", _exc)
     return stats
 
 

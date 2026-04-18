@@ -31,10 +31,13 @@ OpenClaw (GPT Pro flat-rate).
 from __future__ import annotations
 
 import json
+import logging
 import random
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+
+log = logging.getLogger("brain.dream_replay")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -88,8 +91,8 @@ def _sample_distant_pairs(limit: int) -> list[tuple[dict, dict]]:
             )
             if existing and int(existing[0].get("n", 0)) > 0:
                 continue
-        except Exception:
-            pass
+        except Exception as _exc:
+            log.debug("silenced exception in dream_replay.py: %s", _exc)
         pairs.append((a, b))
     return pairs
 

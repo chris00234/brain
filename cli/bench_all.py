@@ -33,8 +33,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 from pathlib import Path
+
+log = logging.getLogger("brain.bench_all")
 
 SNAP_BEFORE = Path("/tmp/brain_bench_before.json")
 SNAP_AFTER = Path("/tmp/brain_bench_after.json")
@@ -82,8 +85,8 @@ def cmd_snap(label: str) -> int:
             print(
                 f"  ⚠ WARNING: eval report is {mins} min stale. Run eval_run before trusting this snapshot."
             )
-    except Exception:
-        pass
+    except Exception as _exc:
+        log.debug("silenced exception in bench_all.py: %s", _exc)
     target.write_text(json.dumps(snap, indent=2, ensure_ascii=False))
     print(f"snapshot [{label}] saved: {target}")
     print(f"  eval @ {snap['timestamp']}")

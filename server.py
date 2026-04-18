@@ -275,6 +275,13 @@ JOB_REGISTRY: dict[str, list[str]] = {
         "-c",
         f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from skill_materializer import cleanup_stale_auto_skills; import json; print(json.dumps(cleanup_stale_auto_skills()))",
     ],
+    # 2026-04-17 session_rotate: archive OpenClaw agent session checkpoints > 14d,
+    # alert on live sessions > 100MB. Triggered after 103MB jenna session caused
+    # 42.5% empty-envelope rate on Telegram alerts.
+    "session_rotate": [
+        _py,
+        f"{_bd}/cli/session_rotate.py",
+    ],
     # 2026-04-17 T2.12: Contextual Retrieval (Anthropic 2024) weekly incremental.
     # Re-embed canonical chunks whose parent doc content_hash changed this week.
     # Directly targets extended eval 64% literal-wording gap. Gated by

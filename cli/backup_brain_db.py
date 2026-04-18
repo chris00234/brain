@@ -21,11 +21,14 @@ Log output (JSON on stdout) for observability.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import sys
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+
+log = logging.getLogger("brain.backup_brain_db")
 
 BRAIN_LOGS_DIR = Path("/Users/chrischo/server/brain/logs")
 BACKUP_DIR = BRAIN_LOGS_DIR / "backups"
@@ -81,7 +84,8 @@ def _rotate(dest_dir: Path, keep_days: int) -> int:
             if file_date < cutoff:
                 f.unlink()
                 deleted += 1
-        except Exception:
+        except Exception as _exc:
+            log.debug("silenced exception in backup_brain_db.py: %s", _exc)
             continue
     return deleted
 

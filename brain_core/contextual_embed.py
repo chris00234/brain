@@ -321,7 +321,8 @@ def run(
     for doc_path in docs:
         try:
             content = doc_path.read_text(errors="ignore")
-        except Exception:
+        except Exception as _exc:
+            log.debug("silenced exception in contextual_embed.py: %s", _exc)
             continue
         if len(content) < 100:
             continue
@@ -438,7 +439,8 @@ if __name__ == "__main__":
                 continue
             try:
                 content = d.read_text(errors="ignore")
-            except Exception:
+            except Exception as _exc:
+                log.debug("silenced exception in contextual_embed.py: %s", _exc)
                 continue
             if len(content) < 100:
                 continue

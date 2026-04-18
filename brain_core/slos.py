@@ -177,6 +177,31 @@ SLOS: dict[str, SLO] = {
         metric_unit="writes",
         consecutive_breaches_required=2,
     ),
+    # 2026-04-17: dispatch failure-rate SLO. The jenna codex session
+    # returned empty envelopes 42.5% of the time for 4 days before the
+    # breaker finally tripped. Per-agent hourly failure rate catches
+    # that degradation 24-48h earlier than breaker_open_count does.
+    "dispatch_failure_rate_1h": SLO(
+        name="dispatch_failure_rate_1h",
+        description="openclaw_dispatch empty-envelope / error rate over the last hour (per all agents)",
+        target=20.0,  # breach when >20% of dispatches fail
+        severity="warning",
+        metric_unit="%",
+        consecutive_breaches_required=2,
+    ),
+    # 2026-04-17: agent session file-size watcher. OpenClaw agent
+    # sessions accumulate indefinitely as conversational context grows;
+    # past 100MB the codex backend starts returning empty responses.
+    # Alerts when any single session .jsonl exceeds the threshold so
+    # operator can rotate sessions.json → fresh sessionKey.
+    "agent_session_max_mb": SLO(
+        name="agent_session_max_mb",
+        description="Size of the largest live OpenClaw agent session .jsonl file (MB)",
+        target=100.0,
+        severity="warning",
+        metric_unit="MB",
+        consecutive_breaches_required=1,
+    ),
 }
 
 
@@ -206,7 +231,8 @@ def _measure_recall_v2_p95() -> float:
             for (payload_str,) in rows:
                 try:
                     payload = json.loads(payload_str)
-                except (json.JSONDecodeError, TypeError):
+                except (json.JSONDecodeError, TypeError) as _exc:
+                    log.debug("silenced exception in slos.py: %s", _exc)
                     continue
                 routes = payload.get("routes", {}) or {}
                 v2 = routes.get("/recall/v2") or {}
@@ -310,8 +336,8 @@ def _measure_atoms_write_throughput() -> float:
         hour_pt = _dt.now(ZoneInfo("America/Los_Angeles")).hour
         if hour_pt < 6 or hour_pt >= 23:
             return 5.0
-    except Exception:
-        pass
+    except Exception as _exc:
+        log.debug("silenced exception in slos.py: %s", _exc)
     try:
         if not BRAIN_DB.exists():
             return 0.0
@@ -447,6 +473,88 @@ def _measure_atom_coactivation_rowcount() -> float:
         return 0.0
 
 
+def _measure_dispatch_failure_rate_1h() -> float:
+    """Read dispatch-failures.jsonl for last hour vs total dispatches.
+
+    Counts entries in logs/dispatch-failures.jsonl with timestamp
+    within the last 60 minutes and divides by total dispatches over
+    the same window (pulled from llm_usage.db). Returns 0 if no
+    dispatches occurred (can't divide)."""
+    try:
+        import datetime as _dt
+
+        failures_path = BRAIN_LOGS_DIR / "dispatch-failures.jsonl"
+        if not failures_path.exists():
+            return 0.0
+        cutoff = _dt.datetime.now(_dt.UTC) - _dt.timedelta(hours=1)
+        cutoff_iso = cutoff.isoformat()
+
+        fail_count = 0
+        # Tail-read: only scan last ~100KB for recent entries
+        with failures_path.open("rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            f.seek(max(0, size - 100_000))
+            tail = f.read().decode("utf-8", errors="ignore")
+        for line in tail.splitlines():
+            if not line.strip().startswith("{"):
+                continue
+            try:
+                rec = json.loads(line)
+            except Exception as _exc:
+                log.debug("silenced exception in slos.py: %s", _exc)
+                continue
+            ts = rec.get("timestamp", "")
+            if ts and ts >= cutoff_iso:
+                fail_count += 1
+
+        # Total dispatches from llm_usage.db
+        try:
+            llm_db = BRAIN_LOGS_DIR / "llm_usage.db"
+            if not llm_db.exists():
+                return 0.0
+            with sqlite3.connect(str(llm_db)) as conn:
+                row = conn.execute(
+                    "SELECT COUNT(*) FROM llm_usage WHERE ts_utc >= ?",
+                    (cutoff_iso,),
+                ).fetchone()
+            total = int(row[0] or 0) if row else 0
+        except Exception:
+            total = 0
+
+        if total == 0:
+            return 0.0
+        return round(100.0 * fail_count / max(total, 1), 2)
+    except Exception as exc:
+        log.debug("dispatch_failure_rate measurement failed: %s", exc)
+        return 0.0
+
+
+def _measure_agent_session_max_mb() -> float:
+    """Largest live OpenClaw agent session .jsonl file size in MB."""
+    try:
+        agents_root = Path.home() / ".openclaw" / "agents"
+        if not agents_root.exists():
+            return 0.0
+        max_bytes = 0
+        for agent_dir in agents_root.iterdir():
+            sessions = agent_dir / "sessions"
+            if not sessions.is_dir():
+                continue
+            for jsonl in sessions.glob("*.jsonl"):
+                if ".checkpoint." in jsonl.name:
+                    continue
+                try:
+                    max_bytes = max(max_bytes, jsonl.stat().st_size)
+                except OSError as _exc:
+                    log.debug("silenced exception in slos.py: %s", _exc)
+                    continue
+        return round(max_bytes / (1024 * 1024), 1)
+    except Exception as exc:
+        log.debug("agent_session_max_mb measurement failed: %s", exc)
+        return 0.0
+
+
 _MEASUREMENTS: dict[str, Callable[[], float]] = {
     "recall_v2_p95_ms": _measure_recall_v2_p95,
     "recall_v2_content_hit_pct": _measure_recall_v2_content_hit,
@@ -460,6 +568,8 @@ _MEASUREMENTS: dict[str, Callable[[], float]] = {
     "holdout_auto_graduation_7d": _measure_holdout_auto_graduation_7d,
     "atom_coactivation_rowcount": _measure_atom_coactivation_rowcount,
     "calibration_brier_drift_7d": lambda: _measure_calibration_drift(),
+    "dispatch_failure_rate_1h": _measure_dispatch_failure_rate_1h,
+    "agent_session_max_mb": _measure_agent_session_max_mb,
 }
 
 
@@ -554,78 +664,24 @@ def _save_last_alert_at(slo_name: str, severity: str, ts: float) -> None:
         import brain_config_store
 
         brain_config_store.set(key, f"{ts:.3f}", updated_by="slos")
-    except sqlite3.Error:
-        pass
+    except sqlite3.Error as _exc:
+        log.debug("silenced exception in slos.py: %s", _exc)
 
 
 def _alert_telegram(slo: SLO, actual: float) -> bool:
-    import subprocess
+    """Delegate to the unified telegram_alert module (2026-04-17)."""
+    import sys as _sys
 
-    OPENCLAW_BIN = "/Users/chrischo/.local/bin/openclaw"
-    TELEGRAM_CHAT_ID = "8484060831"
-    TELEGRAM_ACCOUNT = "jenna-bot"
+    _sys.path.insert(0, str(Path(__file__).parent))
+    from telegram_alert import send_chris_telegram
 
     msg = (
         f"[BRAIN SLO {slo.severity.upper()}] {slo.name}\n"
         f"target {slo.target}{slo.metric_unit} · actual {actual}{slo.metric_unit}\n"
         f"{slo.description}"
     )
-
-    def _queue_backlog(reason: str) -> None:
-        try:
-            import sys as _sys
-
-            _sys.path.insert(0, str(Path(__file__).parent))
-            from llm_backlog import enqueue as _backlog_enqueue
-
-            _backlog_enqueue(
-                "telegram",
-                {
-                    "body": msg,
-                    "severity": "urgent" if slo.severity == "critical" else "warn",
-                    "source": f"slo:{slo.name}",
-                    "failure_reason": reason,
-                },
-            )
-        except Exception:
-            pass
-
-    if not Path(OPENCLAW_BIN).exists():
-        log.warning("openclaw binary missing — skipping telegram alert for %s", slo.name)
-        _queue_backlog("openclaw_missing")
-        return False
-    try:
-        proc = subprocess.run(
-            [
-                OPENCLAW_BIN,
-                "message",
-                "send",
-                "--channel",
-                "telegram",
-                "--target",
-                TELEGRAM_CHAT_ID,
-                "--account",
-                TELEGRAM_ACCOUNT,
-                "--message",
-                msg,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=20,
-        )
-        if proc.returncode != 0:
-            log.warning(
-                "telegram alert rc=%d stderr=%s — queuing backlog",
-                proc.returncode,
-                (proc.stderr or "")[:200],
-            )
-            _queue_backlog(f"rc={proc.returncode}")
-            return False
-        return True
-    except Exception as exc:
-        log.warning("telegram alert dispatch failed: %s", exc)
-        _queue_backlog(f"exc:{type(exc).__name__}")
-        return False
+    severity = "critical" if slo.severity == "critical" else "warn"
+    return send_chris_telegram(msg, source=f"slo:{slo.name}", severity=severity)
 
 
 _QUIET_HOUR_EXCEPTIONS = {"breaker_open_count", "atoms_write_fail_rate_1h"}

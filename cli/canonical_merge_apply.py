@@ -21,10 +21,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import shutil
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+
+log = logging.getLogger("brain.canonical_merge_apply")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "pipeline"))
 from common import ROOT, iter_note_paths, parse_markdown_frontmatter, parse_note, render_note, slugify
@@ -53,7 +56,8 @@ def _find_note_by_id(note_id: str) -> Path | None:
             continue
         try:
             meta, _ = parse_note(path)
-        except Exception:
+        except Exception as _exc:
+            log.debug("silenced exception in canonical_merge_apply.py: %s", _exc)
             continue
         if meta.get("id") == note_id:
             return path
@@ -212,8 +216,8 @@ def _promote_draft(draft_path: Path, dry_run: bool) -> dict:
             valid_until=meta.get("valid_to"),
             provenance={"path": str(target), "supersedes_count": len(supersedes)},
         )
-    except Exception:
-        pass
+    except Exception as _exc:
+        log.debug("silenced exception in canonical_merge_apply.py: %s", _exc)
 
     # Extract entities into Neo4j — keeps graph UI synced with new consolidated pages
     try:
@@ -221,8 +225,8 @@ def _promote_draft(draft_path: Path, dry_run: bool) -> dict:
 
         note_text = f"{title} {body[:1500]}"
         extract_and_store_entities(note_text, canonical_id)
-    except Exception:
-        pass
+    except Exception as _exc:
+        log.debug("silenced exception in canonical_merge_apply.py: %s", _exc)
 
     return {
         "draft": draft_path.name,

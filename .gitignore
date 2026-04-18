@@ -8,3 +8,5 @@ logs/
 brain-ui/node_modules/
 brain-ui/dist/
 .DS_Store
+autonomy.db
+brain.db

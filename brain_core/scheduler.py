@@ -168,6 +168,18 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         agent="system",
         misfire_grace=900,
     ),
+    # 2026-04-17 session_rotate: archive OpenClaw agent session checkpoints
+    # older than 14 days, alert on live sessions >100MB. Sunday 4:30am —
+    # between skill_materialize_cleanup (4:10) and autonomy_proposer (4:45).
+    # Added after a 103MB jenna session caused 42.5% empty-envelope rate
+    # on brain_loop URGENT Telegram alerts.
+    ScheduledJob(
+        name="session_rotate",
+        description="Weekly: archive old agent session checkpoints; alert on oversized live sessions (Sun 4:30am)",
+        trigger=CronTrigger(day_of_week="sun", hour=4, minute=30),
+        agent="system",
+        misfire_grace=900,
+    ),
     # T2.12 Contextual Retrieval (2026-04-17): weekly incremental re-embed of canonical
     # chunks whose parent doc changed. Sunday 5:00am — after Sunday memory_lifecycle (2:30)
     # and canonical_pipeline (2:00), before other Sunday jobs. ~20-30 min runtime on full
@@ -1302,18 +1314,21 @@ class BrainScheduler:
             self._alerted_jobs.discard(job_name)  # reset on success
 
     def _alert_failure(self, job_name: str, last_error: str) -> None:
-        """Send Telegram alert via Jenna when a job fails 3+ times consecutively."""
-        try:
-            from cli_llm import dispatch
+        """Send Telegram alert to Chris when a job fails 3+ times consecutively.
 
-            dispatch(
-                agent="jenna",
-                message=f"[BRAIN ALERT] Job '{job_name}' has failed {self._ALERT_THRESHOLD} consecutive times. Last error: {last_error}",
-                thinking="off",
-                timeout=30,
+        2026-04-17 fix: was dispatching via cli_llm which ignores agent=jenna
+        and returns a codex text response — never actually reached Telegram.
+        Now uses unified telegram_alert module (direct Bot API, no LLM)."""
+        try:
+            from telegram_alert import send_chris_telegram
+
+            msg = (
+                f"[BRAIN ALERT] Job '{job_name}' failed {self._ALERT_THRESHOLD}x consecutively.\n"
+                f"Last error: {(last_error or '')[:300]}"
             )
-        except Exception:
-            log.error("failed to send job failure alert for %s", job_name)
+            send_chris_telegram(msg, source=f"scheduler:{job_name}", severity="warn")
+        except Exception as exc:
+            log.error("failed to send job failure alert for %s: %s", job_name, exc)
 
     def list_jobs(self) -> list[dict]:
         jobs = []

@@ -26,9 +26,12 @@ from "uncalibrated." No LLM calls, no heavy deps — pure SQLite + math.
 from __future__ import annotations
 
 import json
+import logging
 import math
 import sqlite3
 import sys
+
+log = logging.getLogger("brain.confidence_calibration")
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -55,8 +58,8 @@ def _save_params(params: dict) -> None:
         import brain_config_store
 
         brain_config_store.set(CALIBRATION_KEY, json.dumps(params), updated_by="confidence_calibration")
-    except Exception:
-        pass
+    except Exception as _exc:
+        log.debug("silenced exception in confidence_calibration.py: %s", _exc)
 
 
 def apply_calibration(raw: float) -> float:
@@ -197,7 +200,8 @@ def _collect_pairs_from_outcomes(days_window: int = 90) -> list[tuple[float, int
         for conf, override in rows:
             try:
                 c = float(conf)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError) as _exc:
+                log.debug("silenced exception in confidence_calibration.py: %s", _exc)
                 continue
             if 0.0 <= c <= 1.0:
                 correct = 0 if int(override or 0) else 1
@@ -286,8 +290,8 @@ def run() -> dict:
             json.dumps({"drift": drift, "fit_at": params["fit_at"]}),
             updated_by="confidence_calibration",
         )
-    except Exception:
-        pass
+    except Exception as _exc:
+        log.debug("silenced exception in confidence_calibration.py: %s", _exc)
 
     return {"status": "ok", **params}
 

@@ -173,8 +173,8 @@ def top_attention(limit: int = 1) -> list[dict]:
             }
             try:
                 all_atom_ids.update(json.loads(d["related_atoms_json"] or "[]"))
-            except Exception:
-                pass
+            except Exception as _exc:
+                log.debug("silenced exception in attention.py: %s", _exc)
             items.append(d)
         valence_map = {}
         if all_atom_ids:

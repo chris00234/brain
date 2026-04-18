@@ -421,7 +421,16 @@ def monitor_cycle() -> dict:
                     )
                 )
     except Exception as e:
-        log.warning("self_heal dispatch failed: %s", e)
+        # 2026-04-17: distinguish autonomy-gate-denied (normal behavior)
+        # from real self_heal failures. Gate denies when L3 perm missing
+        # or quiet hours — it's a policy decision, not an error, and
+        # shouldn't pollute the scheduler's error count (was causing
+        # /brain/health to flag 14 spurious errors/day).
+        msg = str(e)
+        if "blocked by autonomy gate" in msg or "autonomy gate" in msg.lower():
+            log.info("self_heal gate-denied (policy, not an error): %s", msg)
+        else:
+            log.warning("self_heal dispatch failed: %s", e)
 
     state["last_check"] = datetime.now(UTC).isoformat()
 

@@ -113,7 +113,11 @@ def cache_put(key: str, embedding: list[float]) -> None:
         pass
 
 
-def prune_old(max_age_days: int = 60, max_rows: int = 25_000) -> dict:
+def prune_old(max_age_days: int = 30, max_rows: int = 15_000) -> dict:
+    # 2026-04-17: tightened from 60d/25k to 30d/15k. At ~15KB/row the
+    # prior caps produced a 637MB DB that never actually reached the
+    # 25k row limit, so size wasn't being bounded. New caps target
+    # ≤250MB steady-state.
     """Two-tier cleanup: legacy + age-based + size-cap LRU + VACUUM.
 
     1. Legacy rows (created_at IS NULL OR ''): added before the `created_at`

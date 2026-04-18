@@ -24,6 +24,7 @@ from __future__ import annotations
 import concurrent.futures
 import hashlib
 import json
+import logging
 import math
 import sqlite3
 import sys
@@ -33,6 +34,8 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+
+log = logging.getLogger("brain.atoms_store")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -293,8 +296,8 @@ def _submit_bg_extract(text: str, chroma_id: str) -> bool:
             from llm_backlog import enqueue as _backlog_enqueue
 
             _backlog_enqueue("entities", {"text": text, "chroma_id": chroma_id})
-        except Exception:
-            pass
+        except Exception as _exc:
+            log.debug("silenced exception in atoms_store.py: %s", _exc)
         return False
 
     def _run():
@@ -310,8 +313,8 @@ def _submit_bg_extract(text: str, chroma_id: str) -> bool:
                     from llm_backlog import enqueue as _backlog_enqueue
 
                     _backlog_enqueue("entities", {"text": text, "chroma_id": chroma_id})
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log.debug("silenced exception in atoms_store.py: %s", _exc)
         except Exception:
             # Extraction import or unexpected error — queue for backlog
             # so the work isn't lost.
@@ -319,8 +322,8 @@ def _submit_bg_extract(text: str, chroma_id: str) -> bool:
                 from llm_backlog import enqueue as _backlog_enqueue
 
                 _backlog_enqueue("entities", {"text": text, "chroma_id": chroma_id})
-            except Exception:
-                pass
+            except Exception as _exc:
+                log.debug("silenced exception in atoms_store.py: %s", _exc)
         finally:
             _BG_EXTRACT_SEM.release()
 
@@ -338,8 +341,8 @@ def _submit_bg_extract(text: str, chroma_id: str) -> bool:
             from llm_backlog import enqueue as _backlog_enqueue
 
             _backlog_enqueue("entities", {"text": text, "chroma_id": chroma_id})
-        except Exception:
-            pass
+        except Exception as _exc:
+            log.debug("silenced exception in atoms_store.py: %s", _exc)
         return False
 
 

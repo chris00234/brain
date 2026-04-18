@@ -189,8 +189,8 @@ def _mark_seen(kind: str, subject: str) -> None:
                 (kind, subject, now_ts, now_ts),
             )
             conn.commit()
-    except sqlite3.Error:
-        pass
+    except sqlite3.Error as _exc:
+        log.debug("silenced exception in brain_loop.py: %s", _exc)
 
 
 def _filter_seen(observations: list[Observation]) -> list[Observation]:
@@ -512,7 +512,8 @@ def _sense_contradictions() -> list[Observation]:
                     ts=_now_iso(),
                 )
             )
-        except Exception:
+        except Exception as _exc:
+            log.debug("silenced exception in brain_loop.py: %s", _exc)
             continue
     return obs
 
@@ -707,8 +708,8 @@ def _sense_llm_breaker_closed() -> list[Observation]:
             from llm_backlog import pending_count
 
             pending = pending_count()
-        except Exception:
-            pass
+        except Exception as _exc:
+            log.debug("silenced exception in brain_loop.py: %s", _exc)
         if pending > 0:
             obs.append(
                 Observation(
@@ -724,37 +725,101 @@ def _sense_llm_breaker_closed() -> list[Observation]:
 
 
 def _sense_llm_backlog_pending() -> list[Observation]:
-    """SLO sensor for the llm_backlog queue. Fires when pending > 100 or
-    oldest entry > 24h — indicates drain cron isn't keeping up."""
+    """SLO sensor for llm_backlog health.
+
+    2026-04-17 threshold revision: previous rule (pending>100 OR oldest>24h)
+    fired false positives during normal post-incident catch-up. Example:
+    after a 30-min EMFILE outage queued 300 items, the 30-min cron drain
+    processes ~50/cycle — so pending stays >100 for ~3 hours and `oldest`
+    stays near the outage timestamp, not indicating any actual problem.
+
+    New rule: only fire `overflow` when BOTH
+      - pending > 200 (larger buffer for post-incident catch-up)
+      - last 3 drain cycles failed to make progress (drained=0 or failing)
+    New rule: only fire `stale` when oldest > 24h AND pending is still
+    growing (not draining).
+
+    This avoids paging Chris while the system is self-healing at the
+    expected rate."""
     obs = []
     try:
         from llm_backlog import oldest_pending_age_seconds, pending_count
 
         pending = pending_count()
         oldest = oldest_pending_age_seconds()
-    except Exception:
+    except Exception as exc:
+        log.debug("llm_backlog sensor query failed: %s", exc)
         return obs
-    if pending > 100:
+
+    # Check if drain is making progress. If recent drain cycles processed
+    # items, we're catching up — don't alarm.
+    draining_stuck = _is_backlog_drain_stuck()
+
+    if pending > 200 and draining_stuck:
         obs.append(
             Observation(
                 kind="llm_backlog_overflow",
                 subject="pending_count",
-                evidence={"pending": pending, "oldest_age_s": int(oldest)},
+                evidence={
+                    "pending": pending,
+                    "oldest_age_s": int(oldest),
+                    "drain_stuck": True,
+                },
                 salience=0.8,
                 ts=_now_iso(),
             )
         )
-    elif oldest > 86400:
+    elif oldest > 86400 and draining_stuck:
         obs.append(
             Observation(
                 kind="llm_backlog_stale",
                 subject="oldest_entry",
-                evidence={"pending": pending, "oldest_age_s": int(oldest)},
+                evidence={
+                    "pending": pending,
+                    "oldest_age_s": int(oldest),
+                    "drain_stuck": True,
+                },
                 salience=0.7,
                 ts=_now_iso(),
             )
         )
     return obs
+
+
+def _is_backlog_drain_stuck() -> bool:
+    """Return True if the last 3 drain cycles processed 0 items each.
+
+    Reads from the scheduler's job_history for `llm_backlog_drain`.
+    Conservative default: if we can't tell, assume NOT stuck (don't alarm)."""
+    try:
+        import json as _json
+
+        logs_dir = Path("/Users/chrischo/server/brain/logs/jobs")
+        log_path = logs_dir / "llm_backlog_drain.log"
+        if not log_path.exists():
+            return False
+        # Tail-read the last 3 JSON lines from the drain log
+        with log_path.open("rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            f.seek(max(0, size - 4096))
+            tail = f.read().decode("utf-8", errors="ignore")
+        lines = [line for line in tail.splitlines() if line.strip().startswith("{")]
+        if len(lines) < 3:
+            return False
+        last_three = lines[-3:]
+        zero_drain_streak = 0
+        for line in last_three:
+            try:
+                rec = _json.loads(line)
+            except Exception:
+                return False
+            if rec.get("drained", 0) == 0 and rec.get("pending_after", 0) > 0:
+                zero_drain_streak += 1
+        return zero_drain_streak >= 3
+    except Exception as exc:
+        log.debug("_is_backlog_drain_stuck check failed: %s", exc)
+        return False
 
 
 SENSORS = [
@@ -1146,8 +1211,8 @@ def _mark_seen_with_short_cooldown(kind: str, subject: str) -> None:
                 (kind, subject, shifted_ts, now_ts),
             )
             conn.commit()
-    except sqlite3.Error:
-        pass
+    except sqlite3.Error as _exc:
+        log.debug("silenced exception in brain_loop.py: %s", _exc)
 
 
 # ── Act: execute approved decisions ──────────────────────────────
@@ -1248,7 +1313,18 @@ def _dispatch_agent(agent: str, message: str) -> bool:
 
 
 def _telegram_alert(body: str) -> bool:
-    return _dispatch_agent("jenna", f"[brain_loop URGENT]\n{body}")
+    """Delegate URGENT alerts to the unified telegram_alert module."""
+    try:
+        from telegram_alert import send_chris_telegram
+
+        return send_chris_telegram(
+            f"[brain_loop URGENT]\n{body}",
+            source="brain_loop",
+            severity="urgent",
+        )
+    except Exception as exc:
+        log.warning("brain_loop telegram alert failed: %s", exc)
+        return False
 
 
 def _apply_self_modification(payload: dict) -> bool:
@@ -1343,8 +1419,8 @@ def _act(decisions: list[Decision]) -> list[dict]:
                         actor="brain_loop",
                         session_id=d.action_payload.get("session_id"),
                     )
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log.debug("silenced exception in brain_loop.py: %s", _exc)
         except Exception as e:
             result = {"status": "error", "error": str(e)[:200]}
 

@@ -25,12 +25,15 @@ quality gain is confirmed by eval.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
+
+log = logging.getLogger("brain.self_rag")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -78,8 +81,8 @@ def critique(query: str, results: list[dict]) -> CritiqueReport:
 
         if is_session_active():
             return _fallback_score(query, results)
-    except Exception:
-        pass
+    except Exception as _exc:
+        log.debug("silenced exception in self_rag.py: %s", _exc)
 
     t0 = time.time()
     try:
