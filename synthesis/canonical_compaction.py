@@ -21,20 +21,21 @@ Usage:
 This is deliberately report-only for now. Human reviews clusters before
 any merges land. Merge drafts + auto-apply are follow-ups.
 """
+
 from __future__ import annotations
 
 import argparse
 import json
 import math
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "pipeline"))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "brain_core"))
 
-from common import ROOT, parse_note, iter_note_paths  # noqa: E402
-from indexer import get_embedding  # noqa: E402
+from common import ROOT, iter_note_paths, parse_note
+from indexer import get_embedding
 
 CANONICAL_DIR = ROOT / "canonical"
 REPORT_DIR = ROOT / "reports" / "canonical_compaction"
@@ -49,7 +50,7 @@ EMBED_TEXT_LIMIT = 600
 def _cosine(a: list[float], b: list[float]) -> float:
     if not a or not b or len(a) != len(b):
         return 0.0
-    dot = sum(x * y for x, y in zip(a, b))
+    dot = sum(x * y for x, y in zip(a, b, strict=False))
     na = math.sqrt(sum(x * x for x in a))
     nb = math.sqrt(sum(y * y for y in b))
     if na == 0 or nb == 0:
@@ -69,16 +70,18 @@ def _load_notes() -> list[dict]:
         if meta.get("type") != "canonical" or meta.get("status") != "active":
             continue
         text = ((meta.get("title") or path.stem) + "\n" + (body or ""))[:EMBED_TEXT_LIMIT]
-        out.append({
-            "id": meta.get("id") or path.stem,
-            "title": meta.get("title") or path.stem,
-            "domain": meta.get("domain") or "other",
-            "subtype": meta.get("subtype") or "",
-            "path": str(path.relative_to(ROOT)),
-            "text": text,
-            "created_at": meta.get("created_at") or "",
-            "updated_at": meta.get("updated_at") or "",
-        })
+        out.append(
+            {
+                "id": meta.get("id") or path.stem,
+                "title": meta.get("title") or path.stem,
+                "domain": meta.get("domain") or "other",
+                "subtype": meta.get("subtype") or "",
+                "path": str(path.relative_to(ROOT)),
+                "text": text,
+                "created_at": meta.get("created_at") or "",
+                "updated_at": meta.get("updated_at") or "",
+            }
+        )
     return out
 
 
@@ -110,7 +113,9 @@ class _UnionFind:
             self.parent[ra] = rb
 
 
-def _cluster(notes: list[dict], threshold: float, max_size: int) -> tuple[list[list[int]], list[tuple[float, int, int]]]:
+def _cluster(
+    notes: list[dict], threshold: float, max_size: int
+) -> tuple[list[list[int]], list[tuple[float, int, int]]]:
     """Greedy clique-like clustering.
 
     Simple union-find over-clusters because similarity chains transitively.
@@ -174,7 +179,7 @@ def _cluster_summary(cluster: list[int], notes: list[dict], edges: list[tuple[fl
 
 def _write_report(clusters_summary: list[dict], n_total: int, threshold: float) -> tuple[Path, Path]:
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
-    date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    date = datetime.now(UTC).strftime("%Y-%m-%d")
     json_path = REPORT_DIR / f"{date}.json"
     md_path = REPORT_DIR / f"{date}.md"
 
@@ -182,7 +187,7 @@ def _write_report(clusters_summary: list[dict], n_total: int, threshold: float) 
     consolidation_ratio = round(total_in_clusters / max(len(clusters_summary), 1), 1)
 
     payload = {
-        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
         "total_canonical": n_total,
         "threshold": threshold,
         "cluster_count": len(clusters_summary),
@@ -211,7 +216,9 @@ def _write_report(clusters_summary: list[dict], n_total: int, threshold: float) 
         "",
     ]
     if not clusters_summary:
-        lines.append("_No clusters above threshold. Lower the threshold or the canonical layer is already well-factored._")
+        lines.append(
+            "_No clusters above threshold. Lower the threshold or the canonical layer is already well-factored._"
+        )
     else:
         for idx, c in enumerate(sorted(clusters_summary, key=lambda x: -x["size"]), start=1):
             lines.append(f"## Cluster {idx} — {c['size']} notes — avg sim {c['avg_sim']}")
@@ -247,7 +254,10 @@ def main() -> int:
 
     clusters, edges = _cluster(notes, args.threshold, args.max_cluster)
     clusters = [c for c in clusters if len(c) >= args.min_cluster]
-    print(f"  {len(clusters)} clusters ≥ {args.min_cluster} members at threshold {args.threshold}", file=sys.stderr)
+    print(
+        f"  {len(clusters)} clusters ≥ {args.min_cluster} members at threshold {args.threshold}",
+        file=sys.stderr,
+    )
 
     summaries = [_cluster_summary(c, notes, edges) for c in clusters]
     summaries.sort(key=lambda s: -s["size"])
@@ -264,14 +274,18 @@ def main() -> int:
         return 0
 
     json_path, md_path = _write_report(summaries, len(notes), args.threshold)
-    print(json.dumps({
-        "status": "ok",
-        "total_canonical": len(notes),
-        "cluster_count": len(summaries),
-        "notes_in_clusters": sum(s["size"] for s in summaries),
-        "projected_pages": len(summaries) + (len(notes) - sum(s["size"] for s in summaries)),
-        "report": str(md_path.relative_to(ROOT)),
-    }))
+    print(
+        json.dumps(
+            {
+                "status": "ok",
+                "total_canonical": len(notes),
+                "cluster_count": len(summaries),
+                "notes_in_clusters": sum(s["size"] for s in summaries),
+                "projected_pages": len(summaries) + (len(notes) - sum(s["size"] for s in summaries)),
+                "report": str(md_path.relative_to(ROOT)),
+            }
+        )
+    )
     return 0
 
 

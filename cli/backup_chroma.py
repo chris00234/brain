@@ -14,9 +14,8 @@ Usage:
 
 import argparse
 import hashlib
-import os
-import subprocess
 import shutil
+import subprocess
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -127,7 +126,8 @@ def backup_knowledge(retain_days: int) -> bool:
     try:
         subprocess.run(
             ["tar", "czf", str(archive_path), "-C", str(KNOWLEDGE_ROOT), *existing],
-            check=True, timeout=180,
+            check=True,
+            timeout=180,
         )
     except subprocess.CalledProcessError as e:
         print(f"  ERROR: tar failed: {e}")
@@ -222,8 +222,7 @@ def backup(retain_days):
 
     print("[2/4] Compressing...")
     subprocess.run(
-        ["tar", "czf", str(archive_path), "-C", str(BACKUP_DIR), backup_name],
-        check=True, timeout=120
+        ["tar", "czf", str(archive_path), "-C", str(BACKUP_DIR), backup_name], check=True, timeout=120
     )
     size_mb = archive_path.stat().st_size / (1024 * 1024)
     print(f"  Archive: {archive_path} ({size_mb:.1f} MB)")
@@ -253,7 +252,9 @@ def backup(retain_days):
 
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     log_file = LOG_DIR / f"backup-{date_str}.log"
-    log_file.write_text(f"Backup completed: {now.isoformat()}\nSize: {size_mb:.1f} MB\nRetain: {retain_days} days\n")
+    log_file.write_text(
+        f"Backup completed: {now.isoformat()}\nSize: {size_mb:.1f} MB\nRetain: {retain_days} days\n"
+    )
     print(f"\nBackup complete. Log: {log_file}")
     return True
 
@@ -270,6 +271,7 @@ def backup_semantic_memory(retain_days):
     try:
         # Query ChromaDB directly to bypass server's 200 limit
         import json as _json
+
         sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "brain_core"))
         from http_pool import http_json
         from search import get_collections
@@ -290,14 +292,20 @@ def backup_semantic_memory(retain_days):
         docs = resp.get("documents", [])
         metas = resp.get("metadatas", [])
         for i, eid in enumerate(ids):
-            entries.append({
-                "id": eid,
-                "content": docs[i] if i < len(docs) else "",
-                "metadata": metas[i] if i < len(metas) else {},
-            })
+            entries.append(
+                {
+                    "id": eid,
+                    "content": docs[i] if i < len(docs) else "",
+                    "metadata": metas[i] if i < len(metas) else {},
+                }
+            )
 
         BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-        data = _json.dumps({"memories": entries, "count": len(entries), "exported": now.isoformat()}, ensure_ascii=False, indent=2)
+        data = _json.dumps(
+            {"memories": entries, "count": len(entries), "exported": now.isoformat()},
+            ensure_ascii=False,
+            indent=2,
+        )
         out_path.write_text(data)
         size_kb = out_path.stat().st_size / 1024
         print(f"[1/2] Exported {len(entries)} entries ({size_kb:.0f} KB) to {out_path}")
@@ -351,5 +359,5 @@ def main():
         sys.exit(1)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

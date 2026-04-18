@@ -59,6 +59,7 @@ def brain_env(tmp_path, monkeypatch):
         )
 
     import sleep_consolidate as sc
+
     monkeypatch.setattr(sc, "BRAIN_DB", fake_db)
     # Stub the A-MEM neighbor linking (Chroma) and Sage summary (LLM dispatch)
     monkeypatch.setattr(sc, "_amem_link_neighbors", lambda *_args, **_kw: 0)
@@ -74,9 +75,7 @@ def brain_env(tmp_path, monkeypatch):
     for sess in range(10):
         session_id = f"sess_{sess}"
         for row_i in range(10):
-            _created = (base_ts + timedelta(minutes=sess * 30 + row_i)).isoformat(
-                timespec="seconds"
-            )
+            _created = (base_ts + timedelta(minutes=sess * 30 + row_i)).isoformat(timespec="seconds")
             if sess < 5:
                 retrieved = [f"semantic_memory:atom_{j}" for j in range(5)]
             else:
@@ -122,9 +121,7 @@ def test_coactivation_populated_from_hot_sessions(brain_env):
 
     conn = sqlite3.connect(str(fake_db))
     try:
-        pairs = conn.execute(
-            "SELECT atom_a_id, atom_b_id, n_events FROM atom_coactivation"
-        ).fetchall()
+        pairs = conn.execute("SELECT atom_a_id, atom_b_id, n_events FROM atom_coactivation").fetchall()
     finally:
         conn.close()
     assert len(pairs) >= 5, f"expected at least 5 coactivation edges, got {len(pairs)}"
@@ -138,12 +135,10 @@ def test_cls_promotion_fires_for_frequent_atoms(brain_env):
 
     conn = sqlite3.connect(str(fake_db))
     try:
-        promoted = conn.execute(
-            "SELECT COUNT(*) FROM atoms WHERE tier='semantic'"
-        ).fetchone()[0]
-        evidence = conn.execute(
-            "SELECT COUNT(*) FROM atom_evidence WHERE event_type='reinforce'"
-        ).fetchone()[0]
+        promoted = conn.execute("SELECT COUNT(*) FROM atoms WHERE tier='semantic'").fetchone()[0]
+        evidence = conn.execute("SELECT COUNT(*) FROM atom_evidence WHERE event_type='reinforce'").fetchone()[
+            0
+        ]
     finally:
         conn.close()
     assert promoted >= 1, f"expected at least 1 episodic->semantic, got {promoted}"
@@ -159,8 +154,7 @@ def test_cold_atoms_stay_episodic(brain_env):
     conn = sqlite3.connect(str(fake_db))
     try:
         episodic = conn.execute(
-            "SELECT COUNT(*) FROM atoms WHERE tier='episodic' "
-            "AND chroma_id LIKE 'semantic_memory:atom_%'"
+            "SELECT COUNT(*) FROM atoms WHERE tier='episodic' " "AND chroma_id LIKE 'semantic_memory:atom_%'"
         ).fetchone()[0]
     finally:
         conn.close()
@@ -179,9 +173,7 @@ def test_link_atom_entity_via_helpers(brain_env):
 
     conn = sqlite3.connect(str(fake_db))
     try:
-        rows = conn.execute(
-            "SELECT * FROM atom_entity WHERE atom_id=?", (atom_id,)
-        ).fetchall()
+        rows = conn.execute("SELECT * FROM atom_entity WHERE atom_id=?", (atom_id,)).fetchall()
         ent_rows = conn.execute("SELECT * FROM entities WHERE id=?", (eid,)).fetchall()
     finally:
         conn.close()

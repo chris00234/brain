@@ -41,7 +41,6 @@ import json
 import math
 import sys
 import time
-from pathlib import Path
 
 sys.path.insert(0, "/Users/chrischo/server/brain/brain_core")
 
@@ -66,9 +65,10 @@ EXCLUDED_TYPES = {"agent", "preference", "event"}
 # embedder treats the date as noise and lumps them together, but they
 # refer to different temporal snapshots.
 import re as _re
+
 DATE_PATTERNS = [
     _re.compile(r"\b\d{4}[-_ ]\d{1,2}[-_ ]\d{1,2}\b"),  # 2026-04-08 / 2026 04 08
-    _re.compile(r"\d{4}-\d{2}-\d{2}t\d{2}"),              # ISO timestamps
+    _re.compile(r"\d{4}-\d{2}-\d{2}t\d{2}"),  # ISO timestamps
 ]
 
 
@@ -77,7 +77,7 @@ def _has_date(name: str) -> bool:
 
 
 def cosine(a: list[float], b: list[float]) -> float:
-    dot = sum(x * y for x, y in zip(a, b))
+    dot = sum(x * y for x, y in zip(a, b, strict=False))
     na = math.sqrt(sum(x * x for x in a))
     nb = math.sqrt(sum(x * x for x in b))
     if na == 0 or nb == 0:
@@ -136,6 +136,7 @@ def cluster_by_similarity(
                 union(i, j)
 
     from collections import defaultdict
+
     groups: dict[int, list[int]] = defaultdict(list)
     for i in range(n):
         groups[find(i)].append(i)
@@ -271,10 +272,15 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Cross-language entity canonicalization")
     parser.add_argument("--dry-run", action="store_true", help="Show merges, don't write")
     parser.add_argument("--apply", action="store_true", help="Actually apply merges")
-    parser.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD,
-                        help=f"Cosine similarity threshold (default: {DEFAULT_THRESHOLD})")
-    parser.add_argument("--min-mentions", type=int, default=1,
-                        help="Only consider entities with at least N mentions")
+    parser.add_argument(
+        "--threshold",
+        type=float,
+        default=DEFAULT_THRESHOLD,
+        help=f"Cosine similarity threshold (default: {DEFAULT_THRESHOLD})",
+    )
+    parser.add_argument(
+        "--min-mentions", type=int, default=1, help="Only consider entities with at least N mentions"
+    )
     args = parser.parse_args()
 
     if not (args.dry_run or args.apply):

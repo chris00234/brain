@@ -14,7 +14,7 @@ import logging
 import sqlite3
 import sys
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -65,6 +65,7 @@ except Exception as _init_err:
 
 from contextlib import contextmanager
 
+
 @contextmanager
 def _conn():
     global _db_initialized
@@ -86,7 +87,7 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
 
 def _prune_expired() -> int:
     """Delete focus items past their expiration. Returns count deleted."""
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    now = datetime.now(UTC).isoformat(timespec="seconds")
     with _conn() as conn:
         cur = conn.execute(
             "DELETE FROM focus_items WHERE expires_at IS NOT NULL AND expires_at < ?",
@@ -97,6 +98,7 @@ def _prune_expired() -> int:
 
 # ── Public API ───────────────────────────────────────────
 
+
 def get_working_context() -> dict:
     """Build a snapshot of Chris's current working context from all signals."""
 
@@ -104,14 +106,17 @@ def get_working_context() -> dict:
     active_goals: list[dict] = []
     try:
         from task_queue import task_queue
+
         for goal in task_queue.list_goals(status="active"):
             progress = task_queue.get_goal_progress(goal["id"])
-            active_goals.append({
-                "id": goal["id"],
-                "title": goal["title"],
-                "progress_pct": progress.get("pct", 0),
-                "summary": f"{progress.get('completed', 0)}/{progress.get('total', 0)} done",
-            })
+            active_goals.append(
+                {
+                    "id": goal["id"],
+                    "title": goal["title"],
+                    "progress_pct": progress.get("pct", 0),
+                    "summary": f"{progress.get('completed', 0)}/{progress.get('total', 0)} done",
+                }
+            )
     except Exception as exc:
         log.debug("task_queue unavailable for goals: %s", exc)
 
@@ -119,6 +124,7 @@ def get_working_context() -> dict:
     blocked: list[dict] = []
     try:
         from task_queue import task_queue
+
         for task in task_queue.list_tasks(status="assigned"):
             deps = task.get("depends_on", [])
             if isinstance(deps, str):
@@ -128,12 +134,14 @@ def get_working_context() -> dict:
             for dep_id in deps:
                 dep = task_queue.get_task(dep_id)
                 if dep and dep["status"] != "completed":
-                    blocked.append({
-                        "task_id": task["id"],
-                        "title": task["title"],
-                        "blocked_by": dep_id,
-                        "agent": task["assigned_agent"],
-                    })
+                    blocked.append(
+                        {
+                            "task_id": task["id"],
+                            "title": task["title"],
+                            "blocked_by": dep_id,
+                            "agent": task["assigned_agent"],
+                        }
+                    )
                     break
     except Exception as exc:
         log.debug("task_queue unavailable for blocked scan: %s", exc)
@@ -142,12 +150,15 @@ def get_working_context() -> dict:
     next_up: list[dict] = []
     try:
         from task_queue import task_queue
+
         for t in task_queue.get_ready_tasks()[:5]:
-            next_up.append({
-                "task_id": t["id"],
-                "title": t["title"],
-                "agent": t["assigned_agent"],
-            })
+            next_up.append(
+                {
+                    "task_id": t["id"],
+                    "title": t["title"],
+                    "agent": t["assigned_agent"],
+                }
+            )
     except Exception as exc:
         log.debug("task_queue unavailable for ready tasks: %s", exc)
 
@@ -155,30 +166,33 @@ def get_working_context() -> dict:
     open_threads: list[dict] = []
     try:
         from agent_messenger import get_pending_messages
+
         all_agents = ["liz", "ellie", "jenna", "sage", "market", "claude"]
-        now_utc = datetime.now(timezone.utc)
+        now_utc = datetime.now(UTC)
         for agent in all_agents:
             for m in get_pending_messages(agent, limit=3):
                 try:
                     created = datetime.fromisoformat(m["created_at"])
                     if created.tzinfo is None:
-                        created = created.replace(tzinfo=timezone.utc)
+                        created = created.replace(tzinfo=UTC)
                     age_hours = (now_utc - created).total_seconds() / 3600
                 except (ValueError, KeyError):
                     age_hours = 0
-                open_threads.append({
-                    "from": m["from_agent"],
-                    "to": m["to_agent"],
-                    "summary": m["content"][:100],
-                    "age_hours": round(age_hours, 1),
-                })
+                open_threads.append(
+                    {
+                        "from": m["from_agent"],
+                        "to": m["to_agent"],
+                        "summary": m["content"][:100],
+                        "age_hours": round(age_hours, 1),
+                    }
+                )
     except Exception as exc:
         log.debug("agent_messenger unavailable: %s", exc)
 
     # ── Manual focus items ───────────────────────────────
     _prune_expired()
     manual_focus: list[dict] = []
-    now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    now_iso = datetime.now(UTC).isoformat(timespec="seconds")
     with _conn() as conn:
         rows = conn.execute(
             "SELECT * FROM focus_items "
@@ -194,7 +208,7 @@ def get_working_context() -> dict:
         "next_up": next_up[:3],
         "open_threads": open_threads[:3],
         "manual_focus": manual_focus[:2],
-        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
     }
 
 
@@ -208,7 +222,7 @@ def add_focus(
     """Add a manual focus item. Default TTL is 1 week (168h).
     thread_id links related work across sessions (LangGraph/Letta pattern)."""
     item_id = uuid.uuid4().hex[:12]
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     created = now.isoformat(timespec="seconds")
     expires = (now + timedelta(hours=expires_hours)).isoformat(timespec="seconds")
     meta = {"thread_id": thread_id} if thread_id else {}
@@ -285,7 +299,7 @@ def _evict_old_session_summaries() -> int:
 def get_session_summaries(limit: int = MAX_SESSION_SUMMARIES) -> list[dict]:
     """Return the most recent session summaries, newest first."""
     _prune_expired()
-    now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    now_iso = datetime.now(UTC).isoformat(timespec="seconds")
     with _conn() as conn:
         rows = conn.execute(
             "SELECT * FROM focus_items "
@@ -335,7 +349,7 @@ def wm_set(
     prefixed 'durable:' so wm_consolidate() can find it on SessionEnd."""
     _wm_ensure_schema()
     full_key = f"durable:{key}" if durable else key
-    now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    now_iso = datetime.now(UTC).isoformat(timespec="seconds")
     with _conn() as conn:
         conn.execute(
             "INSERT OR REPLACE INTO session_context "
@@ -383,7 +397,7 @@ def wm_list(session_id: str, agent: str) -> dict[str, dict]:
     for r in rows:
         raw_key = r["key"]
         durable = raw_key.startswith("durable:")
-        display_key = raw_key[len("durable:"):] if durable else raw_key
+        display_key = raw_key[len("durable:") :] if durable else raw_key
         out[display_key] = {
             "value": r["value"],
             "durable": durable,
@@ -408,8 +422,9 @@ def wm_consolidate(session_id: str) -> int:
     except ImportError:
         mirror_memory = None
 
-    from datetime import datetime, timezone
-    now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    from datetime import datetime
+
+    now_iso = datetime.now(UTC).isoformat(timespec="seconds")
 
     with _conn() as conn:
         rows = conn.execute(

@@ -90,6 +90,7 @@ def test_run_sends_when_pending_present(isolated_audit, monkeypatch):
     monkeypatch.setattr(audit, "_send_telegram", fake_send)
     # Force the candidate to look stuck so N3's >=14d gate opens
     import eval_holdout_promote as ehp
+
     monkeypatch.setattr(ehp, "stuck_candidates", lambda *a, **k: [{"candidate_id": "prop_1"}])
     result = audit.run()
     assert result["sent"] is True

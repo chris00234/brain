@@ -164,7 +164,7 @@ def _summarize_community(entities: set[str], atoms: list[str]) -> str | None:
     if not atoms:
         return None
     try:
-        from openclaw_dispatch import dispatch
+        from cli_llm import dispatch
 
         prompt = _SUMMARY_PROMPT.format(
             entities=", ".join(sorted(entities)[:30]),

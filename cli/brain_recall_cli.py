@@ -22,7 +22,7 @@ import json
 import re
 import sqlite3
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 BRAIN_DB = Path("/Users/chrischo/server/brain/logs/brain.db")
@@ -30,11 +30,11 @@ BRAIN_DB = Path("/Users/chrischo/server/brain/logs/brain.db")
 # Correction detection regexes — bilingual. Tested against the 2026-04-14
 # "왜 브레인 안써" incident that triggered this whole plan.
 CORRECTION_PATTERNS = [
-    r"왜\s*브레인\s*안\s*써",       # "why are you not using brain"
-    r"왜.*안\s*썼",                  # "why didn't you use ..."
-    r"내가\s*알려준",                # "I told you about ..."
-    r"기억.*안\s*나",                # "you don't remember"
-    r"brain.*안\s*써",               # English-KR mix
+    r"왜\s*브레인\s*안\s*써",  # "why are you not using brain"
+    r"왜.*안\s*썼",  # "why didn't you use ..."
+    r"내가\s*알려준",  # "I told you about ..."
+    r"기억.*안\s*나",  # "you don't remember"
+    r"brain.*안\s*써",  # English-KR mix
     r"should\s+have\s+used\s+brain",
     r"did\s+not\s+use\s+brain",
     r"you\s+didn.t\s+(?:check|use|query)\s+brain",
@@ -48,10 +48,10 @@ CORRECTION_REGEX = re.compile("|".join(CORRECTION_PATTERNS), re.IGNORECASE)
 def _parse_since(period: str) -> datetime:
     """Parse '7d', '24h', '30m' into a datetime cutoff (UTC)."""
     if not period:
-        return datetime.now(timezone.utc) - timedelta(days=7)
+        return datetime.now(UTC) - timedelta(days=7)
     m = re.match(r"^(\d+)([smhdw])$", period.strip())
     if not m:
-        return datetime.now(timezone.utc) - timedelta(days=7)
+        return datetime.now(UTC) - timedelta(days=7)
     n = int(m.group(1))
     unit = m.group(2)
     delta = {
@@ -61,7 +61,7 @@ def _parse_since(period: str) -> datetime:
         "d": timedelta(days=n),
         "w": timedelta(weeks=n),
     }[unit]
-    return datetime.now(timezone.utc) - delta
+    return datetime.now(UTC) - delta
 
 
 def _conn() -> sqlite3.Connection:
@@ -71,6 +71,7 @@ def _conn() -> sqlite3.Connection:
 
 
 # ── Replay ────────────────────────────────────────────────────────
+
 
 def cmd_replay(args: argparse.Namespace) -> int:
     """Print every turn for a specific session."""
@@ -100,6 +101,7 @@ def cmd_replay(args: argparse.Namespace) -> int:
 
 # ── Miss detection ────────────────────────────────────────────────
 
+
 def cmd_miss(args: argparse.Namespace) -> int:
     """Find sessions where the next prompt looks like a correction, meaning
     the previous /recall/active response missed what Chris actually wanted."""
@@ -127,14 +129,16 @@ def cmd_miss(args: argparse.Namespace) -> int:
             prev = turns[i - 1]
             cur_text = t["query_text"] or ""
             if CORRECTION_REGEX.search(cur_text):
-                misses.append({
-                    "session_id": sid,
-                    "prev_ts": prev["created_at"],
-                    "prev_prompt": (prev["query_text"] or "")[:200],
-                    "correction_ts": t["created_at"],
-                    "correction_prompt": cur_text[:200],
-                    "prev_atom_count": len(json.loads(prev["retrieved_atom_ids"] or "[]")),
-                })
+                misses.append(
+                    {
+                        "session_id": sid,
+                        "prev_ts": prev["created_at"],
+                        "prev_prompt": (prev["query_text"] or "")[:200],
+                        "correction_ts": t["created_at"],
+                        "correction_prompt": cur_text[:200],
+                        "prev_atom_count": len(json.loads(prev["retrieved_atom_ids"] or "[]")),
+                    }
+                )
 
     if not misses:
         print(f"No recall misses detected since {args.since}")
@@ -152,6 +156,7 @@ def cmd_miss(args: argparse.Namespace) -> int:
 
 
 # ── Stats ────────────────────────────────────────────────────────
+
 
 def cmd_stats(args: argparse.Namespace) -> int:
     """Latency distribution, intent frequency, volume since cutoff."""
@@ -192,6 +197,7 @@ def cmd_stats(args: argparse.Namespace) -> int:
     miss_args = argparse.Namespace(since=args.since)
     _capture = sys.stdout
     import io
+
     sys.stdout = io.StringIO()
     try:
         cmd_miss(miss_args)
@@ -208,6 +214,7 @@ def cmd_stats(args: argparse.Namespace) -> int:
 
 
 # ── CLI entry ────────────────────────────────────────────────────
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(

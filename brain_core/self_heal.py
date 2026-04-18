@@ -5,6 +5,7 @@ conservative: they can only improve or revert to a known-good state.
 
 Rate-limited per (signal_type, target) to prevent thrashing.
 """
+
 from __future__ import annotations
 
 import json
@@ -12,10 +13,10 @@ import logging
 import os
 import sqlite3
 import time
-from dataclasses import dataclass, asdict, field
-from datetime import datetime, timezone
+from collections.abc import Callable
+from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Callable, Any, Optional
 
 log = logging.getLogger("brain.self_heal")
 
@@ -31,27 +32,26 @@ except ImportError:
     def load_bearer_secret() -> str:
         return Path("/Users/chrischo/.openclaw/credentials/.personal_webhook_secret").read_text().strip()
 
+
 # Optional whitelist: if set, ONLY signals with `signal.source` in this set
 # are actioned, even when BRAIN_AUTO_HEAL_ENABLED=true. Empty = all sources.
 # Used for staged rollout (week 2: slo_monitor only → week 3: add eval_gate).
 _auto_heal_sources_raw = os.environ.get("BRAIN_AUTO_HEAL_SOURCES", "").strip()
 BRAIN_AUTO_HEAL_SOURCES: set[str] = (
-    {s.strip() for s in _auto_heal_sources_raw.split(",") if s.strip()}
-    if _auto_heal_sources_raw
-    else set()
+    {s.strip() for s in _auto_heal_sources_raw.split(",") if s.strip()} if _auto_heal_sources_raw else set()
 )
 
 
 @dataclass
 class HealingSignal:
-    source: str           # "eval_gate", "slo_monitor", "memory_leak_detector"
-    signal_type: str      # "eval_regression", "slo_latency_breach", "memory_growth"
-    severity: str         # "low", "medium", "high", "critical"
-    metric: str           # e.g. "recall_p95_ms", "hit_content_pct"
+    source: str  # "eval_gate", "slo_monitor", "memory_leak_detector"
+    signal_type: str  # "eval_regression", "slo_latency_breach", "memory_growth"
+    severity: str  # "low", "medium", "high", "critical"
+    metric: str  # e.g. "recall_p95_ms", "hit_content_pct"
     value: float
     baseline: float
     target: str = "default"  # e.g. collection name, agent name
-    context: Optional[dict] = field(default=None)
+    context: dict | None = field(default=None)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -122,11 +122,13 @@ def _record_action(signal_type: str, target: str, action: str, result: str):
                 pass
 
 
-def _log_event(signal: HealingSignal, action: str, result: str, before: dict | None = None, after: dict | None = None):
+def _log_event(
+    signal: HealingSignal, action: str, result: str, before: dict | None = None, after: dict | None = None
+):
     try:
         HEAL_LOG.parent.mkdir(parents=True, exist_ok=True)
         entry = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "signal": signal.to_dict(),
             "action": action,
             "result": result,
@@ -140,6 +142,7 @@ def _log_event(signal: HealingSignal, action: str, result: str, before: dict | N
 
 
 # ── Healers ─────────────────────────────────────────────────
+
 
 def heal_eval_regression(signal: HealingSignal) -> dict:
     """Triggered when eval_gate detects score drop > threshold.
@@ -157,6 +160,7 @@ def heal_eval_regression(signal: HealingSignal) -> dict:
 
     try:
         import urllib.request
+
         secret = load_bearer_secret()
         req = urllib.request.Request(
             "http://127.0.0.1:8791/jobs/reindex",
@@ -186,6 +190,7 @@ def heal_slo_latency(signal: HealingSignal) -> dict:
         # Vacuum embed cache + prewarm
         try:
             import urllib.request
+
             secret = load_bearer_secret()
             req = urllib.request.Request(
                 "http://127.0.0.1:8791/jobs/log_rotation",
@@ -200,6 +205,7 @@ def heal_slo_latency(signal: HealingSignal) -> dict:
     if breach_count < 10:
         try:
             import urllib.request
+
             secret = load_bearer_secret()
             req = urllib.request.Request(
                 "http://127.0.0.1:8791/jobs/reindex",
@@ -219,6 +225,7 @@ def heal_memory_growth(signal: HealingSignal) -> dict:
     """Triggered when a collection grows >20% WoW."""
     try:
         import urllib.request
+
         secret = load_bearer_secret()
         # Trigger consolidation + dedup
         for job in ("memory_consolidation",):
@@ -276,7 +283,11 @@ def dispatch(signal: HealingSignal) -> dict:
 
     # Staged rollout: if BRAIN_AUTO_HEAL_SOURCES is set, gate by source.
     if BRAIN_AUTO_HEAL_SOURCES and signal.source not in BRAIN_AUTO_HEAL_SOURCES:
-        _log_event(signal, "source_filtered", f"source={signal.source} not in whitelist {sorted(BRAIN_AUTO_HEAL_SOURCES)}")
+        _log_event(
+            signal,
+            "source_filtered",
+            f"source={signal.source} not in whitelist {sorted(BRAIN_AUTO_HEAL_SOURCES)}",
+        )
         return {"action": "source_filtered", "result": f"source {signal.source} not in whitelist"}
 
     # Phase 5: route through autonomy gate before existing rate-limit + healer call.
@@ -310,7 +321,9 @@ def dispatch(signal: HealingSignal) -> dict:
 
     try:
         result = healer(signal)
-        _record_action(signal.signal_type, signal.target, result.get("action", "?"), result.get("result", "?"))
+        _record_action(
+            signal.signal_type, signal.target, result.get("action", "?"), result.get("result", "?")
+        )
         _log_event(signal, result.get("action", "?"), result.get("result", "?"))
         # Phase 5: feed outcome to breaker so repeated failures open the CB
         try:

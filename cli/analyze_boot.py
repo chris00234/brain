@@ -10,14 +10,13 @@ Reads boot-context-log.jsonl and reports:
   - Per-agent token cost
 """
 
-import json
 import argparse
+import json
 from collections import defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
 
-
-LOG_FILE = Path('/Users/chrischo/server/brain/logs/boot-context-log.jsonl')
+LOG_FILE = Path("/Users/chrischo/server/brain/logs/boot-context-log.jsonl")
 
 
 def load_logs(days):
@@ -69,7 +68,9 @@ def analyze(entries):
     for agent, stats in sorted(agent_stats.items()):
         avg_tokens = stats["total_tokens"] / stats["boots"] if stats["boots"] else 0
         avg_score = sum(stats["scores"]) / len(stats["scores"]) if stats["scores"] else 0
-        print(f"  {agent}: {stats['boots']} boots, avg {avg_tokens:.0f} tokens/boot, avg score {avg_score:.1f}")
+        print(
+            f"  {agent}: {stats['boots']} boots, avg {avg_tokens:.0f} tokens/boot, avg score {avg_score:.1f}"
+        )
 
     print("\n## Low-Value Queries (avg score < 40)")
     low_value = []
@@ -100,5 +101,5 @@ def main():
     analyze(entries)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

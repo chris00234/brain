@@ -20,25 +20,24 @@ import logging
 import math
 import re
 import sys
-import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 log = logging.getLogger("brain.learn")
 
 # Reuse the indexer's ChromaDB + Ollama helpers (sibling in brain_core/).
 sys.path.insert(0, str(Path(__file__).parent))
+from cli_llm import dispatch as _dispatch  # noqa: E402  # migrated 2026-04-17
 from indexer import (  # noqa: E402
-    chroma_api,
-    get_embedding,
-    ensure_collection,
-    _get_collection_id,
     EMBED_MODEL,
     EMBED_MODEL_VERSION,
+    _get_collection_id,
+    chroma_api,
+    ensure_collection,
+    get_embedding,
 )
-from openclaw_dispatch import dispatch as _dispatch  # noqa: E402
 
 try:
     from config import OPENCLAW_BIN
@@ -54,10 +53,25 @@ SIMILARITY_THRESHOLD = 0.90  # cosine similarity above this = potential contradi
 MIN_CONTRADICTION_OVERLAP = 0.55
 # Exclude "wants / would like / prefers / should" statements about broad topics
 # from contradiction detection — these are additive preferences, not flips.
-PREFERENCE_STOPWORDS = frozenset({
-    "chris", "wants", "want", "prefers", "prefer", "likes", "like",
-    "would", "should", "brain", "system", "the", "a", "to", "be",
-})
+PREFERENCE_STOPWORDS = frozenset(
+    {
+        "chris",
+        "wants",
+        "want",
+        "prefers",
+        "prefer",
+        "likes",
+        "like",
+        "would",
+        "should",
+        "brain",
+        "system",
+        "the",
+        "a",
+        "to",
+        "be",
+    }
+)
 DISTILL_TIMEOUT_SEC = 90
 EMBED_TRUNCATE = 1000
 SESSION_SUMMARY_MAX_LEN = 200
@@ -114,6 +128,7 @@ def _count_corroborating_trust(content: str) -> float:
     score = TRUST_BASELINE + TRUST_PER_SOURCE * min(matched, TRUST_MAX_SOURCES)
     return round(min(1.0, score), 3)
 
+
 # ── Trigger heuristics ──────────────────────────────────────────────────
 POSITIVE_TRIGGERS = re.compile(
     r"\b(good|great|perfect|nice|awesome|exactly|love it|brilliant|wonderful|"
@@ -141,7 +156,7 @@ FACT_DECLARATIONS = re.compile(
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _digest(text: str) -> str:
@@ -161,7 +176,7 @@ def _jaccard(a: set[str], b: set[str]) -> float:
 def _cosine(v1: list[float], v2: list[float]) -> float:
     if not v1 or not v2 or len(v1) != len(v2):
         return 0.0
-    dot = sum(x * y for x, y in zip(v1, v2))
+    dot = sum(x * y for x, y in zip(v1, v2, strict=False))
     n1 = math.sqrt(sum(x * x for x in v1))
     n2 = math.sqrt(sum(y * y for y in v2))
     if n1 == 0 or n2 == 0:
@@ -206,6 +221,7 @@ def _write_session_summary(transcript: str, source: str, agent: str) -> str | No
         return None
     try:
         from working_memory import add_session_summary
+
         add_session_summary(content=summary, agent=agent, source=source)
         log.info("session summary written: %.80s...", summary)
         return summary
@@ -251,12 +267,14 @@ def extract_candidates(transcript: str) -> list[dict[str, Any]]:
             triggers.append("korean")
 
         if score > 0:
-            candidates.append({
-                "block": block,
-                "score": score,
-                "triggers": triggers,
-                "position": idx,
-            })
+            candidates.append(
+                {
+                    "block": block,
+                    "score": score,
+                    "triggers": triggers,
+                    "position": idx,
+                }
+            )
 
     candidates.sort(key=lambda x: x["score"], reverse=True)
     return candidates[: MAX_PER_SESSION * 2]  # send 2x to LLM, it filters
@@ -267,14 +285,16 @@ DISTILL_PROMPT = """You are extracting durable memories about Chris from a sessi
 
 Rules:
 - Output ONLY valid JSON (no prose, no markdown fences) with this shape:
-  {{"memories": [...], "corrections": [...]}}
+  {{"memories": [...], "corrections": [...], "workflows": [...]}}
 - Each memory: {{"content": "<one sentence>", "category": "preference|fact|decision|entity|other", "confidence": 0.0-1.0, "reason": "<why this is durable>", "context_tags": "<comma-separated contexts: coding,infra,personal,etc>", "override_conditions": "<when Chris would NOT follow this, or empty>"}}
 - Each correction: {{"wrong_claim": "<what the brain/agent said that was wrong>", "right_answer": "<what Chris said the correct answer is>", "domain": "<topic area: infra|coding|personal|general>"}}
+- Each workflow (AWM, Agent Workflow Memory): {{"task_type": "<2-4 word snake_case classifier, e.g. deploy_docker_service>", "title": "<human-readable summary>", "steps": ["step 1", "step 2", ...], "preconditions": "<what must be true before running, or empty>", "tools": ["tool1", ...]}}
 - Maximum {max_n} memories. Fewer is better. Skip ephemeral chat.
 - Only extract memories that would still be true next month.
 - Each content field must be self-contained — no pronouns referring to outside context.
 - Skip anything you already know from Chris's profile (functional components, conventional commits, npm, Tailwind, shadcn, etc.) — only NEW signals.
 - For corrections: look for moments where Chris told the agent/brain it was wrong, gave a correction, or overrode a recommendation. Only include real factual corrections, not style preferences.
+- For workflows: ONLY extract when the transcript shows a SUCCESSFUL multi-step procedure (3+ distinct actions, task completed). Skip if session was Q&A, brainstorming, or debugging. Workflow = reusable recipe. Maximum 2 per session; usually 0.
 {correction_hint}
 Transcript:
 \"\"\"
@@ -293,19 +313,22 @@ def _has_correction_signals(transcript: str) -> bool:
 
 
 def distill_via_jenna(
-    transcript: str, candidates: list[dict[str, Any]], max_n: int = MAX_PER_SESSION,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Dispatch to OpenClaw Jenna for structured memory + correction extraction.
+    transcript: str,
+    candidates: list[dict[str, Any]],
+    max_n: int = MAX_PER_SESSION,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Dispatch to OpenClaw Jenna for structured memory + correction + workflow extraction.
 
-    Returns (memories, corrections). Failures return ([], []) silently —
+    Returns (memories, corrections, workflows). Failures return ([], [], []) silently —
     the caller logs and proceeds without breaking the session.
     """
     if not candidates and len(transcript) < 200:
-        return [], []
+        return [], [], []
 
-    passages_str = "\n".join(
-        f"- [{c['triggers']}] {c['block'][:300]}" for c in candidates[:10]
-    ) or "(none scored — extract from full transcript)"
+    passages_str = (
+        "\n".join(f"- [{c['triggers']}] {c['block'][:300]}" for c in candidates[:10])
+        or "(none scored — extract from full transcript)"
+    )
 
     correction_hint = ""
     if _has_correction_signals(transcript):
@@ -328,54 +351,110 @@ def distill_via_jenna(
         timeout=DISTILL_TIMEOUT_SEC,
     )
     if not result.ok:
-        return [], []
+        return [], [], []
     return _parse_distill_response(result.text)
 
 
+def _parse_distill_response(
+    text: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Parse Jenna's response into (memories, corrections, workflows).
 
-def _parse_distill_response(text: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Parse Jenna's response into (memories, corrections).
-
-    Handles both the new {memories, corrections} object format and the
-    legacy bare-array format (backward compat).
+    Handles both the new {memories, corrections, workflows} object format and
+    the legacy formats (bare array memories / pre-AWM {memories, corrections}).
+    Workflows default to empty list on older response shapes.
     """
     if not text:
-        return [], []
+        return [], [], []
     text = text.strip()
     text = re.sub(r"^```(?:json)?\s*", "", text)
     text = re.sub(r"\s*```$", "", text)
 
-    # Try object format first: {"memories": [...], "corrections": [...]}
+    # Try object format first: {"memories": [...], "corrections": [...], "workflows": [...]}
     obj_match = re.search(r"\{.*\}", text, re.DOTALL)
     if obj_match:
         try:
             parsed = json.loads(obj_match.group(0))
             if isinstance(parsed, dict):
                 memories = [
-                    m for m in (parsed.get("memories") or [])
-                    if isinstance(m, dict) and m.get("content")
+                    m for m in (parsed.get("memories") or []) if isinstance(m, dict) and m.get("content")
                 ]
                 corrections = [
-                    c for c in (parsed.get("corrections") or [])
+                    c
+                    for c in (parsed.get("corrections") or [])
                     if isinstance(c, dict) and c.get("wrong_claim")
                 ]
-                if memories or corrections:
-                    return memories, corrections
+                workflows = [
+                    w
+                    for w in (parsed.get("workflows") or [])
+                    if isinstance(w, dict)
+                    and w.get("task_type")
+                    and isinstance(w.get("steps"), list)
+                    and len(w.get("steps") or []) >= 3
+                ]
+                if memories or corrections or workflows:
+                    return memories, corrections, workflows
         except json.JSONDecodeError:
             pass
 
-    # Fallback: legacy bare array format
+    # Fallback: legacy bare array format (memories only)
     arr_match = re.search(r"\[.*\]", text, re.DOTALL)
     if arr_match:
         try:
             parsed = json.loads(arr_match.group(0))
             if isinstance(parsed, list):
                 memories = [m for m in parsed if isinstance(m, dict) and m.get("content")]
-                return memories, []
+                return memories, [], []
         except json.JSONDecodeError:
             pass
 
-    return [], []
+    return [], [], []
+
+
+def _store_workflows(
+    workflows: list[dict[str, Any]],
+    *,
+    source: str,
+    agent: str,
+) -> int:
+    """Materialize extracted workflows as procedures via task_queue._store_procedure.
+
+    Leverages the existing Jaccard-0.7 dedup in _store_procedure — already-seen
+    workflows increment success_count instead of creating duplicates. New
+    procedures inherit source="awm_session" so they're distinguishable from
+    task-derived procedures (source="extraction").
+    """
+    if not workflows:
+        return 0
+    try:
+        from task_queue import task_queue
+    except ImportError:
+        return 0
+    stored = 0
+    for w in workflows:
+        task_type = str(w.get("task_type") or "").strip()
+        title = str(w.get("title") or "").strip()
+        steps_raw = w.get("steps") or []
+        if not (task_type and title and isinstance(steps_raw, list) and len(steps_raw) >= 3):
+            continue
+        steps = [str(s)[:300] for s in steps_raw[:10] if s]
+        if len(steps) < 3:
+            continue
+        tools_raw = w.get("tools") or []
+        tools = [str(t)[:60] for t in tools_raw[:10]] if isinstance(tools_raw, list) else []
+        try:
+            task_queue._store_procedure(
+                task_type=task_type[:80],
+                title=title[:200],
+                steps=steps,
+                preconditions=str(w.get("preconditions") or "")[:300],
+                tools=tools,
+                source=f"awm_session:{source}",
+            )
+            stored += 1
+        except Exception:
+            continue
+    return stored
 
 
 # ── Step 3: embed and store ─────────────────────────────────────────────
@@ -462,9 +541,13 @@ def embed_and_store(memories: list[dict[str, Any]], source: str, agent: str) -> 
         supersede_target = None
         try:
             from memory_operations import classify_operation, should_delete_by_content
+
             # Always run classifier to find a target candidate
             op, target_id, _diag = classify_operation(
-                content, embedding, confidence, col_id,
+                content,
+                embedding,
+                confidence,
+                col_id,
                 category=category,
             )
             supersede_target = target_id
@@ -490,6 +573,7 @@ def embed_and_store(memories: list[dict[str, Any]], source: str, agent: str) -> 
                 )
                 try:
                     from audit_log import log_event
+
                     log_event(
                         "delete",
                         entity_a=supersede_target,
@@ -516,14 +600,17 @@ def embed_and_store(memories: list[dict[str, Any]], source: str, agent: str) -> 
                     f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/update",
                     {
                         "ids": [supersede_target],
-                        "metadatas": [{
-                            "superseded_by": mem_id,
-                            "valid_until": now_iso,
-                        }],
+                        "metadatas": [
+                            {
+                                "superseded_by": mem_id,
+                                "valid_until": now_iso,
+                            }
+                        ],
                     },
                 )
                 try:
                     from audit_log import log_event
+
                     log_event(
                         "supersession",
                         entity_a=supersede_target,
@@ -536,6 +623,7 @@ def embed_and_store(memories: list[dict[str, Any]], source: str, agent: str) -> 
                 # Phase 3 atoms-truth-layer mirror: mark superseded + insert provenance edge
                 try:
                     from atoms_store import mark_superseded
+
                     mark_superseded(supersede_target, mem_id)
                 except Exception:
                     pass
@@ -546,13 +634,15 @@ def embed_and_store(memories: list[dict[str, Any]], source: str, agent: str) -> 
         embeddings.append(embedding)
         documents.append(content)
         metadatas.append(meta)
-        stored.append({
-            "id": mem_id,
-            "content": content,
-            "metadata": meta,
-            "embedding": embedding,
-            "operation": operation,
-        })
+        stored.append(
+            {
+                "id": mem_id,
+                "content": content,
+                "metadata": meta,
+                "embedding": embedding,
+                "operation": operation,
+            }
+        )
 
     # Intra-batch dedup: if two memories in the same batch are about the same thing,
     # keep only the longer/more detailed one. This prevents chatty sessions from
@@ -561,7 +651,7 @@ def embed_and_store(memories: list[dict[str, Any]], source: str, agent: str) -> 
         from math import sqrt
 
         def _cosine_sim(a: list[float], b: list[float]) -> float:
-            dot = sum(x * y for x, y in zip(a, b))
+            dot = sum(x * y for x, y in zip(a, b, strict=False))
             na = sqrt(sum(x * x for x in a))
             nb = sqrt(sum(y * y for y in b))
             return dot / (na * nb) if na and nb else 0.0
@@ -583,11 +673,11 @@ def embed_and_store(memories: list[dict[str, Any]], source: str, agent: str) -> 
                         break
 
         if not all(keep):
-            ids = [x for x, k in zip(ids, keep) if k]
-            embeddings = [x for x, k in zip(embeddings, keep) if k]
-            documents = [x for x, k in zip(documents, keep) if k]
-            metadatas = [x for x, k in zip(metadatas, keep) if k]
-            stored = [x for x, k in zip(stored, keep) if k]
+            ids = [x for x, k in zip(ids, keep, strict=False) if k]
+            embeddings = [x for x, k in zip(embeddings, keep, strict=False) if k]
+            documents = [x for x, k in zip(documents, keep, strict=False) if k]
+            metadatas = [x for x, k in zip(metadatas, keep, strict=False) if k]
+            stored = [x for x, k in zip(stored, keep, strict=False) if k]
 
     if not ids:
         return []
@@ -606,6 +696,7 @@ def embed_and_store(memories: list[dict[str, Any]], source: str, agent: str) -> 
     # Fire on_memory_stored hooks (one per stored memory)
     try:
         import hooks
+
         for entry in stored:
             hooks.fire(
                 "on_memory_stored",
@@ -624,6 +715,7 @@ def embed_and_store(memories: list[dict[str, Any]], source: str, agent: str) -> 
     # agent-extracted content leaked into the trusted filter.
     try:
         from ingest_mirror import mirror_memory
+
         for entry in stored:
             meta = entry.get("metadata") or {}
             mr = mirror_memory(
@@ -703,7 +795,7 @@ def check_contradictions_for_memory(
 
     new_tokens = _tokenize(content)
 
-    for other_id, other_doc, other_dist, other_meta in zip(ids, docs, dists, metas_list):
+    for other_id, other_doc, other_dist, other_meta in zip(ids, docs, dists, metas_list, strict=False):
         if other_id == mem_id:
             continue
         other_category = (other_meta or {}).get("category", "")
@@ -736,6 +828,7 @@ def check_contradictions_for_memory(
         # an existing atom IS the Friston learning signal. Best-effort.
         try:
             from atoms_store import insert_action_audit as _iaa
+
             _iaa(
                 route="/memory.contradiction",
                 tool="predictive_error",
@@ -753,7 +846,11 @@ def check_contradictions_for_memory(
         try:
             from atoms_store import (
                 cluster_size_for as _cluster_size,
+            )
+            from atoms_store import (
                 derive_atom_id as _derive_atom_id,
+            )
+            from atoms_store import (
                 update_atom_confidence as _uac,
             )
 
@@ -792,6 +889,7 @@ def check_contradictions_for_memory(
                 )
                 try:
                     from audit_log import log_event
+
                     log_event(
                         "resolve",
                         entity_a=other_id,
@@ -848,10 +946,7 @@ def _store_contradiction(contradiction: dict[str, Any]) -> None:
     col_id = _get_collection_id(CONTRADICTIONS_COLLECTION)
     if not col_id:
         return
-    summary = (
-        f"NEW: {contradiction['new_content']}\n"
-        f"OLD: {contradiction['old_content']}"
-    )
+    summary = f"NEW: {contradiction['new_content']}\n" f"OLD: {contradiction['old_content']}"
     embedding = get_embedding(summary[:EMBED_TRUNCATE])
     if not embedding:
         return
@@ -862,22 +957,26 @@ def _store_contradiction(contradiction: dict[str, Any]) -> None:
             "ids": [contradiction["id"]],
             "embeddings": [embedding],
             "documents": [summary],
-            "metadatas": [{
-                "new_id": contradiction["new_id"],
-                "old_id": contradiction["old_id"],
-                "category": contradiction["category"],
-                "distance": str(contradiction["distance"]),
-                "token_overlap": str(contradiction["token_overlap"]),
-                "created_at": contradiction["created_at"],
-                "review_state": "pending",
-            }],
+            "metadatas": [
+                {
+                    "new_id": contradiction["new_id"],
+                    "old_id": contradiction["old_id"],
+                    "category": contradiction["category"],
+                    "distance": str(contradiction["distance"]),
+                    "token_overlap": str(contradiction["token_overlap"]),
+                    "created_at": contradiction["created_at"],
+                    "review_state": "pending",
+                }
+            ],
         },
     )
 
 
 # ── Correction recording ──────────────────────────────────────────────
 def _record_corrections(
-    corrections: list[dict[str, Any]], source: str, agent: str,
+    corrections: list[dict[str, Any]],
+    source: str,
+    agent: str,
 ) -> int:
     """Record extracted corrections as negative outcomes + semantic memories.
 
@@ -901,6 +1000,7 @@ def _record_corrections(
         # 1. Record negative outcome in accuracy tracker
         try:
             from task_queue import task_queue
+
             task_id = f"correction_{_digest(wrong + right)}"
             task_queue.record_outcome(
                 task_id=task_id,
@@ -914,7 +1014,7 @@ def _record_corrections(
             log.warning("failed to record correction outcome: %s", e)
 
         # 2. Store as semantic_memory so the brain remembers the mistake
-        content = f"CORRECTION: Brain/agent said \"{wrong}\" but the correct answer is \"{right}\""
+        content = f'CORRECTION: Brain/agent said "{wrong}" but the correct answer is "{right}"'
         mem = {
             "content": content,
             "category": "correction",
@@ -967,7 +1067,7 @@ def process_session(transcript: str, source: str = "session", agent: str = "clau
         summary["errors"].append(f"session_summary: {e}")
 
     try:
-        memories, corrections = distill_via_jenna(transcript, candidates)
+        memories, corrections, workflows = distill_via_jenna(transcript, candidates)
         summary["distilled"] = len(memories)
     except Exception as e:
         summary["errors"].append(f"distill: {e}")
@@ -980,12 +1080,18 @@ def process_session(transcript: str, source: str = "session", agent: str = "clau
     except Exception as e:
         summary["errors"].append(f"corrections: {e}")
 
+    # AWM: materialize extracted multi-step workflows as procedures
+    try:
+        n_workflows = _store_workflows(workflows, source=source, agent=agent)
+        summary["workflows"] = n_workflows
+    except Exception as e:
+        summary["errors"].append(f"workflows: {e}")
+
     try:
         stored = embed_and_store(memories, source=source, agent=agent)
         summary["stored"] = len(stored)
         summary["entries"] = [
-            {"id": s["id"], "content": s["content"], "category": s["metadata"]["category"]}
-            for s in stored
+            {"id": s["id"], "content": s["content"], "category": s["metadata"]["category"]} for s in stored
         ]
     except Exception as e:
         summary["errors"].append(f"store: {e}")
@@ -1003,6 +1109,7 @@ def process_session(transcript: str, source: str = "session", agent: str = "clau
 # ── CLI for manual testing ──────────────────────────────────────────────
 if __name__ == "__main__":
     import argparse
+
     parser = argparse.ArgumentParser(description="Self-learning extraction pipeline")
     parser.add_argument("--transcript", help="Inline transcript text")
     parser.add_argument("--file", help="Read transcript from file")

@@ -20,37 +20,81 @@ import urllib.request
 BRAIN_URL = "http://127.0.0.1:8791"
 SECRET_FILE = os.path.expanduser("~/.openclaw/credentials/.personal_webhook_secret")
 
-try:
-    SECRET = open(SECRET_FILE).read().strip()
-except Exception:
-    SECRET = ""
+# 2026-04-16 R-6: secret is read once at module load AND re-read on
+# every auth-failure (401) to handle rotation without requiring a full
+# process restart. MCP lifecycle is capped at MAX_LIFETIME_S=3600 so
+# this is a belt-and-suspenders: the self-reap limits worst-case drift,
+# the re-read handles mid-lifecycle rotations.
+import time as _time
+
+_SECRET_CACHE: dict = {"value": "", "loaded_at": 0.0}
 
 
-def _brain_request(method: str, path: str, body: dict | None = None, actor: str | None = None) -> dict | str:
+def _load_secret(force: bool = False) -> str:
+    now = _time.time()
+    if not force and _SECRET_CACHE["value"] and (now - _SECRET_CACHE["loaded_at"] < 600):
+        return _SECRET_CACHE["value"]
+    try:
+        val = open(SECRET_FILE).read().strip()
+    except Exception:
+        val = ""
+    _SECRET_CACHE["value"] = val
+    _SECRET_CACHE["loaded_at"] = now
+    return val
+
+
+SECRET = _load_secret()
+
+
+def _brain_request(
+    method: str, path: str, body: dict | None = None, actor: str | None = None, timeout_s: int = 60
+) -> dict | str:
     """Make an authenticated request to the brain API.
 
     `actor` (M7-WS8): the calling agent name — propagated as both `x-agent`
     header (preferred) and `?actor=` query param fallback. This feeds the
     `action_audit` table so /brain/usage can show per-agent adoption counts.
+
+    `timeout_s` (2026-04-17): caller-tunable HTTP timeout. Slow paths
+    (brain_decide / brain_reason) pass 4s so OpenClaw's 5s MCP transport
+    timeout gets a structured timeout response instead of -32001.
     """
     data = json.dumps(body).encode() if body else None
     if actor and method == "GET" and "?" in path:
         path = path + "&actor=" + urllib.parse.quote(actor)
     elif actor and method == "GET":
         path = path + "?actor=" + urllib.parse.quote(actor)
-    req = urllib.request.Request(f"{BRAIN_URL}{path}", data=data, method=method)
-    req.add_header("Authorization", f"Bearer {SECRET}")
-    if actor:
-        req.add_header("x-agent", actor)
-    if data:
-        req.add_header("Content-Type", "application/json")
+
+    def _do_request(secret: str):
+        req = urllib.request.Request(f"{BRAIN_URL}{path}", data=data, method=method)
+        req.add_header("Authorization", f"Bearer {secret}")
+        if actor:
+            req.add_header("x-agent", actor)
+        if data:
+            req.add_header("Content-Type", "application/json")
+        return urllib.request.urlopen(req, timeout=timeout_s)
+
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        with _do_request(_load_secret()) as resp:
             ct = resp.headers.get("content-type", "")
             raw = resp.read().decode()
             if "json" in ct:
                 return json.loads(raw)
             return raw
+    except urllib.error.HTTPError as http_err:
+        # 2026-04-16 R-6: on 401, force-reload the secret file and retry once
+        # so rotation doesn't require an MCP process restart.
+        if http_err.code == 401:
+            try:
+                with _do_request(_load_secret(force=True)) as resp:
+                    ct = resp.headers.get("content-type", "")
+                    raw = resp.read().decode()
+                    if "json" in ct:
+                        return json.loads(raw)
+                    return raw
+            except Exception as e2:
+                return {"error": str(e2)[:200]}
+        return {"error": f"HTTP {http_err.code}: {str(http_err)[:180]}"}
     except Exception as e:
         return {"error": str(e)[:200]}
 
@@ -101,7 +145,7 @@ def handle_tools_list(params):
             },
             {
                 "name": "brain_decide",
-                "description": "Get a preference-grounded decision recommendation from the brain.",
+                "description": "Get a preference-grounded decision recommendation from the brain. Slow path (dispatches LLM, 5-30s). Prefer brain_recall for fast lookups; use brain_decide only when you need a ranked recommendation across options with Chris-preference weighting.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -124,7 +168,7 @@ def handle_tools_list(params):
             },
             {
                 "name": "brain_reason",
-                "description": "Deep multi-step reasoning with evidence from the knowledge base.",
+                "description": "Deep multi-step reasoning with evidence. Slow path (multi-hop, 10-60s). Use only for genuine synthesis questions — brain_recall + brain_decide are faster for most needs.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -287,7 +331,10 @@ def handle_tools_list(params):
                     "type": "object",
                     "properties": {
                         "path": {"type": "string", "description": "Absolute local path to the image file"},
-                        "base64_data": {"type": "string", "description": "Alternative: base64-encoded image bytes"},
+                        "base64_data": {
+                            "type": "string",
+                            "description": "Alternative: base64-encoded image bytes",
+                        },
                         "mime_type": {"type": "string", "default": "image/png"},
                         "prompt": {"type": "string", "description": "Optional: custom captioning prompt"},
                     },
@@ -306,6 +353,39 @@ def handle_tools_list(params):
                     "required": ["query"],
                 },
             },
+            # 2026-04-16 Tier 3 #8: cognitive verbs for a superhuman brain.
+            # The first 11 tools are about storing + retrieving. These three
+            # are about knowing what the brain doesn't know, deliberate
+            # forgetting, and on-demand consolidation — metacognitive ops.
+            {
+                "name": "brain_forget",
+                "description": "Permanently delete a memory by chroma_id. Use when Chris explicitly asks to forget something, when a superseded memory is confirmed obsolete, or when a stored fact is proven wrong. Irreversible — requires the raw Chroma UUID (get one from brain_recall's `id` field).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "memory_id": {
+                            "type": "string",
+                            "description": "Raw Chroma UUID from brain_recall result `id`",
+                        },
+                    },
+                    "required": ["memory_id"],
+                },
+            },
+            {
+                "name": "brain_consolidate",
+                "description": "Trigger on-demand sleep consolidation — runs the same co-activation + tier-promotion job that normally fires nightly. Use after a burst of learning (long session, many new memories) when you want tier/supersession/confidence to settle before the scheduled 3am run. Async dispatch; returns pid immediately.",
+                "inputSchema": {"type": "object", "properties": {}},
+            },
+            {
+                "name": "brain_doubt",
+                "description": "Surface what the brain is currently uncertain about: low-confidence atoms (confidence<0.4), unresolved semantic contradictions, and stale canonical notes. Use at the start of a research/decision session to know which beliefs to validate, or when Chris asks 'what are you unsure about?' / '잘 모르겠는 거 있어?'.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "limit": {"type": "integer", "description": "Max items per category", "default": 20},
+                    },
+                },
+            },
         ]
     }
 
@@ -321,7 +401,16 @@ def handle_tools_call(params):
         q = args["query"]
         n = args.get("limit", 5)
         col = args.get("collection", "")
-        path = f"/recall/v2?q={urllib.parse.quote(q)}&n={n}&expand=true"
+        # 2026-04-17 MCP timeout fix: OpenClaw's bundle-mcp has a default 5s
+        # operation timeout. Previously this path passed expand=true which
+        # triggers _hyde.expand_query (Jenna/codex CLI dispatch, 2-3s) +
+        # cross-encoder rerank (2-3s) → 5-6s total → timeout. gateway.err.log
+        # was full of "-32001 Request timed out" errors for brain_recall.
+        # Drop expand=true: bilingual expansion in search_unified already
+        # provides KR↔EN coverage without the LLM roundtrip. `expand=true`
+        # can still be requested via the explicit expand=true URL param on
+        # /recall/v2 when deep expansion is actually needed.
+        path = f"/recall/v2?q={urllib.parse.quote(q)}&n={n}"
         if col:
             path += f"&collection={col}"
         result = _brain_request("GET", path, actor=actor)
@@ -340,27 +429,47 @@ def handle_tools_call(params):
         )
 
     elif name == "brain_decide":
-        result = _brain_request(
-            "POST",
-            "/brain/decide",
-            {
-                "situation": args["situation"],
-                "options": args.get("options", []),
-                "agent": actor,
-            },
-            actor=actor,
-        )
+        # 2026-04-17 fix: OpenClaw's MCP transport has a 5s operation timeout;
+        # /brain/decide dispatches an LLM (5-30s) and would always hit
+        # -32001. Return a structured timeout hint instead so the agent gets
+        # actionable feedback instead of an MCP protocol error.
+        try:
+            result = _brain_request(
+                "POST",
+                "/brain/decide",
+                {
+                    "situation": args["situation"],
+                    "options": args.get("options", []),
+                    "agent": actor,
+                },
+                actor=actor,
+                timeout_s=4,
+            )
+        except Exception as exc:
+            result = {
+                "status": "timeout",
+                "hint": "brain_decide is LLM-backed (5-30s). Try brain_recall for fast lookups, or call /brain/decide via HTTP directly when the 5s MCP window is insufficient.",
+                "error": str(exc)[:200],
+            }
 
     elif name == "brain_reason":
-        result = _brain_request(
-            "POST",
-            "/brain/reason",
-            {
-                "question": args["question"],
-                "agent": actor,
-            },
-            actor=actor,
-        )
+        try:
+            result = _brain_request(
+                "POST",
+                "/brain/reason",
+                {
+                    "question": args["question"],
+                    "agent": actor,
+                },
+                actor=actor,
+                timeout_s=4,
+            )
+        except Exception as exc:
+            result = {
+                "status": "timeout",
+                "hint": "brain_reason is multi-hop LLM (10-60s). Use brain_recall + brain_decide, or hit /brain/reason via HTTP for the full run.",
+                "error": str(exc)[:200],
+            }
 
     elif name == "brain_ingest":
         result = _brain_request(
@@ -478,6 +587,25 @@ def handle_tools_call(params):
             actor=actor,
         )
 
+    # 2026-04-16 Tier 3 #8: cognitive verb handlers
+    elif name == "brain_forget":
+        mem_id = args.get("memory_id", "")
+        if not mem_id:
+            result = {"error": "memory_id required"}
+        else:
+            result = _brain_request(
+                "DELETE",
+                f"/memory/{urllib.parse.quote(mem_id)}",
+                actor=actor,
+            )
+
+    elif name == "brain_consolidate":
+        result = _brain_request("POST", "/brain/consolidate", {}, actor=actor)
+
+    elif name == "brain_doubt":
+        limit = int(args.get("limit", 20))
+        result = _brain_request("GET", f"/brain/doubt?limit={limit}", actor=actor)
+
     else:
         result = {"error": f"Unknown tool: {name}"}
 
@@ -541,7 +669,7 @@ def main():
             return
         current_parent = os.getppid()
         if current_parent != original_parent and current_parent == 1:
-            _log(f"parent died (reparented to init), exiting")
+            _log("parent died (reparented to init), exiting")
             return
 
         # Non-blocking wait on stdin. If no input within POLL_INTERVAL_S,

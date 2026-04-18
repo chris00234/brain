@@ -14,14 +14,13 @@ This closes the self-improvement loop that was stuck at placeholder before:
 signal was being generated (raw/inbox populated), but the proposal path was
 `# not yet implemented`. (2026-04-12)
 """
-import os
-import sys
+
 import json
-import hashlib
 import math
 import subprocess
+import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from datetime import datetime, timedelta, timezone
 
 import yaml
 
@@ -36,11 +35,11 @@ RAW_INBOX = Path("/Users/chrischo/server/knowledge/raw/inbox")
 # so 0.78 means "vaguely related" not "clustered")
 RECENT_DAYS = 7
 MAX_INBOX_FILES = 500
-CLUSTER_THRESHOLD = 0.88     # cosine sim to join a cluster (tightened from 0.78)
-MAX_CLUSTER_SIZE = 30        # cap cluster size so centroid drift can't swallow everything
-MIN_CLUSTER_SIZE = 3         # propose only when ≥3 records cluster together
+CLUSTER_THRESHOLD = 0.88  # cosine sim to join a cluster (tightened from 0.78)
+MAX_CLUSTER_SIZE = 30  # cap cluster size so centroid drift can't swallow everything
+MIN_CLUSTER_SIZE = 3  # propose only when ≥3 records cluster together
 EXISTING_SKILL_THRESHOLD = 0.82  # cluster sim to existing skill → update, not new (tightened from 0.75)
-MAX_PROPOSALS_PER_RUN = 10   # cap so one run can't flood _proposed/
+MAX_PROPOSALS_PER_RUN = 10  # cap so one run can't flood _proposed/
 
 TELEGRAM_CHAT_ID = "8484060831"
 TELEGRAM_ACCOUNT = "jenna-bot"
@@ -105,7 +104,7 @@ def index_existing_skills():
                     "desc": description[:500],
                     "path": str(skill_md),
                     "now": datetime.now().isoformat(),
-                }
+                },
             )
             indexed += 1
         except Exception:
@@ -116,10 +115,12 @@ def index_existing_skills():
 
 # ── Embedding helpers (reuse brain's existing Ollama embedder) ───────────
 
+
 def _embed(text: str) -> list[float]:
     """Return a single embedding via brain_core.indexer.get_embedding. Empty on failure."""
     try:
         from indexer import get_embedding
+
         return get_embedding((text or "")[:1000], prefix="passage", use_cache=True) or []
     except Exception as e:
         print(f"  [embed] failed: {e}", file=sys.stderr)
@@ -129,7 +130,7 @@ def _embed(text: str) -> list[float]:
 def _cosine(a: list[float], b: list[float]) -> float:
     if not a or not b or len(a) != len(b):
         return 0.0
-    dot = sum(x * y for x, y in zip(a, b))
+    dot = sum(x * y for x, y in zip(a, b, strict=False))
     na = math.sqrt(sum(x * x for x in a))
     nb = math.sqrt(sum(y * y for y in b))
     if na == 0 or nb == 0:
@@ -139,17 +140,18 @@ def _cosine(a: list[float], b: list[float]) -> float:
 
 # ── Step 2: read raw/inbox records ───────────────────────────────────────
 
+
 def load_recent_inbox(days: int = RECENT_DAYS, max_files: int = MAX_INBOX_FILES) -> list[dict]:
     """Load raw/inbox JSON records newer than `days` ago, cap at `max_files`."""
     if not RAW_INBOX.exists():
         return []
-    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    cutoff = datetime.now(UTC) - timedelta(days=days)
     recs = []
     for f in sorted(RAW_INBOX.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
         if len(recs) >= max_files:
             break
         try:
-            mtime = datetime.fromtimestamp(f.stat().st_mtime, tz=timezone.utc)
+            mtime = datetime.fromtimestamp(f.stat().st_mtime, tz=UTC)
             if mtime < cutoff:
                 continue
             data = json.loads(f.read_text())
@@ -164,15 +166,17 @@ def load_recent_inbox(days: int = RECENT_DAYS, max_files: int = MAX_INBOX_FILES)
             text = f"{title}\n{content}\n{facts_text}".strip()
             if len(text) < 20:
                 continue
-            recs.append({
-                "id": data.get("id") or f.stem,
-                "text": text,
-                "title": title,
-                "domain": data.get("domain", ""),
-                "source": data.get("source", ""),
-                "subtype": data.get("subtype", ""),
-                "path": str(f),
-            })
+            recs.append(
+                {
+                    "id": data.get("id") or f.stem,
+                    "text": text,
+                    "title": title,
+                    "domain": data.get("domain", ""),
+                    "source": data.get("source", ""),
+                    "subtype": data.get("subtype", ""),
+                    "path": str(f),
+                }
+            )
         except Exception:
             continue
     return recs
@@ -180,9 +184,13 @@ def load_recent_inbox(days: int = RECENT_DAYS, max_files: int = MAX_INBOX_FILES)
 
 # ── Step 3: greedy clustering by cosine similarity ───────────────────────
 
-def cluster_by_embedding(records: list[dict], threshold: float = CLUSTER_THRESHOLD,
-                         min_size: int = MIN_CLUSTER_SIZE,
-                         max_size: int = MAX_CLUSTER_SIZE) -> list[list[dict]]:
+
+def cluster_by_embedding(
+    records: list[dict],
+    threshold: float = CLUSTER_THRESHOLD,
+    min_size: int = MIN_CLUSTER_SIZE,
+    max_size: int = MAX_CLUSTER_SIZE,
+) -> list[list[dict]]:
     """Greedy single-pass clustering with size cap.
 
     Each record joins the first existing cluster whose centroid has cosine
@@ -216,21 +224,22 @@ def cluster_by_embedding(records: list[dict], threshold: float = CLUSTER_THRESHO
             # Update centroid as running average
             n = len(c["members"])
             centroid = c["centroid"]
-            c["centroid"] = [
-                (centroid[j] * (n - 1) + r["_vec"][j]) / n for j in range(len(centroid))
-            ]
+            c["centroid"] = [(centroid[j] * (n - 1) + r["_vec"][j]) / n for j in range(len(centroid))]
         else:
             clusters.append({"centroid": list(r["_vec"]), "members": [r]})
 
     kept = [c for c in clusters if len(c["members"]) >= min_size]
     kept.sort(key=lambda c: len(c["members"]), reverse=True)
     sizes = [len(c["members"]) for c in kept]
-    print(f"  clustered {len(records)} records → {len(clusters)} clusters → "
-          f"{len(kept)} actionable (≥{min_size}), sizes={sizes}")
+    print(
+        f"  clustered {len(records)} records → {len(clusters)} clusters → "
+        f"{len(kept)} actionable (≥{min_size}), sizes={sizes}"
+    )
     return kept[:MAX_PROPOSALS_PER_RUN]
 
 
 # ── Step 4: decide new-skill vs update-existing-skill ─────────────────────
+
 
 def load_existing_skill_embeddings() -> list[dict]:
     """Walk SKILLS_DIR, return [{name, description, path, vec}] for each live SKILL.md.
@@ -265,10 +274,12 @@ def find_closest_skill(cluster_vec: list[float], skills: list[dict]) -> tuple[di
 
 # ── Step 5: Jenna-dispatched proposals ────────────────────────────────────
 
+
 def _dispatch_proposal(prompt: str, schema: str) -> dict | None:
     """Call Jenna via openclaw_dispatch.dispatch_with_schema. Returns parsed dict or None."""
     try:
-        from openclaw_dispatch import dispatch_with_schema
+        from cli_llm import dispatch_with_schema
+
         return dispatch_with_schema(
             agent="jenna",
             message=prompt,
@@ -318,7 +329,7 @@ Output ONLY this JSON (no markdown fences, no prose):
 name: {name}
 type: proposed-new-skill
 evidence_count: {len(members)}
-proposed_at: {datetime.now(timezone.utc).isoformat()}
+proposed_at: {datetime.now(UTC).isoformat()}
 ---
 
 # {name}
@@ -383,7 +394,7 @@ target_skill: {existing['name']}
 target_path: {existing['path']}
 cluster_similarity: {round(similarity, 3)}
 evidence_count: {len(members)}
-proposed_at: {datetime.now(timezone.utc).isoformat()}
+proposed_at: {datetime.now(UTC).isoformat()}
 ---
 
 # Proposed update to skill: {existing['name']}
@@ -408,6 +419,7 @@ proposed_at: {datetime.now(timezone.utc).isoformat()}
 
 
 # ── Step 6: weekly digest + Telegram delivery ────────────────────────────
+
 
 def build_weekly_proposal_digest() -> str:
     """Walk ~/.openclaw/skills/_proposed/ and return a markdown digest (empty string if nothing)."""
@@ -461,13 +473,21 @@ def send_digest_to_telegram(digest: str) -> bool:
     try:
         result = subprocess.run(
             [
-                OPENCLAW_BIN, "message", "send",
-                "--channel", "telegram",
-                "--target", TELEGRAM_CHAT_ID,
-                "--account", TELEGRAM_ACCOUNT,
-                "--message", digest,
+                OPENCLAW_BIN,
+                "message",
+                "send",
+                "--channel",
+                "telegram",
+                "--target",
+                TELEGRAM_CHAT_ID,
+                "--account",
+                TELEGRAM_ACCOUNT,
+                "--message",
+                digest,
             ],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
         return result.returncode == 0
     except Exception as e:
@@ -476,6 +496,7 @@ def send_digest_to_telegram(digest: str) -> bool:
 
 
 # ── Orchestration ─────────────────────────────────────────────────────────
+
 
 def propose_skills_from_recent_learnings() -> dict:
     """Top-level: read inbox, cluster, propose new or update skills, return stats."""
@@ -513,7 +534,7 @@ def propose_skills_from_recent_learnings() -> dict:
 
 def main():
     print("=" * 60)
-    print(f"skill_extractor — {datetime.now(timezone.utc).isoformat()}")
+    print(f"skill_extractor — {datetime.now(UTC).isoformat()}")
     print("=" * 60)
 
     # Step 1: index existing skills into Neo4j

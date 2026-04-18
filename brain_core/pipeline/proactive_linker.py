@@ -1,12 +1,13 @@
 #!/opt/homebrew/bin/python3
 """Daily proactive surfacing — find novel entity connections from recent activity."""
-import sys
+
 import json
+import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from openclaw_dispatch import dispatch
+from cli_llm import dispatch  # 2026-04-17: migrated from openclaw_dispatch
 
 INSIGHTS_DIR = Path("/Users/chrischo/server/knowledge/distilled/insights")
 
@@ -24,13 +25,14 @@ def find_hot_entities(limit: int = 10) -> list[dict]:
     """Query Neo4j for most-accessed entities in last 7 days."""
     try:
         from neo4j_client import run_query
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+
+        cutoff = (datetime.now(UTC) - timedelta(days=7)).isoformat()
         rows = run_query(
             "MATCH (e:Entity) "
             "WHERE e.last_seen_at >= $cutoff "
             "RETURN e.name AS name, e.entity_type AS type, e.mention_count AS count "
             "ORDER BY count DESC LIMIT $limit",
-            {"cutoff": cutoff, "limit": limit}
+            {"cutoff": cutoff, "limit": limit},
         )
         return rows
     except Exception as e:
@@ -42,12 +44,13 @@ def find_connections(entity_name: str, limit: int = 5) -> list[dict]:
     """Find entities recently co-mentioned with this one."""
     try:
         from neo4j_client import run_query
+
         rows = run_query(
             "MATCH (e:Entity {name: $name})-[r:RELATES_TO]->(other:Entity) "
             "WHERE r.co_occurrence_count >= 2 "
             "RETURN other.name AS name, other.entity_type AS type, r.weight AS weight "
             "ORDER BY r.weight DESC LIMIT $limit",
-            {"name": entity_name, "limit": limit}
+            {"name": entity_name, "limit": limit},
         )
         return rows
     except Exception:
@@ -72,7 +75,10 @@ def main():
     connections_str = json.dumps(connections, default=str)
     prompt = PROMPT.format(entities=entities_str, connections=connections_str)
 
-    result = dispatch(agent="jenna", message=prompt, thinking="low", timeout=60)
+    # 2026-04-17: migrated to cli_dispatch for stateless, sub-backed calls
+    from cli_llm import cli_dispatch
+
+    result = cli_dispatch(prompt, backend="codex", timeout=60)
     if not result.ok:
         print(f"Dispatch failed: {result.error}")
         return 1
@@ -89,7 +95,7 @@ def main():
     try:
         parsed = json.loads(text.strip())
     except json.JSONDecodeError:
-        print(f"Failed to parse insights")
+        print("Failed to parse insights")
         return 1
 
     insights = parsed.get("insights", [])
@@ -102,7 +108,7 @@ def main():
     INSIGHTS_DIR.mkdir(parents=True, exist_ok=True)
     out_file = INSIGHTS_DIR / f"{today}.md"
 
-    now_iso = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    now_iso = datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     all_entities: list[str] = []
     for insight in insights:
         for e in insight.get("entities", []) or []:

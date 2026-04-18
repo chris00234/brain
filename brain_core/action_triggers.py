@@ -17,13 +17,13 @@ import logging
 import sqlite3
 import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-import autopilot  # noqa: E402
-from task_queue import task_queue  # noqa: E402
+import autopilot
+from task_queue import task_queue
 
 try:
     from config import BRAIN_LOGS_DIR
@@ -40,21 +40,36 @@ DEFAULT_TRIGGERS = [
         "description": "Auto-investigate when a health check fails",
         "condition_type": "proactive_insight",
         "condition_config": {"category": "health", "severity": "urgent"},
-        "action_template": {"title": "Investigate: {summary}", "agent": "ellie", "priority": 2, "confidence": 0.85},
+        "action_template": {
+            "title": "Investigate: {summary}",
+            "agent": "ellie",
+            "priority": 2,
+            "confidence": 0.85,
+        },
     },
     {
         "name": "meeting_no_prep",
         "description": "Auto-create meeting prep brief",
         "condition_type": "proactive_insight",
         "condition_config": {"category": "schedule", "severity": "warning"},
-        "action_template": {"title": "Prep brief: {summary}", "agent": "jenna", "priority": 4, "confidence": 0.85},
+        "action_template": {
+            "title": "Prep brief: {summary}",
+            "agent": "jenna",
+            "priority": 4,
+            "confidence": 0.85,
+        },
     },
     {
         "name": "eval_accuracy_drop",
         "description": "Investigate RAG accuracy regression",
         "condition_type": "proactive_insight",
         "condition_config": {"category": "trend", "severity": "warning"},
-        "action_template": {"title": "Investigate RAG accuracy drop", "agent": "ellie", "priority": 5, "confidence": 0.7},
+        "action_template": {
+            "title": "Investigate RAG accuracy drop",
+            "agent": "ellie",
+            "priority": 5,
+            "confidence": 0.7,
+        },
     },
     {
         "name": "scheduler_failure",
@@ -108,7 +123,7 @@ def _init_db() -> None:
 
             count = conn.execute("SELECT COUNT(*) FROM triggers").fetchone()[0]
             if count == 0:
-                now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                now = datetime.now(UTC).isoformat(timespec="seconds")
                 for t in DEFAULT_TRIGGERS:
                     conn.execute(
                         "INSERT INTO triggers (id, name, description, condition_type, condition_config, action_template, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -135,6 +150,7 @@ _init_db()
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _check_cooldown(trigger: dict) -> bool:
     """True if enough time has passed since the trigger last fired."""
     last = trigger.get("last_fired_at")
@@ -143,8 +159,8 @@ def _check_cooldown(trigger: dict) -> bool:
     try:
         last_dt = datetime.fromisoformat(last.replace("Z", "+00:00"))
         if last_dt.tzinfo is None:
-            last_dt = last_dt.replace(tzinfo=timezone.utc)
-        elapsed = (datetime.now(timezone.utc) - last_dt).total_seconds()
+            last_dt = last_dt.replace(tzinfo=UTC)
+        elapsed = (datetime.now(UTC) - last_dt).total_seconds()
         return elapsed >= trigger.get("cooldown_seconds", 3600)
     except (ValueError, TypeError):
         return True
@@ -178,7 +194,7 @@ def _fire_trigger(trigger: dict, context: dict) -> dict:
     )
 
     # Update trigger stats (both DB and in-memory to prevent re-fire in same run)
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    now = datetime.now(UTC).isoformat(timespec="seconds")
     trigger["last_fired_at"] = now
     try:
         with _conn() as conn:
@@ -200,6 +216,7 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
 
 def evaluate_triggers() -> list[dict]:
     """Check all enabled triggers. Only fires when autopilot is ON.
@@ -316,7 +333,7 @@ def create_trigger(
     if not name or not condition_type:
         raise ValueError("name and condition_type are required")
     trigger_id = str(uuid.uuid4())
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    now = datetime.now(UTC).isoformat(timespec="seconds")
     with _conn() as conn:
         existing = conn.execute("SELECT id FROM triggers WHERE name = ?", (name,)).fetchone()
         if existing:

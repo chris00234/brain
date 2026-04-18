@@ -21,38 +21,37 @@ Usage:
 import argparse
 import hashlib
 import json
-import os
 import re
 import shutil
 import sqlite3
-import subprocess
 import sys
 import tempfile
-import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 # Reuse helpers from brain_core.indexer (single source of truth).
 sys.path.insert(0, "/Users/chrischo/server/brain/brain_core")
 from indexer import (
+    EMBED_MODEL,
+    _get_collection_id,
     chroma_api,
-    get_embedding,
     ensure_collection,
     filter_secrets,
-    _get_collection_id,
-    EMBED_MODEL,
+    get_embedding,
 )
 
 # ── Config ──────────────────────────────────────────────
-STATE_FILE = Path('/Users/chrischo/server/brain/logs/personal-ingest-state.json')
-FAILURE_LOG = Path('/Users/chrischo/server/brain/logs/personal-ingest-failures.jsonl')
+STATE_FILE = Path("/Users/chrischo/server/brain/logs/personal-ingest-state.json")
+FAILURE_LOG = Path("/Users/chrischo/server/brain/logs/personal-ingest-failures.jsonl")
 
 # Direct SQLite paths — bypass osascript entirely.
 # Requires Full Disk Access on the Python binary that runs this script.
-MESSAGES_DB = Path.home() / 'Library' / 'Messages' / 'chat.db'
-NOTES_DB = Path.home() / 'Library' / 'Group Containers' / 'group.com.apple.notes' / 'NoteStore.sqlite'
-CALENDAR_DB = Path.home() / 'Library' / 'Group Containers' / 'group.com.apple.calendar' / 'Calendar.sqlitedb'
-REMINDERS_STORES_DIR = Path.home() / 'Library' / 'Group Containers' / 'group.com.apple.reminders' / 'Container_v1' / 'Stores'
+MESSAGES_DB = Path.home() / "Library" / "Messages" / "chat.db"
+NOTES_DB = Path.home() / "Library" / "Group Containers" / "group.com.apple.notes" / "NoteStore.sqlite"
+CALENDAR_DB = Path.home() / "Library" / "Group Containers" / "group.com.apple.calendar" / "Calendar.sqlitedb"
+REMINDERS_STORES_DIR = (
+    Path.home() / "Library" / "Group Containers" / "group.com.apple.reminders" / "Container_v1" / "Stores"
+)
 
 APPLE_EPOCH_OFFSET = 978307200  # seconds between unix epoch and 2001-01-01
 
@@ -62,7 +61,7 @@ def _log_failure(adapter: str, error: str) -> None:
     try:
         FAILURE_LOG.parent.mkdir(parents=True, exist_ok=True)
         entry = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "adapter": adapter,
             "error": str(error)[:500],
         }
@@ -71,18 +70,41 @@ def _log_failure(adapter: str, error: str) -> None:
     except Exception:
         pass  # never let logging break the run
 
-MIN_NOTE_LEN = 50
+
+# 2026-04-16 R-5: MIN_NOTE_LEN was dead code — the actual check at
+# line 484 uses 10 directly. Keep the constant consistent with the check
+# so future readers / refactorers see the true value.
+MIN_NOTE_LEN = 10
 MIN_MESSAGE_LEN = 4  # Korean text is info-dense at shorter char counts
 MAX_GROUP_PARTICIPANTS = 10
-MAX_CHUNK_CHARS = 1000
+# 2026-04-16 R-5: Korean text is tokenized via SentencePiece and a single
+# Korean character can occupy 1–3 tokens. At MAX_CHUNK_CHARS=1000 pure
+# Korean content exceeded multilingual-e5's 512-token context, causing
+# the indexer retry-on-context-error to halve max_chars and silently lose
+# the tail. Conservative split for Korean: cap at 800 chars so post-
+# tokenize budget stays under 512 even for dense Korean. English-heavy
+# text was comfortably under; the 20% reduction is negligible there.
+MAX_CHUNK_CHARS = 800
 MAX_REMINDER_LEN = 5  # title-only is fine, just skip empty
+
+
+def _effective_chunk_chars(text: str) -> int:
+    """Per-chunk char budget: Korean content uses the tighter ceiling, ASCII
+    stays at the historical 1000. Detects script by CJK ratio."""
+    if not text:
+        return 1000
+    sample = text[:300]
+    cjk = sum(1 for ch in sample if "\u3040" <= ch <= "\u9fff" or "\uac00" <= ch <= "\ud7af")
+    return MAX_CHUNK_CHARS if cjk / max(len(sample), 1) > 0.2 else 1000
+
 
 # Extra PII regexes for personal data (in addition to indexer.filter_secrets)
 PII_PATTERNS = [
-    re.compile(r'\b\d{3}-\d{2}-\d{4}\b'),                    # SSN
-    re.compile(r'\b\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b'),  # credit card
-    re.compile(r'\b\d{3}\s?\d{6}\b'),                          # bank-ish
+    re.compile(r"\b\d{3}-\d{2}-\d{4}\b"),  # SSN
+    re.compile(r"\b\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b"),  # credit card
+    re.compile(r"\b\d{3}\s?\d{6}\b"),  # bank-ish
 ]
+
 
 def filter_pii(text):
     text = filter_secrets(text)
@@ -95,12 +117,16 @@ def filter_pii(text):
 # ── State (uses safe_state for file locking) ──────────────
 try:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "brain_core"))
-    from safe_state import load_state as _safe_load, save_state as _safe_save
+    from safe_state import load_state as _safe_load
+    from safe_state import save_state as _safe_save
+
     def load_state():
         return _safe_load(STATE_FILE)
+
     def save_state(state):
         _safe_save(STATE_FILE, state)
 except ImportError:
+
     def load_state():
         if STATE_FILE.exists():
             try:
@@ -108,6 +134,7 @@ except ImportError:
             except Exception:
                 return {}
         return {}
+
     def save_state(state):
         STATE_FILE.write_text(json.dumps(state, indent=2, ensure_ascii=False))
 
@@ -140,39 +167,42 @@ def add_personal_documents(collection_name, docs, skip_stale_cleanup=True):
 
     is_tty = sys.stdout.isatty()
     for i, doc in enumerate(docs):
-        content = filter_pii(doc['content'])
+        content = filter_pii(doc["content"])
         if content is None:
             continue
         if len(content.strip()) < 30:
             continue
-        if len(content) > MAX_CHUNK_CHARS:
-            content = content[:MAX_CHUNK_CHARS] + "\n[...truncated]"
+        _cap = _effective_chunk_chars(content)
+        if len(content) > _cap:
+            content = content[:_cap] + "\n[...truncated]"
 
-        source = str(doc.get('source', ''))
-        doc_type = doc.get('type', '')
-        service = doc.get('service', '')
+        source = str(doc.get("source", ""))
+        doc_type = doc.get("type", "")
+        service = doc.get("service", "")
 
         # Semantic header for embedding (vector search anchor)
         header_parts = []
-        if doc_type == 'note':
+        if doc_type == "note":
             header_parts.append(f"Apple Note titled '{doc.get('title', '')}' in folder '{service}'")
-        elif doc_type == 'message':
+        elif doc_type == "message":
             header_parts.append(f"iMessage conversation with {service} on {doc.get('date', '')}")
-        elif doc_type == 'event':
-            header_parts.append(f"Calendar event '{doc.get('title', '')}' in '{service}' on {doc.get('event_date', '')}")
-        elif doc_type == 'reminder':
+        elif doc_type == "event":
+            header_parts.append(
+                f"Calendar event '{doc.get('title', '')}' in '{service}' on {doc.get('event_date', '')}"
+            )
+        elif doc_type == "reminder":
             header_parts.append(f"Reminder in list '{service}' status {doc.get('status', '')}")
 
         embed_text = ("\n".join(header_parts) + "\n\n" + content) if header_parts else content
 
         # Stable ID — let updated content overwrite previous version
-        id_seed = doc.get('stable_id') or f"{source}:{content}"
+        id_seed = doc.get("stable_id") or f"{source}:{content}"
         doc_id = f"{collection_name}:{hashlib.md5(id_seed.encode()).hexdigest()}"[:63]
 
         # Only use \r carriage-return progress in a TTY; in logfiles it creates
         # one giant unreadable line. (Bug fix 2026-04-12.)
         if is_tty:
-            print(f"    Embedding {i+1}/{len(docs)}: {doc_id[:50]}...", end='\r')
+            print(f"    Embedding {i+1}/{len(docs)}: {doc_id[:50]}...", end="\r")
         elif (i + 1) % 20 == 0:
             print(f"    Embedding {i+1}/{len(docs)}")
         try:
@@ -186,22 +216,24 @@ def add_personal_documents(collection_name, docs, skip_stale_cleanup=True):
         ids.append(doc_id)
         documents.append(content)
         embeddings.append(emb)
-        metadatas.append({
-            'source': doc.get('source', ''),
-            'type': doc_type,
-            'service': service,
-            'title': doc.get('title', ''),
-            'date': doc.get('date', ''),
-            'event_date': doc.get('event_date', ''),
-            'modified_at': doc.get('modified_at', ''),
-            'status': doc.get('status', ''),
-            'due': doc.get('due', ''),
-            'is_past': str(doc.get('is_past', '')),
-            'participant_count': str(doc.get('participant_count', '')),
-            'note_id': doc.get('note_id', ''),
-            'created_at': datetime.now(timezone.utc).isoformat(),
-            'embed_model': EMBED_MODEL,
-        })
+        metadatas.append(
+            {
+                "source": doc.get("source", ""),
+                "type": doc_type,
+                "service": service,
+                "title": doc.get("title", ""),
+                "date": doc.get("date", ""),
+                "event_date": doc.get("event_date", ""),
+                "modified_at": doc.get("modified_at", ""),
+                "status": doc.get("status", ""),
+                "due": doc.get("due", ""),
+                "is_past": str(doc.get("is_past", "")),
+                "participant_count": str(doc.get("participant_count", "")),
+                "note_id": doc.get("note_id", ""),
+                "created_at": datetime.now(UTC).isoformat(),
+                "embed_model": EMBED_MODEL,
+            }
+        )
 
     if not ids:
         print(f"    No valid docs after filtering for '{collection_name}'")
@@ -210,14 +242,16 @@ def add_personal_documents(collection_name, docs, skip_stale_cleanup=True):
     BATCH = 20
     for start in range(0, len(ids), BATCH):
         end = min(start + BATCH, len(ids))
-        chroma_api("POST",
+        chroma_api(
+            "POST",
             f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/upsert",
             {
                 "ids": ids[start:end],
                 "embeddings": embeddings[start:end],
                 "documents": documents[start:end],
                 "metadatas": metadatas[start:end],
-            })
+            },
+        )
         print(f"    Batch {start//BATCH + 1}: upserted {end - start} chunks       ")
 
     print(f"    Total: {len(ids)} chunks in '{collection_name}'")
@@ -236,9 +270,11 @@ def _run_personal_stale_cleanup(collection_name: str, upserted_ids: set) -> int:
         return 0
     BATCH = 20
     try:
-        resp = chroma_api("POST",
+        resp = chroma_api(
+            "POST",
             f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/get",
-            {"limit": 1_000_000, "include": []})
+            {"limit": 1_000_000, "include": []},
+        )
         existing_ids = set(resp.get("ids", []))
         stale_ids = list(existing_ids - upserted_ids)
         if not stale_ids:
@@ -247,14 +283,18 @@ def _run_personal_stale_cleanup(collection_name: str, upserted_ids: set) -> int:
         # Safety guard: refuse to delete > 30% of the collection in one run.
         # Protects against a bug in an adapter that returns zero rows.
         if len(stale_ids) > len(existing_ids) * 0.3:
-            print(f"  WARNING: Stale cleanup would delete {len(stale_ids)}/{len(existing_ids)} "
-                  f"({len(stale_ids)/len(existing_ids):.0%}) — refusing (>30% threshold)")
+            print(
+                f"  WARNING: Stale cleanup would delete {len(stale_ids)}/{len(existing_ids)} "
+                f"({len(stale_ids)/len(existing_ids):.0%}) — refusing (>30% threshold)"
+            )
             return 0
         for s in range(0, len(stale_ids), BATCH):
             e = min(s + BATCH, len(stale_ids))
-            chroma_api("POST",
+            chroma_api(
+                "POST",
                 f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/delete",
-                {"ids": stale_ids[s:e]})
+                {"ids": stale_ids[s:e]},
+            )
         print(f"  Stale cleanup: deleted {len(stale_ids)} stale docs from '{collection_name}'")
         return len(stale_ids)
     except Exception as ex:
@@ -263,7 +303,7 @@ def _run_personal_stale_cleanup(collection_name: str, upserted_ids: set) -> int:
 
 
 # ── Adapter 1: Apple Notes (direct SQLite read from NoteStore.sqlite) ──
-def _copy_sqlite_live(db_path: Path, tmpdir: str, suffixes: tuple[str, ...] = ('-shm', '-wal')) -> Path:
+def _copy_sqlite_live(db_path: Path, tmpdir: str, suffixes: tuple[str, ...] = ("-shm", "-wal")) -> Path:
     """Safely copy a live SQLite file and its WAL/SHM so queries don't block the app."""
     tmp_db = Path(tmpdir) / db_path.name
     shutil.copy2(db_path, tmp_db)
@@ -285,7 +325,7 @@ def _apple_timestamp_to_iso(ts: float | int | None) -> str:
     if not ts or ts <= 0:
         return ""
     try:
-        return datetime.fromtimestamp(ts + APPLE_EPOCH_OFFSET, tz=timezone.utc).isoformat()
+        return datetime.fromtimestamp(ts + APPLE_EPOCH_OFFSET, tz=UTC).isoformat()
     except (ValueError, OSError):
         return ""
 
@@ -322,7 +362,7 @@ def _pb_walk(data, pos, end):
                 length, pos = _pb_read_varint(data, pos)
                 if pos + length > end:
                     return
-                yield field_num, wire_type, data[pos:pos + length]
+                yield field_num, wire_type, data[pos : pos + length]
                 pos += length
             elif wire_type == 1:  # 64-bit fixed
                 pos += 8
@@ -340,20 +380,20 @@ def _extract_text_legacy(raw):
     walker can't find the canonical body field. ASCII/Latin1 only — Korean
     and other CJK text are systematically dropped.
     """
-    segments = re.findall(rb'[\x20-\x7e\xc0-\xff][\x20-\x7e\x80-\xff]{8,}', raw)
+    segments = re.findall(rb"[\x20-\x7e\xc0-\xff][\x20-\x7e\x80-\xff]{8,}", raw)
     texts = []
     for seg in segments:
         try:
-            decoded = seg.decode('utf-8', errors='ignore').strip()
+            decoded = seg.decode("utf-8", errors="ignore").strip()
         except Exception:
             continue
         if len(decoded) < 10:
             continue
-        if ' ' not in decoded and '\t' not in decoded:
+        if " " not in decoded and "\t" not in decoded:
             continue
-        if re.match(r'^[A-F0-9\-]{20,}$', decoded):
+        if re.match(r"^[A-F0-9\-]{20,}$", decoded):
             continue
-        if decoded.startswith('com.apple.'):
+        if decoded.startswith("com.apple."):
             continue
         texts.append(decoded)
     return "\n".join(texts)
@@ -380,11 +420,12 @@ def _extract_text_from_zdata(blob):
     byte-range heuristic so we never regress on notes the old code worked on.
     """
     import gzip as _gzip
+
     if not blob:
         return ""
     # Decompress if gzip-wrapped, else treat as raw
     try:
-        raw = _gzip.decompress(blob) if blob[:2] == b'\x1f\x8b' else blob
+        raw = _gzip.decompress(blob) if blob[:2] == b"\x1f\x8b" else blob
     except Exception:
         raw = blob
 
@@ -399,7 +440,7 @@ def _extract_text_from_zdata(blob):
                 for f3, wt3, v3 in _pb_walk(v2, 0, len(v2)):
                     if f3 == 2 and wt3 == 2 and v3:
                         try:
-                            text = v3.decode('utf-8', errors='replace').strip()
+                            text = v3.decode("utf-8", errors="replace").strip()
                             if len(text) >= 2:
                                 return text
                         except Exception:
@@ -488,16 +529,18 @@ def collect_notes():
         content = f"Note: {title}\nFolder: {folder}\nModified: {modified}"
         if body:
             content += f"\n\n{body}"
-        docs.append({
-            'content': content,
-            'source': f"apple-notes://{note_pk}",
-            'type': 'note',
-            'service': folder,
-            'title': title,
-            'note_id': str(note_pk),
-            'modified_at': modified,
-            'stable_id': f"note:{note_pk}",
-        })
+        docs.append(
+            {
+                "content": content,
+                "source": f"apple-notes://{note_pk}",
+                "type": "note",
+                "service": folder,
+                "title": title,
+                "note_id": str(note_pk),
+                "modified_at": modified,
+                "stable_id": f"note:{note_pk}",
+            }
+        )
     return docs
 
 
@@ -512,24 +555,24 @@ def collect_messages(days_back=30):
 
     # Copy db to temp because chat.db may be locked by Messages.app
     with tempfile.TemporaryDirectory() as tmpdir:
-        tmp_db = Path(tmpdir) / 'chat.db'
+        tmp_db = Path(tmpdir) / "chat.db"
         try:
             shutil.copy2(MESSAGES_DB, tmp_db)
-            for suffix in ('-shm', '-wal'):
-                src = MESSAGES_DB.parent / f'chat.db{suffix}'
+            for suffix in ("-shm", "-wal"):
+                src = MESSAGES_DB.parent / f"chat.db{suffix}"
                 if src.exists():
-                    shutil.copy2(src, Path(tmpdir) / f'chat.db{suffix}')
+                    shutil.copy2(src, Path(tmpdir) / f"chat.db{suffix}")
         except Exception as e:
             msg = f"Cannot copy chat.db: {e}. Grant Full Disk Access to /bin/bash and /opt/homebrew/bin/python3 in System Settings."
             print(f"    ERROR: {msg}")
             _log_failure("messages", msg)
             return []
 
-        cutoff_unix = (datetime.now(timezone.utc) - timedelta(days=days_back)).timestamp()
+        cutoff_unix = (datetime.now(UTC) - timedelta(days=days_back)).timestamp()
         cutoff_apple = int((cutoff_unix - APPLE_EPOCH_OFFSET) * 1_000_000_000)
 
         try:
-            conn = sqlite3.connect(f'file:{tmp_db}?mode=ro', uri=True)
+            conn = sqlite3.connect(f"file:{tmp_db}?mode=ro", uri=True)
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
 
@@ -541,9 +584,10 @@ def collect_messages(days_back=30):
                 LEFT JOIN chat_handle_join ON chat_handle_join.chat_id = chat.ROWID
                 GROUP BY chat.ROWID
             """)
-            chat_participants = {row['chat_id']: row['participant_count'] for row in cur.fetchall()}
+            chat_participants = {row["chat_id"]: row["participant_count"] for row in cur.fetchall()}
 
-            cur.execute("""
+            cur.execute(
+                """
                 SELECT
                     message.text,
                     message.date,
@@ -562,7 +606,9 @@ def collect_messages(days_back=30):
                   AND message.is_system_message = 0
                   AND message.associated_message_type = 0
                 ORDER BY message.date ASC
-            """, (cutoff_apple,))
+            """,
+                (cutoff_apple,),
+            )
             rows = cur.fetchall()
             conn.close()
         except Exception as e:
@@ -572,19 +618,19 @@ def collect_messages(days_back=30):
             return []
 
     # Group by (chat_id, day)
-    EMOJI_ONLY_RE = re.compile(r'^[\W_\u2600-\u27BF\U0001F300-\U0001FAFF\s]+$')
+    EMOJI_ONLY_RE = re.compile(r"^[\W_\u2600-\u27BF\U0001F300-\U0001FAFF\s]+$")
     grouped = {}
     chat_meta = {}
 
     for row in rows:
-        text = row['text'] or ''
+        text = row["text"] or ""
         text = text.strip()
         if len(text) < MIN_MESSAGE_LEN:
             continue
         if EMOJI_ONLY_RE.match(text):
             continue
 
-        chat_id = row['chat_id']
+        chat_id = row["chat_id"]
         if chat_id is None:
             continue
 
@@ -593,35 +639,37 @@ def collect_messages(days_back=30):
             continue
 
         # Convert Apple date to unix
-        unix_ts = (row['date'] / 1_000_000_000) + APPLE_EPOCH_OFFSET
-        dt = datetime.fromtimestamp(unix_ts, tz=timezone.utc)
-        day = dt.strftime('%Y-%m-%d')
+        unix_ts = (row["date"] / 1_000_000_000) + APPLE_EPOCH_OFFSET
+        dt = datetime.fromtimestamp(unix_ts, tz=UTC)
+        day = dt.strftime("%Y-%m-%d")
 
-        contact = row['chat_name'] or row['chat_identifier'] or row['handle_id'] or 'unknown'
+        contact = row["chat_name"] or row["chat_identifier"] or row["handle_id"] or "unknown"
         # Skip messages from purely numeric handles that look like spam shortcodes
-        if contact and re.match(r'^\d{3,6}$', str(contact)):
+        if contact and re.match(r"^\d{3,6}$", str(contact)):
             continue
 
         key = (chat_id, day)
-        grouped.setdefault(key, []).append({
-            'time': dt.strftime('%H:%M'),
-            'is_from_me': row['is_from_me'],
-            'text': text,
-            'sender': row['handle_id'] or 'me',
-        })
+        grouped.setdefault(key, []).append(
+            {
+                "time": dt.strftime("%H:%M"),
+                "is_from_me": row["is_from_me"],
+                "text": text,
+                "sender": row["handle_id"] or "me",
+            }
+        )
         chat_meta[chat_id] = {
-            'contact': contact,
-            'participants': participants,
+            "contact": contact,
+            "participants": participants,
         }
 
     # Build chunks
     docs = []
     for (chat_id, day), msgs in grouped.items():
         meta = chat_meta[chat_id]
-        contact = meta['contact']
+        contact = meta["contact"]
         lines = [f"Conversation with {contact} on {day}:"]
         for m in msgs:
-            speaker = "Me" if m['is_from_me'] else "Them"
+            speaker = "Me" if m["is_from_me"] else "Them"
             lines.append(f"{speaker}: {m['text']}")
         content = "\n".join(lines)
 
@@ -642,25 +690,29 @@ def collect_messages(days_back=30):
                 chunk_parts.append(current)
             for idx, part in enumerate(chunk_parts):
                 chunk_hash = hashlib.md5(part.encode()).hexdigest()[:8]
-                docs.append({
-                    'content': part,
-                    'source': f"imessage://{chat_id}/{day}/{idx}",
-                    'type': 'message',
-                    'service': contact,
-                    'date': day,
-                    'participant_count': meta['participants'],
-                    'stable_id': f"msg:{chat_id}:{day}:{chunk_hash}",
-                })
+                docs.append(
+                    {
+                        "content": part,
+                        "source": f"imessage://{chat_id}/{day}/{idx}",
+                        "type": "message",
+                        "service": contact,
+                        "date": day,
+                        "participant_count": meta["participants"],
+                        "stable_id": f"msg:{chat_id}:{day}:{chunk_hash}",
+                    }
+                )
         else:
-            docs.append({
-                'content': content,
-                'source': f"imessage://{chat_id}/{day}",
-                'type': 'message',
-                'service': contact,
-                'date': day,
-                'participant_count': meta['participants'],
-                'stable_id': f"msg:{chat_id}:{day}",
-            })
+            docs.append(
+                {
+                    "content": content,
+                    "source": f"imessage://{chat_id}/{day}",
+                    "type": "message",
+                    "service": contact,
+                    "date": day,
+                    "participant_count": meta["participants"],
+                    "stable_id": f"msg:{chat_id}:{day}",
+                }
+            )
     return docs
 
 
@@ -674,7 +726,7 @@ def collect_calendar(days_back=30, days_forward=60):
         _log_failure("calendar", msg)
         return docs
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     cutoff_start = (now - timedelta(days=days_back)).timestamp() - APPLE_EPOCH_OFFSET
     cutoff_end = (now + timedelta(days=days_forward)).timestamp() - APPLE_EPOCH_OFFSET
 
@@ -696,7 +748,8 @@ def collect_calendar(days_back=30, days_forward=60):
             conn = sqlite3.connect(f"file:{tmp_db}?mode=ro", uri=True)
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
-            cur.execute("""
+            cur.execute(
+                """
                 SELECT
                     ci.ROWID,
                     ci.summary,
@@ -715,7 +768,9 @@ def collect_calendar(days_back=30, days_forward=60):
                   AND ci.start_date BETWEEN ? AND ?
                   AND (ci.hidden IS NULL OR ci.hidden = 0)
                 ORDER BY ci.start_date DESC
-            """, (cutoff_start, cutoff_end))
+            """,
+                (cutoff_start, cutoff_end),
+            )
             rows = cur.fetchall()
             conn.close()
         except Exception as e:
@@ -747,16 +802,18 @@ def collect_calendar(days_back=30, days_forward=60):
             content_lines.append(f"Notes: {desc[:500]}")
         content = "\n".join(content_lines)
 
-        docs.append({
-            'content': content,
-            'source': f"calendar://{cal_name}/{uid}",
-            'type': 'event',
-            'service': cal_name,
-            'title': title,
-            'event_date': event_date,
-            'is_past': is_past,
-            'stable_id': f"event:{uid}",
-        })
+        docs.append(
+            {
+                "content": content,
+                "source": f"calendar://{cal_name}/{uid}",
+                "type": "event",
+                "service": cal_name,
+                "title": title,
+                "event_date": event_date,
+                "is_past": is_past,
+                "stable_id": f"event:{uid}",
+            }
+        )
     return docs
 
 
@@ -865,40 +922,44 @@ def collect_reminders():
         content = "\n".join(content_lines)
 
         rem_id = str(row["Z_PK"])
-        docs.append({
-            'content': content,
-            'source': f"reminders://{list_name}/{rem_id}",
-            'type': 'reminder',
-            'service': list_name,
-            'title': name,
-            'status': status,
-            'due': due_iso,
-            'stable_id': f"reminder:{rem_id}",
-        })
+        docs.append(
+            {
+                "content": content,
+                "source": f"reminders://{list_name}/{rem_id}",
+                "type": "reminder",
+                "service": list_name,
+                "title": name,
+                "status": status,
+                "due": due_iso,
+                "stable_id": f"reminder:{rem_id}",
+            }
+        )
     return docs
 
 
 # ── Main ────────────────────────────────────────────────
 def main():
-    parser = argparse.ArgumentParser(description="Personal data ingestion (Notes/iMessage/Calendar/Reminders)")
-    parser.add_argument('--days', type=int, default=90, help='iMessage lookback days')
-    parser.add_argument('--cal-back', type=int, default=30)
-    parser.add_argument('--cal-forward', type=int, default=60)
-    parser.add_argument('--notes-only', action='store_true')
-    parser.add_argument('--messages-only', action='store_true')
-    parser.add_argument('--calendar-only', action='store_true')
-    parser.add_argument('--reminders-only', action='store_true')
+    parser = argparse.ArgumentParser(
+        description="Personal data ingestion (Notes/iMessage/Calendar/Reminders)"
+    )
+    parser.add_argument("--days", type=int, default=90, help="iMessage lookback days")
+    parser.add_argument("--cal-back", type=int, default=30)
+    parser.add_argument("--cal-forward", type=int, default=60)
+    parser.add_argument("--notes-only", action="store_true")
+    parser.add_argument("--messages-only", action="store_true")
+    parser.add_argument("--calendar-only", action="store_true")
+    parser.add_argument("--reminders-only", action="store_true")
     args = parser.parse_args()
 
     print("=" * 60)
-    print(f"Personal Data Ingestion — {datetime.now(timezone.utc).isoformat()}")
+    print(f"Personal Data Ingestion — {datetime.now(UTC).isoformat()}")
     print("=" * 60)
 
     print("\n[setup] Ensuring collections...")
-    ensure_collection('personal')
+    ensure_collection("personal")
 
     state = load_state()
-    state['last_run'] = datetime.now(timezone.utc).isoformat()
+    state["last_run"] = datetime.now(UTC).isoformat()
 
     only_flags = (args.notes_only, args.messages_only, args.calendar_only, args.reminders_only)
     run_all = not any(only_flags)
@@ -920,7 +981,7 @@ def main():
             upserted = add_personal_documents("personal", docs)
             counts[name] = len(upserted)
             all_upserted.update(upserted)
-            state[f'{name}_last_count'] = len(upserted)
+            state[f"{name}_last_count"] = len(upserted)
         except Exception as e:
             crashed.append(name)
             err_msg = f"{name} adapter crashed: {type(e).__name__}: {e}"
@@ -934,8 +995,9 @@ def main():
         _run_adapter("messages", "2/4", collect_messages, days_back=args.days)
 
     if run_all or args.calendar_only:
-        _run_adapter("calendar", "3/4", collect_calendar,
-                     days_back=args.cal_back, days_forward=args.cal_forward)
+        _run_adapter(
+            "calendar", "3/4", collect_calendar, days_back=args.cal_back, days_forward=args.cal_forward
+        )
 
     if run_all or args.reminders_only:
         _run_adapter("tasks", "4/4", collect_reminders)
@@ -984,10 +1046,12 @@ def main():
         sys.exit(1)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     import sys as _sys
+
     _sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from brain_core.batch_lock import batch_lock
+
     print("  Acquiring batch lock (ensures no concurrent heavy jobs)...")
     with batch_lock("personal_ingest"):
         main()

@@ -24,12 +24,12 @@ import hashlib
 import json
 import subprocess
 import sys
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "brain_core"))
-from safe_state import atomic_write_text  # noqa: E402
-from openclaw_dispatch import dispatch_with_schema  # noqa: E402
+from cli_llm import dispatch_with_schema  # migrated 2026-04-17
+from safe_state import atomic_write_text
 
 # ── Config ──────────────────────────────────────────────
 OPENCLAW_BIN = "/Users/chrischo/.local/bin/openclaw"
@@ -66,10 +66,7 @@ def log_failure(reason: str) -> None:
     try:
         FAILURE_LOG.parent.mkdir(parents=True, exist_ok=True)
         with FAILURE_LOG.open("a") as f:
-            f.write(
-                json.dumps({"timestamp": datetime.now(timezone.utc).isoformat(), "reason": reason[:500]})
-                + "\n"
-            )
+            f.write(json.dumps({"timestamp": datetime.now(UTC).isoformat(), "reason": reason[:500]}) + "\n")
     except Exception:
         pass
 
@@ -80,8 +77,8 @@ def query_day(target_date: str) -> list[dict]:
     Avoids a subprocess cold-start per query by importing the module directly.
     """
     sys.path.insert(0, "/Users/chrischo/server/brain/brain_core")
-    import search_unified  # noqa: E402
-    import temporal as _temporal  # noqa: E402
+    import search_unified
+    import temporal as _temporal
 
     since = target_date
     until = (datetime.fromisoformat(target_date) + timedelta(days=1)).strftime("%Y-%m-%d")
@@ -118,7 +115,34 @@ def query_day(target_date: str) -> list[dict]:
     # Python-side temporal filter after fanout (ChromaDB 1.4.1 bug)
     all_items = _temporal.filter_by_created_at(all_items, start_dt, end_dt)
 
+    # 2026-04-16 fix: break the synthesis staircase loop. Previously
+    # daily.write_candidate_facts wrote Jenna's distilled output back into
+    # raw/inbox → batch_distill picked them up → promote_canonical pushed
+    # them to the canonical collection → next day's query_day re-read them
+    # as "events" and Jenna summarized her own prior summary. Each synthesis
+    # layer compressed already-compressed content, bleeding raw-signal
+    # detail. Exclude any item whose source_ref or type marks it as a
+    # prior synthesis artifact before feeding it back to the LLM.
+    def _is_synthesis_artifact(item: dict) -> bool:
+        meta = item.get("metadata") or {}
+        src_ref = (meta.get("source_ref") or item.get("source_ref") or "").lower()
+        src_type = (meta.get("source_type") or item.get("source_type") or "").lower()
+        item_type = (meta.get("type") or item.get("type") or "").lower()
+        if src_type == "synthesis":
+            return True
+        if item_type in ("synthesis-daily", "synthesis-weekly", "synthesis-monthly"):
+            return True
+        if (
+            src_ref.startswith("jenna:daily_synthesis")
+            or src_ref.startswith("jenna:weekly_synthesis")
+            or src_ref.startswith("jenna:monthly_synthesis")
+        ):
+            return True
+        return False
+
     for item in all_items:
+        if _is_synthesis_artifact(item):
+            continue
         key = item.get("path", "") + ":" + item.get("title", "")
         if key in seen_paths:
             continue
@@ -172,7 +196,7 @@ def build_prompt(target_date: str, day_results: list[dict]) -> str:
 def write_narrative(target_date: str, parsed: dict) -> Path:
     DISTILLED_DIR.mkdir(parents=True, exist_ok=True)
     out = DISTILLED_DIR / f"{target_date}.md"
-    now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    now = datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     metadata = {
         "id": f"dist_daily_{target_date.replace('-', '_')}",
         "type": "distilled",
@@ -241,7 +265,7 @@ def write_candidate_facts(target_date: str, parsed: dict) -> int:
         rec_id = f"raw_synthesis_{date_part}_{digest[:8]}"
         record = {
             "id": rec_id,
-            "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
             "source_type": "synthesis",
             "source_ref": f"jenna:daily_synthesis:{target_date}",
             "actor": "jenna",
@@ -282,7 +306,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    target_date = args.date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    target_date = args.date or datetime.now(UTC).strftime("%Y-%m-%d")
     print(f"Daily synthesis for {target_date}")
 
     existing = DISTILLED_DIR / f"{target_date}.md"

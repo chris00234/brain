@@ -12,6 +12,7 @@ Usage:
 Output format (one JSON object per line):
   {"query": "...", "expected_source": "<rel-path>", "expected_content": "...", "collection": "all"}
 """
+
 from __future__ import annotations
 
 import argparse
@@ -21,7 +22,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "brain_core"))
-from openclaw_dispatch import dispatch_with_schema  # noqa: E402
+from cli_llm import dispatch_with_schema  # migrated 2026-04-17
 
 CANONICAL_ROOT = Path("/Users/chrischo/server/knowledge/canonical")
 DEFAULT_OUTPUT = Path("/tmp/brain_eval_mine_canonical.jsonl")
@@ -63,10 +64,11 @@ def extract_frontmatter_title_and_body(text: str) -> tuple[str, str]:
 
     if stripped.startswith("---"):
         import re as _re
+
         m = _re.match(r"^---(?:json)?\s*\n(.*?)\n---\s*\n", stripped, _re.DOTALL)
         if m:
             fm_raw = m.group(1)
-            body = stripped[m.end():]
+            body = stripped[m.end() :]
             # Extract title from either YAML or JSON frontmatter
             title_match = _re.search(r'"?title"?\s*[:=]\s*"([^"]+)"', fm_raw)
             if title_match:
@@ -134,12 +136,14 @@ def mine_note(md_path: Path, rel_path: str, agent: str) -> list[dict]:
         expected_content = (q.get("expected_content") or "").strip()
         if not query or len(query) < 5 or len(query) > 200:
             continue
-        out.append({
-            "query": query,
-            "expected_source": expected_source,
-            "expected_content": expected_content,
-            "collection": q.get("collection") or "all",
-        })
+        out.append(
+            {
+                "query": query,
+                "expected_source": expected_source,
+                "expected_content": expected_content,
+                "collection": q.get("collection") or "all",
+            }
+        )
     return out
 
 
@@ -173,8 +177,9 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=0, help="Only mine first N files (0 = all)")
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--agent", default="jenna", help="OpenClaw agent to dispatch to")
-    parser.add_argument("--fresh", action="store_true",
-                        help="Ignore existing output file; re-mine from scratch")
+    parser.add_argument(
+        "--fresh", action="store_true", help="Ignore existing output file; re-mine from scratch"
+    )
     args = parser.parse_args()
 
     if not CANONICAL_ROOT.exists():
@@ -183,7 +188,7 @@ def main() -> int:
 
     md_files = sorted(CANONICAL_ROOT.rglob("*.md"))
     if args.limit > 0:
-        md_files = md_files[:args.limit]
+        md_files = md_files[: args.limit]
 
     # Checkpoint: skip notes already present in the output file unless --fresh
     already_mined = set()
@@ -192,8 +197,10 @@ def main() -> int:
         if already_mined:
             print(f"checkpoint: {len(already_mined)} notes already mined, will skip and append new ones")
 
-    print(f"mining {len(md_files)} canonical notes via {args.agent}"
-          f" ({len(already_mined)} already done, ~{len(md_files) - len(already_mined)} to go)...")
+    print(
+        f"mining {len(md_files)} canonical notes via {args.agent}"
+        f" ({len(already_mined)} already done, ~{len(md_files) - len(already_mined)} to go)..."
+    )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     # Append mode when checkpoint exists, write mode when --fresh
     mode = "a" if already_mined and not args.fresh else "w"
@@ -215,7 +222,9 @@ def main() -> int:
         out_f.flush()
         dt = time.time() - t_note
         elapsed = time.time() - t_start
-        print(f"  [{i}/{len(md_files)}] {rel[:50]} → {len(questions)} qs ({dt:.1f}s, total {total_out}, elapsed {elapsed:.0f}s)")
+        print(
+            f"  [{i}/{len(md_files)}] {rel[:50]} → {len(questions)} qs ({dt:.1f}s, total {total_out}, elapsed {elapsed:.0f}s)"
+        )
 
     out_f.close()
     print(f"\nDONE — wrote {total_out} new questions, skipped {skipped} already-mined")

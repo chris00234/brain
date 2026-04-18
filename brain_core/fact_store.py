@@ -13,14 +13,14 @@ Usage:
     facts = query_facts(attribute="preferred_framework")
     facts = get_entity_facts("chris cho")
 """
+
 from __future__ import annotations
 
 import contextlib
-import json
 import sqlite3
 import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 try:
@@ -110,13 +110,14 @@ def _conn_read():
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 def _normalize(value: str) -> str:
     """Normalize a value for dedup comparison."""
     import re
-    return re.sub(r'[^a-z0-9]+', '_', value.lower()).strip('_')
+
+    return re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")
 
 
 def store_fact(
@@ -173,9 +174,22 @@ def store_fact(
                     " observed_at, source, source_type, confidence, status, supersedes, superseded_by, "
                     " created_at, updated_at) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'superseded', '', ?, ?, ?)",
-                    (fact_id_low, entity.lower(), attribute.lower(), value, normalized,
-                     valid_from or now, now, observed_at or now,
-                     source, source_type, confidence, ex["id"], now, now),
+                    (
+                        fact_id_low,
+                        entity.lower(),
+                        attribute.lower(),
+                        value,
+                        normalized,
+                        valid_from or now,
+                        now,
+                        observed_at or now,
+                        source,
+                        source_type,
+                        confidence,
+                        ex["id"],
+                        now,
+                        now,
+                    ),
                 )
                 conn.execute("COMMIT")
                 return {"status": "superseded_by_existing", "id": fact_id_low}
@@ -194,10 +208,20 @@ def store_fact(
                 " created_at, updated_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)",
                 (
-                    fact_id, entity.lower(), attribute.lower(), value, normalized,
-                    valid_from or now, valid_to, observed_at or now,
-                    source, source_type, confidence,
-                    ",".join(supersede_ids), now, now,
+                    fact_id,
+                    entity.lower(),
+                    attribute.lower(),
+                    value,
+                    normalized,
+                    valid_from or now,
+                    valid_to,
+                    observed_at or now,
+                    source,
+                    source_type,
+                    confidence,
+                    ",".join(supersede_ids),
+                    now,
+                    now,
                 ),
             )
             conn.execute("COMMIT")
@@ -208,6 +232,7 @@ def store_fact(
     # Audit trail
     try:
         from audit_log import log_event
+
         log_event(
             event_type="fact_store",
             entity_a=entity,

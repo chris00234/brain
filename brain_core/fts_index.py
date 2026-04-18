@@ -7,6 +7,7 @@ Portable — the entire search index is a single SQLite file.
 Tokenizer: `unicode61 remove_diacritics 2` — handles CJK (Korean) + English
 without English-only stemming. The porter stemmer mangles Korean tokens.
 """
+
 from __future__ import annotations
 
 import re
@@ -19,8 +20,16 @@ FTS_DB = Path("/Users/chrischo/server/brain/logs/fts_index.db")
 # Includes both pre- and post-migration personal collection names, so FTS
 # search works regardless of whether migrate_personal.py has been run yet.
 MONITORED_COLLECTIONS = [
-    "semantic_memory", "knowledge", "canonical", "experience",
-    "obsidian", "personal", "notes", "messages", "calendar", "tasks",
+    "semantic_memory",
+    "knowledge",
+    "canonical",
+    "experience",
+    "obsidian",
+    "personal",
+    "notes",
+    "messages",
+    "calendar",
+    "tasks",
 ]
 
 # FTS5 reserved operators — stripped from user queries to prevent syntax errors
@@ -94,9 +103,11 @@ def rebuild_from_chroma():
             if not col_id:
                 continue
             try:
-                resp = http_json("POST",
+                resp = http_json(
+                    "POST",
                     f"http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/get",
-                    {"limit": 50000, "include": ["documents", "metadatas"]})
+                    {"limit": 50000, "include": ["documents", "metadatas"]},
+                )
             except Exception as e:
                 print(f"  {col_name}: fetch failed: {e}")
                 continue
@@ -105,11 +116,11 @@ def rebuild_from_chroma():
             docs = resp.get("documents", []) or []
             metas = resp.get("metadatas", []) or []
 
-            for i, doc, meta in zip(ids, docs, metas):
+            for i, doc, meta in zip(ids, docs, metas, strict=False):
                 meta = meta or {}
                 conn.execute(
                     "INSERT INTO memories_new (id, collection, content, title, path) VALUES (?, ?, ?, ?, ?)",
-                    (i, col_name, doc or "", meta.get("title", ""), meta.get("source", meta.get("path", "")))
+                    (i, col_name, doc or "", meta.get("title", ""), meta.get("source", meta.get("path", ""))),
                 )
                 total += 1
 
@@ -155,13 +166,13 @@ def search_fts(query: str, limit: int = 10, collection: str | None = None) -> li
             rows = conn.execute(
                 "SELECT id, collection, content, title, path, rank FROM memories "
                 "WHERE memories MATCH ? AND collection = ? ORDER BY rank LIMIT ?",
-                (safe_query, collection, limit)
+                (safe_query, collection, limit),
             ).fetchall()
         else:
             rows = conn.execute(
                 "SELECT id, collection, content, title, path, rank FROM memories "
                 "WHERE memories MATCH ? ORDER BY rank LIMIT ?",
-                (safe_query, limit)
+                (safe_query, limit),
             ).fetchall()
 
         return [

@@ -3,6 +3,7 @@
 All paths default to the current user's home directory layout.
 Override any path via environment variables for portability.
 """
+
 import os
 from pathlib import Path
 
@@ -51,28 +52,68 @@ OPENCLAW_CREDENTIALS = OPENCLAW_DIR / "credentials"
 SECRET_FILE = OPENCLAW_CREDENTIALS / ".personal_webhook_secret"
 ONTOLOGY_GRAPH = OPENCLAW_DIR / "memory" / "ontology" / "graph.jsonl"
 OBSIDIAN_VAULT = OPENCLAW_DIR / "workspace" / "obsidian-vault"
-OBSIDIAN_VAULT_ICLOUD = HOME / "Library" / "Mobile Documents" / "iCloud~md~obsidian" / "Documents" / "Obsidian-vault"
+OBSIDIAN_VAULT_ICLOUD = (
+    HOME / "Library" / "Mobile Documents" / "iCloud~md~obsidian" / "Documents" / "Obsidian-vault"
+)
 OBSIDIAN_VAULT_LOCAL = OPENCLAW_DIR / "workspace" / "obsidian-vault"
 
 # ── Embedding model ───────────────────────────────────────
 EMBED_MODEL = os.getenv("BRAIN_EMBED_MODEL", "blaifa/multilingual-e5-large-instruct")
-EMBED_MODEL_VERSION = os.getenv("BRAIN_EMBED_MODEL_VERSION", "multilingual-e5-large-instruct:v1")
+EMBED_MODEL_VERSION = os.getenv("BRAIN_EMBED_MODEL_VERSION", "multilingual-e5-large-instruct:v2")
+# v2 (2026-04-17): bumped to force reindex after chunker fixes (Source Summary
+# skip + frontmatter strip). Incremental indexer compares embed_model_version
+# + mtime to skip unchanged files — old chunks with dirty frontmatter survive
+# across reindexes when file mtime hasn't changed. Bumping the version
+# invalidates the mtime-equality fast-path and re-embeds all content through
+# the current cleaner chunker.
 
 # ── Executables ───────────────────────────────────────────
 PYTHON = os.getenv("BRAIN_PYTHON", "/Users/chrischo/server/brain/.venv/bin/python")
 
 # ── Feature flags ─────────────────────────────────────────
-BRAIN_CROSS_ENCODER_ENABLED = os.getenv("BRAIN_CROSS_ENCODER_ENABLED", "false").lower() in ("true", "1", "yes")
-BRAIN_TRUST_RANKING_ENABLED = os.getenv("BRAIN_TRUST_RANKING_ENABLED", "false").lower() in ("true", "1", "yes")
-BRAIN_DISPATCH_CACHE_ENABLED = os.getenv("BRAIN_DISPATCH_CACHE_ENABLED", "false").lower() in ("true", "1", "yes")
+BRAIN_CROSS_ENCODER_ENABLED = os.getenv("BRAIN_CROSS_ENCODER_ENABLED", "false").lower() in (
+    "true",
+    "1",
+    "yes",
+)
+BRAIN_TRUST_RANKING_ENABLED = os.getenv("BRAIN_TRUST_RANKING_ENABLED", "false").lower() in (
+    "true",
+    "1",
+    "yes",
+)
+BRAIN_DISPATCH_CACHE_ENABLED = os.getenv("BRAIN_DISPATCH_CACHE_ENABLED", "false").lower() in (
+    "true",
+    "1",
+    "yes",
+)
 BRAIN_AUTO_HEAL_ENABLED = os.getenv("BRAIN_AUTO_HEAL_ENABLED", "false").lower() in ("true", "1", "yes")
 BRAIN_FINETUNE_ENABLED = os.getenv("BRAIN_FINETUNE_ENABLED", "false").lower() in ("true", "1", "yes")
 # Round 10 — neuromorphic retrieval (enabled 2026-04-11 after manual verification)
-BRAIN_SPREADING_ACTIVATION_ENABLED = os.getenv("BRAIN_SPREADING_ACTIVATION_ENABLED", "true").lower() in ("true", "1", "yes")
-BRAIN_SALIENCE_RANKING_ENABLED = os.getenv("BRAIN_SALIENCE_RANKING_ENABLED", "true").lower() in ("true", "1", "yes")
+BRAIN_SPREADING_ACTIVATION_ENABLED = os.getenv("BRAIN_SPREADING_ACTIVATION_ENABLED", "true").lower() in (
+    "true",
+    "1",
+    "yes",
+)
+BRAIN_SALIENCE_RANKING_ENABLED = os.getenv("BRAIN_SALIENCE_RANKING_ENABLED", "true").lower() in (
+    "true",
+    "1",
+    "yes",
+)
 BRAIN_MMR_DIVERSITY_ENABLED = os.getenv("BRAIN_MMR_DIVERSITY_ENABLED", "true").lower() in ("true", "1", "yes")
-BRAIN_EPISODIC_BINDING_ENABLED = os.getenv("BRAIN_EPISODIC_BINDING_ENABLED", "true").lower() in ("true", "1", "yes")
-BRAIN_MMR_LAMBDA = float(os.getenv("BRAIN_MMR_LAMBDA", "0.85"))  # 0.85 = strongly relevance-biased; 0.6 was too aggressive on single-shot QA
+BRAIN_EPISODIC_BINDING_ENABLED = os.getenv("BRAIN_EPISODIC_BINDING_ENABLED", "true").lower() in (
+    "true",
+    "1",
+    "yes",
+)
+# 2026-04-16 R-10: keep MMR at 0.85 — Tier-2 drop to 0.6 regressed eval
+# by ~1pt and content_hit is the hill to defend. The confidence-skip
+# gate still protects against diversifying well-separated results; the
+# remaining wins come from canonical trust bonus + idempotency fixes.
+BRAIN_MMR_LAMBDA = float(os.getenv("BRAIN_MMR_LAMBDA", "0.85"))
+
+# 2026-04-17 Phase 3: learned-to-rank blend. Default OFF; enable via
+# BRAIN_LTR_ENABLED=true once cli/ltr_train.py has run and saved weights.
+BRAIN_LTR_ENABLED = os.getenv("BRAIN_LTR_ENABLED", "false").lower() in ("true", "1", "yes")
 
 # Phase 3 — atoms truth layer (Brain v1 plan)
 # BRAIN_ATOMS_ENABLED: master flag for atoms write path. Default off until verified.
@@ -80,7 +121,11 @@ BRAIN_MMR_LAMBDA = float(os.getenv("BRAIN_MMR_LAMBDA", "0.85"))  # 0.85 = strong
 # BRAIN_ENABLE_ATOMS_MIGRATION: whether check_and_migrate runs the atoms backfill on startup.
 BRAIN_ATOMS_ENABLED = os.getenv("BRAIN_ATOMS_ENABLED", "false").lower() in ("true", "1", "yes")
 BRAIN_ATOMS_READ = os.getenv("BRAIN_ATOMS_READ", "false").lower() in ("true", "1", "yes")
-BRAIN_ENABLE_ATOMS_MIGRATION = os.getenv("BRAIN_ENABLE_ATOMS_MIGRATION", "false").lower() in ("true", "1", "yes")
+BRAIN_ENABLE_ATOMS_MIGRATION = os.getenv("BRAIN_ENABLE_ATOMS_MIGRATION", "false").lower() in (
+    "true",
+    "1",
+    "yes",
+)
 BRAIN_DB = BRAIN_LOGS_DIR / "brain.db"
 
 

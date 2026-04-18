@@ -24,7 +24,8 @@ log = logging.getLogger("brain.graph_consolidation")
 def run_consolidation() -> dict:
     """Execute all four phases of graph consolidation."""
     try:
-        from neo4j_client import run_query, is_healthy
+        from neo4j_client import is_healthy, run_query
+
         if not is_healthy():
             return {"status": "skip", "reason": "neo4j unavailable"}
     except Exception as e:
@@ -71,6 +72,7 @@ def run_consolidation() -> dict:
         prune_count = to_prune[0]["cnt"] if to_prune else 0
         if prune_count > 0:
             from neo4j_client import run_write
+
             run_write(
                 "MATCH (s:Entity)-[r:RELATES_TO]->(t:Entity) "
                 "WHERE coalesce(r.weight, 0.5) < 0.01 "
@@ -91,6 +93,7 @@ def run_consolidation() -> dict:
         orphan_count = orphan_count_result[0]["cnt"] if orphan_count_result else 0
         if orphan_count > 0:
             from neo4j_client import run_write
+
             run_write(
                 "MATCH (e:Entity) "
                 "WHERE NOT (e)--() "
@@ -139,7 +142,9 @@ def run_consolidation() -> dict:
             "  (coalesce(r1.weight,0.5) + coalesce(r2.weight,0.5) + coalesce(r3.weight,0.5)) / 3.0 AS strength "
             "ORDER BY strength DESC LIMIT 10"
         )
-        results["phase4_clusters"] = [{"entities": t["cluster"], "strength": round(t["strength"], 2)} for t in triangles]
+        results["phase4_clusters"] = [
+            {"entities": t["cluster"], "strength": round(t["strength"], 2)} for t in triangles
+        ]
     except Exception as e:
         results["phase4_error"] = str(e)[:200]
         log.warning("Phase 4 (clusters) failed: %s", e)
@@ -147,6 +152,7 @@ def run_consolidation() -> dict:
     # Final stats
     try:
         from neo4j_client import get_stats
+
         results["final_stats"] = get_stats()
     except Exception:
         pass

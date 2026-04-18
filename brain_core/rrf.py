@@ -60,7 +60,7 @@ def rrf_fuse(
     rrf_scores: dict[str, float] = {}
     best_record: dict[str, dict[str, Any]] = {}
 
-    for results, trust in zip(result_lists, trust_weights):
+    for results, trust in zip(result_lists, trust_weights, strict=False):
         for rank, doc in enumerate(results):
             doc_id = doc.get(id_key) or doc.get("id") or doc.get("title")
             if not doc_id:
@@ -69,6 +69,7 @@ def rrf_fuse(
                 # memory address and differs per-process-per-call, which
                 # defeats fusion entirely for anonymous results.
                 import hashlib
+
                 body = str(doc.get("content", ""))[:512]
                 doc_id = f"__anon_{hashlib.md5(body.encode()).hexdigest()[:12]}"
             doc_id = str(doc_id)

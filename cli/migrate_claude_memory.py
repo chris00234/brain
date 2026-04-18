@@ -25,12 +25,11 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import re
 import sys
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 # /memory POST is rate-limited to 30/minute. Sleep this long between POSTs
@@ -69,7 +68,7 @@ def _parse_frontmatter(text: str) -> tuple[dict, str]:
     if end < 0:
         return {}, text.strip()
     header = text[3:end].strip()
-    body = text[end + 4:].strip()
+    body = text[end + 4 :].strip()
     meta: dict[str, str] = {}
     for line in header.splitlines():
         line = line.strip()
@@ -83,12 +82,14 @@ def _parse_frontmatter(text: str) -> tuple[dict, str]:
 def _post_memory(content: str, category: str, source: str, secret: str) -> dict:
     req = urllib.request.Request(
         f"{BRAIN_URL}/memory",
-        data=json.dumps({
-            "content": content,
-            "category": category,
-            "agent": "claude",
-            "source": source,
-        }).encode(),
+        data=json.dumps(
+            {
+                "content": content,
+                "category": category,
+                "agent": "claude",
+                "source": source,
+            }
+        ).encode(),
         headers={
             "Authorization": f"Bearer {secret}",
             "Content-Type": "application/json",
@@ -188,7 +189,9 @@ def _category_for(meta: dict, filename: str) -> str:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Migrate Claude Code auto-memory .md files into brain atoms.")
+    parser = argparse.ArgumentParser(
+        description="Migrate Claude Code auto-memory .md files into brain atoms."
+    )
     parser.add_argument("--apply", action="store_true", help="Actually POST to /memory (default: dry run)")
     parser.add_argument("--verbose", action="store_true", help="Print each file as it's processed")
     args = parser.parse_args()
@@ -205,7 +208,7 @@ def main() -> int:
     # Collect files
     files = sorted(p for p in MEMORY_DIR.glob("*.md") if p.name != "MEMORY.md")
     if not files:
-        print(f"no .md files to migrate (excluding MEMORY.md)", file=sys.stderr)
+        print("no .md files to migrate (excluding MEMORY.md)", file=sys.stderr)
         return 1
 
     log_entries: list[dict] = []
@@ -236,11 +239,13 @@ def main() -> int:
                 "content_hash": content_hash,
                 "content_len": len(chunk),
                 "meta_name": meta.get("name", ""),
-                "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "ts": datetime.now(UTC).isoformat(timespec="seconds"),
             }
 
             if args.verbose or not args.apply:
-                print(f"{'[DRY]' if not args.apply else '[POST]'} {path.name:45s} chunk={idx}/{len(chunks)} category={category:11s} len={len(chunk):5d}")
+                print(
+                    f"{'[DRY]' if not args.apply else '[POST]'} {path.name:45s} chunk={idx}/{len(chunks)} category={category:11s} len={len(chunk):5d}"
+                )
 
             if args.apply:
                 result = _post_memory(chunk, category, chunk_source, secret)
@@ -249,7 +254,10 @@ def main() -> int:
                     sent += 1
                 else:
                     failed += 1
-                    print(f"FAIL {path.name} ({idx}/{len(chunks)}): {result.get('body', result)[:200]}", file=sys.stderr)
+                    print(
+                        f"FAIL {path.name} ({idx}/{len(chunks)}): {result.get('body', result)[:200]}",
+                        file=sys.stderr,
+                    )
                 # Pacing guard — stay under /memory 30/minute rate limit even on re-runs
                 time.sleep(RATE_LIMIT_SLEEP_S)
 
@@ -257,18 +265,25 @@ def main() -> int:
 
     if args.apply:
         MIGRATION_LOG.parent.mkdir(parents=True, exist_ok=True)
-        MIGRATION_LOG.write_text(json.dumps({
-            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            "files_total": len(files),
-            "sent": sent,
-            "skipped": skipped,
-            "entries": log_entries,
-        }, indent=2))
+        MIGRATION_LOG.write_text(
+            json.dumps(
+                {
+                    "ts": datetime.now(UTC).isoformat(timespec="seconds"),
+                    "files_total": len(files),
+                    "sent": sent,
+                    "skipped": skipped,
+                    "entries": log_entries,
+                },
+                indent=2,
+            )
+        )
         print(f"\nMigration complete: {sent}/{len(files)} sent, log: {MIGRATION_LOG}")
     else:
         print(f"\nDry run: {len(files)} files would be migrated. Re-run with --apply to commit.")
 
-    return 0 if (not args.apply or sent == len([e for e in log_entries if e.get('content_len', 0) > 0])) else 2
+    return (
+        0 if (not args.apply or sent == len([e for e in log_entries if e.get("content_len", 0) > 0])) else 2
+    )
 
 
 if __name__ == "__main__":

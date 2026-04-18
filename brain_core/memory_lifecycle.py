@@ -15,20 +15,22 @@ import hashlib
 import json
 import re
 import shutil
-import subprocess
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-
 try:
-    from config import OPENCLAW_DIR as AGENTS_DIR, INBOX_DIR, OPENCLAW_BIN
+    from config import INBOX_DIR, OPENCLAW_BIN
+    from config import OPENCLAW_DIR as AGENTS_DIR
+
     EXTRACTION_FAILURE_LOG = AGENTS_DIR / "workspace-liz" / "logs" / "memory-extraction-failures.jsonl"
 except ImportError:
     AGENTS_DIR = Path("/Users/chrischo/.openclaw")
     INBOX_DIR = Path("/Users/chrischo/server/knowledge/raw/inbox")
     OPENCLAW_BIN = "/Users/chrischo/.local/bin/openclaw"
-    EXTRACTION_FAILURE_LOG = Path("/Users/chrischo/.openclaw/workspace-liz/logs/memory-extraction-failures.jsonl")
+    EXTRACTION_FAILURE_LOG = Path(
+        "/Users/chrischo/.openclaw/workspace-liz/logs/memory-extraction-failures.jsonl"
+    )
 LIZ_DISPATCH_TIMEOUT = 180
 EXTRACTION_AGENT = "liz"
 
@@ -105,15 +107,15 @@ def extract_via_liz(memory_file: Path) -> int:
         f"=" * 60 + "\n"
         f"{content}\n"
         f"=" * 60 + "\n\n"
-        f"OUTPUT FORMAT (return ONLY valid JSON, no markdown fences):\n"
-        f'{{"facts": [{{"text": "<short fact>", "kind": "preference|decision|fact|entity"}}]}}\n'
-        f"\n"
-        f"If nothing is worth promoting, return: {{\"facts\": []}}\n"
-        f"STRICT: return only the JSON object, no prose."
+        "OUTPUT FORMAT (return ONLY valid JSON, no markdown fences):\n"
+        '{"facts": [{"text": "<short fact>", "kind": "preference|decision|fact|entity"}]}\n'
+        "\n"
+        'If nothing is worth promoting, return: {"facts": []}\n'
+        "STRICT: return only the JSON object, no prose."
     )
 
     sys.path.insert(0, str(Path(__file__).parent))
-    from openclaw_dispatch import dispatch as _dispatch  # noqa: E402
+    from cli_llm import dispatch as _dispatch
 
     result = _dispatch(
         agent=EXTRACTION_AGENT,
@@ -123,7 +125,9 @@ def extract_via_liz(memory_file: Path) -> int:
     )
     if not result.ok:
         log_extraction_failure(f"openclaw dispatch failed for {memory_file.name}: {result.error}")
-        sys.stderr.write(f"DISPATCH_FAIL agent={EXTRACTION_AGENT} reason={result.error[:200]} file={memory_file.name}\n")
+        sys.stderr.write(
+            f"DISPATCH_FAIL agent={EXTRACTION_AGENT} reason={result.error[:200]} file={memory_file.name}\n"
+        )
         return 0
 
     try:
@@ -141,7 +145,7 @@ def extract_via_liz(memory_file: Path) -> int:
 
     INBOX_DIR.mkdir(parents=True, exist_ok=True)
     written = 0
-    now_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    now_iso = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     date_part = now_iso[:10].replace("-", "_")
     for fact in facts:
         text = fact.get("text", "").strip()
@@ -174,8 +178,11 @@ def main():
     parser.add_argument("--archive-age", type=int, default=90, help="Days before archiving")
     parser.add_argument("--delete-age", type=int, default=180, help="Days before deleting archived files")
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--no-extract", action="store_true",
-                        help="Skip pre-archival extraction (e.g. for testing or quota-sensitive runs)")
+    parser.add_argument(
+        "--no-extract",
+        action="store_true",
+        help="Skip pre-archival extraction (e.g. for testing or quota-sensitive runs)",
+    )
     args = parser.parse_args()
 
     now = datetime.now()
@@ -196,8 +203,10 @@ def main():
             continue
         archive_dir = f.parent / "archive"
         if args.dry_run:
-            print(f"  ARCHIVE: {agent}/{f.name} ({file_date.strftime('%Y-%m-%d')})"
-                  + (" [+extract via Liz]" if not args.no_extract else ""))
+            print(
+                f"  ARCHIVE: {agent}/{f.name} ({file_date.strftime('%Y-%m-%d')})"
+                + (" [+extract via Liz]" if not args.no_extract else "")
+            )
         else:
             # Pre-archival extraction (best-effort, never blocks the archive)
             if not args.no_extract:
@@ -231,12 +240,15 @@ def main():
     else:
         print("  [DRY RUN] Would run semantic_memory dedup")
 
-    print(f"\nArchived: {archived_count} | Deleted: {deleted_count} | Facts extracted: {extracted_total} | Dedup removed: {dedup_removed}")
+    print(
+        f"\nArchived: {archived_count} | Deleted: {deleted_count} | Facts extracted: {extracted_total} | Dedup removed: {dedup_removed}"
+    )
 
 
 def dedup_semantic_memory() -> int:
     """Remove content-duplicate entries from the semantic_memory ChromaDB collection."""
     import urllib.request
+
     CHROMA = "http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections"
 
     # Find collection ID
@@ -299,8 +311,9 @@ def dedup_semantic_near_duplicates() -> dict:
     (same thresholds as learn.py inline dedup). Keeps the longer/newer entry,
     deletes the shorter/older one. Logs decisions to audit trail.
     """
-    import urllib.request
     import re
+    import urllib.request
+
     CHROMA = "http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections"
 
     # Find collection ID
@@ -341,13 +354,13 @@ def dedup_semantic_near_duplicates() -> dict:
     if len(ids) < 2:
         return {"status": "ok", "checked": len(ids), "removed": 0}
 
-    TOKEN_RE = re.compile(r'[a-z0-9_\-]{2,}')
+    TOKEN_RE = re.compile(r"[a-z0-9_\-]{2,}")
 
     def tokenize(text):
         return set(TOKEN_RE.findall((text or "").lower()))
 
     def cosine_dist(a, b):
-        dot = sum(x * y for x, y in zip(a, b))
+        dot = sum(x * y for x, y in zip(a, b, strict=False))
         na = sum(x * x for x in a) ** 0.5
         nb = sum(x * x for x in b) ** 0.5
         if na == 0 or nb == 0:
@@ -419,6 +432,7 @@ def dedup_semantic_near_duplicates() -> dict:
     try:
         sys.path.insert(0, str(Path(__file__).parent))
         from audit_log import log_event
+
         log_event(
             event_type="dedup",
             entity_a="semantic_memory",
@@ -439,6 +453,7 @@ def _get_vote_consensus(contra_id: str) -> str | None:
     """
     try:
         import sqlite3
+
         db = Path("/Users/chrischo/server/brain/logs/autonomy.db")
         if not db.exists():
             return None
@@ -473,9 +488,10 @@ def auto_resolve_stale_contradictions():
     2. If contradiction is > 14 days old and unreviewed — keep the newer entry
     3. If one side is already deleted — dismiss the contradiction
     """
+    from datetime import datetime, timedelta
+
     from http_pool import http_json
     from search import get_collections
-    from datetime import datetime, timezone, timedelta
 
     cols = get_collections()
     contra_col = cols.get("semantic_contradictions")
@@ -485,9 +501,10 @@ def auto_resolve_stale_contradictions():
 
     # Fetch pending contradictions
     try:
-        resp = http_json("POST",
+        resp = http_json(
+            "POST",
             f"http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections/{contra_col}/get",
-            {"where": {"review_state": "pending"}, "limit": 500, "include": ["metadatas"]}
+            {"where": {"review_state": "pending"}, "limit": 500, "include": ["metadatas"]},
         )
     except Exception as e:
         return {"resolved": 0, "error": str(e)}
@@ -496,9 +513,9 @@ def auto_resolve_stale_contradictions():
     metas = resp.get("metadatas", [])
     resolved_count = 0
     kept_count = 0
-    cutoff_date = datetime.now(timezone.utc) - timedelta(days=14)
+    cutoff_date = datetime.now(UTC) - timedelta(days=14)
 
-    for contra_id, meta in zip(ids, metas or [{}] * len(ids)):
+    for contra_id, meta in zip(ids, metas or [{}] * len(ids), strict=False):
         meta = meta or {}
         old_id = meta.get("old_id")
         new_id = meta.get("new_id")
@@ -509,16 +526,17 @@ def auto_resolve_stale_contradictions():
 
         # Fetch both memories
         try:
-            mem_resp = http_json("POST",
+            mem_resp = http_json(
+                "POST",
                 f"http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col}/get",
-                {"ids": [old_id, new_id], "include": ["metadatas"]}
+                {"ids": [old_id, new_id], "include": ["metadatas"]},
             )
         except Exception:
             continue
 
         returned_ids = mem_resp.get("ids", [])
         returned_metas = mem_resp.get("metadatas", []) or []
-        id_to_meta = {i: m for i, m in zip(returned_ids, returned_metas) if m}
+        id_to_meta = {i: m for i, m in zip(returned_ids, returned_metas, strict=False) if m}
 
         action = None
 
@@ -548,7 +566,7 @@ def auto_resolve_stale_contradictions():
                 try:
                     contra_dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
                     if contra_dt.tzinfo is None:
-                        contra_dt = contra_dt.replace(tzinfo=timezone.utc)
+                        contra_dt = contra_dt.replace(tzinfo=UTC)
                     if contra_dt < cutoff_date:
                         action = "keep_new"
                 except Exception:
@@ -568,26 +586,30 @@ def auto_resolve_stale_contradictions():
         # Apply resolution
         try:
             if action == "keep_new" and old_id in returned_ids:
-                http_json("POST",
+                http_json(
+                    "POST",
                     f"http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col}/delete",
-                    {"ids": [old_id]}
+                    {"ids": [old_id]},
                 )
             elif action == "keep_old" and new_id in returned_ids:
-                http_json("POST",
+                http_json(
+                    "POST",
                     f"http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col}/delete",
-                    {"ids": [new_id]}
+                    {"ids": [new_id]},
                 )
             # "dismiss" and the keep_* branches both clear the contradiction
             # record after (optionally) deleting one side.
-            http_json("POST",
+            http_json(
+                "POST",
                 f"http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections/{contra_col}/delete",
-                {"ids": [contra_id]}
+                {"ids": [contra_id]},
             )
             # Clean up any orphan votes for this contradiction so the
             # contradiction_votes table doesn't grow unbounded and so future
             # votes can't match a deleted contradiction_id.
             try:
                 import sqlite3
+
                 db = Path("/Users/chrischo/server/brain/logs/autonomy.db")
                 if db.exists():
                     conn = sqlite3.connect(str(db))
@@ -644,7 +666,7 @@ def cleanup_supersession_chains() -> dict:
             break
         metas = resp.get("metadatas", []) or []
 
-        for mid, meta in zip(ids, metas):
+        for mid, meta in zip(ids, metas, strict=False):
             all_ids.add(mid)
             meta = meta or {}
             target = (meta.get("superseded_by") or "").strip()
@@ -688,8 +710,8 @@ def cleanup_supersession_chains() -> dict:
     fixed = 0
     BATCH = 50
     for i in range(0, len(orphaned_ids), BATCH):
-        batch_ids = orphaned_ids[i:i + BATCH]
-        batch_metas = orphaned_metas[i:i + BATCH]
+        batch_ids = orphaned_ids[i : i + BATCH]
+        batch_metas = orphaned_metas[i : i + BATCH]
         try:
             http_json(
                 "POST",
@@ -717,6 +739,7 @@ def recompute_trust_scores() -> dict:
     """
     from http_pool import http_json
     from search import get_collections
+
     sys.path.insert(0, str(Path(__file__).parent))
     try:
         from learn import _count_corroborating_trust
@@ -751,7 +774,7 @@ def recompute_trust_scores() -> dict:
 
         update_ids: list[str] = []
         update_metas: list[dict] = []
-        for mid, content, meta in zip(ids, docs, metas):
+        for mid, content, meta in zip(ids, docs, metas, strict=False):
             total += 1
             meta = meta or {}
             try:
@@ -810,6 +833,7 @@ def reinforce_on_access(memory_ids: list[str], boost: float = 0.02) -> dict:
         return {"reinforced": 0}
     from http_pool import http_json
     from search import get_collections
+
     cols = get_collections()
     sem_col = cols.get("semantic_memory")
     if not sem_col:
@@ -833,10 +857,10 @@ def reinforce_on_access(memory_ids: list[str], boost: float = 0.02) -> dict:
     # Z-suffix matches the convention used by entity_graph._now() and
     # learn._now_iso() — keeps lexicographic comparison consistent across
     # all writers (the prune job sorts by these timestamps).
-    now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    now_iso = datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
     update_ids: list[str] = []
     update_metas: list[dict] = []
-    for mid, meta in zip(ids, metas):
+    for mid, meta in zip(ids, metas, strict=False):
         meta = dict(meta or {})
         try:
             count = int(meta.get("access_count", 0))
@@ -857,10 +881,10 @@ def reinforce_on_access(memory_ids: list[str], boost: float = 0.02) -> dict:
                 last_ts = last_accessed_raw.replace("Z", "+00:00")
                 last_dt = datetime.fromisoformat(last_ts)
                 if last_dt.tzinfo is None:
-                    last_dt = last_dt.replace(tzinfo=timezone.utc)
+                    last_dt = last_dt.replace(tzinfo=UTC)
                 now_dt = datetime.fromisoformat(now_iso.replace("Z", "+00:00"))
                 days_since = max(0, (now_dt - last_dt).total_seconds() / 86400)
-                decay_factor = 0.95 ** days_since
+                decay_factor = 0.95**days_since
                 existing_score = existing_score * decay_factor
             except (ValueError, TypeError):
                 pass
@@ -891,6 +915,7 @@ def reinforce_on_access(memory_ids: list[str], boost: float = 0.02) -> dict:
     try:
         sys.path.insert(0, str(Path(__file__).parent))
         from entity_graph import reinforce_memory_neo4j_only
+
         for mid in update_ids:
             try:
                 reinforce_memory_neo4j_only(mid, success=True)
@@ -902,8 +927,9 @@ def reinforce_on_access(memory_ids: list[str], boost: float = 0.02) -> dict:
     return {"reinforced": len(update_ids)}
 
 
-def prune_atrophied_memories(dry_run: bool = True, max_age_days: int = 120,
-                              compress_with_gist: bool = False) -> dict:
+def prune_atrophied_memories(
+    dry_run: bool = True, max_age_days: int = 120, compress_with_gist: bool = False
+) -> dict:
     """Round 10 C1 (MemoryBank): synaptic pruning of unused obsolete memories.
 
     Walks semantic_memory and identifies entries matching ALL of:
@@ -930,10 +956,12 @@ def prune_atrophied_memories(dry_run: bool = True, max_age_days: int = 120,
     """
     from http_pool import http_json
     from search import get_collections
+
     sys.path.insert(0, str(Path(__file__).parent))
     try:
         from audit_log import log_event
     except Exception:
+
         def log_event(*args, **kwargs):
             return ""
 
@@ -942,7 +970,7 @@ def prune_atrophied_memories(dry_run: bool = True, max_age_days: int = 120,
     if not sem_col:
         return {"status": "error", "reason": "semantic_memory missing"}
 
-    cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
+    cutoff = datetime.now(UTC) - timedelta(days=max_age_days)
     # Normalize to Z-suffix so lexicographic comparison works against memories
     # whose timestamps were written by entity_graph._now() (Z-suffix) rather
     # than reinforce_on_access (+00:00 suffix). "+" sorts after "Z" in ASCII,
@@ -966,6 +994,7 @@ def prune_atrophied_memories(dry_run: bool = True, max_age_days: int = 120,
                     txt = f.read_text(errors="replace")
                     # Extract semantic_memory:<hex> patterns
                     import re as _re
+
                     for m in _re.finditer(r"semantic_memory:[a-f0-9]{8,40}", txt):
                         canonical_refs.add(m.group(0))
                 except Exception:
@@ -993,7 +1022,7 @@ def prune_atrophied_memories(dry_run: bool = True, max_age_days: int = 120,
         docs = resp.get("documents", []) or []
         metas = resp.get("metadatas", []) or []
 
-        for mid, doc, meta in zip(ids, docs, metas):
+        for mid, doc, meta in zip(ids, docs, metas, strict=False):
             total_scanned += 1
             meta = meta or {}
             tier = (meta.get("memory_class") or "").lower()
@@ -1011,7 +1040,9 @@ def prune_atrophied_memories(dry_run: bool = True, max_age_days: int = 120,
                 trust = 0.5
             if trust >= 0.5:
                 continue
-            last_accessed = meta.get("last_accessed_at") or meta.get("updated_at") or meta.get("created_at") or ""
+            last_accessed = (
+                meta.get("last_accessed_at") or meta.get("updated_at") or meta.get("created_at") or ""
+            )
             if not last_accessed:
                 continue
             # Normalize Z/+00:00 suffix for lexicographic comparison (round 11 fix)
@@ -1024,13 +1055,15 @@ def prune_atrophied_memories(dry_run: bool = True, max_age_days: int = 120,
             if mid in canonical_refs:
                 continue
 
-            candidates.append({
-                "id": mid,
-                "content": (doc or "")[:300],
-                "trust": trust,
-                "last_accessed": last_accessed,
-                "tier": tier,
-            })
+            candidates.append(
+                {
+                    "id": mid,
+                    "content": (doc or "")[:300],
+                    "trust": trust,
+                    "last_accessed": last_accessed,
+                    "tier": tier,
+                }
+            )
 
         if len(ids) < PAGE:
             break
@@ -1056,7 +1089,9 @@ def prune_atrophied_memories(dry_run: bool = True, max_age_days: int = 120,
             "status": "dry_run" if dry_run else "ok",
             "scanned": total_scanned,
             "candidates": n_candidates,
-            "would_prune": [{"id": c["id"], "trust": c["trust"], "last_accessed": c["last_accessed"]} for c in sample],
+            "would_prune": [
+                {"id": c["id"], "trust": c["trust"], "last_accessed": c["last_accessed"]} for c in sample
+            ],
             "actually_deleted": 0,
         }
 
@@ -1067,14 +1102,19 @@ def prune_atrophied_memories(dry_run: bool = True, max_age_days: int = 120,
     gist_count = 0
     if compress_with_gist and candidates:
         try:
-            from openclaw_dispatch import dispatch
+            from cli_llm import dispatch
+
             BATCH = 50
+            # 2026-04-17 token-spike fix: cap per-item content at 400 chars.
+            # Previously unbounded concat of 50 memories could hit 760K tokens/call
+            # (observed 3-day OpenAI spike). 400 chars × 50 = 20KB prompt ≈ 5K tokens,
+            # still enough context for a 1-line gist of each memory.
             for i in range(0, len(candidates), BATCH):
-                batch = candidates[i:i + BATCH]
+                batch = candidates[i : i + BATCH]
                 prompt = (
                     "Compress each of these memories to a single 1-line gist. "
-                    "Return strict JSON: {\"gists\": [{\"id\": \"...\", \"gist\": \"...\"}, ...]}\n\n"
-                    + "\n".join(f"[{c['id']}] {c['content']}" for c in batch)
+                    'Return strict JSON: {"gists": [{"id": "...", "gist": "..."}, ...]}\n\n'
+                    + "\n".join(f"[{c['id']}] {(c['content'] or '')[:400]}" for c in batch)
                 )
                 result = dispatch(agent="jenna", message=prompt, thinking="off", timeout=60)
                 if result.ok:
@@ -1095,6 +1135,7 @@ def prune_atrophied_memories(dry_run: bool = True, max_age_days: int = 120,
                             # Store the gist as a new memory with tier=gist
                             try:
                                 from indexer import get_embedding
+
                                 emb = get_embedding(gist_text, prefix="passage")
                                 if emb:
                                     new_id = f"gist_{old_id[:24]}"
@@ -1105,12 +1146,14 @@ def prune_atrophied_memories(dry_run: bool = True, max_age_days: int = 120,
                                             "ids": [new_id],
                                             "embeddings": [emb],
                                             "documents": [gist_text],
-                                            "metadatas": [{
-                                                "memory_class": "gist",
-                                                "derived_from": old_id,
-                                                "created_at": datetime.now(timezone.utc).isoformat(),
-                                                "trust_score": "0.4",
-                                            }],
+                                            "metadatas": [
+                                                {
+                                                    "memory_class": "gist",
+                                                    "derived_from": old_id,
+                                                    "created_at": datetime.now(UTC).isoformat(),
+                                                    "trust_score": "0.4",
+                                                }
+                                            ],
                                         },
                                     )
                                     gist_count += 1
@@ -1125,7 +1168,7 @@ def prune_atrophied_memories(dry_run: bool = True, max_age_days: int = 120,
     deleted = 0
     BATCH = 50
     for i in range(0, len(candidate_ids), BATCH):
-        batch = candidate_ids[i:i + BATCH]
+        batch = candidate_ids[i : i + BATCH]
         try:
             http_json(
                 "POST",
@@ -1174,10 +1217,12 @@ def cleanup_stale_superseded() -> dict:
     """
     from http_pool import http_json
     from search import get_collections
+
     sys.path.insert(0, str(Path(__file__).parent))
     try:
         from audit_log import log_event
     except Exception:
+
         def log_event(*args, **kwargs):
             return ""
 
@@ -1186,7 +1231,7 @@ def cleanup_stale_superseded() -> dict:
     if not sem_col:
         return {"cleaned": 0, "checked": 0, "error": "semantic_memory missing"}
 
-    cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+    cutoff = datetime.now(UTC) - timedelta(days=30)
     cutoff_iso = cutoff.isoformat().replace("+00:00", "Z")
 
     # Fetch all entries in pages
@@ -1211,7 +1256,7 @@ def cleanup_stale_superseded() -> dict:
             break
         metas = resp.get("metadatas", []) or []
 
-        for mid, meta in zip(ids, metas):
+        for mid, meta in zip(ids, metas, strict=False):
             total_scanned += 1
             all_ids.add(mid)
             meta = meta or {}
@@ -1266,7 +1311,7 @@ def cleanup_stale_superseded() -> dict:
     deleted = 0
     BATCH = 50
     for i in range(0, len(candidates), BATCH):
-        batch = candidates[i:i + BATCH]
+        batch = candidates[i : i + BATCH]
         try:
             http_json(
                 "POST",
@@ -1327,7 +1372,7 @@ def memory_health_report() -> dict:
             break
         offset += PAGE
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     now_iso = now.isoformat().replace("+00:00", "Z")
     total = len(all_metas)
 
@@ -1354,7 +1399,7 @@ def memory_health_report() -> dict:
             try:
                 dt = datetime.fromisoformat(created_raw.rstrip("Z").replace("+00:00", ""))
                 if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
+                    dt = dt.replace(tzinfo=UTC)
                 age_days = max(0.0, (now - dt).total_seconds() / 86400)
             except Exception:
                 pass
@@ -1376,10 +1421,8 @@ def memory_health_report() -> dict:
             stuck_count += 1
 
     # Compute averages
-    tier_avg_age = {t: round(tier_age_sum.get(t, 0) / max(c, 1), 1)
-                    for t, c in tier_counts.items()}
-    tier_avg_access = {t: round(tier_access_sum.get(t, 0) / max(c, 1), 2)
-                       for t, c in tier_counts.items()}
+    tier_avg_age = {t: round(tier_age_sum.get(t, 0) / max(c, 1), 1) for t, c in tier_counts.items()}
+    tier_avg_access = {t: round(tier_access_sum.get(t, 0) / max(c, 1), 2) for t, c in tier_counts.items()}
 
     report = {
         "status": "ok",
@@ -1404,5 +1447,5 @@ def memory_health_report() -> dict:
     return report
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

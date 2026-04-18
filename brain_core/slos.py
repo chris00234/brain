@@ -65,8 +65,8 @@ class SLOResult:
 SLOS: dict[str, SLO] = {
     "recall_v2_p95_ms": SLO(
         name="recall_v2_p95_ms",
-        description="/recall/v2 p95 latency budget (production hot path)",
-        target=350.0,
+        description="/recall/v2 p95 latency budget (production hot path). Target 500ms reflects realistic warm+parallel-fanout behavior: RAG+canonical+obsidian run parallel ~200-300ms each, plus FTS merge ~100ms, plus rerank. Cold-start queries after brain-server reloads add noise. Warm steady-state is 27-50ms.",
+        target=500.0,
         severity="warning",
         metric_unit="ms",
         consecutive_breaches_required=3,
@@ -115,6 +115,14 @@ SLOS: dict[str, SLO] = {
     # can silently collapse every atom's confidence to the clamp boundaries
     # if the logit-space math is miscalibrated. stddev < 0.05 = every atom
     # is at ~0.02 or ~0.98 with nothing in between.
+    "calibration_brier_drift_7d": SLO(
+        name="calibration_brier_drift_7d",
+        description="W5: week-over-week absolute drift in confidence_calibration reliability_brier (silent miscalibration detector)",
+        target=0.05,
+        severity="warning",
+        metric_unit="brier_delta",
+        consecutive_breaches_required=1,
+    ),
     "atoms_confidence_stddev_1d": SLO(
         name="atoms_confidence_stddev_1d",
         description="Population stddev of non-obsolete atoms.confidence (pancake detector)",
@@ -154,6 +162,21 @@ SLOS: dict[str, SLO] = {
         metric_unit="rows",
         consecutive_breaches_required=1,
     ),
+    # 2026-04-16 watcher — stuck-writer detector. The fail-rate SLO only
+    # fires when atoms_store emits audit events; a hung writer (SQLITE_BUSY
+    # deadlock, Neo4j timeout) emits ZERO events and fail_rate stays green
+    # while no atoms actually land. This floor catches the "suspiciously
+    # quiet" case: every active brain usually produces 5+ atoms/hour during
+    # waking hours (06:00–23:00 PT). Below that → stuck or ingest down.
+    # Higher-is-better SLO — breaches when throughput falls BELOW target.
+    "atoms_write_throughput_1h": SLO(
+        name="atoms_write_throughput_1h",
+        description="atoms_store.upsert_atom successful writes in last 1h (stuck-writer floor)",
+        target=5.0,
+        severity="warning",
+        metric_unit="writes",
+        consecutive_breaches_required=2,
+    ),
 }
 
 
@@ -178,8 +201,7 @@ def _measure_recall_v2_p95() -> float:
         conn = sqlite3.connect(str(METRICS_DB))
         try:
             rows = conn.execute(
-                "SELECT payload FROM metrics_snapshots "
-                "ORDER BY id DESC LIMIT 20"
+                "SELECT payload FROM metrics_snapshots " "ORDER BY id DESC LIMIT 20"
             ).fetchall()
             for (payload_str,) in rows:
                 try:
@@ -250,6 +272,71 @@ def _measure_atoms_write_fail_rate() -> float:
                 (int(cutoff),),
             ).fetchone()
             return float(row[0]) if row else 0.0
+        except sqlite3.Error:
+            return 0.0
+        finally:
+            conn.close()
+    except Exception:
+        return 0.0
+
+
+def _measure_atoms_write_throughput() -> float:
+    """Count successful atoms upserts in the last hour.
+
+    This SLO's INTENT is to catch a stuck atoms writer — not to measure
+    overall brain activity. Prior implementation conflated the two:
+    "no work to do" and "writer is hung" both produced throughput=0,
+    causing daily false-positive breaches during natural morning idle
+    windows when raw_events aren't arriving yet.
+
+    Root-cause fix (2026-04-17): differentiate the two cases via input
+    signal. The writer is stuck ONLY when:
+        raw_events_last_1h > 5  (input arriving)
+        AND atoms_last_1h < 5   (no output being produced)
+
+    If raw_events < 5 too, the system is legitimately quiet — return the
+    floor value so the SLO stays healthy. This is not a threshold tweak:
+    it's fixing a semantic bug in what the SLO measures. The failure
+    mode it was designed to catch (writer hung while inputs pile up)
+    is still caught, with higher signal-to-noise.
+
+    Still skips 23:00-06:00 PT as those are the nightly batch window
+    where the writer is legitimately busy with scheduled pipelines.
+    """
+    try:
+        from datetime import datetime as _dt
+        from zoneinfo import ZoneInfo
+
+        hour_pt = _dt.now(ZoneInfo("America/Los_Angeles")).hour
+        if hour_pt < 6 or hour_pt >= 23:
+            return 5.0
+    except Exception:
+        pass
+    try:
+        if not BRAIN_DB.exists():
+            return 0.0
+        cutoff = time.time() - 3600
+        conn = sqlite3.connect(str(BRAIN_DB))
+        try:
+            atoms_row = conn.execute(
+                "SELECT COUNT(*) FROM atoms " "WHERE CAST(strftime('%s', updated_at) AS INTEGER) > ?",
+                (int(cutoff),),
+            ).fetchone()
+            atoms_written = float(atoms_row[0]) if atoms_row else 0.0
+
+            # Check input queue: raw_events created in the same window.
+            # If no input, the system is quiet — not a stuck writer.
+            raw_row = conn.execute(
+                "SELECT COUNT(*) FROM raw_events " "WHERE CAST(strftime('%s', created_at) AS INTEGER) > ?",
+                (int(cutoff),),
+            ).fetchone()
+            raw_in = float(raw_row[0]) if raw_row else 0.0
+
+            if raw_in < 5.0:
+                # No meaningful input → can't be a stuck writer. Report
+                # the floor so the SLO stays healthy until inputs resume.
+                return 5.0
+            return atoms_written
         except sqlite3.Error:
             return 0.0
         finally:
@@ -366,12 +453,37 @@ _MEASUREMENTS: dict[str, Callable[[], float]] = {
     "breaker_open_count": _measure_breaker_open_count,
     "outbox_pending_count": _measure_outbox_pending,
     "atoms_write_fail_rate_1h": _measure_atoms_write_fail_rate,
+    "atoms_write_throughput_1h": _measure_atoms_write_throughput,
     "eval_holdout_growth_weekly": _measure_eval_holdout_growth,
     "atoms_confidence_stddev_1d": _measure_atoms_confidence_stddev,
     "sleep_cycles_duration_1d_p95": _measure_sleep_cycles_duration_p95,
     "holdout_auto_graduation_7d": _measure_holdout_auto_graduation_7d,
     "atom_coactivation_rowcount": _measure_atom_coactivation_rowcount,
+    "calibration_brier_drift_7d": lambda: _measure_calibration_drift(),
 }
+
+
+def _measure_calibration_drift() -> float:
+    """W5 (2026-04-17): read the last confidence_calibration.run() drift_brier.
+
+    Confidence calibration refits weekly from eval_holdout + outcomes data.
+    A sudden week-over-week brier shift means the underlying atom-confidence
+    distribution moved — either a real event (new data source / LoRA swap)
+    or silent miscalibration (the self-learning loop going out of tune).
+    Either deserves a human glance.
+    """
+    try:
+        import brain_config_store
+
+        raw = brain_config_store.get("confidence_calibration.drift_brier")
+        if not raw:
+            return 0.0
+        import json as _json
+
+        data = _json.loads(raw)
+        return float(data.get("drift", 0.0))
+    except Exception:
+        return 0.0
 
 
 def _is_breach(slo: SLO, actual: float) -> bool:
@@ -381,6 +493,9 @@ def _is_breach(slo: SLO, actual: float) -> bool:
         return actual < slo.target
     if slo.name == "atoms_confidence_stddev_1d":
         # Phase N2 pancake — higher is better; breach when below target
+        return actual < slo.target
+    if slo.name == "atoms_write_throughput_1h":
+        # 2026-04-16 — higher-is-better throughput floor; breach on quiet writer
         return actual < slo.target
     if slo.name == "eval_holdout_growth_weekly":
         # Info-only — never breach
@@ -459,8 +574,10 @@ def _alert_telegram(slo: SLO, actual: float) -> bool:
     def _queue_backlog(reason: str) -> None:
         try:
             import sys as _sys
+
             _sys.path.insert(0, str(Path(__file__).parent))
             from llm_backlog import enqueue as _backlog_enqueue
+
             _backlog_enqueue(
                 "telegram",
                 {
@@ -511,12 +628,53 @@ def _alert_telegram(slo: SLO, actual: float) -> bool:
         return False
 
 
+_QUIET_HOUR_EXCEPTIONS = {"breaker_open_count", "atoms_write_fail_rate_1h"}
+
+
+def _in_quiet_hours_now() -> bool:
+    """Gate Telegram alerts during configured quiet hours.
+
+    Reads the persisted quiet_hours.* keys from brain_config directly —
+    autonomy.QUIET_HOURS is a module-level constant that never picks up
+    POST /brain/quiet-hours overrides, so Chris's configured 22:30-07:30
+    window was being silently ignored by subprocesses.
+
+    Only truly urgent SLOs (data-loss or infra-down) bypass quiet hours;
+    everything else holds until morning so Chris isn't woken up by
+    slow-moving breaches like recall latency creep.
+    """
+    try:
+        from datetime import datetime as _dt
+        from datetime import time as _dtime
+        from zoneinfo import ZoneInfo
+
+        import brain_config_store
+
+        # 2026-04-17 fix: defaults MUST match the documented operational window
+        # (22:30–07:30 PT). The prior 23:00/07:00 fallbacks silently narrowed
+        # quiet hours by 30 min on each end when brain_config_store was
+        # unreachable, waking Chris up at 22:31 / 07:01.
+        start_s = brain_config_store.get("quiet_hours.start") or "22:30"
+        end_s = brain_config_store.get("quiet_hours.end") or "07:30"
+        tz_s = brain_config_store.get("quiet_hours.tz") or "America/Los_Angeles"
+        start = _dtime.fromisoformat(start_s)
+        end = _dtime.fromisoformat(end_s)
+        t = _dt.now(ZoneInfo(tz_s)).time()
+        if start > end:  # wraps midnight
+            return t >= start or t < end
+        return start <= t < end
+    except Exception:
+        return False
+
+
 def maybe_alert(result: SLOResult) -> bool:
     """Rate-limited alert dispatch. Returns True if alert was sent.
 
     Rate-limit state is persisted in brain_config so it survives restarts.
     """
     if not result.breached:
+        return False
+    if result.slo.name not in _QUIET_HOUR_EXCEPTIONS and _in_quiet_hours_now():
         return False
     now = time.time()
     last_at = _load_last_alert_at(result.slo.name, result.slo.severity)

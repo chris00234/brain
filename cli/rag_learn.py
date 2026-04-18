@@ -1,34 +1,43 @@
 #!/opt/homebrew/bin/python3
 """Record a learning/experience to RAG. Called by agents after tasks."""
+
+import hashlib
 import json
 import sys
-import hashlib
 from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "brain_core"))
-from search import get_embedding  # noqa: E402
+from search import get_embedding
+
 
 def get_collection_id(name):
     """Get ChromaDB collection ID by name."""
     import urllib.request
+
     url = f"http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections/{name}"
     req = urllib.request.Request(url)
     with urllib.request.urlopen(req, timeout=30) as resp:
         data = json.loads(resp.read())
     return data.get("id")
 
+
 def upsert(col_id, ids, embeddings, documents, metadatas):
     """Upsert documents into ChromaDB collection."""
     import urllib.request
+
     url = f"http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/upsert"
-    payload = json.dumps({"ids": ids, "embeddings": embeddings, "documents": documents, "metadatas": metadatas}).encode()
-    req = urllib.request.Request(url, data=payload, method="POST",
-                                 headers={"Content-Type": "application/json"})
+    payload = json.dumps(
+        {"ids": ids, "embeddings": embeddings, "documents": documents, "metadatas": metadatas}
+    ).encode()
+    req = urllib.request.Request(
+        url, data=payload, method="POST", headers={"Content-Type": "application/json"}
+    )
     with urllib.request.urlopen(req, timeout=120) as resp:
         return json.loads(resp.read())
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     if len(sys.argv) < 4:
         print("Usage: rag_learn.py <collection> <agent> <content> [type] [service] [tags]")
         print("  collection: knowledge | experience | context")

@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from common import ROOT, SCHEMA_DIR, ValidationError, dump_json, load_json, validate_schema
@@ -28,7 +28,7 @@ def build_record(args: argparse.Namespace) -> dict[str, object]:
     if not args.content:
         raise ValidationError("either --content or --input-file is required")
 
-    timestamp = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    timestamp = datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     digest = hashlib.sha256(args.content.encode()).hexdigest()
     return {
         "id": f"raw_{timestamp[:10].replace('-', '_')}_{digest[:8]}",

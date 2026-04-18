@@ -13,12 +13,12 @@ import argparse
 import json
 import subprocess
 import sys
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "brain_core"))
-from safe_state import atomic_write_text  # noqa: E402
-from openclaw_dispatch import dispatch_with_schema  # noqa: E402
+from cli_llm import dispatch_with_schema  # migrated 2026-04-17
+from safe_state import atomic_write_text
 
 OPENCLAW_BIN = "/Users/chrischo/.local/bin/openclaw"
 DISTILLED_DAILY = Path("/Users/chrischo/server/knowledge/distilled/daily")
@@ -92,7 +92,7 @@ def collect_week(target_week: str) -> dict:
 
 def build_prompt(week: str, data: dict) -> str:
     lines = []
-    lines.append(f"You are Sage, Chris's research and synthesis agent.")
+    lines.append("You are Sage, Chris's research and synthesis agent.")
     lines.append(f"Produce Chris's weekly arc for {week} ({data['days'][0]} to {data['days'][-1]}).")
     lines.append("")
     lines.append("=" * 60)
@@ -141,7 +141,7 @@ def build_prompt(week: str, data: dict) -> str:
 def write_arc(week: str, data: dict, parsed: dict) -> Path:
     WEEKLY_OUT.mkdir(parents=True, exist_ok=True)
     out = WEEKLY_OUT / f"{week}.md"
-    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     record = {
         "id": f"chris_weekly_arc_{week.replace('-', '_').lower()}",
         "type": "canonical",
@@ -167,9 +167,15 @@ def write_arc(week: str, data: dict, parsed: dict) -> Path:
         "supersedes": [],
         "superseded_by": None,
     }
-    body = ["---json", json.dumps(record, indent=2), "---", "",
-            f"# {record['title']}", "",
-            "## Did this week"]
+    body = [
+        "---json",
+        json.dumps(record, indent=2),
+        "---",
+        "",
+        f"# {record['title']}",
+        "",
+        "## Did this week",
+    ]
     body += [f"- {x}" for x in parsed.get("did", [])]
     body += ["", "## Decided"] + [f"- {x}" for x in parsed.get("decided", [])]
     body += ["", "## Struggled with"] + [f"- {x}" for x in parsed.get("struggled", [])]
@@ -233,12 +239,22 @@ def main() -> None:
         sys.stderr.write("DISPATCH_FAIL agent=sage reason=dispatch_with_schema returned None\n")
         log_failure("dispatch_with_schema returned None")
         try:
-            subprocess.run([
-                OPENCLAW_BIN, "agent",
-                "--agent", "jenna",
-                "--message", f"SYNTHESIS FAILED: {Path(__file__).stem} — dispatch_with_schema returned None",
-                "--thinking", "off", "--timeout", "30",
-            ], timeout=35, capture_output=True)
+            subprocess.run(
+                [
+                    OPENCLAW_BIN,
+                    "agent",
+                    "--agent",
+                    "jenna",
+                    "--message",
+                    f"SYNTHESIS FAILED: {Path(__file__).stem} — dispatch_with_schema returned None",
+                    "--thinking",
+                    "off",
+                    "--timeout",
+                    "30",
+                ],
+                timeout=35,
+                capture_output=True,
+            )
         except Exception:
             pass
         sys.exit(1)
@@ -246,24 +262,44 @@ def main() -> None:
     if not isinstance(parsed.get("narrative"), str):
         sys.stderr.write("VALIDATION_FAIL: narrative is not a string\n")
         try:
-            subprocess.run([
-                OPENCLAW_BIN, "agent",
-                "--agent", "jenna",
-                "--message", f"SYNTHESIS FAILED: {Path(__file__).stem} — narrative field missing or not a string",
-                "--thinking", "off", "--timeout", "30",
-            ], timeout=35, capture_output=True)
+            subprocess.run(
+                [
+                    OPENCLAW_BIN,
+                    "agent",
+                    "--agent",
+                    "jenna",
+                    "--message",
+                    f"SYNTHESIS FAILED: {Path(__file__).stem} — narrative field missing or not a string",
+                    "--thinking",
+                    "off",
+                    "--timeout",
+                    "30",
+                ],
+                timeout=35,
+                capture_output=True,
+            )
         except Exception:
             pass
         sys.exit(1)
     if not isinstance(parsed.get("did"), list):
         sys.stderr.write("VALIDATION_FAIL: did is not a list\n")
         try:
-            subprocess.run([
-                OPENCLAW_BIN, "agent",
-                "--agent", "jenna",
-                "--message", f"SYNTHESIS FAILED: {Path(__file__).stem} — did field missing or not a list",
-                "--thinking", "off", "--timeout", "30",
-            ], timeout=35, capture_output=True)
+            subprocess.run(
+                [
+                    OPENCLAW_BIN,
+                    "agent",
+                    "--agent",
+                    "jenna",
+                    "--message",
+                    f"SYNTHESIS FAILED: {Path(__file__).stem} — did field missing or not a list",
+                    "--thinking",
+                    "off",
+                    "--timeout",
+                    "30",
+                ],
+                timeout=35,
+                capture_output=True,
+            )
         except Exception:
             pass
         sys.exit(1)

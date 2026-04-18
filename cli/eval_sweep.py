@@ -32,12 +32,12 @@ Safety:
   the patch and tries to restart again. If that also fails, the state file
   is marked `brain_unhealthy = true` and the sweep stops.
 """
+
 from __future__ import annotations
 
 import hashlib
 import json
 import os
-import shutil
 import subprocess
 import sys
 import time
@@ -48,7 +48,7 @@ from pathlib import Path
 
 # Make cli/ importable so we can load the matrix
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from eval_sweep_matrix import MATRIX, knob_count  # noqa: E402
+from eval_sweep_matrix import MATRIX, knob_count
 
 # ── Paths ──────────────────────────────────────────────────────────────
 BRAIN_ROOT = Path("/Users/chrischo/server/brain")
@@ -68,13 +68,14 @@ EVAL_SET_FULL = BRAIN_ROOT / "cli" / "eval_set.json"
 def _eval_set_path() -> Path:
     return EVAL_SET_TRAIN if EVAL_SET_TRAIN.exists() else EVAL_SET_FULL
 
+
 # ── Decision thresholds ────────────────────────────────────────────────
-LATENCY_BUDGET_MS = 300   # warm p50
+LATENCY_BUDGET_MS = 300  # warm p50
 LATENCY_STRETCH_MS = 400  # allow if big accuracy win
-KEEP_ACC_MIN = 0.5        # ≥0.5pt avg delta to keep at normal budget
-KEEP_ACC_BIG = 1.5        # ≥1.5pt avg delta to keep at stretch budget
-NO_GAIN_STREAK_LIMIT = 9   # consecutive KNOBS with no improvement (relaxed — always finish all knobs)
-ITER_CAP = 80              # hard cap on single-value measurements
+KEEP_ACC_MIN = 0.5  # ≥0.5pt avg delta to keep at normal budget
+KEEP_ACC_BIG = 1.5  # ≥1.5pt avg delta to keep at stretch budget
+NO_GAIN_STREAK_LIMIT = 9  # consecutive KNOBS with no improvement (relaxed — always finish all knobs)
+ITER_CAP = 80  # hard cap on single-value measurements
 TARGET_SOURCE = 92.0
 TARGET_CONTENT = 85.0
 
@@ -111,11 +112,11 @@ def _init_state() -> dict:
         "current_value_idx": 0,
         "iteration": 0,
         "baseline_captured": False,
-        "baseline": None,          # initial measurement, never changes
+        "baseline": None,  # initial measurement, never changes
         "rolling_baseline": None,  # promoted after each knob's winning value
-        "winning_config": {},      # {knob_name: {value, scores, d_acc_avg}}
-        "knob_best": None,         # best passing value seen for current knob
-        "knob_no_gain": 0,         # consecutive knobs with no improvement
+        "winning_config": {},  # {knob_name: {value, scores, d_acc_avg}}
+        "knob_best": None,  # best passing value seen for current knob
+        "knob_no_gain": 0,  # consecutive knobs with no improvement
         "done": False,
         "brain_unhealthy": False,
     }
@@ -222,7 +223,9 @@ def _restart_brain() -> bool:
     try:
         r = subprocess.run(
             ["launchctl", "kickstart", "-k", LAUNCHD_LABEL],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
         if r.returncode != 0:
             print(f"launchctl kickstart failed: {r.stderr.strip()}", file=sys.stderr)
@@ -261,7 +264,9 @@ def _run_eval_compare() -> dict | None:
     try:
         r = subprocess.run(
             [str(VENV_PY), str(EVAL_COMPARE), "--json", "--eval-set", str(_eval_set_path())],
-            capture_output=True, text=True, timeout=600,
+            capture_output=True,
+            text=True,
+            timeout=600,
             cwd=str(BRAIN_ROOT),
         )
         if r.returncode != 0:
@@ -336,10 +341,12 @@ def run_one_step() -> int:
         state["rolling_baseline"] = dict(baseline)
         state["baseline_captured"] = True
         _save_state(state)
-        print(f"[iter 0] baseline: source={baseline['source']:.1f}% "
-              f"content={baseline['content']:.1f}% "
-              f"latency={baseline['latency_ms']}ms "
-              f"(n={baseline['total']})")
+        print(
+            f"[iter 0] baseline: source={baseline['source']:.1f}% "
+            f"content={baseline['content']:.1f}% "
+            f"latency={baseline['latency_ms']}ms "
+            f"(n={baseline['total']})"
+        )
         return 0
 
     # Step N — either finalize current knob or test the next value
@@ -371,7 +378,9 @@ def run_one_step() -> int:
     print(f"[iter {iter_no}] knob={knob['knob']} value={val_idx} {value}")
     print(f"  file: {Path(knob['file']).name}")
     print(f"  hypothesis: {knob['hypothesis']}")
-    print(f"  rolling baseline: source={baseline['source']:.1f}% content={baseline['content']:.1f}% lat={baseline['latency_ms']}ms")
+    print(
+        f"  rolling baseline: source={baseline['source']:.1f}% content={baseline['content']:.1f}% lat={baseline['latency_ms']}ms"
+    )
     print(f"{'=' * 70}")
 
     pre_sha = _sha256(Path(knob["file"]))
@@ -379,11 +388,17 @@ def run_one_step() -> int:
     ok, err = _apply_patch(knob["file"], old_string, new_string)
     if not ok:
         print(f"  PATCH FAILED: {err}", file=sys.stderr)
-        _log_iteration({
-            "ts": _now_iso(), "iter": iter_no, "knob": knob["knob"],
-            "value_idx": val_idx, "value": value,
-            "decision": "PATCH_FAILED", "error": err,
-        })
+        _log_iteration(
+            {
+                "ts": _now_iso(),
+                "iter": iter_no,
+                "knob": knob["knob"],
+                "value_idx": val_idx,
+                "value": value,
+                "decision": "PATCH_FAILED",
+                "error": err,
+            }
+        )
         state["current_value_idx"] += 1
         _save_state(state)
         return 0
@@ -395,12 +410,26 @@ def run_one_step() -> int:
         if not _restart_brain():
             state["brain_unhealthy"] = True
             _save_state(state)
-            _log_iteration({"ts": _now_iso(), "iter": iter_no, "knob": knob["knob"],
-                            "value_idx": val_idx, "decision": "BRAIN_UNHEALTHY"})
+            _log_iteration(
+                {
+                    "ts": _now_iso(),
+                    "iter": iter_no,
+                    "knob": knob["knob"],
+                    "value_idx": val_idx,
+                    "decision": "BRAIN_UNHEALTHY",
+                }
+            )
             return 2
-        _log_iteration({"ts": _now_iso(), "iter": iter_no, "knob": knob["knob"],
-                        "value_idx": val_idx, "value": value,
-                        "decision": "REVERTED_AFTER_RESTART_FAIL"})
+        _log_iteration(
+            {
+                "ts": _now_iso(),
+                "iter": iter_no,
+                "knob": knob["knob"],
+                "value_idx": val_idx,
+                "value": value,
+                "decision": "REVERTED_AFTER_RESTART_FAIL",
+            }
+        )
         state["current_value_idx"] += 1
         _save_state(state)
         return 0
@@ -416,9 +445,16 @@ def run_one_step() -> int:
 
     if not v2:
         print("  eval_compare failed", file=sys.stderr)
-        _log_iteration({"ts": _now_iso(), "iter": iter_no, "knob": knob["knob"],
-                        "value_idx": val_idx, "value": value,
-                        "decision": "EVAL_FAILED"})
+        _log_iteration(
+            {
+                "ts": _now_iso(),
+                "iter": iter_no,
+                "knob": knob["knob"],
+                "value_idx": val_idx,
+                "value": value,
+                "decision": "EVAL_FAILED",
+            }
+        )
         state["current_value_idx"] += 1
         _save_state(state)
         return 0
@@ -426,8 +462,10 @@ def run_one_step() -> int:
     current = _score_of(v2)
     decision, deltas = _decide(baseline, current)
     passed = decision == "KEEP"
-    print(f"  result: source={current['source']:.1f}% content={current['content']:.1f}% "
-          f"lat={current['latency_ms']}ms  Δacc={deltas['d_acc_avg']:+.2f}pt  Δlat={deltas['d_latency_ms']:+d}ms")
+    print(
+        f"  result: source={current['source']:.1f}% content={current['content']:.1f}% "
+        f"lat={current['latency_ms']}ms  Δacc={deltas['d_acc_avg']:+.2f}pt  Δlat={deltas['d_latency_ms']:+d}ms"
+    )
     print(f"  gate: {'PASS' if passed else 'FAIL'}")
 
     # Track the best passing value for this knob
@@ -450,13 +488,21 @@ def run_one_step() -> int:
         marker = "fail"
     print(f"  → {marker}")
 
-    _log_iteration({
-        "ts": _now_iso(), "iter": iter_no, "knob": knob["knob"],
-        "value_idx": val_idx, "value": value,
-        "baseline": baseline, "current": current, "deltas": deltas,
-        "decision": decision, "note": marker,
-        "pre_sha": pre_sha,
-    })
+    _log_iteration(
+        {
+            "ts": _now_iso(),
+            "iter": iter_no,
+            "knob": knob["knob"],
+            "value_idx": val_idx,
+            "value": value,
+            "baseline": baseline,
+            "current": current,
+            "deltas": deltas,
+            "decision": decision,
+            "note": marker,
+            "pre_sha": pre_sha,
+        }
+    )
 
     state["current_value_idx"] += 1
     if state["iteration"] >= ITER_CAP:
@@ -480,8 +526,10 @@ def _finalize_knob(state: dict, knob: dict, knob_idx: int) -> int:
         print("  no passing value — knob skipped, no changes")
         state["knob_no_gain"] += 1
     else:
-        print(f"  applying best: value[{best['value_idx']}] = {best['value']} "
-              f"(Δacc={best['deltas']['d_acc_avg']:+.2f}pt)")
+        print(
+            f"  applying best: value[{best['value_idx']}] = {best['value']} "
+            f"(Δacc={best['deltas']['d_acc_avg']:+.2f}pt)"
+        )
         old_string = best["old_string"]
         new_string = best["new_string"]
         ok, err = _apply_patch(knob["file"], old_string, new_string)
@@ -504,9 +552,11 @@ def _finalize_knob(state: dict, knob: dict, knob_idx: int) -> int:
             "new_string": new_string,
         }
         state["knob_no_gain"] = 0
-        print(f"  new rolling baseline: source={best['scores']['source']:.1f}% "
-              f"content={best['scores']['content']:.1f}% "
-              f"lat={best['scores']['latency_ms']}ms")
+        print(
+            f"  new rolling baseline: source={best['scores']['source']:.1f}% "
+            f"content={best['scores']['content']:.1f}% "
+            f"lat={best['scores']['latency_ms']}ms"
+        )
 
     # Advance to next knob
     state["current_knob"] += 1
@@ -544,8 +594,12 @@ def _print_final_summary(state: dict) -> None:
     print("=" * 70)
     b = state.get("baseline") or {}
     r = state.get("rolling_baseline") or {}
-    print(f"baseline    : source={b.get('source', 0):.1f}%  content={b.get('content', 0):.1f}%  latency={b.get('latency_ms', 0)}ms")
-    print(f"final       : source={r.get('source', 0):.1f}%  content={r.get('content', 0):.1f}%  latency={r.get('latency_ms', 0)}ms")
+    print(
+        f"baseline    : source={b.get('source', 0):.1f}%  content={b.get('content', 0):.1f}%  latency={b.get('latency_ms', 0)}ms"
+    )
+    print(
+        f"final       : source={r.get('source', 0):.1f}%  content={r.get('content', 0):.1f}%  latency={r.get('latency_ms', 0)}ms"
+    )
     ds = r.get("source", 0) - b.get("source", 0)
     dc = r.get("content", 0) - b.get("content", 0)
     print(f"delta       : source={ds:+.1f}pt  content={dc:+.1f}pt")

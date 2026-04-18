@@ -27,18 +27,17 @@ from __future__ import annotations
 
 import json
 import logging
-import shutil
 import sqlite3
 import subprocess
 import sys
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
 try:
-    from config import BRAIN_LOGS_DIR, KNOWLEDGE_DIR, AUTONOMY_DB
+    from config import AUTONOMY_DB, BRAIN_LOGS_DIR, KNOWLEDGE_DIR
 except ImportError:
     BRAIN_LOGS_DIR = Path("/Users/chrischo/server/brain/logs")
     KNOWLEDGE_DIR = Path("/Users/chrischo/server/knowledge")
@@ -51,11 +50,11 @@ log = logging.getLogger("brain.live_state_snapshot")
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _atomic_write(path: Path, content: str) -> bool:
@@ -83,12 +82,12 @@ def _header(title: str) -> str:
 
 # ── Docker services ──────────────────────────────────────────────
 
+
 def _snapshot_docker() -> str:
     """Capture `docker ps` output as formatted markdown."""
     try:
         result = subprocess.run(
-            ["docker", "ps", "--format",
-             "{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"],
+            ["docker", "ps", "--format", "{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"],
             capture_output=True,
             text=True,
             timeout=8,
@@ -97,7 +96,10 @@ def _snapshot_docker() -> str:
         return _header("Running Docker containers") + f"(docker ps failed: {e})\n"
 
     if result.returncode != 0:
-        return _header("Running Docker containers") + f"(docker ps returned {result.returncode}: {result.stderr[:200]})\n"
+        return (
+            _header("Running Docker containers")
+            + f"(docker ps returned {result.returncode}: {result.stderr[:200]})\n"
+        )
 
     lines = [ln for ln in (result.stdout or "").splitlines() if ln.strip()]
     if not lines:
@@ -118,6 +120,7 @@ def _snapshot_docker() -> str:
 
 
 # ── launchd services ─────────────────────────────────────────────
+
 
 def _snapshot_launchd() -> str:
     """List ai.openclaw.* launchd services and their running state."""
@@ -153,6 +156,7 @@ def _snapshot_launchd() -> str:
 
 
 # ── Active goals + focus ─────────────────────────────────────────
+
 
 def _snapshot_goals() -> str:
     """Read autonomy.db::goals WHERE status='active' + focus_items."""
@@ -197,6 +201,7 @@ def _snapshot_goals() -> str:
 
 # ── Recent commits across repos ──────────────────────────────────
 
+
 def _snapshot_commits() -> str:
     """Git log across the top-level server repos for the last 24 hours."""
     md = _header("Recent commits (last 24h)")
@@ -211,9 +216,15 @@ def _snapshot_commits() -> str:
             continue
         try:
             result = subprocess.run(
-                ["git", "-C", str(repo), "log",
-                 "--since=24 hours ago",
-                 "--pretty=format:%h %cd %s", "--date=iso-strict"],
+                [
+                    "git",
+                    "-C",
+                    str(repo),
+                    "log",
+                    "--since=24 hours ago",
+                    "--pretty=format:%h %cd %s",
+                    "--date=iso-strict",
+                ],
                 capture_output=True,
                 text=True,
                 timeout=5,
@@ -233,6 +244,7 @@ def _snapshot_commits() -> str:
 
 
 # ── Active sessions (Claude + OpenClaw agents) ──────────────────
+
 
 def _snapshot_sessions() -> str:
     """Read action_audit for distinct session_id/actor in last hour."""
@@ -300,7 +312,7 @@ def run() -> dict:
     # Write a top-level index so the canonical_paths lookup also finds it.
     index_content = _header("Live state index")
     index_content += "## Files\n\n"
-    for filename in TOPICS.keys():
+    for filename in TOPICS:
         index_content += f"- [{filename[:-3]}]({filename})\n"
     index_content += (
         f"\n---\nSnapshot captured: {_now_iso()}\n"

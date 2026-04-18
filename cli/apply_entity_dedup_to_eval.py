@@ -28,7 +28,6 @@ import re
 import sys
 from pathlib import Path
 
-
 EVAL_SETS = [
     "/Users/chrischo/server/brain/cli/eval_set.json",
     "/Users/chrischo/server/brain/cli/eval_set_extended_v2.json",

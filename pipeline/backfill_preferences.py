@@ -8,25 +8,54 @@ Usage:
   backfill_preferences.py              # dry-run
   backfill_preferences.py --apply      # write to Neo4j
 """
+
 from __future__ import annotations
 
 import re
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "brain_core"))
 
 _DOMAIN_KEYWORDS = {
-    "coding": {"typescript", "react", "vite", "nextjs", "python", "code", "import", "function", "type", "const", "strict", "eslint", "prettier", "npm"},
-    "infra": {"docker", "nginx", "cloudflare", "chromadb", "ollama", "neo4j", "container", "port", "server", "deploy", "uptime", "launchd"},
+    "coding": {
+        "typescript",
+        "react",
+        "vite",
+        "nextjs",
+        "python",
+        "code",
+        "import",
+        "function",
+        "type",
+        "const",
+        "strict",
+        "eslint",
+        "prettier",
+        "npm",
+    },
+    "infra": {
+        "docker",
+        "nginx",
+        "cloudflare",
+        "chromadb",
+        "ollama",
+        "neo4j",
+        "container",
+        "port",
+        "server",
+        "deploy",
+        "uptime",
+        "launchd",
+    },
     "personal": {"chris", "schedule", "prefer", "like", "always", "never", "habit", "routine", "timezone"},
     "communication": {"tone", "emoji", "concise", "direct", "response", "message", "slack", "telegram"},
 }
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 def _infer_domain(text: str) -> str:
@@ -40,34 +69,40 @@ def _infer_domain(text: str) -> str:
 
 def collect_preferences() -> list[dict]:
     """Query semantic_memory for preference entries."""
-    from indexer import chroma_api, _get_collection_id
+    from indexer import _get_collection_id, chroma_api
 
     col_id = _get_collection_id("semantic_memory")
     if not col_id:
         print("semantic_memory collection not found")
         return []
 
-    resp = chroma_api("POST", f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/get", {
-        "limit": 200,
-        "include": ["documents", "metadatas"],
-        "where": {"category": "preference"},
-    })
+    resp = chroma_api(
+        "POST",
+        f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/get",
+        {
+            "limit": 200,
+            "include": ["documents", "metadatas"],
+            "where": {"category": "preference"},
+        },
+    )
 
     docs = resp.get("documents", [])
     metas = resp.get("metadatas", [])
     ids = resp.get("ids", [])
 
     prefs = []
-    for doc, meta, pid in zip(docs, metas, ids):
+    for doc, meta, pid in zip(docs, metas, ids, strict=False):
         if not doc or len(doc.strip()) < 10:
             continue
-        prefs.append({
-            "id": pid,
-            "content": doc.strip()[:200],
-            "agent": meta.get("agent", ""),
-            "confidence": float(meta.get("confidence", "0.5")),
-            "domain": _infer_domain(doc),
-        })
+        prefs.append(
+            {
+                "id": pid,
+                "content": doc.strip()[:200],
+                "agent": meta.get("agent", ""),
+                "confidence": float(meta.get("confidence", "0.5")),
+                "domain": _infer_domain(doc),
+            }
+        )
 
     # Sort by confidence descending, take top 50
     prefs.sort(key=lambda p: p["confidence"], reverse=True)
@@ -88,12 +123,13 @@ def backfill(apply: bool = False):
         return
 
     from neo4j_client import run_write
+
     now = _now_iso()
 
     created = 0
     for p in prefs:
         # Create a short name from content
-        name = re.sub(r'[^a-z0-9\s]', '', p["content"].lower())[:60].strip()
+        name = re.sub(r"[^a-z0-9\s]", "", p["content"].lower())[:60].strip()
         name = " ".join(name.split()[:8])  # max 8 words
         if len(name) < 5:
             continue
@@ -108,8 +144,13 @@ def backfill(apply: bool = False):
             "ON MATCH SET pref.last_seen_at = $now, "
             "  pref.mention_count = pref.mention_count + 1, "
             "  pref.confidence = $confidence",
-            {"name": name, "now": now, "domain": p["domain"],
-             "confidence": p["confidence"], "content": p["content"]},
+            {
+                "name": name,
+                "now": now,
+                "domain": p["domain"],
+                "confidence": p["confidence"],
+                "content": p["content"],
+            },
         )
 
         # Link preference to Chris

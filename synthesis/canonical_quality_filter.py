@@ -26,18 +26,18 @@ Default mode is dry-run. --apply physically moves files into
 canonical/archived/<original-domain>/ with updated frontmatter (adds
 archived_at, archived_reason, sets status: archived).
 """
+
 from __future__ import annotations
 
 import argparse
 import json
 import re
-import shutil
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "pipeline"))
-from common import ROOT, parse_note, render_note, iter_note_paths  # noqa: E402
+from common import ROOT, iter_note_paths, parse_note, render_note
 
 CANONICAL_DIR = ROOT / "canonical"
 ARCHIVE_DIR = CANONICAL_DIR / "archived"
@@ -112,23 +112,25 @@ def _load_candidates() -> list[dict]:
         if meta.get("status") != "active":
             continue
         score, signals = _score_note(meta, body)
-        out.append({
-            "path": path,
-            "rel_path": str(path.relative_to(ROOT)),
-            "id": meta.get("id") or path.stem,
-            "title": (meta.get("title") or path.stem)[:120],
-            "domain": meta.get("domain") or "other",
-            "subtype": meta.get("subtype") or "",
-            "score": score,
-            "signals": signals,
-            "body_chars": len(body.strip()),
-        })
+        out.append(
+            {
+                "path": path,
+                "rel_path": str(path.relative_to(ROOT)),
+                "id": meta.get("id") or path.stem,
+                "title": (meta.get("title") or path.stem)[:120],
+                "domain": meta.get("domain") or "other",
+                "subtype": meta.get("subtype") or "",
+                "score": score,
+                "signals": signals,
+                "body_chars": len(body.strip()),
+            }
+        )
     return out
 
 
 def _write_report(candidates: list[dict], threshold: int, all_count: int) -> tuple[Path, Path]:
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
-    date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    date = datetime.now(UTC).strftime("%Y-%m-%d")
     json_path = REPORT_DIR / f"{date}.json"
     md_path = REPORT_DIR / f"{date}.md"
 
@@ -140,15 +142,13 @@ def _write_report(candidates: list[dict], threshold: int, all_count: int) -> tup
         by_domain.setdefault(c["domain"], []).append(c)
 
     payload = {
-        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
         "total_scanned": all_count,
         "threshold": threshold,
         "flagged_count": len(flagged),
         "keep_count": len(keep),
         "by_domain": {d: len(items) for d, items in by_domain.items()},
-        "flagged": [
-            {k: v for k, v in c.items() if k != "path"} for c in flagged
-        ],
+        "flagged": [{k: v for k, v in c.items() if k != "path"} for c in flagged],
     }
     json_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
 
@@ -169,7 +169,9 @@ def _write_report(candidates: list[dict], threshold: int, all_count: int) -> tup
         lines.append("")
         for c in by_domain[d][:50]:
             sigs = ", ".join(c["signals"])
-            lines.append(f"- `{c['id']}` — **{c['title']}** — score {c['score']} — {sigs} — `{c['rel_path']}`")
+            lines.append(
+                f"- `{c['id']}` — **{c['title']}** — score {c['score']} — {sigs} — `{c['rel_path']}`"
+            )
         if len(by_domain[d]) > 50:
             lines.append(f"- _… {len(by_domain[d]) - 50} more_")
         lines.append("")
@@ -183,7 +185,7 @@ def _archive_note(candidate: dict) -> dict:
     src = candidate["path"]
     meta, body = parse_note(src)
     meta["status"] = "archived"
-    meta["archived_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    meta["archived_at"] = datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     meta["archived_reason"] = "quality_filter:" + ",".join(candidate["signals"])
     original_domain = candidate["domain"]
     dest_dir = ARCHIVE_DIR / original_domain
@@ -212,13 +214,17 @@ def main() -> int:
     flagged = [c for c in candidates if c["score"] >= args.threshold]
 
     if not args.apply:
-        print(json.dumps({
-            "status": "dry-run",
-            "scanned": len(candidates),
-            "flagged": len(flagged),
-            "report_md": str(md_path.relative_to(ROOT)),
-            "report_json": str(json_path.relative_to(ROOT)),
-        }))
+        print(
+            json.dumps(
+                {
+                    "status": "dry-run",
+                    "scanned": len(candidates),
+                    "flagged": len(flagged),
+                    "report_md": str(md_path.relative_to(ROOT)),
+                    "report_json": str(json_path.relative_to(ROOT)),
+                }
+            )
+        )
         return 0
 
     # Apply mode — move each flagged note
@@ -231,13 +237,18 @@ def main() -> int:
             errors += 1
             print(f"  archive error on {c['rel_path']}: {e}", file=sys.stderr)
 
-    print(json.dumps({
-        "status": "applied",
-        "scanned": len(candidates),
-        "moved": len(moved),
-        "errors": errors,
-        "report_md": str(md_path.relative_to(ROOT)),
-    }, indent=2))
+    print(
+        json.dumps(
+            {
+                "status": "applied",
+                "scanned": len(candidates),
+                "moved": len(moved),
+                "errors": errors,
+                "report_md": str(md_path.relative_to(ROOT)),
+            },
+            indent=2,
+        )
+    )
     return 0
 
 

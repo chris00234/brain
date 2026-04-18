@@ -11,6 +11,7 @@ config:
 
 Writes a markdown report to logs/eval_sweep_verify.md.
 """
+
 from __future__ import annotations
 
 import json
@@ -34,7 +35,9 @@ def _run(eval_set: Path) -> dict | None:
     try:
         r = subprocess.run(
             [str(VENV_PY), str(EVAL_COMPARE), "--json", "--eval-set", str(eval_set)],
-            capture_output=True, text=True, timeout=600,
+            capture_output=True,
+            text=True,
+            timeout=600,
             cwd=str(BRAIN_ROOT),
         )
         if r.returncode != 0:
@@ -49,8 +52,10 @@ def _run(eval_set: Path) -> dict | None:
 def _fmt(v2: dict) -> str:
     if not v2:
         return "FAILED"
-    return (f"source={v2['hit_source_pct']:.1f}%  content={v2['hit_content_pct']:.1f}%  "
-            f"mean_rank={v2['mean_rank']}  latency={v2['mean_latency_ms']:.0f}ms  n={v2['total']}")
+    return (
+        f"source={v2['hit_source_pct']:.1f}%  content={v2['hit_content_pct']:.1f}%  "
+        f"mean_rank={v2['mean_rank']}  latency={v2['mean_latency_ms']:.0f}ms  n={v2['total']}"
+    )
 
 
 def main() -> int:
@@ -97,24 +102,34 @@ def main() -> int:
     lines.append("")
     lines.append("## Train set (n≈595)")
     lines.append("")
-    lines.append(f"- baseline:  source={baseline.get('source', 0):.1f}%  content={baseline.get('content', 0):.1f}%  lat={baseline.get('latency_ms', 0)}ms")
-    lines.append(f"- rolling:   source={rolling.get('source', 0):.1f}%  content={rolling.get('content', 0):.1f}%  lat={rolling.get('latency_ms', 0)}ms")
+    lines.append(
+        f"- baseline:  source={baseline.get('source', 0):.1f}%  content={baseline.get('content', 0):.1f}%  lat={baseline.get('latency_ms', 0)}ms"
+    )
+    lines.append(
+        f"- rolling:   source={rolling.get('source', 0):.1f}%  content={rolling.get('content', 0):.1f}%  lat={rolling.get('latency_ms', 0)}ms"
+    )
     if train_v2:
         ds = train_v2["hit_source_pct"] - baseline.get("source", 0)
         dc = train_v2["hit_content_pct"] - baseline.get("content", 0)
         dl = train_v2["mean_latency_ms"] - baseline.get("latency_ms", 0)
-        lines.append(f"- verify:    source={train_v2['hit_source_pct']:.1f}%  content={train_v2['hit_content_pct']:.1f}%  lat={train_v2['mean_latency_ms']:.0f}ms")
+        lines.append(
+            f"- verify:    source={train_v2['hit_source_pct']:.1f}%  content={train_v2['hit_content_pct']:.1f}%  lat={train_v2['mean_latency_ms']:.0f}ms"
+        )
         lines.append(f"- delta vs baseline: source={ds:+.1f}pt  content={dc:+.1f}pt  lat={dl:+.0f}ms")
     lines.append("")
     lines.append("## Full merged set (n=744)")
     lines.append("")
     if full_v2:
-        lines.append(f"- source={full_v2['hit_source_pct']:.1f}%  content={full_v2['hit_content_pct']:.1f}%  lat={full_v2['mean_latency_ms']:.0f}ms")
+        lines.append(
+            f"- source={full_v2['hit_source_pct']:.1f}%  content={full_v2['hit_content_pct']:.1f}%  lat={full_v2['mean_latency_ms']:.0f}ms"
+        )
     lines.append("")
     lines.append("## Holdout set (n=149, never tuned on)")
     lines.append("")
     if hold_v2:
-        lines.append(f"- source={hold_v2['hit_source_pct']:.1f}%  content={hold_v2['hit_content_pct']:.1f}%  lat={hold_v2['mean_latency_ms']:.0f}ms")
+        lines.append(
+            f"- source={hold_v2['hit_source_pct']:.1f}%  content={hold_v2['hit_content_pct']:.1f}%  lat={hold_v2['mean_latency_ms']:.0f}ms"
+        )
     lines.append("")
     lines.append("## Winning config")
     lines.append("")
@@ -123,7 +138,9 @@ def main() -> int:
     for knob_name, cfg in winners.items():
         d = cfg.get("deltas", {})
         v = cfg.get("value", {})
-        lines.append(f"- **{knob_name}**: {v}  (Δacc={d.get('d_acc_avg', 0):+.2f}pt  Δlat={d.get('d_latency_ms', 0):+d}ms)")
+        lines.append(
+            f"- **{knob_name}**: {v}  (Δacc={d.get('d_acc_avg', 0):+.2f}pt  Δlat={d.get('d_latency_ms', 0):+d}ms)"
+        )
     lines.append("")
     lines.append("## Source file mutations")
     lines.append("")

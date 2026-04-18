@@ -4,6 +4,7 @@ Takes a complex question, runs 3-5 reasoning hops via Jenna with retrieved
 evidence at each step. Each step is checkpointed to SQLite so the reasoning
 can resume after failure.
 """
+
 from __future__ import annotations
 
 import json
@@ -11,16 +12,15 @@ import sqlite3
 import sys
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
 
 # brain_core is already on sys.path when loaded by server.py, but ensure it
 # resolves when imported standalone (e.g. from a CLI smoke test).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import search_unified  # noqa: E402
-from openclaw_dispatch import dispatch  # noqa: E402
+import search_unified
+from cli_llm import dispatch  # 2026-04-17: migrated from openclaw_dispatch
 
 CHECKPOINT_DB = Path("/Users/chrischo/server/brain/logs/reasoning_checkpoints.db")
 MAX_HOPS = 5
@@ -79,7 +79,7 @@ def _save_checkpoint(thread_id: str, step: int, state: dict) -> None:
     try:
         conn.execute(
             "INSERT OR REPLACE INTO reasoning_checkpoints (thread_id, step, state_json, created_at) VALUES (?, ?, ?, ?)",
-            (thread_id, step, json.dumps(state), datetime.now(timezone.utc).isoformat())
+            (thread_id, step, json.dumps(state), datetime.now(UTC).isoformat()),
         )
         conn.commit()
     finally:
@@ -92,7 +92,7 @@ def _load_checkpoints(thread_id: str) -> list[dict]:
     try:
         rows = conn.execute(
             "SELECT step, state_json FROM reasoning_checkpoints WHERE thread_id = ? ORDER BY step",
-            (thread_id,)
+            (thread_id,),
         ).fetchall()
         return [json.loads(r[1]) for r in rows]
     finally:
@@ -188,26 +188,31 @@ def run_reasoning(question: str, thread_id: str | None = None, max_hops: int = M
         if time.time() - started_at > DEFAULT_TIMEOUT:
             break
 
-        is_last_hop = (hop == max_hops)
+        is_last_hop = hop == max_hops
 
         # Ask Jenna: search more or synthesize? On last hop, skip planning and go straight to synthesis.
         if not is_last_hop:
-            plan_prompt = PLANNING_PROMPT.format(
-                question=question,
-                evidence=_format_evidence(evidence)
-            )
+            plan_prompt = PLANNING_PROMPT.format(question=question, evidence=_format_evidence(evidence))
             plan_result = dispatch(agent="jenna", message=plan_prompt, thinking="low", timeout=45)
             if not plan_result.ok:
-                _save_checkpoint(thread_id, hop, {"step": hop, "step_type": "plan_failed", "error": plan_result.error})
+                _save_checkpoint(
+                    thread_id, hop, {"step": hop, "step_type": "plan_failed", "error": plan_result.error}
+                )
                 break
 
             try:
                 plan = json.loads(_strip_json_fence(plan_result.text))
             except json.JSONDecodeError as e:
-                _save_checkpoint(thread_id, hop, {
-                    "step": hop, "step_type": "plan_parse_failed",
-                    "error": str(e), "raw": plan_result.text[:500],
-                })
+                _save_checkpoint(
+                    thread_id,
+                    hop,
+                    {
+                        "step": hop,
+                        "step_type": "plan_parse_failed",
+                        "error": str(e),
+                        "raw": plan_result.text[:500],
+                    },
+                )
                 break
 
             action = plan.get("next_action", "synthesize")
@@ -215,26 +220,28 @@ def run_reasoning(question: str, thread_id: str | None = None, max_hops: int = M
             if action == "search":
                 query = plan.get("query", question)
                 try:
-                    search_result = search_unified.search_all(query, limit=5, sources=["rag", "canonical", "obsidian"])
+                    search_result = search_unified.search_all(
+                        query, limit=5, sources=["rag", "canonical", "obsidian"]
+                    )
                     results = search_result.get("results", [])[:5]
                 except Exception:
                     results = []
 
                 evidence.extend(results)
-                _save_checkpoint(thread_id, hop, {
-                    "step": hop, "step_type": "search",
-                    "query": query, "results": results[:5]
-                })
+                _save_checkpoint(
+                    thread_id,
+                    hop,
+                    {"step": hop, "step_type": "search", "query": query, "results": results[:5]},
+                )
                 continue
 
         # Synthesize (either Jenna said so, or this is the last hop)
-        synth_prompt = SYNTHESIS_PROMPT.format(
-            question=question,
-            evidence=_format_evidence(evidence)
-        )
+        synth_prompt = SYNTHESIS_PROMPT.format(question=question, evidence=_format_evidence(evidence))
         synth_result = dispatch(agent="jenna", message=synth_prompt, thinking="low", timeout=60)
         if not synth_result.ok:
-            _save_checkpoint(thread_id, hop, {"step": hop, "step_type": "synth_failed", "error": synth_result.error})
+            _save_checkpoint(
+                thread_id, hop, {"step": hop, "step_type": "synth_failed", "error": synth_result.error}
+            )
             break
 
         try:
@@ -242,10 +249,7 @@ def run_reasoning(question: str, thread_id: str | None = None, max_hops: int = M
         except json.JSONDecodeError:
             final_answer = {"answer": synth_result.text, "confidence": 0.5, "citations": []}
 
-        _save_checkpoint(thread_id, hop, {
-            "step": hop, "step_type": "synthesize",
-            "answer": final_answer
-        })
+        _save_checkpoint(thread_id, hop, {"step": hop, "step_type": "synthesize", "answer": final_answer})
         break
 
     return {

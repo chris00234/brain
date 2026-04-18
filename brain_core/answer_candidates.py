@@ -11,10 +11,11 @@ Schema (brain.db / answer_candidates):
     score, status (pending|promoted|rejected|skipped), promoted_path,
     rejected_reason, processed_at
 """
+
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 try:
@@ -68,7 +69,7 @@ def record(
         return 0
     if len(answer.strip()) < 80:
         return 0  # too short to be worth canonicalizing
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    now = datetime.now(UTC).isoformat(timespec="seconds")
     with _conn() as conn:
         cur = conn.execute(
             "INSERT INTO answer_candidates (created_at, source_route, agent, query, answer, reason) "
@@ -81,8 +82,7 @@ def record(
 def list_pending(limit: int = 50) -> list[dict]:
     with _conn() as conn:
         rows = conn.execute(
-            "SELECT * FROM answer_candidates WHERE status = 'pending' "
-            "ORDER BY created_at DESC LIMIT ?",
+            "SELECT * FROM answer_candidates WHERE status = 'pending' " "ORDER BY created_at DESC LIMIT ?",
             (limit,),
         ).fetchall()
     return [dict(r) for r in rows]
@@ -90,14 +90,12 @@ def list_pending(limit: int = 50) -> list[dict]:
 
 def get(candidate_id: int) -> dict | None:
     with _conn() as conn:
-        row = conn.execute(
-            "SELECT * FROM answer_candidates WHERE id = ?", (candidate_id,)
-        ).fetchone()
+        row = conn.execute("SELECT * FROM answer_candidates WHERE id = ?", (candidate_id,)).fetchone()
     return dict(row) if row else None
 
 
 def mark_promoted(candidate_id: int, promoted_path: str, score: float) -> None:
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    now = datetime.now(UTC).isoformat(timespec="seconds")
     with _conn() as conn:
         conn.execute(
             "UPDATE answer_candidates SET status='promoted', promoted_path=?, "
@@ -107,7 +105,7 @@ def mark_promoted(candidate_id: int, promoted_path: str, score: float) -> None:
 
 
 def mark_rejected(candidate_id: int, reason: str, score: float | None = None) -> None:
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    now = datetime.now(UTC).isoformat(timespec="seconds")
     with _conn() as conn:
         conn.execute(
             "UPDATE answer_candidates SET status='rejected', rejected_reason=?, "
@@ -117,18 +115,15 @@ def mark_rejected(candidate_id: int, reason: str, score: float | None = None) ->
 
 
 def mark_skipped(candidate_id: int, reason: str) -> None:
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    now = datetime.now(UTC).isoformat(timespec="seconds")
     with _conn() as conn:
         conn.execute(
-            "UPDATE answer_candidates SET status='skipped', rejected_reason=?, "
-            "processed_at=? WHERE id=?",
+            "UPDATE answer_candidates SET status='skipped', rejected_reason=?, " "processed_at=? WHERE id=?",
             (reason[:500], now, candidate_id),
         )
 
 
 def stats() -> dict:
     with _conn() as conn:
-        rows = conn.execute(
-            "SELECT status, COUNT(*) as c FROM answer_candidates GROUP BY status"
-        ).fetchall()
+        rows = conn.execute("SELECT status, COUNT(*) as c FROM answer_candidates GROUP BY status").fetchall()
     return {r["status"]: r["c"] for r in rows}

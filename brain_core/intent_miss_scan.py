@@ -20,11 +20,11 @@ import json
 import logging
 import re
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 try:
-    from config import BRAIN_LOGS_DIR, AUTONOMY_DB
+    from config import AUTONOMY_DB, BRAIN_LOGS_DIR
 except ImportError:
     BRAIN_LOGS_DIR = Path("/Users/chrischo/server/brain/logs")
     AUTONOMY_DB = BRAIN_LOGS_DIR / "autonomy.db"
@@ -58,7 +58,7 @@ def run(since_days: int = 7) -> dict:
 
     Returns {"scanned": N, "misses": N, "proposed": N} — for scheduler logging.
     """
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=since_days)).isoformat()
+    cutoff = (datetime.now(UTC) - timedelta(days=since_days)).isoformat()
 
     # Read turns from brain.db::action_audit
     try:
@@ -91,13 +91,15 @@ def run(since_days: int = 7) -> dict:
             cur = turns[i]
             cur_text = cur["query_text"] or ""
             if CORRECTION_REGEX.search(cur_text):
-                misses.append({
-                    "session_id": sid,
-                    "prev_ts": prev["created_at"],
-                    "prev_prompt": prev["query_text"] or "",
-                    "correction_ts": cur["created_at"],
-                    "correction_prompt": cur_text,
-                })
+                misses.append(
+                    {
+                        "session_id": sid,
+                        "prev_ts": prev["created_at"],
+                        "prev_prompt": prev["query_text"] or "",
+                        "correction_ts": cur["created_at"],
+                        "correction_prompt": cur_text,
+                    }
+                )
 
     # Write each miss to eval_proposals (dedup by fingerprint)
     proposed = 0
@@ -110,18 +112,18 @@ def run(since_days: int = 7) -> dict:
                 for m in misses:
                     fp = _fingerprint(m["prev_prompt"], m["correction_prompt"])
                     pid = f"imiss_{fp}"
-                    existing = conn.execute(
-                        "SELECT id FROM eval_proposals WHERE id = ?", (pid,)
-                    ).fetchone()
+                    existing = conn.execute("SELECT id FROM eval_proposals WHERE id = ?", (pid,)).fetchone()
                     if existing:
                         continue
                     query = m["prev_prompt"][:1000]
-                    expected = json.dumps({
-                        "correction_signal": m["correction_prompt"][:500],
-                        "session_id": m["session_id"],
-                        "prev_ts": m["prev_ts"],
-                        "correction_ts": m["correction_ts"],
-                    })
+                    expected = json.dumps(
+                        {
+                            "correction_signal": m["correction_prompt"][:500],
+                            "session_id": m["session_id"],
+                            "prev_ts": m["prev_ts"],
+                            "correction_ts": m["correction_ts"],
+                        }
+                    )
                     conn.execute(
                         "INSERT INTO eval_proposals "
                         "(id, query, expected, expected_sources, source_event, "
@@ -135,7 +137,7 @@ def run(since_days: int = 7) -> dict:
                             "intent_miss_scan",
                             "candidate",
                             0.7,
-                            datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                            datetime.now(UTC).isoformat(timespec="seconds"),
                         ),
                     )
                     proposed += 1
@@ -151,7 +153,10 @@ def run(since_days: int = 7) -> dict:
 
     log.info(
         "intent_miss_scan: scanned=%d misses=%d proposed=%d (since %s)",
-        scanned, len(misses), proposed, cutoff[:10],
+        scanned,
+        len(misses),
+        proposed,
+        cutoff[:10],
     )
     return {"scanned": scanned, "misses": len(misses), "proposed": proposed}
 

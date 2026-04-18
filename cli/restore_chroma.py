@@ -8,11 +8,10 @@ Usage:
 import argparse
 import hashlib
 import os
-import subprocess
 import shutil
+import subprocess
 import sys
 from pathlib import Path
-
 
 CHROMA_DATA = Path("/Users/chrischo/server/rag/chroma-data")
 BACKUP_DIR = Path("/Users/chrischo/server/rag/chroma-backups")
@@ -60,22 +59,27 @@ def restore(date_str):
             for chunk in iter(lambda: f.read(1024 * 1024), b""):
                 actual.update(chunk)
         if expected != actual.hexdigest():
-            raise RuntimeError(f"Checksum mismatch: expected {expected[:16]}..., got {actual.hexdigest()[:16]}...")
+            raise RuntimeError(
+                f"Checksum mismatch: expected {expected[:16]}..., got {actual.hexdigest()[:16]}..."
+            )
         print(f"  checksum verified: {expected[:16]}...")
     else:
-        print(f"  WARNING: no checksum file found, skipping verification")
+        print("  WARNING: no checksum file found, skipping verification")
 
     print("[2/4] Extracting...")
-    subprocess.run(
-        ["tar", "xzf", str(local_archive), "-C", str(BACKUP_DIR)],
-        check=True, timeout=120
-    )
+    subprocess.run(["tar", "xzf", str(local_archive), "-C", str(BACKUP_DIR)], check=True, timeout=120)
 
     print("[3/4] Stopping ChromaDB...")
     # ChromaDB runs natively via launchd — stop it before restoring data
-    subprocess.run(["launchctl", "unload",
-                    os.path.expanduser("~/Library/LaunchAgents/ai.openclaw.chromadb-native.plist")],
-                   capture_output=True, timeout=30)
+    subprocess.run(
+        [
+            "launchctl",
+            "unload",
+            os.path.expanduser("~/Library/LaunchAgents/ai.openclaw.chromadb-native.plist"),
+        ],
+        capture_output=True,
+        timeout=30,
+    )
 
     print("[4/4] Restoring data...")
     # ChromaDB runs natively via launchd — data lives at ~/server/rag/chroma-data/.
@@ -94,7 +98,9 @@ def restore(date_str):
     if not src.is_dir() or not any(src.iterdir()):
         raise RuntimeError(f"Extracted backup dir is empty or missing: {src}")
     new_dir = CHROMA_DATA.parent / "chroma-data.new-restore"
-    from datetime import datetime as _dt, timedelta as _td
+    from datetime import datetime as _dt
+    from datetime import timedelta as _td
+
     stamp = _dt.now().strftime("%Y%m%d_%H%M%S")
     backup_current = CHROMA_DATA.parent / f"chroma-data.pre-restore-{stamp}"
     if new_dir.exists():
@@ -131,16 +137,23 @@ def restore(date_str):
         except Exception:
             continue
 
-    subprocess.run(["launchctl", "load",
-                    os.path.expanduser("~/Library/LaunchAgents/ai.openclaw.chromadb-native.plist")],
-                   capture_output=True, timeout=30)
+    subprocess.run(
+        ["launchctl", "load", os.path.expanduser("~/Library/LaunchAgents/ai.openclaw.chromadb-native.plist")],
+        capture_output=True,
+        timeout=30,
+    )
 
     import time
+
     time.sleep(3)
     import json
     import urllib.request
+
     try:
-        with urllib.request.urlopen("http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections", timeout=15) as resp:
+        with urllib.request.urlopen(
+            "http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections",
+            timeout=15,
+        ) as resp:
             cols = json.loads(resp.read())
         print(f"\nRestore complete. Collections: {[c['name'] for c in cols]}")
     except Exception:
@@ -159,5 +172,5 @@ def main():
     restore(args.date)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

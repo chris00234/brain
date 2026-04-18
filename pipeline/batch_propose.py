@@ -100,7 +100,9 @@ def find_duplicate_proposal(
     candidate_title = metadata.get("title", "")
     candidate_entities = list(metadata.get("entities", []))
     for proposal_id, title, entities, existing_body in existing_signatures:
-        score = _merge_or_duplicate_score(candidate_title, body, candidate_entities, title, existing_body, entities)
+        score = _merge_or_duplicate_score(
+            candidate_title, body, candidate_entities, title, existing_body, entities
+        )
         if score >= score_threshold:
             return proposal_id
     return None
@@ -154,13 +156,12 @@ def build_proposal(
     proposal_body = (
         "## Statement\n\nReview this proposed canonical note.\n\n"
         f"## Source Summary\n\n{body}\n\n"
-        "## Distilled Evidence\n\n"
-        + " ".join(body.split())[:max_summary_len]
-        + "\n"
+        "## Distilled Evidence\n\n" + " ".join(body.split())[:max_summary_len] + "\n"
     )
     if merge_candidates:
-        proposal_body += "\n## Merge Suggestion\n\nPotential overlap with existing canonical note(s):\n" + "\n".join(
-            [f"- {note_id}" for note_id in merge_candidates]
+        proposal_body += (
+            "\n## Merge Suggestion\n\nPotential overlap with existing canonical note(s):\n"
+            + "\n".join([f"- {note_id}" for note_id in merge_candidates])
         )
 
     return proposal, proposal_body
@@ -170,7 +171,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Batch-generate canonical proposals from distilled notes")
     parser.add_argument("--input-dir", type=Path, default=ROOT / "distilled")
     parser.add_argument("--review-queue", type=Path, default=ROOT / "reports" / "review-queue")
-    parser.add_argument("--manifest", type=Path, default=ROOT / "reports" / "review-queue" / "batch_propose_manifest.json")
+    parser.add_argument(
+        "--manifest", type=Path, default=ROOT / "reports" / "review-queue" / "batch_propose_manifest.json"
+    )
     parser.add_argument("--min-confidence", type=float, default=0.60)
     parser.add_argument("--min-sources", type=int, default=1)
     parser.add_argument("--max-merge-hints", type=int, default=2)

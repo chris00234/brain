@@ -5,16 +5,17 @@ Syncs CouchDB (Obsidian Live Sync) to a local folder for OpenClaw access.
 Supports reading and writing notes.
 """
 
+import argparse
+import base64
+import fcntl
+import json
 import os
 import sys
-import json
 import time
-import base64
-import urllib.request
 import urllib.parse
-import argparse
+import urllib.request
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 ENV_FILE = Path(os.getenv("OBSIDIAN_SYNC_ENV_FILE", "/Users/chrischo/.openclaw/workspace/.obsidian_sync.env"))
@@ -22,30 +23,51 @@ FAILURE_LOG = Path("/Users/chrischo/server/brain/logs/obsidian-sync-failures.jso
 STATE_FILE = Path("/Users/chrischo/server/brain/logs/obsidian-sync-state.json")
 
 
+# 2026-04-16 R-5: flock-based safe_state to prevent overlapping syncs
+# from corrupting last_seq (would force a full rescan from seq=0).
 def load_state() -> dict:
     if not STATE_FILE.exists():
         return {"last_seq": "0", "last_run": None}
     try:
-        return json.loads(STATE_FILE.read_text())
+        with STATE_FILE.open("r") as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_SH)
+            try:
+                return json.loads(f.read())
+            finally:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
     except Exception:
         return {"last_seq": "0", "last_run": None}
 
 
 def save_state(state: dict) -> None:
-    state["last_run"] = datetime.now().isoformat()
+    state["last_run"] = datetime.now(UTC).isoformat()
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    STATE_FILE.write_text(json.dumps(state, indent=2))
+    tmp = STATE_FILE.with_suffix(STATE_FILE.suffix + ".tmp")
+    with tmp.open("w") as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        try:
+            f.write(json.dumps(state, indent=2))
+            f.flush()
+            os.fsync(f.fileno())
+        finally:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+    os.replace(tmp, STATE_FILE)
 
 
 def log_failure(stage: str, error: str = ""):
     try:
         FAILURE_LOG.parent.mkdir(parents=True, exist_ok=True)
         with FAILURE_LOG.open("a") as f:
-            f.write(json.dumps({
-                "timestamp": datetime.now().isoformat(),
-                "stage": stage,
-                "error": str(error)[:500],
-            }) + "\n")
+            f.write(
+                json.dumps(
+                    {
+                        "timestamp": datetime.now(UTC).isoformat(),
+                        "stage": stage,
+                        "error": str(error)[:500],
+                    }
+                )
+                + "\n"
+            )
     except Exception:
         pass
 
@@ -72,6 +94,7 @@ COUCH_PASS = os.getenv("OBSIDIAN_COUCH_PASS")
 DB_NAME = os.getenv("OBSIDIAN_COUCH_DB", "obsidian")
 VAULT_DIR = os.getenv("OBSIDIAN_VAULT_DIR", "/Users/chrischo/.openclaw/workspace/obsidian-vault")
 
+
 def _check_creds():
     if not COUCH_USER or not COUCH_PASS:
         raise RuntimeError(
@@ -79,17 +102,18 @@ def _check_creds():
             "(or create /Users/chrischo/.openclaw/workspace/.obsidian_sync.env)."
         )
 
+
 def couch_request(path, method="GET", data=None):
     """Make authenticated CouchDB request"""
     url = f"{COUCH_URL}/{path}"
     creds = base64.b64encode(f"{COUCH_USER}:{COUCH_PASS}".encode()).decode()
     headers = {"Authorization": f"Basic {creds}", "Content-Type": "application/json"}
-    
+
     if data:
         req = urllib.request.Request(url, data=json.dumps(data).encode(), headers=headers, method=method)
     else:
         req = urllib.request.Request(url, headers=headers, method=method)
-    
+
     try:
         resp = urllib.request.urlopen(req)
         return json.loads(resp.read())
@@ -100,6 +124,7 @@ def couch_request(path, method="GET", data=None):
         log_failure("couch_request", f"{method} {path} {e}")
         return {"error": str(e)}
 
+
 def get_all_docs():
     """Get all document IDs from CouchDB (full scan fallback)"""
     result = couch_request(f"{DB_NAME}/_all_docs?include_docs=true&limit=10000")
@@ -108,20 +133,23 @@ def get_all_docs():
 
 def get_changes(since: str = "0", limit: int = 500):
     """Get changed docs since last sync using CouchDB _changes feed."""
-    url = f"{DB_NAME}/_changes?since={urllib.parse.quote(str(since), safe='')}&include_docs=true&limit={limit}"
+    url = (
+        f"{DB_NAME}/_changes?since={urllib.parse.quote(str(since), safe='')}&include_docs=true&limit={limit}"
+    )
     result = couch_request(url)
     return result.get("results", []), result.get("last_seq", since)
+
 
 def reconstruct_note(doc):
     """Reconstruct note content from parent + children chunks"""
     if doc.get("deleted"):
         return None
-    
+
     children = doc.get("children", [])
     if not children:
         # Small doc with inline data
         return doc.get("data", "")
-    
+
     # Fetch children chunks and concatenate
     content_parts = []
     for child_id in children:
@@ -129,8 +157,9 @@ def reconstruct_note(doc):
         child = couch_request(f"{DB_NAME}/{encoded_id}")
         if "data" in child:
             content_parts.append(child["data"])
-    
+
     return "".join(content_parts)
+
 
 def atomic_write_text(file_path, content):
     """Write text atomically to avoid transient 0-byte/truncated files."""
@@ -163,7 +192,7 @@ def _sync_md_doc(doc: dict) -> str:
     os.makedirs(os.path.dirname(file_path), exist_ok=True)
     if os.path.exists(file_path):
         try:
-            with open(file_path, "r", encoding="utf-8") as f:
+            with open(file_path, encoding="utf-8") as f:
                 if f.read() == content:
                     return "unchanged"
         except Exception as e:
@@ -259,7 +288,7 @@ def pull_notes():
             # Skip rewrite when content is identical (reduces editor write conflicts)
             if os.path.exists(file_path):
                 try:
-                    with open(file_path, "r", encoding="utf-8") as f:
+                    with open(file_path, encoding="utf-8") as f:
                         if f.read() == content:
                             unchanged += 1
                             continue
@@ -282,13 +311,14 @@ def pull_notes():
     print(f"🟰 Unchanged {unchanged}")
     print(f"⏭️ Skipped {skipped} (deleted/binary)")
 
+
 def push_note(file_path):
     """Push a local note back to CouchDB (Live Sync-compatible parent+leaf format)."""
     rel_path = os.path.relpath(file_path, VAULT_DIR)
     doc_id = rel_path.lower()
 
     # Read local file
-    with open(file_path, "r", encoding="utf-8") as f:
+    with open(file_path, encoding="utf-8") as f:
         content = f.read()
 
     now_ms = int(time.time() * 1000)
@@ -307,7 +337,7 @@ def push_note(file_path):
             "data": content,
             "ctime": now_ms,
             "mtime": now_ms,
-            "eden": {}
+            "eden": {},
         }
         encoded_child = urllib.parse.quote(child_id, safe="")
         child_result = couch_request(f"{DB_NAME}/{encoded_child}", method="PUT", data=child_doc)
@@ -320,7 +350,7 @@ def push_note(file_path):
             "size": content_size,
             "type": "plain",
             "children": [child_id],
-            "eden": {}
+            "eden": {},
         }
         parent_result = couch_request(f"{DB_NAME}/{encoded_id}", method="PUT", data=parent_doc)
 
@@ -338,7 +368,7 @@ def push_note(file_path):
             "data": content,
             "ctime": existing.get("ctime", now_ms),
             "mtime": now_ms,
-            "eden": existing_child.get("eden", {}) if "error" not in existing_child else {}
+            "eden": existing_child.get("eden", {}) if "error" not in existing_child else {},
         }
         if "error" not in existing_child and "_rev" in existing_child:
             child_doc["_rev"] = existing_child["_rev"]
@@ -362,6 +392,7 @@ def push_note(file_path):
         log_failure("push_note", f"{rel_path}: {result}")
         print(f"❌ Error: {result}")
 
+
 def list_notes():
     """List all notes in CouchDB"""
     rows = get_all_docs()
@@ -374,17 +405,16 @@ def list_notes():
         if doc.get("deleted"):
             continue
         if doc_id.endswith(".md"):
-            notes.append({
-                "path": doc.get("path", doc_id),
-                "size": doc.get("size", 0),
-                "mtime": doc.get("mtime", 0)
-            })
-    
+            notes.append(
+                {"path": doc.get("path", doc_id), "size": doc.get("size", 0), "mtime": doc.get("mtime", 0)}
+            )
+
     notes.sort(key=lambda x: x["mtime"], reverse=True)
     for n in notes[:30]:
         ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(n["mtime"] / 1000))
         print(f"  {ts}  {n['size']:>6}B  {n['path']}")
     print(f"\nTotal: {len(notes)} notes")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Obsidian Live Sync ↔ Local Folder")

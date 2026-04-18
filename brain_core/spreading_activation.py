@@ -19,6 +19,7 @@ in autonomy.db so follow-up queries inside a session inherit warmth.
 
 Reference: https://arxiv.org/abs/2405.14831 (HippoRAG)
 """
+
 from __future__ import annotations
 
 import logging
@@ -49,9 +50,9 @@ _graph_lock = threading.Lock()
 _GRAPH_TTL_SECONDS = 300
 
 # PPR hyperparameters
-ALPHA = 0.85       # standard damping factor
-MAX_ITER = 30      # cap iterations to bound latency
-TOLERANCE = 1e-4   # convergence threshold
+ALPHA = 0.85  # standard damping factor
+MAX_ITER = 30  # cap iterations to bound latency
+TOLERANCE = 1e-4  # convergence threshold
 
 # Activation TTL in the autonomy.db session table
 ACTIVATION_TTL_SECONDS = 90
@@ -156,6 +157,7 @@ def _seed_entities_from_query(query: str, max_seeds: int = 8) -> list[str]:
     avoids spurious matches like "go" → "google", "ago", "argo".
     """
     import re as _re
+
     g = _get_graph()
     if g is None:
         return []
@@ -309,6 +311,7 @@ def boost_results_by_activation(
     if not activation or not results:
         return results
     import re as _re
+
     # Pre-lowercase + tokenize the activation keys
     activation_lower = {k.lower(): v for k, v in activation.items() if k and len(k) >= 3}
     pool = results if top_n is None else results[:top_n]
@@ -329,11 +332,7 @@ def boost_results_by_activation(
         # explicit entity tagging. Tokenize the haystack once, check
         # whole-word membership against each activation key.
         if best == 0 and activation_lower:
-            haystack = (
-                (r.get("title", "") or "")[:200]
-                + " "
-                + (r.get("content", "") or "")[:400]
-            ).lower()
+            haystack = ((r.get("title", "") or "")[:200] + " " + (r.get("content", "") or "")[:400]).lower()
             if haystack:
                 tokens = set(_re.findall(r"\w+", haystack))
                 for ent_lower, score in activation_lower.items():

@@ -18,10 +18,10 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "brain_core"))
 
-import active_recall  # noqa: E402
-
+import active_recall
 
 # ── Fixtures ──────────────────────────────────────────────
+
 
 @pytest.fixture(autouse=True)
 def _redirect_autonomy_db(tmp_path, monkeypatch):
@@ -31,6 +31,7 @@ def _redirect_autonomy_db(tmp_path, monkeypatch):
     monkeypatch.setattr(active_recall, "AUTONOMY_DB", fake_db)
     # Initialize the session_context table
     import sqlite3
+
     with sqlite3.connect(str(fake_db)) as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS session_context (
@@ -54,6 +55,7 @@ def _clear_routes_cache():
 
 
 # ── Intent matching ─────────────────────────────────────
+
 
 def test_intent_matches_korean_design_keyword():
     matches = active_recall._match_canonical_routes("프론트엔드 디자인 어떻게 해?")
@@ -98,6 +100,7 @@ def test_empty_prompt_returns_empty():
 
 # ── Canonical path loading ───────────────────────────────
 
+
 def test_load_canonical_path_missing_returns_none(tmp_path):
     result = active_recall._load_canonical_path(str(tmp_path / "does_not_exist.md"))
     assert result is None
@@ -114,6 +117,7 @@ def test_load_canonical_path_reads_file(tmp_path):
 
 
 # ── Dedup + decay ────────────────────────────────────────
+
 
 def test_apply_decay_filter_critical_reinjects_after_15_turns():
     """CR1 fix (2026-04-14): critical-priority blocks re-inject after 15
@@ -168,15 +172,31 @@ def test_apply_decay_filter_unseen_block_passes():
 
 # ── Budget enforcement ───────────────────────────────────
 
+
 def test_enforce_budget_sorts_by_priority():
     low = active_recall.InjectionBlock(
-        id="a", title="low", content="x" * 500, source="s", score=0.3, priority="low",
+        id="a",
+        title="low",
+        content="x" * 500,
+        source="s",
+        score=0.3,
+        priority="low",
     )
     high = active_recall.InjectionBlock(
-        id="b", title="high", content="y" * 500, source="s", score=0.9, priority="high",
+        id="b",
+        title="high",
+        content="y" * 500,
+        source="s",
+        score=0.9,
+        priority="high",
     )
     crit = active_recall.InjectionBlock(
-        id="c", title="crit", content="z" * 500, source="s", score=1.0, priority="critical",
+        id="c",
+        title="crit",
+        content="z" * 500,
+        source="s",
+        score=1.0,
+        priority="critical",
     )
     kept = active_recall._enforce_budget([low, high, crit], limit=1000)
     # Order should be critical → high → low
@@ -187,13 +207,19 @@ def test_enforce_budget_sorts_by_priority():
 def test_enforce_budget_trims_when_over_limit():
     blocks = [
         active_recall.InjectionBlock(
-            id=f"b{i}", title="t", content="x" * 500, source="s", score=0.5,
+            id=f"b{i}",
+            title="t",
+            content="x" * 500,
+            source="s",
+            score=0.5,
             priority="medium",
         )
         for i in range(10)
     ]
     kept = active_recall._enforce_budget(blocks, limit=500)
-    total_tokens = sum(active_recall._rough_tokens(b.content) + active_recall._rough_tokens(b.title) for b in kept)
+    total_tokens = sum(
+        active_recall._rough_tokens(b.content) + active_recall._rough_tokens(b.title) for b in kept
+    )
     assert total_tokens <= 500
 
 
@@ -204,6 +230,7 @@ def test_rough_tokens_floor_is_one():
 
 
 # ── Confidence sentinel ──────────────────────────────────
+
 
 def test_confidence_sentinel_has_source_tag():
     sentinel = active_recall._confidence_sentinel()
@@ -216,9 +243,11 @@ def test_confidence_sentinel_has_source_tag():
 
 # ── build_injection end-to-end ──────────────────────────
 
+
 def test_build_injection_fails_open_on_search_error(monkeypatch):
     """If search_all raises, build_injection returns degraded=False with
     whatever it has (doesn't crash)."""
+
     def _boom(*args, **kwargs):
         raise RuntimeError("chroma unreachable")
 
@@ -261,12 +290,11 @@ def test_build_injection_design_query_returns_canonical():
     blocks = result.get("blocks", [])
     has_canonical = any(b.get("source") == "canonical" for b in blocks)
     # Either canonical hits OR confidence sentinel if paths missing
-    assert has_canonical or any(
-        b.get("source") == "confidence_sentinel" for b in blocks
-    )
+    assert has_canonical or any(b.get("source") == "confidence_sentinel" for b in blocks)
 
 
 # ── Seen registry round-trip ────────────────────────────
+
 
 def test_update_seen_persists_to_session_context():
     block = active_recall.InjectionBlock(

@@ -10,12 +10,13 @@ When disabled, returns results unchanged so callers can fall back to token-overl
 Replaced Ollama/qwen2.5 scorer 2026-04-12 — the LLM approach was serial HTTP
 per doc and the real cross-encoder is batched, ~10x faster and measurably better.
 """
+
 from __future__ import annotations
 
 import logging
 import math
-from pathlib import Path
 import sys
+from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -62,10 +63,7 @@ def rerank_with_cross_encoder(query: str, results: list[dict], top_k: int = 20) 
     tail = results[top_k:]
 
     # Build (query, title+content) pairs. Content capped at 1500 chars in score_pairs.
-    docs = [
-        ((r.get("title") or "") + "\n" + (r.get("content") or ""))
-        for r in subset
-    ]
+    docs = [((r.get("title") or "") + "\n" + (r.get("content") or "")) for r in subset]
     raw_scores = score_pairs(query, docs)
 
     if not raw_scores or all(s == 0.0 for s in raw_scores):
@@ -83,7 +81,7 @@ def rerank_with_cross_encoder(query: str, results: list[dict], top_k: int = 20) 
     ce_normalized = [_sigmoid(s) for s in filled_scores]
 
     # Blend 20% original × 80% CE (CE × 100 to match RRF score scale)
-    for r, ce_norm in zip(subset, ce_normalized):
+    for r, ce_norm in zip(subset, ce_normalized, strict=False):
         original = float(r.get("score", 0))
         blended = original * 0.2 + ce_norm * 100 * 0.8
         r["cross_encoder_score"] = round(ce_norm, 4)

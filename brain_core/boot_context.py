@@ -8,14 +8,12 @@ Returns the most relevant context snippets for the agent's role,
 searched across ChromaDB, canonical knowledge, and Obsidian vault.
 """
 
-import json
-import subprocess
-import sys
 import argparse
+import json
+import sys
 import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from datetime import datetime, timedelta, timezone
-
 
 AGENT_QUERIES = {
     "ellie": [
@@ -67,24 +65,25 @@ DEFAULT_QUERIES = [
 ]
 
 try:
-    from config import BRAIN_LOGS_DIR, KNOWLEDGE_DIR, OPENCLAW_DIR, INBOX_DIR
-    BOOT_LOG = BRAIN_LOGS_DIR / 'boot-context-log.jsonl'
-    CHRIS_IDENTITY = KNOWLEDGE_DIR / 'canonical' / 'chris' / '_identity.md'
-    CHRIS_STATE = KNOWLEDGE_DIR / 'canonical' / 'chris' / '_state.md'
+    from config import BRAIN_LOGS_DIR, INBOX_DIR, KNOWLEDGE_DIR, OPENCLAW_DIR
+
+    BOOT_LOG = BRAIN_LOGS_DIR / "boot-context-log.jsonl"
+    CHRIS_IDENTITY = KNOWLEDGE_DIR / "canonical" / "chris" / "_identity.md"
+    CHRIS_STATE = KNOWLEDGE_DIR / "canonical" / "chris" / "_state.md"
 except ImportError:
-    BOOT_LOG = Path('/Users/chrischo/server/brain/logs/boot-context-log.jsonl')
-    CHRIS_IDENTITY = Path('/Users/chrischo/server/knowledge/canonical/chris/_identity.md')
-    CHRIS_STATE = Path('/Users/chrischo/server/knowledge/canonical/chris/_state.md')
-    OPENCLAW_DIR = Path('/Users/chrischo/.openclaw')
-    INBOX_DIR = Path('/Users/chrischo/server/knowledge/raw/inbox')
+    BOOT_LOG = Path("/Users/chrischo/server/brain/logs/boot-context-log.jsonl")
+    CHRIS_IDENTITY = Path("/Users/chrischo/server/knowledge/canonical/chris/_identity.md")
+    CHRIS_STATE = Path("/Users/chrischo/server/knowledge/canonical/chris/_state.md")
+    OPENCLAW_DIR = Path("/Users/chrischo/.openclaw")
+    INBOX_DIR = Path("/Users/chrischo/server/knowledge/raw/inbox")
 
 
 # ---------------------------------------------------------------------------
 # Block cache — avoids re-fetching static content every session
 # ---------------------------------------------------------------------------
 _block_cache: dict[str, tuple[float, str]] = {}  # key -> (timestamp, content)
-STATIC_TTL = 7 * 24 * 3600   # 7 days — static blocks (identity, state)
-DYNAMIC_TTL = 300             # 5 min — dynamic blocks (scratch, memories, alerts, messages, focus, search)
+STATIC_TTL = 7 * 24 * 3600  # 7 days — static blocks (identity, state)
+DYNAMIC_TTL = 300  # 5 min — dynamic blocks (scratch, memories, alerts, messages, focus, search)
 
 
 def _cache_get(key: str, ttl: float) -> str | None:
@@ -144,7 +143,8 @@ def _predictive_queries(agent: str) -> list[str]:
 
     # Step 2 — Calendar lookahead (<10ms)
     try:
-        from indexer import chroma_api, _get_collection_id
+        from indexer import _get_collection_id, chroma_api
+
         col_id = _get_collection_id("personal") or _get_collection_id("calendar")
         if col_id:
             resp = chroma_api(
@@ -154,10 +154,10 @@ def _predictive_queries(agent: str) -> list[str]:
             )
             docs = resp.get("documents", [])
             metas = resp.get("metadatas", [])
-            now_utc = datetime.now(timezone.utc)
+            now_utc = datetime.now(UTC)
             cutoff = now_utc + timedelta(hours=4)
             cal_count = 0
-            for doc, meta in zip(docs, metas):
+            for doc, meta in zip(docs, metas, strict=False):
                 if cal_count >= 2:
                     break
                 if not meta:
@@ -168,7 +168,7 @@ def _predictive_queries(agent: str) -> list[str]:
                 try:
                     event_dt = datetime.fromisoformat(date_str)
                     if event_dt.tzinfo is None:
-                        event_dt = event_dt.replace(tzinfo=timezone.utc)
+                        event_dt = event_dt.replace(tzinfo=UTC)
                     if not (now_utc <= event_dt <= cutoff):
                         continue
                 except Exception:
@@ -183,6 +183,7 @@ def _predictive_queries(agent: str) -> list[str]:
     # Step 3 — Session continuation (<5ms)
     try:
         from working_memory import get_session_summaries
+
         summaries = get_session_summaries(limit=3)
         if summaries:
             content = summaries[0].get("content", "")
@@ -208,6 +209,7 @@ def _load_search_mod():
         sys.path.insert(0, _parent)
     try:
         import search_unified
+
         _search_mod = search_unified
     except ImportError:
         pass
@@ -224,6 +226,7 @@ def search(query, limit=3):
         return payload.get("results", [])
     except Exception as e:
         import logging
+
         logging.getLogger("brain.boot_context").warning("search failed for %r: %s", query[:50], e)
         return []
 
@@ -233,7 +236,7 @@ def get_scratch_context(agent_name):
     cached = _cache_get(key, DYNAMIC_TTL)
     if cached is not None:
         return cached
-    scratch = OPENCLAW_DIR / f'workspace-{agent_name}' / 'SCRATCH.md'
+    scratch = OPENCLAW_DIR / f"workspace-{agent_name}" / "SCRATCH.md"
     if scratch.exists():
         content = scratch.read_text().strip()
         if content and len(content) > 50:
@@ -249,8 +252,8 @@ def _read_stripped_body(path: Path):
         return None
     try:
         text = path.read_text()
-        if text.startswith('---'):
-            parts = text.split('---', 2)
+        if text.startswith("---"):
+            parts = text.split("---", 2)
             if len(parts) >= 3:
                 body = parts[2].strip()
                 return body if body else None
@@ -281,15 +284,21 @@ def get_chris_state():
     return content
 
 
+# 2026-04-17: get_chris_profile alias removed. reasoning.py now imports
+# get_chris_state directly with a rename-at-import — cleaner + prevents
+# ambiguity about whether a "profile" is identity+state vs state-only.
+
+
 def _recency_score(created_at: str) -> float:
     if not created_at:
         return 0.3
     try:
-        from datetime import datetime, timezone
+        from datetime import datetime
+
         dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        age_days = (datetime.now(timezone.utc) - dt).total_seconds() / 86400
+            dt = dt.replace(tzinfo=UTC)
+        age_days = (datetime.now(UTC) - dt).total_seconds() / 86400
         if age_days < 1:
             return 1.0
         if age_days < 7:
@@ -312,14 +321,16 @@ def get_agent_memories(agent_name, limit=5):
     if cached is not None:
         return cached
     try:
-        from indexer import chroma_api, _get_collection_id
+        from indexer import _get_collection_id, chroma_api
+
         col_id = _get_collection_id("semantic_memory")
         if not col_id:
             return ""
-        resp = chroma_api("POST",
+        resp = chroma_api(
+            "POST",
             f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/get",
-            {"limit": 200, "include": ["documents", "metadatas"],
-             "where": {"agent": {"$eq": agent_name}}})
+            {"limit": 200, "include": ["documents", "metadatas"], "where": {"agent": {"$eq": agent_name}}},
+        )
         ids = resp.get("ids", [])
         docs = resp.get("documents", [])
         metas = resp.get("metadatas", [])
@@ -329,21 +340,24 @@ def get_agent_memories(agent_name, limit=5):
         entries = []
         for i, doc in enumerate(docs):
             meta = metas[i] if i < len(metas) else {}
-            entries.append({
-                "id": ids[i] if i < len(ids) else None,
-                "doc": doc,
-                "meta": meta,
-                "created_at": meta.get("created_at", ""),
-            })
+            entries.append(
+                {
+                    "id": ids[i] if i < len(ids) else None,
+                    "doc": doc,
+                    "meta": meta,
+                    "created_at": meta.get("created_at", ""),
+                }
+            )
 
         try:
             from neo4j_client import run_query
+
             id_list = [e["id"] for e in entries if e.get("id")]
             if id_list:
                 score_rows = run_query(
                     "UNWIND $ids AS mid OPTIONAL MATCH (m:MemoryAccess {memory_id: mid}) "
                     "RETURN mid, coalesce(m.utility_score, 0.5) AS score",
-                    {"ids": id_list}
+                    {"ids": id_list},
                 )
                 score_map = {r["mid"]: float(r["score"]) for r in score_rows}
             else:
@@ -378,11 +392,13 @@ def get_recent_openclaw_distillations(hours: int = 24, limit: int = 5) -> list[d
     Skips claude agent (has its own ingest path). Sorted by record timestamp desc.
     """
     from inbox_utils import get_recent_inbox_records
+
     records = [
-        r for r in get_recent_inbox_records(prefix='raw_oc_', hours=hours, parse=True)
-        if not r.get('source_ref', '').startswith('openclaw:claude:')
+        r
+        for r in get_recent_inbox_records(prefix="raw_oc_", hours=hours, parse=True)
+        if not r.get("source_ref", "").startswith("openclaw:claude:")
     ]
-    records.sort(key=lambda r: r.get('timestamp', ''), reverse=True)
+    records.sort(key=lambda r: r.get("timestamp", ""), reverse=True)
     return records[:limit]
 
 
@@ -402,6 +418,7 @@ def build_boot_context(agent_name, limit=3):
     else:
         try:
             from working_memory import get_working_context
+
             ctx = get_working_context()
             focus_lines = []
             for g in ctx.get("active_goals", [])[:3]:
@@ -415,13 +432,16 @@ def build_boot_context(agent_name, limit=3):
             if focus_lines:
                 content = "\n".join(focus_lines)
                 _cache_set(f"working_memory:{agent_name}", content)
-                sections.append({"section": "Current Focus", "content": content, "source": "brain/working_memory"})
+                sections.append(
+                    {"section": "Current Focus", "content": content, "source": "brain/working_memory"}
+                )
         except Exception:
             pass
 
     # Recent session summaries — "what Chris was working on"
     try:
         from working_memory import get_session_summaries
+
         summaries = get_session_summaries(limit=5)
         if summaries:
             session_lines = []
@@ -429,36 +449,45 @@ def build_boot_context(agent_name, limit=3):
                 ts = s.get("created_at", "")[:16].replace("T", " ")
                 agent_tag = s.get("agent") or "claude"
                 session_lines.append(f"- [{ts} {agent_tag}] {s['content']}")
-            sections.append({
-                "section": "Recent Sessions",
-                "content": "\n".join(session_lines),
-                "source": "brain/session_summaries",
-            })
+            sections.append(
+                {
+                    "section": "Recent Sessions",
+                    "content": "\n".join(session_lines),
+                    "source": "brain/session_summaries",
+                }
+            )
     except Exception:
         pass
 
     # Recent OpenClaw agent conversations (last 24h) — cached 5min
     oc_cached = _cache_get("openclaw_recent_24h", DYNAMIC_TTL)
     if oc_cached is not None:
-        sections.append({
-            "section": "Recent Agent Conversations (24h)",
-            "content": oc_cached,
-            "source": "raw/inbox/openclaw",
-        })
+        sections.append(
+            {
+                "section": "Recent Agent Conversations (24h)",
+                "content": oc_cached,
+                "source": "raw/inbox/openclaw",
+            }
+        )
     else:
         try:
             recent_oc = get_recent_openclaw_distillations(hours=24, limit=5)
             if recent_oc:
                 lines = []
                 for rec in recent_oc:
-                    ts = rec.get('timestamp', '')[:16].replace('T', ' ')
-                    src_ref = rec.get('source_ref', '')
-                    oc_agent = src_ref.split(':')[1] if src_ref.startswith('openclaw:') else 'unknown'
-                    body = rec.get('content', '')
-                    summary = ''
-                    for bl in body.split('\n'):
+                    ts = rec.get("timestamp", "")[:16].replace("T", " ")
+                    src_ref = rec.get("source_ref", "")
+                    oc_agent = src_ref.split(":")[1] if src_ref.startswith("openclaw:") else "unknown"
+                    body = rec.get("content", "")
+                    summary = ""
+                    for bl in body.split("\n"):
                         bl = bl.strip()
-                        if bl and not bl.startswith('OpenClaw ') and not bl.startswith('Signal:') and not bl.startswith('Context '):
+                        if (
+                            bl
+                            and not bl.startswith("OpenClaw ")
+                            and not bl.startswith("Signal:")
+                            and not bl.startswith("Context ")
+                        ):
                             summary = bl
                             break
                     if not summary:
@@ -466,47 +495,57 @@ def build_boot_context(agent_name, limit=3):
                     lines.append(f"- [{ts} {oc_agent}] {summary[:300]}")
                 content = "\n".join(lines)
                 _cache_set("openclaw_recent_24h", content)
-                sections.append({
-                    "section": "Recent Agent Conversations (24h)",
-                    "content": content,
-                    "source": "raw/inbox/openclaw",
-                })
+                sections.append(
+                    {
+                        "section": "Recent Agent Conversations (24h)",
+                        "content": content,
+                        "source": "raw/inbox/openclaw",
+                    }
+                )
         except Exception:
             pass
 
     # Chris identity (immutable core) + state (mutable snapshot)
     identity = get_chris_identity()
     if identity:
-        sections.append({
-            "section": "Chris Identity",
-            "content": identity,
-            "source": "canonical/chris/_identity.md",
-        })
+        sections.append(
+            {
+                "section": "Chris Identity",
+                "content": identity,
+                "source": "canonical/chris/_identity.md",
+            }
+        )
 
     state = get_chris_state()
     if state:
-        sections.append({
-            "section": "Chris State",
-            "content": state,
-            "source": "canonical/chris/_state.md",
-        })
+        sections.append(
+            {
+                "section": "Chris State",
+                "content": state,
+                "source": "canonical/chris/_state.md",
+            }
+        )
 
     scratch = get_scratch_context(agent_name)
     if scratch:
-        sections.append({
-            "section": "Active Task",
-            "content": scratch,
-            "source": "SCRATCH.md",
-        })
+        sections.append(
+            {
+                "section": "Active Task",
+                "content": scratch,
+                "source": "SCRATCH.md",
+            }
+        )
 
     # Agent-specific memory recall — "what did Chris tell ME last time"
     agent_memories = get_agent_memories(agent_name)
     if agent_memories:
-        sections.append({
-            "section": f"Chris's feedback to {agent_name}",
-            "content": agent_memories,
-            "source": "semantic_memory",
-        })
+        sections.append(
+            {
+                "section": f"Chris's feedback to {agent_name}",
+                "content": agent_memories,
+                "source": "semantic_memory",
+            }
+        )
 
     # Phase 6: Atoms due for review (SM-2 spaced repetition signal).
     # Surfaces top-3 atoms whose next_review_at has passed so the agent gets
@@ -520,42 +559,131 @@ def build_boot_context(agent_name, limit=3):
             for d in due:
                 preview = (d.get("text") or "")[:140].replace("\n", " ")
                 lines.append(f"- [{d.get('tier')}] {preview}")
-            sections.append({
-                "section": "Atoms due for review (SM-2)",
-                "content": "\n".join(lines),
-                "source": "brain/atoms",
-            })
+            sections.append(
+                {
+                    "section": "Atoms due for review (SM-2)",
+                    "content": "\n".join(lines),
+                    "source": "brain/atoms",
+                }
+            )
     except Exception:
         pass
 
-    # Proactive alerts — things the brain noticed that agents should know
-    alerts_cached = _cache_get("proactive_alerts", DYNAMIC_TTL)
-    if alerts_cached is not None:
-        sections.append({"section": "Proactive Alerts", "content": alerts_cached, "source": "brain/proactive"})
+    # Predictive Context (2026-04-17 A) — context-aware prefetch based on
+    # current focus_items. Surfaces past atoms/decisions/lessons most likely
+    # relevant to what Chris is currently doing. Complementary to the existing
+    # temporal _predictive_queries at line 110 (which asks "what time is it")
+    # — this asks "what is Chris focused on right now".
+    pred_cached = _cache_get("predictive_top", DYNAMIC_TTL)
+    if pred_cached is not None:
+        sections.append(
+            {
+                "section": "Predictive Context (relevant to current focus)",
+                "content": pred_cached,
+                "source": "brain/predictive",
+            }
+        )
     else:
         try:
-            from proactive import get_current_insights
-            insights = get_current_insights(max_age_hours=12)
-            active = [i for i in insights if not i.acted_on][:3]
-            if active:
-                content = "\n".join(f"[{i.severity.upper()}] {i.summary}" for i in active)
-                _cache_set("proactive_alerts", content)
-                sections.append({"section": "Proactive Alerts", "content": content, "source": "brain/proactive"})
+            from predictive import predict_relevant_context
+
+            top = predict_relevant_context(limit=3)
+            if top:
+                lines = []
+                for item in top:
+                    title = item.get("title") or item.get("content", "")[:60]
+                    reason = item.get("reason", "")
+                    prio = item.get("priority", 0)
+                    lines.append(f"[prio={prio:.1f} | {reason}] {title[:100]}")
+                content = "\n".join(lines)
+                _cache_set("predictive_top", content)
+                sections.append(
+                    {
+                        "section": "Predictive Context (relevant to current focus)",
+                        "content": content,
+                        "source": "brain/predictive",
+                    }
+                )
         except Exception:
             pass
+
+    # Attention priority queue (2026-04-17 D wiring) — biologically-inspired
+    # priority-ordered insights. Replaces flat "Proactive Alerts" with the
+    # attention_queue output (severity × novelty × valence). Each item shown
+    # auto-bumps shown_count so habituation kicks in across sessions — the
+    # same alert surfaces less aggressively after Chris has seen it 3x.
+    # Fails open to the legacy proactive block.
+    attn_cached = _cache_get("attention_top", DYNAMIC_TTL)
+    if attn_cached is not None:
+        sections.append(
+            {"section": "Attention (top priorities)", "content": attn_cached, "source": "brain/attention"}
+        )
+    else:
+        try:
+            from attention import mark_shown, top_attention
+
+            top_items = top_attention(limit=3)
+            if top_items:
+                lines = []
+                for item in top_items:
+                    sev = str(item.get("severity", "info")).upper()
+                    summary = str(item.get("summary", ""))[:200]
+                    prio = item.get("priority", 0)
+                    lines.append(f"[{sev} prio={prio:.2f}] {summary}")
+                    # Mark shown for habituation — fails open.
+                    try:
+                        mark_shown(item.get("id", ""))
+                    except Exception:
+                        pass
+                content = "\n".join(lines)
+                _cache_set("attention_top", content)
+                sections.append(
+                    {
+                        "section": "Attention (top priorities)",
+                        "content": content,
+                        "source": "brain/attention",
+                    }
+                )
+        except Exception:
+            # Legacy fallback to proactive insights if attention module fails.
+            try:
+                from proactive import get_current_insights
+
+                insights = get_current_insights(max_age_hours=12)
+                active = [i for i in insights if not i.acted_on][:3]
+                if active:
+                    content = "\n".join(f"[{i.severity.upper()}] {i.summary}" for i in active)
+                    sections.append(
+                        {"section": "Proactive Alerts", "content": content, "source": "brain/proactive"}
+                    )
+            except Exception:
+                pass
 
     # Pending messages for this agent
     msgs_cached = _cache_get(f"messages:{agent_name}", DYNAMIC_TTL)
     if msgs_cached is not None:
-        sections.append({"section": f"Pending Messages for {agent_name}", "content": msgs_cached, "source": "brain/messages"})
+        sections.append(
+            {
+                "section": f"Pending Messages for {agent_name}",
+                "content": msgs_cached,
+                "source": "brain/messages",
+            }
+        )
     else:
         try:
             from agent_messenger import get_pending_messages
+
             msgs = get_pending_messages(agent_name, limit=5)
             if msgs:
                 content = "\n".join(f"[{m['from_agent']}] {m['content'][:200]}" for m in msgs)
                 _cache_set(f"messages:{agent_name}", content)
-                sections.append({"section": f"Pending Messages for {agent_name}", "content": content, "source": "brain/messages"})
+                sections.append(
+                    {
+                        "section": f"Pending Messages for {agent_name}",
+                        "content": content,
+                        "source": "brain/messages",
+                    }
+                )
         except Exception:
             pass
 
@@ -569,6 +697,7 @@ def build_boot_context(agent_name, limit=3):
             pass  # corrupted cache — fall through to fresh fetch
     else:
         from concurrent.futures import ThreadPoolExecutor, as_completed
+
         query_results = {}
         with ThreadPoolExecutor(max_workers=3) as executor:
             future_to_query = {executor.submit(search, q, limit): q for q in queries}
@@ -581,23 +710,25 @@ def build_boot_context(agent_name, limit=3):
         search_sections = []
         for query in queries:
             for r in query_results.get(query, []):
-                if r.get('score', 0) < 40:
+                if r.get("score", 0) < 40:
                     continue
-                source_key = r.get('path', r.get('title', ''))[:60]
+                source_key = r.get("path", r.get("title", ""))[:60]
                 if source_key in seen_sources:
                     continue
                 seen_sources.add(source_key)
 
-                content = r.get('content', '').strip()
+                content = r.get("content", "").strip()
                 if len(content) > 800:
                     content = content[:800] + "..."
 
-                search_sections.append({
-                    "section": f"{r.get('collection', 'unknown')}:{r.get('source_type', 'unknown')}",
-                    "content": content,
-                    "source": r.get('title', r.get('path', '')).replace(str(Path.home()) + '/', '~/'),
-                    "score": r.get('score', 0),
-                })
+                search_sections.append(
+                    {
+                        "section": f"{r.get('collection', 'unknown')}:{r.get('source_type', 'unknown')}",
+                        "content": content,
+                        "source": r.get("title", r.get("path", "")).replace(str(Path.home()) + "/", "~/"),
+                        "score": r.get("score", 0),
+                    }
+                )
 
         if search_sections:
             _cache_set(search_key, json.dumps(search_sections, ensure_ascii=False))
@@ -609,39 +740,41 @@ def build_boot_context(agent_name, limit=3):
 def log_boot(agent_name, queries, sections):
     try:
         BOOT_LOG.parent.mkdir(parents=True, exist_ok=True)
-        scores = [s.get('score', 0) for s in sections if 'score' in s]
+        scores = [s.get("score", 0) for s in sections if "score" in s]
         entry = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "agent": agent_name,
             "queries": queries,
             "results_count": len(sections),
             "avg_score": round(sum(scores) / len(scores), 2) if scores else 0,
-            "total_tokens": sum(len(s.get('content', '').split()) for s in sections),
-            "sources": [s.get('source', '') for s in sections],
+            "total_tokens": sum(len(s.get("content", "").split()) for s in sections),
+            "sources": [s.get("source", "") for s in sections],
         }
-        with open(BOOT_LOG, 'a') as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + '\n')
+        with open(BOOT_LOG, "a") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except Exception:
         pass
 
 
 def format_boot_context(agent_name, sections):
     lines = []
-    lines.append(f"[Unified Boot Context] Agent: {agent_name} | {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC")
+    lines.append(
+        f"[Unified Boot Context] Agent: {agent_name} | {datetime.now(UTC).strftime('%Y-%m-%d %H:%M')} UTC"
+    )
     lines.append(f"Loaded {len(sections)} context blocks (sources: rag, canonical, obsidian)")
     lines.append("")
 
     for s in sections:
-        source = s.get('source', '')
-        score_str = f" (score: {s['score']:.1f})" if 'score' in s else ""
+        source = s.get("source", "")
+        score_str = f" (score: {s['score']:.1f})" if "score" in s else ""
         lines.append(f"### {s['section']} — {source}{score_str}")
-        lines.append(s['content'])
+        lines.append(s["content"])
         lines.append("")
 
     if not sections:
         lines.append("No relevant boot context found. Starting fresh.")
 
-    return '\n'.join(lines)
+    return "\n".join(lines)
 
 
 def main():
@@ -663,5 +796,5 @@ def main():
         print(format_boot_context(agent, sections))
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

@@ -189,13 +189,21 @@ def list_levels() -> dict[str, str]:
 
 
 def _autopilot_enabled() -> bool:
-    """Top-level kill switch — preserved from autopilot.py JSON state file."""
+    """Top-level kill switch — preserved from autopilot.py JSON state file.
+
+    2026-04-16 fix: fails CLOSED (returns False) when the autopilot module
+    cannot be imported or raises. Previously fail-open — a broken import
+    silently enabled every autonomous action, which is exactly the wrong
+    failure mode for a kill switch. An autonomous brain that defaults ON
+    under module corruption is unsafe; the correct default is OFF and
+    require Chris to explicitly re-enable after investigating.
+    """
     try:
         from autopilot import is_enabled
 
         return bool(is_enabled())
     except Exception:
-        return True  # fail-open: if autopilot module breaks, don't lock everything
+        return False
 
 
 def _in_quiet_hours(now_local: datetime) -> bool:
@@ -250,8 +258,12 @@ def authorize(
     now = now or datetime.now(ZoneInfo("UTC"))
     breaker_state = "n/a"
 
-    # (a) hard env kill
-    if os.environ.get("BRAIN_AUTOPILOT_DISABLED") == "1":
+    # (a) hard env kill — 2026-04-16 fix: now accepts any truthy value
+    # ("1"/"true"/"yes"/"on"), matching the rest of the config-flag idiom
+    # in config.py. Previously only "1" disabled; setting the intuitive
+    # BRAIN_AUTOPILOT_DISABLED=true had no effect — worst-case silent
+    # misconfiguration of the most safety-critical flag in the system.
+    if os.environ.get("BRAIN_AUTOPILOT_DISABLED", "").strip().lower() in ("1", "true", "yes", "on"):
         return AuthorizationDecision(
             allowed=False,
             level="L0",

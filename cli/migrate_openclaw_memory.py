@@ -37,7 +37,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 OPENCLAW_MEMORY_DIR = Path.home() / ".openclaw" / "memory"
@@ -75,27 +75,31 @@ def _chunks_for_agent(agent: str) -> list[dict]:
         print(f"{agent}: sqlite read error: {e}", file=sys.stderr)
         return []
     for r in rows:
-        out.append({
-            "id": r["id"],
-            "path": r["path"],
-            "source": r["source"],
-            "start_line": r["start_line"],
-            "end_line": r["end_line"],
-            "hash": r["hash"],
-            "text": r["text"],
-        })
+        out.append(
+            {
+                "id": r["id"],
+                "path": r["path"],
+                "source": r["source"],
+                "start_line": r["start_line"],
+                "end_line": r["end_line"],
+                "hash": r["hash"],
+                "text": r["text"],
+            }
+        )
     return out
 
 
 def _post_memory(content: str, category: str, source: str, agent: str, secret: str) -> dict:
     req = urllib.request.Request(
         f"{BRAIN_URL}/memory",
-        data=json.dumps({
-            "content": content,
-            "category": category,
-            "agent": agent,
-            "source": source,
-        }).encode(),
+        data=json.dumps(
+            {
+                "content": content,
+                "category": category,
+                "agent": agent,
+                "source": source,
+            }
+        ).encode(),
         headers={
             "Authorization": f"Bearer {secret}",
             "Content-Type": "application/json",
@@ -116,7 +120,7 @@ def _post_memory(content: str, category: str, source: str, agent: str, secret: s
 def _truncate(text: str, limit: int = MAX_CONTENT) -> str:
     if len(text) <= limit:
         return text
-    return text[:limit - 20] + " ...(truncated)"
+    return text[: limit - 20] + " ...(truncated)"
 
 
 def _compose_content(chunk: dict) -> str:
@@ -129,7 +133,7 @@ def _compose_content(chunk: dict) -> str:
 
 def _backup_source_dbs(agents: list[str]) -> Path:
     """Copy source sqlites to _migrated_<DATE>/ for rollback."""
-    backup_dir = OPENCLAW_MEMORY_DIR / f"_migrated_{datetime.now(timezone.utc).strftime('%Y_%m_%d')}"
+    backup_dir = OPENCLAW_MEMORY_DIR / f"_migrated_{datetime.now(UTC).strftime('%Y_%m_%d')}"
     backup_dir.mkdir(parents=True, exist_ok=True)
     for agent in agents:
         src = OPENCLAW_MEMORY_DIR / f"{agent}.sqlite"
@@ -141,8 +145,12 @@ def _backup_source_dbs(agents: list[str]) -> Path:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Migrate OpenClaw memory sqlites into brain atoms.")
     parser.add_argument("--apply", action="store_true", help="Actually POST to /memory (default: dry run)")
-    parser.add_argument("--agent", choices=KNOWN_AGENTS + ["all"], default="all",
-                        help="Restrict to a single agent (default: all)")
+    parser.add_argument(
+        "--agent",
+        choices=KNOWN_AGENTS + ["all"],
+        default="all",
+        help="Restrict to a single agent (default: all)",
+    )
     parser.add_argument("--limit", type=int, default=0, help="Max chunks to process per agent (0 = all)")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
@@ -192,12 +200,14 @@ def main() -> int:
             "source": source,
             "content_hash": content_hash,
             "content_len": len(content),
-            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "ts": datetime.now(UTC).isoformat(timespec="seconds"),
         }
 
         if args.verbose or not args.apply:
-            print(f"{'[DRY]' if not args.apply else '[POST]'} [{idx:3d}/{total}] {agent:6s} "
-                  f"{chunk['path'][-50:]:50s} L{chunk['start_line']}-{chunk['end_line']} len={len(content)}")
+            print(
+                f"{'[DRY]' if not args.apply else '[POST]'} [{idx:3d}/{total}] {agent:6s} "
+                f"{chunk['path'][-50:]:50s} L{chunk['start_line']}-{chunk['end_line']} len={len(content)}"
+            )
 
         if args.apply:
             result = _post_memory(content, "fact", source, agent, secret)
@@ -214,14 +224,19 @@ def main() -> int:
 
     if args.apply:
         MIGRATION_LOG.parent.mkdir(parents=True, exist_ok=True)
-        MIGRATION_LOG.write_text(json.dumps({
-            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            "agents": agents,
-            "total": total,
-            "sent": sent,
-            "failed": failed,
-            "entries": log_entries,
-        }, indent=2))
+        MIGRATION_LOG.write_text(
+            json.dumps(
+                {
+                    "ts": datetime.now(UTC).isoformat(timespec="seconds"),
+                    "agents": agents,
+                    "total": total,
+                    "sent": sent,
+                    "failed": failed,
+                    "entries": log_entries,
+                },
+                indent=2,
+            )
+        )
         print(f"\nMigration complete: {sent}/{total} sent, {failed} failed")
         print(f"Log: {MIGRATION_LOG}")
     else:

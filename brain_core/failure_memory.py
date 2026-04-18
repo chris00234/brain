@@ -3,15 +3,15 @@
 When an agent task fails, dispatch to Jenna for reflection. Store as LESSON node
 in Neo4j. Before running similar tasks, query recent lessons and inject into prompt.
 """
+
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import logging
-from datetime import datetime, timedelta, timezone
-from typing import Optional
+from datetime import UTC, datetime, timedelta
 
-from openclaw_dispatch import dispatch
+from cli_llm import cli_dispatch
 
 log = logging.getLogger("brain.failure_memory")
 
@@ -33,7 +33,7 @@ def record_failure_lesson(
     failure_reason: str,
     agent_id: str = "system",
     context: str = "",
-) -> Optional[str]:
+) -> str | None:
     """Record a task failure as a LESSON node in Neo4j via MemRL pattern.
 
     Returns lesson_id if recorded, None on failure.
@@ -44,7 +44,8 @@ def record_failure_lesson(
         error=failure_reason[:500],
         context=context[:500],
     )
-    result = dispatch(agent="jenna", message=prompt, thinking="low", timeout=45)
+    # 2026-04-17: migrated from openclaw dispatch (95MB session replay) to cli_dispatch
+    result = cli_dispatch(prompt, backend="codex", timeout=45)
     if not result.ok:
         log.warning("failed to generate reflection: %s", result.error)
         return None
@@ -65,16 +66,15 @@ def record_failure_lesson(
 
     # Lesson ID is stable across retries — hash of task + agent only, no timestamp.
     # This lets MERGE (l:Lesson {id: $id}) properly deduplicate repeated failures.
-    lesson_id = "lesson_" + hashlib.md5(
-        f"{task_description}:{agent_id}".encode()
-    ).hexdigest()[:12]
+    lesson_id = "lesson_" + hashlib.md5(f"{task_description}:{agent_id}".encode()).hexdigest()[:12]
 
-    now_iso = datetime.now(timezone.utc).isoformat()
+    now_iso = datetime.now(UTC).isoformat()
 
     # Store in Neo4j — MERGE semantics deduplicate repeated failures.
     # ON MATCH bumps failure_count + last_seen_at; ON CREATE sets initial fields.
     try:
         from neo4j_client import run_write
+
         run_write(
             "MERGE (l:Lesson {id: $id}) "
             "ON CREATE SET l.task = $task, l.failure_reason = $reason, "
@@ -96,7 +96,7 @@ def record_failure_lesson(
                 "try_next": parsed.get("try_next", "")[:200],
                 "agent_id": agent_id,
                 "created_at": now_iso,
-            }
+            },
         )
         log.info("recorded lesson %s for agent %s", lesson_id, agent_id)
         return lesson_id
@@ -123,7 +123,7 @@ def get_similar_lessons(task_description: str, agent_id: str = "system", limit: 
                 "  l.avoid AS avoid, l.try_next AS try_next, l.created_at AS created_at, "
                 "  coalesce(l.failure_count, 1) AS failure_count "
                 "ORDER BY l.created_at DESC LIMIT $limit",
-                {"agent": agent_id, "limit": limit}
+                {"agent": agent_id, "limit": limit},
             )
 
         # Try APOC similarity first
@@ -136,7 +136,7 @@ def get_similar_lessons(task_description: str, agent_id: str = "system", limit: 
                 "RETURN l.id AS id, l.task AS task, l.reflection AS reflection, "
                 "  l.avoid AS avoid, l.try_next AS try_next, sim "
                 "ORDER BY sim DESC LIMIT $limit",
-                {"agent": agent_id, "task": task_description, "limit": limit}
+                {"agent": agent_id, "task": task_description, "limit": limit},
             )
             if rows:
                 return rows
@@ -155,7 +155,7 @@ def get_similar_lessons(task_description: str, agent_id: str = "system", limit: 
             "RETURN l.id AS id, l.task AS task, l.reflection AS reflection, "
             "  l.avoid AS avoid, l.try_next AS try_next "
             "ORDER BY l.created_at DESC LIMIT $limit",
-            {"agent": agent_id, "words": task_words, "limit": limit}
+            {"agent": agent_id, "words": task_words, "limit": limit},
         )
         return rows
     except Exception as e:
@@ -167,19 +167,20 @@ def archive_old_lessons(days: int = 365) -> int:
     """Archive lessons older than N days (default 1 year). Returns count archived."""
     try:
         from neo4j_client import run_query, run_write
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+        cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
         # Count first (read-only), then archive (write)
         count_rows = run_query(
             "MATCH (l:Lesson) WHERE l.created_at < $cutoff AND l.archived = false "
             "RETURN count(l) AS count",
-            {"cutoff": cutoff}
+            {"cutoff": cutoff},
         )
         count = count_rows[0]["count"] if count_rows else 0
         if count > 0:
             run_write(
                 "MATCH (l:Lesson) WHERE l.created_at < $cutoff AND l.archived = false "
                 "SET l.archived = true",
-                {"cutoff": cutoff}
+                {"cutoff": cutoff},
             )
         return count
     except Exception:
@@ -189,12 +190,13 @@ def archive_old_lessons(days: int = 365) -> int:
 if __name__ == "__main__":
     # Smoke test
     import sys
+
     if len(sys.argv) > 1 and sys.argv[1] == "test":
         lesson_id = record_failure_lesson(
             "Test task for failure memory",
             "Intentional test failure",
             agent_id="system",
-            context="smoke test"
+            context="smoke test",
         )
         print(f"Recorded: {lesson_id}")
         similar = get_similar_lessons("Test task", agent_id="system")

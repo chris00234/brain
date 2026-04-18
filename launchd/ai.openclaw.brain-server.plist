@@ -28,6 +28,8 @@
 		<string>8791</string>
 		<key>BRAIN_SPREADING_ACTIVATION_ENABLED</key>
 		<string>true</string>
+		<key>BRAIN_LTR_ENABLED</key>
+		<string>true</string>
 		<key>HOME</key>
 		<string>/Users/chrischo</string>
 		<key>PATH</key>

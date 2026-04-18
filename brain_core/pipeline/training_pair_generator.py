@@ -4,18 +4,18 @@
 Reads user feedback on search results and generates positive/negative pairs
 for LoRA fine-tuning of the embedding model.
 """
+
 from __future__ import annotations
 
 import json
 import random
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from http_pool import http_json
 from search import get_collections
-
 
 FEEDBACK_LOG = Path("/Users/chrischo/server/brain/logs/search-feedback.jsonl")
 TRAINING_DIR = Path("/Users/chrischo/server/brain/logs/training")
@@ -39,7 +39,7 @@ def read_feedback_events(since_days: int = 30) -> list[dict]:
                 events.append(entry)
             except Exception:
                 continue
-    cutoff = datetime.now(timezone.utc) - timedelta(days=since_days)
+    cutoff = datetime.now(UTC) - timedelta(days=since_days)
     filtered: list[dict] = []
     for e in events:
         ts = e.get("timestamp", "")
@@ -48,7 +48,7 @@ def read_feedback_events(since_days: int = 30) -> list[dict]:
         try:
             entry_dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
             if entry_dt.tzinfo is None:
-                entry_dt = entry_dt.replace(tzinfo=timezone.utc)
+                entry_dt = entry_dt.replace(tzinfo=UTC)
         except Exception:
             continue
         if entry_dt >= cutoff:
@@ -188,6 +188,7 @@ def generate_pairs(since_days: int = 30) -> dict:
 
 if __name__ == "__main__":
     import argparse
+
     parser = argparse.ArgumentParser(description="Generate training pairs from feedback")
     parser.add_argument("--since-days", type=int, default=30)
     args = parser.parse_args()

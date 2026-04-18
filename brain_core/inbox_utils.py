@@ -14,16 +14,16 @@ from pathlib import Path
 try:
     from config import INBOX_DIR
 except ImportError:
-    INBOX_DIR = Path('/Users/chrischo/server/knowledge/raw/inbox')
+    INBOX_DIR = Path("/Users/chrischo/server/knowledge/raw/inbox")
 
 
-_DEDUP_TOKEN_RE = re.compile(r'[a-z0-9_\-]{3,}')
+_DEDUP_TOKEN_RE = re.compile(r"[a-z0-9_\-]{3,}")
 _dedup_token_cache: dict[str, set[str]] = {}
 _DEDUP_CACHE_MAX = 200
 
 
 def get_recent_inbox_records(
-    prefix: str = 'raw_',
+    prefix: str = "raw_",
     hours: float | None = None,
     limit: int | None = None,
     parse: bool = False,
@@ -46,7 +46,7 @@ def get_recent_inbox_records(
     inbox = inbox_dir or INBOX_DIR
     if not inbox.exists():
         return []
-    paths = list(inbox.glob(f'{prefix}*.json'))
+    paths = list(inbox.glob(f"{prefix}*.json"))
     if hours is not None:
         cutoff = time.time() - hours * 3600
         paths = [p for p in paths if p.stat().st_mtime >= cutoff]
@@ -84,7 +84,10 @@ def is_near_duplicate(
         _dedup_token_cache.clear()
 
     recent = get_recent_inbox_records(
-        prefix='raw_', limit=window, inbox_dir=inbox_dir, parse=False,
+        prefix="raw_",
+        limit=window,
+        inbox_dir=inbox_dir,
+        parse=False,
     )
     for f in recent:
         fkey = str(f)
@@ -92,9 +95,7 @@ def is_near_duplicate(
         if existing_tokens is None:
             try:
                 existing = json.loads(f.read_text())
-                existing_tokens = set(
-                    _DEDUP_TOKEN_RE.findall(existing.get('content', '').lower())
-                )
+                existing_tokens = set(_DEDUP_TOKEN_RE.findall(existing.get("content", "").lower()))
                 _dedup_token_cache[fkey] = existing_tokens
             except Exception:
                 continue

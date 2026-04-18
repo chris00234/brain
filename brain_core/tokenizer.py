@@ -12,12 +12,48 @@ import re
 
 _LATIN_RE = re.compile(r"[a-z0-9_\-]{2,}")
 _KOREAN_RE = re.compile(r"[가-힣]{2,}")
-_STOPWORDS = frozenset({
-    "the", "is", "an", "in", "on", "of", "for", "to", "and", "or", "not",
-    "it", "this", "that", "with", "from", "by", "at", "as", "be", "was",
-    "are", "were", "been", "has", "had", "have", "do", "does", "did",
-    "will", "would", "could", "should", "may", "might", "shall", "can",
-})
+_STOPWORDS = frozenset(
+    {
+        "the",
+        "is",
+        "an",
+        "in",
+        "on",
+        "of",
+        "for",
+        "to",
+        "and",
+        "or",
+        "not",
+        "it",
+        "this",
+        "that",
+        "with",
+        "from",
+        "by",
+        "at",
+        "as",
+        "be",
+        "was",
+        "are",
+        "were",
+        "been",
+        "has",
+        "had",
+        "have",
+        "do",
+        "does",
+        "did",
+        "will",
+        "would",
+        "could",
+        "should",
+        "may",
+        "might",
+        "shall",
+        "can",
+    }
+)
 
 
 def tokenize(text: str) -> set[str]:

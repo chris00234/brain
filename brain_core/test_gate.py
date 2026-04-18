@@ -23,7 +23,7 @@ TEST_SESSION_PREFIXES = (
     "test-",
     "e2e-",
     "smoke-",
-    "final-",        # I used final-verif, final-after-autopilot, etc.
+    "final-",  # I used final-verif, final-after-autopilot, etc.
     "hook-e2e-",
     "wm-e2e-",
     "e2e-test-",

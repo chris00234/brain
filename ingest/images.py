@@ -47,11 +47,11 @@ from pathlib import Path
 
 sys.path.insert(0, "/Users/chrischo/server/brain/brain_core")
 
-from indexer import (  # noqa: E402
+from indexer import (
+    _get_collection_id,
     chroma_api,
     ensure_collection,
     get_embedding,
-    _get_collection_id,
 )
 
 log = logging.getLogger("brain.ingest.images")

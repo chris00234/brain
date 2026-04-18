@@ -10,10 +10,12 @@ from search_memory import DEFAULT_RAG_SEARCH, package_results
 
 def build_context_block(payload: dict[str, Any], max_results: int = 5, max_evidence: int = 2) -> str:
     lines: list[str] = []
-    lines.append(f"# Memory Context")
+    lines.append("# Memory Context")
     lines.append(f"Query: {payload['query']}")
     lines.append("")
-    lines.append("Use canonical notes as current truth. Use distilled notes as supporting context. Use RAG evidence as fallback evidence, not source-of-truth.")
+    lines.append(
+        "Use canonical notes as current truth. Use distilled notes as supporting context. Use RAG evidence as fallback evidence, not source-of-truth."
+    )
     lines.append("")
 
     for index, hit in enumerate(payload.get("results", [])[:max_results], start=1):
@@ -48,10 +50,18 @@ def main() -> int:
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
 
-    payload = package_results(args.query, args.limit, args.include_rag, args.rag_limit, Path(args.rag_command))
+    payload = package_results(
+        args.query, args.limit, args.include_rag, args.rag_limit, Path(args.rag_command)
+    )
     context = build_context_block(payload, max_results=args.limit)
     if args.json:
-        print(json.dumps({"query": args.query, "context": context, "results": payload["results"]}, indent=2, ensure_ascii=False))
+        print(
+            json.dumps(
+                {"query": args.query, "context": context, "results": payload["results"]},
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
         return 0
 
     print(context, end="")

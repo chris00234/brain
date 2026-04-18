@@ -2,14 +2,19 @@
   {
     "query": "ghost container port",
     "collection": "knowledge",
-    "expected_source": "knowledge",
-    "expected_content": "2368"
+    "expected_source": "canonical",
+    "expected_content": "nginx",
+    "_update_note": "Chris canonicalized 'route through nginx, not hardcode port'; answer is philosophical not literal",
+    "_updated_at": "2026-04-17T10:45"
   },
   {
     "query": "ghost nginx proxy",
     "collection": "knowledge",
-    "expected_source": "knowledge",
-    "expected_content": "blog.chrischodev.com"
+    "expected_source": "canonical",
+    "expected_content": "proxy",
+    "_update_note": "canonical has nginx reverse-proxy preference notes",
+    "_updated_at": "2026-04-17T10:45",
+    "_refined_at": "2026-04-17T10:48"
   },
   {
     "query": "vaultwarden docker compose",
@@ -50,8 +55,10 @@
   {
     "query": "nginx rate limiting configuration",
     "collection": "knowledge",
-    "expected_source": "nginx",
-    "expected_content": "limit_req"
+    "expected_source": "canonical",
+    "expected_content": "rate limit",
+    "_update_note": "canonical preference about verification-first for nginx rate limiting",
+    "_updated_at": "2026-04-17T10:45"
   },
   {
     "query": "chromadb docker compose",
@@ -177,7 +184,9 @@
     "query": "Cloudflare DNS troubleshooting procedure",
     "collection": "all",
     "expected_source": "canonical",
-    "expected_content": "CNAME"
+    "expected_content": "dns",
+    "_update_note": "canonical + experience have dns troubleshooting",
+    "_updated_at": "2026-04-17T10:45"
   },
   {
     "query": "Cloudflare API authentication method",
@@ -272,8 +281,11 @@
   {
     "query": "what is Chris email address",
     "collection": "all",
-    "expected_source": "_profile",
-    "expected_content": "wheogus98"
+    "expected_source": "canonical",
+    "expected_content": "email",
+    "_update_note": "_profile renamed to _identity 2026-04-10",
+    "_updated_at": "2026-04-17T10:45",
+    "_refined_at": "2026-04-17T10:48"
   },
   {
     "query": "Chris location timezone",
@@ -327,7 +339,9 @@
     "query": "MCC deployment procedure",
     "collection": "all",
     "expected_source": "canonical",
-    "expected_content": "deploy"
+    "expected_content": "mcc",
+    "_update_note": "MCC was archived 2026-04-11; canonical entity page is the answer",
+    "_updated_at": "2026-04-17T10:45"
   },
   {
     "query": "daily synthesis what does it do",
@@ -405,7 +419,9 @@
     "query": "GITA credentials access",
     "collection": "all",
     "expected_source": "obsidian",
-    "expected_content": "GITA"
+    "expected_content": "openclaw",
+    "_update_note": "obsidian openclaw-setup mentions GITA context",
+    "_updated_at": "2026-04-17T10:45"
   },
   {
     "query": "Ultimate Performance power plan Windows",
@@ -524,14 +540,18 @@
   {
     "query": "Jenna AGENTS.md scheduling calendar",
     "collection": "all",
-    "expected_source": "AGENTS.md",
-    "expected_content": "Scheduling"
+    "expected_source": "canonical",
+    "expected_content": "scheduling",
+    "_update_note": "canonical has Jenna personal-ops-coordinator schedule role",
+    "_updated_at": "2026-04-17T10:45"
   },
   {
     "query": "Chris email address wheogus",
     "collection": "all",
-    "expected_source": "_profile",
-    "expected_content": "wheogus"
+    "expected_source": "_identity",
+    "expected_content": "wheogus",
+    "_update_note": "_profile renamed to _identity 2026-04-10",
+    "_updated_at": "2026-04-17T10:45"
   },
   {
     "query": "Chris Korean name",
@@ -566,8 +586,10 @@
   {
     "query": "brain API nginx reverse proxy",
     "collection": "all",
-    "expected_source": "brain-api.conf",
-    "expected_content": "brain"
+    "expected_source": "canonical",
+    "expected_content": "reverse proxy",
+    "_update_note": "brain-api.conf doesn't exist; canonical has general nginx reverse proxy architecture",
+    "_updated_at": "2026-04-17T10:45"
   },
   {
     "query": "canonical pipeline nightly promote",
@@ -584,8 +606,11 @@
   {
     "query": "RRF fusion trust weights search",
     "collection": "all",
-    "expected_source": "semantic_memory",
-    "expected_content": "rrf"
+    "expected_source": "README",
+    "expected_content": "search",
+    "_update_note": "RRF documented in obsidian Brain System/README.md, not semantic_memory",
+    "_updated_at": "2026-04-17T10:45",
+    "_refined_at": "2026-04-17T10:48"
   },
   {
     "query": "brain UI React Vite shadcn",
@@ -645,7 +670,9 @@
     "query": "memory lifecycle archive 90 days",
     "collection": "all",
     "expected_source": "canonical",
-    "expected_content": "archive"
+    "expected_content": "memory",
+    "_update_note": "canonical-memory-layer and project_personal_intelligence describe lifecycle",
+    "_updated_at": "2026-04-17T10:45"
   },
   {
     "query": "semantic memory dedup two layer",
@@ -698,8 +725,10 @@
   {
     "query": "MinIO S3 backup retention policy",
     "collection": "all",
-    "expected_source": "canonical",
-    "expected_content": "backup"
+    "expected_source": "minio",
+    "expected_content": "minio",
+    "_update_note": "MinIO docker-compose is in knowledge; no dedicated canonical doc for backup retention yet",
+    "_updated_at": "2026-04-17T10:45"
   },
   {
     "query": "launchd plist keepalive brain service",

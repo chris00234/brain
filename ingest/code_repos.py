@@ -10,6 +10,7 @@ Run via:
   /Users/chrischo/server/brain/.venv/bin/python3 ingest/code_repos.py
 or via the scheduler `code_index_refresh` job.
 """
+
 from __future__ import annotations
 
 import ast
@@ -18,12 +19,12 @@ import json
 import re
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "brain_core"))
-from http_pool import http_json  # noqa: E402
-from indexer import ensure_collection, get_embeddings_batch  # noqa: E402
+from http_pool import http_json
+from indexer import ensure_collection, get_embeddings_batch
 
 CODE_COLLECTION = "code"
 STATE_FILE = Path("/Users/chrischo/server/brain/logs/code-index-state.json")
@@ -44,9 +45,23 @@ REPOS: list[Path] = [
 
 # Skip dirs that have no value or break parsing.
 SKIP_DIRS = {
-    ".git", "node_modules", ".venv", "venv", "__pycache__", "dist", "build",
-    ".next", ".turbo", ".cache", "coverage", "logs", "chroma-data", "ollama-data",
-    ".pytest_cache", ".mypy_cache", ".ruff_cache",
+    ".git",
+    "node_modules",
+    ".venv",
+    "venv",
+    "__pycache__",
+    "dist",
+    "build",
+    ".next",
+    ".turbo",
+    ".cache",
+    "coverage",
+    "logs",
+    "chroma-data",
+    "ollama-data",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
 }
 
 # Source extensions we know how to parse.
@@ -55,7 +70,10 @@ EXTENSIONS = {".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"}
 # Heuristic JS/TS function patterns. Cheap, no tree-sitter dep.
 JS_FUNC_PATTERNS = [
     re.compile(r"^(?:export\s+)?(?:async\s+)?function\s+(\w+)\s*\([^)]*\)", re.MULTILINE),
-    re.compile(r"^(?:export\s+)?const\s+(\w+)\s*(?::\s*[^=]+)?=\s*(?:async\s+)?\([^)]*\)\s*(?::\s*[^=]+)?=>\s*\{", re.MULTILINE),
+    re.compile(
+        r"^(?:export\s+)?const\s+(\w+)\s*(?::\s*[^=]+)?=\s*(?:async\s+)?\([^)]*\)\s*(?::\s*[^=]+)?=>\s*\{",
+        re.MULTILINE,
+    ),
     re.compile(r"^(?:export\s+)?class\s+(\w+)", re.MULTILINE),
 ]
 
@@ -71,7 +89,7 @@ def load_state() -> dict:
 
 def save_state(state: dict) -> None:
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    state["last_run_at"] = datetime.now(timezone.utc).isoformat()
+    state["last_run_at"] = datetime.now(UTC).isoformat()
     tmp = STATE_FILE.with_suffix(".tmp")
     tmp.write_text(json.dumps(state, indent=2))
     tmp.replace(STATE_FILE)
@@ -108,8 +126,10 @@ def parse_python(path: Path, source: str) -> list[dict]:
     for node in ast.walk(tree):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             continue
-        kind = "class" if isinstance(node, ast.ClassDef) else (
-            "async_function" if isinstance(node, ast.AsyncFunctionDef) else "function"
+        kind = (
+            "class"
+            if isinstance(node, ast.ClassDef)
+            else ("async_function" if isinstance(node, ast.AsyncFunctionDef) else "function")
         )
         name = node.name
         # Build a signature string. ast.unparse exists in Py 3.9+.
@@ -130,14 +150,16 @@ def parse_python(path: Path, source: str) -> list[dict]:
             body_text = ""
         if not body_text:
             continue
-        out.append({
-            "kind": kind,
-            "name": name,
-            "signature": signature,
-            "docstring": docstring[:500],
-            "body": body_text[:1500],
-            "line_start": node.lineno,
-        })
+        out.append(
+            {
+                "kind": kind,
+                "name": name,
+                "signature": signature,
+                "docstring": docstring[:500],
+                "body": body_text[:1500],
+                "line_start": node.lineno,
+            }
+        )
     return out
 
 
@@ -153,20 +175,22 @@ def parse_js_ts(path: Path, source: str) -> list[dict]:
                 continue
             seen_names.add(name)
             # Approximate line number from match offset
-            line_no = source[:m.start()].count("\n") + 1
+            line_no = source[: m.start()].count("\n") + 1
             kind = "class" if pat is JS_FUNC_PATTERNS[2] else "function"
             # Grab ~30 lines around the match for body
             start = max(0, line_no - 1)
             end = min(len(lines), line_no + 30)
             body_text = "\n".join(lines[start:end])
-            out.append({
-                "kind": kind,
-                "name": name,
-                "signature": m.group(0).strip()[:300],
-                "docstring": "",
-                "body": body_text[:1500],
-                "line_start": line_no,
-            })
+            out.append(
+                {
+                    "kind": kind,
+                    "name": name,
+                    "signature": m.group(0).strip()[:300],
+                    "docstring": "",
+                    "body": body_text[:1500],
+                    "line_start": line_no,
+                }
+            )
     return out
 
 
@@ -235,9 +259,13 @@ def index_repo(repo: Path, state: dict, col_id: str) -> dict:
                 "kind": fn["kind"],
                 "signature": fn["signature"][:300],
                 "line_start": fn["line_start"],
-                "language": "python" if path.suffix == ".py" else "typescript" if path.suffix in (".ts", ".tsx") else "javascript",
+                "language": "python"
+                if path.suffix == ".py"
+                else "typescript"
+                if path.suffix in (".ts", ".tsx")
+                else "javascript",
                 "repo": repo.name,
-                "indexed_at": datetime.now(timezone.utc).isoformat(),
+                "indexed_at": datetime.now(UTC).isoformat(),
             }
             pending_ids.append(doc_id)
             pending_texts.append(doc_text)
@@ -273,23 +301,27 @@ def _flush_batch(col_id: str, ids: list, texts: list, metas: list) -> None:
     except Exception as e:
         print(f"  embed batch failed: {e}", flush=True)
         return
-    valid = [(i, t, m, e) for i, t, m, e in zip(ids, texts, metas, embs) if e]
+    valid = [(i, t, m, e) for i, t, m, e in zip(ids, texts, metas, embs, strict=False) if e]
     if not valid:
         return
-    v_ids, v_texts, v_metas, v_embs = zip(*valid)
+    v_ids, v_texts, v_metas, v_embs = zip(*valid, strict=False)
     try:
-        http_json("POST", f"{CHROMA_API}/{col_id}/upsert", {
-            "ids": list(v_ids),
-            "embeddings": list(v_embs),
-            "documents": list(v_texts),
-            "metadatas": list(v_metas),
-        })
+        http_json(
+            "POST",
+            f"{CHROMA_API}/{col_id}/upsert",
+            {
+                "ids": list(v_ids),
+                "embeddings": list(v_embs),
+                "documents": list(v_texts),
+                "metadatas": list(v_metas),
+            },
+        )
     except Exception as e:
         print(f"  upsert failed: {e}", flush=True)
 
 
 def main() -> int:
-    print(f"[code_index] starting at {datetime.now(timezone.utc).isoformat()}", flush=True)
+    print(f"[code_index] starting at {datetime.now(UTC).isoformat()}", flush=True)
     state = load_state()
     print(f"[code_index] state: {len(state.get('file_mtimes', {}))} files tracked", flush=True)
 
@@ -307,7 +339,10 @@ def main() -> int:
         try:
             r = index_repo(repo, state, col_id)
             results.append(r)
-            print(f"  indexed_files={r['indexed_files']} extracted_functions={r['extracted_functions']} skipped={r['skipped_unchanged']}", flush=True)
+            print(
+                f"  indexed_files={r['indexed_files']} extracted_functions={r['extracted_functions']} skipped={r['skipped_unchanged']}",
+                flush=True,
+            )
         except Exception as e:
             print(f"  ERROR: {e}", file=sys.stderr, flush=True)
 

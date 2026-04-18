@@ -8,13 +8,14 @@ the task_queue when the same query repeats ≥3 times in a 14-day window.
 Tracks a high-watermark in `logs/gap-detector-state.json` so re-runs don't
 double-count old gap rows.
 """
+
 from __future__ import annotations
 
 import json
 import re
 import sys
 from collections import defaultdict
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -56,7 +57,7 @@ def main() -> int:
     state = _load_state()
     high_watermark = state.get("high_watermark", "")
     promoted = state.get("promoted_queries", {})  # normalized → last_promoted_iso
-    cutoff = datetime.now(timezone.utc) - timedelta(days=WINDOW_DAYS)
+    cutoff = datetime.now(UTC) - timedelta(days=WINDOW_DAYS)
 
     # Read every entry within the window. Group by normalized query.
     # The window cutoff is the correctness gate; the watermark below it is
@@ -81,7 +82,7 @@ def main() -> int:
             try:
                 row_dt = datetime.fromisoformat(ts.rstrip("Zz"))
                 if row_dt.tzinfo is None:
-                    row_dt = row_dt.replace(tzinfo=timezone.utc)
+                    row_dt = row_dt.replace(tzinfo=UTC)
             except Exception:
                 continue
             if row_dt < cutoff:
@@ -98,6 +99,7 @@ def main() -> int:
     tasks_created = 0
     try:
         from task_queue import TaskQueue  # type: ignore
+
         tq = TaskQueue()
     except Exception as e:
         print(json.dumps({"status": "error", "reason": f"task_queue import failed: {e}"}))
@@ -112,7 +114,7 @@ def main() -> int:
             try:
                 lp_dt = datetime.fromisoformat(last_promoted.rstrip("Zz"))
                 if lp_dt.tzinfo is None:
-                    lp_dt = lp_dt.replace(tzinfo=timezone.utc)
+                    lp_dt = lp_dt.replace(tzinfo=UTC)
                 if lp_dt >= cutoff:
                     continue
             except Exception:
@@ -141,7 +143,7 @@ def main() -> int:
                     "window_days": WINDOW_DAYS,
                 },
             )
-            promoted[normalized] = datetime.now(timezone.utc).isoformat()
+            promoted[normalized] = datetime.now(UTC).isoformat()
             tasks_created += 1
         except Exception as e:
             print(f"  task creation failed for '{normalized[:40]}': {e}", file=sys.stderr)
@@ -150,13 +152,17 @@ def main() -> int:
     state["promoted_queries"] = promoted
     _save_state(state)
 
-    print(json.dumps({
-        "status": "ok",
-        "tasks_created": tasks_created,
-        "queries_inspected": len(by_query),
-        "window_days": WINDOW_DAYS,
-        "min_repeat": MIN_REPEAT,
-    }))
+    print(
+        json.dumps(
+            {
+                "status": "ok",
+                "tasks_created": tasks_created,
+                "queries_inspected": len(by_query),
+                "window_days": WINDOW_DAYS,
+                "min_repeat": MIN_REPEAT,
+            }
+        )
+    )
     return 0
 
 

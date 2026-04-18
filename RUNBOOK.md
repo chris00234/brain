@@ -431,3 +431,48 @@ BRAIN_ATOMS_ENABLED=true .venv/bin/python cli/canonicalize_entities.py --thresho
 - SLO definitions: `~/server/brain/brain_core/slos.py`
 - Outbox drainer: `~/server/brain/cli/outbox_drain.py`
 - Restart soak: `tests/smoke/restart_soak.sh`
+
+---
+
+## 16. 2026-04-16 Tier 1/2/3 module recovery
+
+New subsystems shipped this cycle. Each has its own failure + recovery pattern.
+
+### retrieval_competition table bloat (Bjork inhibition)
+- **Symptom:** `retrieval_competition` row count > 500k, inhibition job slow.
+- **Fix:** bump VACUUM_AFTER_DAYS in `brain_core/retrieval_inhibition.py` (default 60).
+  Or manually: `sqlite3 logs/brain.db "DELETE FROM retrieval_competition WHERE last_seen_at < date('now','-60 days')"`.
+
+### confidence_calibration returning identity
+- **Symptom:** `/brain/doubt` output matches raw atoms.confidence; no fit applied.
+- **Cause:** fewer than 50 samples from eval holdout.
+- **Fix:** add more per-test entries to `eval-report-stable.json` by running `POST /jobs/eval_run_stable` with `--include-per-test`.
+
+### dream_replay emits zero conjectures
+- **Cause:** Neo4j has no entity pairs with `size(name)>=4` and `mention_count>=2` unconnected.
+- **Fix:** run `graph_rebuild_mentions` + `graph_backfill_co_mention` Sunday jobs to populate entity graph first.
+
+### RAPTOR tree empty
+- **Symptom:** `canonical_raptor` Chroma collection stays empty after `raptor_build` job.
+- **Cause:** fewer than 2 × MIN_CLUSTER_SIZE (4) active canonical notes.
+- **Fix:** verify `canonical` collection has documents with `status=active`. The job returns status=skip.
+
+### schema_revision firing too often
+- **Symptom:** `raw/inbox/` filling with `raw_schema_revision_*` records.
+- **Cause:** MIN_CLUSTER_SIZE set too low or many `prediction_error` events.
+- **Fix:** bump `MIN_CLUSTER_SIZE` in `brain_core/schema_revision.py` from 3 to 5.
+
+### SSE /recall/stream connection hangs
+- **Symptom:** client sees keepalive comments but no events.
+- **Cause:** internal `search_all` call blocked. Check `/brain/slos` for `recall_v2_p95_ms` breach.
+- **Fix:** stream has a 20s wall-clock cap built in; emits `event: end {"reason":"timeout"}` and closes.
+
+### Self-RAG critique latency spike
+- **Symptom:** iterative recalls with `BRAIN_SELF_RAG_ENABLED=true` exceeding 3s.
+- **Cause:** Jenna dispatch congested.
+- **Fix:** flip `BRAIN_SELF_RAG_ENABLED=false` in launchd plist. Heuristic `_crag_score` stays live.
+
+### Conjectures leaking into factual recall
+- **Symptom:** top-K results include atoms with `kind=conjecture` or `dream:*` chroma_ids.
+- **Cause:** `include_provisional=True` passed to `search_all`.
+- **Fix:** default is False. Verify callers aren't overriding.

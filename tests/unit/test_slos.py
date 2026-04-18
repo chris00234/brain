@@ -21,16 +21,20 @@ def slos_module():
 
 
 def test_slo_count(slos_module):
-    assert len(slos_module.SLOS) == 10  # 6 base + 4 N-series watchers
+    # 6 base + 4 N-series watchers + 1 stuck-writer throughput (2026-04-16)
+    # + 1 calibration_brier_drift_7d (2026-04-17 W5 — silent miscalibration detector)
+    assert len(slos_module.SLOS) == 12
+    assert "atoms_write_throughput_1h" in slos_module.SLOS
+    assert "calibration_brier_drift_7d" in slos_module.SLOS
 
 
 def test_recall_v2_p95_lower_is_better(slos_module):
     slo = slos_module.SLOS["recall_v2_p95_ms"]
-    assert slo.target == 350.0
+    assert slo.target == 500.0
     assert slo.severity == "warning"
-    # 400ms > 350 target → breach (latency is lower-is-better)
-    assert slos_module._is_breach(slo, 400.0) is True
-    assert slos_module._is_breach(slo, 200.0) is False
+    # 600ms > 500 target → breach (latency is lower-is-better)
+    assert slos_module._is_breach(slo, 600.0) is True
+    assert slos_module._is_breach(slo, 400.0) is False
 
 
 def test_content_hit_higher_is_better(slos_module):
@@ -61,7 +65,7 @@ def test_check_one_returns_result(slos_module, monkeypatch):
     assert result is not None
     assert result.actual == 150.0
     assert result.breached is False
-    assert result.delta == 150.0 - 350.0
+    assert result.delta == 150.0 - 500.0
 
 
 def test_check_one_unknown_slo(slos_module):
@@ -72,7 +76,7 @@ def test_check_all_returns_all(slos_module, monkeypatch):
     for name in slos_module.SLOS:
         monkeypatch.setitem(slos_module._MEASUREMENTS, name, lambda: 0.0)
     results = slos_module.check_all()
-    assert len(results) == 10
+    assert len(results) == len(slos_module.SLOS)
 
 
 def test_alert_rate_limited(slos_module, monkeypatch):
@@ -117,6 +121,6 @@ def test_run_returns_summary(slos_module, monkeypatch):
         lambda name, sev, ts: fake_store.__setitem__((name, sev), ts),
     )
     summary = slos_module.run()
-    assert summary["checked"] == 10
+    assert summary["checked"] == len(slos_module.SLOS)
     assert "results" in summary
-    assert len(summary["results"]) == 10
+    assert len(summary["results"]) == len(slos_module.SLOS)

@@ -102,6 +102,7 @@ def run() -> dict:
 
     try:
         from eval_holdout_promote import stuck_candidates
+
         stuck = {row["candidate_id"] for row in stuck_candidates()}
     except Exception as exc:
         log.warning("stuck_candidates unavailable: %s — skipping telegram", exc)

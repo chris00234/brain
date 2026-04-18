@@ -4,7 +4,7 @@ import hashlib
 import json
 import re
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -35,7 +35,7 @@ def dump_json(path: Path, payload: Any) -> None:
 
 
 def utc_now() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def sha256_text(value: str) -> str:
@@ -156,10 +156,7 @@ def iter_note_files(root: Path, folder: str) -> list[Path]:
 def iter_note_paths(root: Path) -> list[Path]:
     """Iterate schema-compliant notes under root, skipping index / README files."""
     _SKIP = {"index.md", "readme.md", "README.md"}
-    return sorted(
-        path for path in root.rglob("*.md")
-        if path.is_file() and path.name not in _SKIP
-    )
+    return sorted(path for path in root.rglob("*.md") if path.is_file() and path.name not in _SKIP)
 
 
 def slugify(value: str) -> str:
@@ -182,6 +179,7 @@ def read_all_notes(root: Path) -> list[dict[str, Any]]:
     and lint_memory jobs depend on this being resilient.
     """
     import logging
+
     log = logging.getLogger("brain.pipeline.read_all_notes")
     notes = []
     for folder in ("distilled", "canonical"):
@@ -195,7 +193,9 @@ def read_all_notes(root: Path) -> list[dict[str, Any]]:
     return notes
 
 
-def find_similar_canonical(title: str, body: str, canonical_dir: Path | None = None, threshold: float = 0.7) -> Path | None:
+def find_similar_canonical(
+    title: str, body: str, canonical_dir: Path | None = None, threshold: float = 0.7
+) -> Path | None:
     """Check if a canonical note with similar content already exists.
     Returns the path of the match, or None."""
     if canonical_dir is None:

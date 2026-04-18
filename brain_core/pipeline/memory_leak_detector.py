@@ -4,15 +4,15 @@
 Compares per-collection counts against last week's snapshot. If any collection
 grew >20% WoW without a corresponding ingest event, emits a healing signal.
 """
+
 import json
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from http_pool import http_json
 from search import get_collections
-
 
 HISTORY_FILE = Path("/Users/chrischo/server/brain/logs/collection_size_history.jsonl")
 GROWTH_THRESHOLD_PCT = 20.0
@@ -66,22 +66,21 @@ def append_snapshot(counts: dict[str, int]) -> None:
     entries so the file never exceeds HISTORY_MAX_ENTRIES lines.
     """
     import os
+
     HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
     entry = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "counts": counts,
     }
     existing_lines: list[str] = []
     if HISTORY_FILE.exists():
         try:
-            existing_lines = [
-                ln for ln in HISTORY_FILE.read_text().splitlines() if ln.strip()
-            ]
+            existing_lines = [ln for ln in HISTORY_FILE.read_text().splitlines() if ln.strip()]
         except Exception:
             existing_lines = []
     # Keep the most recent N-1 entries, then append the new one.
     if len(existing_lines) >= HISTORY_MAX_ENTRIES:
-        existing_lines = existing_lines[-(HISTORY_MAX_ENTRIES - 1):]
+        existing_lines = existing_lines[-(HISTORY_MAX_ENTRIES - 1) :]
     tmp = HISTORY_FILE.with_suffix(HISTORY_FILE.suffix + ".tmp")
     with tmp.open("w") as f:
         for ln in existing_lines:
@@ -98,7 +97,7 @@ def detect_leaks() -> dict:
     previous = get_last_snapshot()
 
     result: dict = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "current_counts": current,
         "leaks": [],
         "normal_growth": [],
@@ -134,17 +133,20 @@ def detect_leaks() -> dict:
     if result["leaks"]:
         try:
             from self_heal import HealingSignal, dispatch
+
             for leak in result["leaks"]:
-                dispatch(HealingSignal(
-                    source="memory_leak_detector",
-                    signal_type="memory_growth",
-                    severity="high" if leak["growth_pct"] > 50 else "medium",
-                    metric="weekly_growth_pct",
-                    value=leak["growth_pct"],
-                    baseline=GROWTH_THRESHOLD_PCT,
-                    target=leak["collection"],
-                    context=leak,
-                ))
+                dispatch(
+                    HealingSignal(
+                        source="memory_leak_detector",
+                        signal_type="memory_growth",
+                        severity="high" if leak["growth_pct"] > 50 else "medium",
+                        metric="weekly_growth_pct",
+                        value=leak["growth_pct"],
+                        baseline=GROWTH_THRESHOLD_PCT,
+                        target=leak["collection"],
+                        context=leak,
+                    )
+                )
         except Exception as e:
             print(f"self_heal dispatch failed: {e}")
 

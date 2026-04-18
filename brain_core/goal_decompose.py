@@ -21,8 +21,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from reasoning import suggest_delegation  # noqa: E402
-from task_queue import task_queue  # noqa: E402
+from reasoning import suggest_delegation
+from task_queue import task_queue
 
 log = logging.getLogger("brain.goal_decompose")
 
@@ -32,6 +32,7 @@ MAX_SUBTASKS = 8
 # ---------------------------------------------------------------------------
 # Prompt builder
 # ---------------------------------------------------------------------------
+
 
 def _build_decomposition_prompt(goal: dict) -> str:
     title = goal.get("title", "Untitled goal")
@@ -61,6 +62,7 @@ Return ONLY a JSON array:
 # ---------------------------------------------------------------------------
 # JSON parser (tolerant)
 # ---------------------------------------------------------------------------
+
 
 def _parse_subtasks(text: str) -> list[dict]:
     """Extract a JSON array of subtask dicts from Sage's response.
@@ -100,6 +102,7 @@ def _parse_subtasks(text: str) -> list[dict]:
 # Main entry point
 # ---------------------------------------------------------------------------
 
+
 def decompose_goal(goal_id: str) -> list[dict]:
     """Decompose a goal into subtasks, create them in the task queue.
 
@@ -131,7 +134,8 @@ def decompose_goal(goal_id: str) -> list[dict]:
 
     # Dispatch directly to Sage (not via reason_deep, which wraps in its own prompt)
     try:
-        from openclaw_dispatch import dispatch
+        from cli_llm import dispatch
+
         result = dispatch(agent="sage", message=prompt, thinking="medium", timeout=90)
         raw_text = result.text if result.ok else ""
     except Exception:
@@ -157,12 +161,16 @@ def decompose_goal(goal_id: str) -> list[dict]:
         if out_of_range:
             log.warning(
                 "Invalid out-of-range dependency indices %s for subtask '%s' (cap=%d) — will be ignored",
-                out_of_range, raw.get("title", "?"), MAX_SUBTASKS,
+                out_of_range,
+                raw.get("title", "?"),
+                MAX_SUBTASKS,
             )
         if forward_refs:
             log.warning(
                 "Invalid forward-reference dependency indices %s for subtask[%d] '%s' — will be ignored",
-                forward_refs, idx, raw.get("title", "?"),
+                forward_refs,
+                idx,
+                raw.get("title", "?"),
             )
 
     # Assign agents and create tasks
@@ -183,9 +191,7 @@ def decompose_goal(goal_id: str) -> list[dict]:
         if not isinstance(depends_on_indices, list):
             depends_on_indices = []
         depends_on_ids = [
-            index_to_task_id[i]
-            for i in depends_on_indices
-            if isinstance(i, int) and i in index_to_task_id
+            index_to_task_id[i] for i in depends_on_indices if isinstance(i, int) and i in index_to_task_id
         ]
 
         task = task_queue.create_task(
@@ -225,6 +231,7 @@ def _fallback_single_task(goal_id: str, goal: dict) -> list[dict]:
 # ---------------------------------------------------------------------------
 # Goal status
 # ---------------------------------------------------------------------------
+
 
 def get_goal_status(goal_id: str) -> dict:
     """Return progress summary for a goal and its subtasks."""

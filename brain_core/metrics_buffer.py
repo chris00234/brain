@@ -21,7 +21,7 @@ import threading
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -29,7 +29,7 @@ HISTOGRAM_WINDOW = 512
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 @dataclass
@@ -54,6 +54,7 @@ class PhaseStats:
     record_search_latency. Each phase is an independent rolling window so
     p50/p95/p99 can be queried without decoding full request payloads.
     """
+
     count: int = 0
     latencies_ms: deque = field(default_factory=lambda: deque(maxlen=HISTOGRAM_WINDOW))
 
@@ -88,13 +89,24 @@ class DispatchStats:
 class MetricsBuffer:
     # Phase keys we track from the /recall/v2 timing dict. Unknown integer
     # keys with an _ms suffix are also captured (forward-compatible).
-    _PHASE_KEYS = frozenset({
-        "search_ms", "expansion_ms", "hyde_ms",
-        "rag_ms", "canonical_ms", "obsidian_ms",
-        "graph_ms", "fts_ms", "graph_prefetch_ms",
-        "rrf_ms", "rerank_ms", "cross_encoder_ms",
-        "decay_ms", "enrich_ms",
-    })
+    _PHASE_KEYS = frozenset(
+        {
+            "search_ms",
+            "expansion_ms",
+            "hyde_ms",
+            "rag_ms",
+            "canonical_ms",
+            "obsidian_ms",
+            "graph_ms",
+            "fts_ms",
+            "graph_prefetch_ms",
+            "rrf_ms",
+            "rerank_ms",
+            "cross_encoder_ms",
+            "decay_ms",
+            "enrich_ms",
+        }
+    )
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -108,6 +120,11 @@ class MetricsBuffer:
         self._last_backup_at: str = ""
         self._last_backup_ok: bool = True
         self._search_latencies: deque = deque(maxlen=1000)
+        # 2026-04-17 hook adoption metrics — counts + p95 latency per-hook
+        # per-agent, exposed in /metrics so we can verify OpenClaw's
+        # brain-active-recall hook actually fires across all 5 agents.
+        self._hook_calls: dict[tuple[str, str], int] = defaultdict(int)
+        self._hook_latencies: dict[str, deque] = defaultdict(lambda: deque(maxlen=500))
 
     def record_search_latency(self, total_ms: int, source_timings: dict[str, int] | None = None) -> None:
         """Record search latency and per-phase timings for p50/p95/p99 tracking."""
@@ -157,7 +174,16 @@ class MetricsBuffer:
                 if stats.count > 0
             }
 
-    def record_request(self, path: str, latency_ms: float, error: bool = False) -> None:
+    def record_request(
+        self,
+        path: str,
+        latency_ms: float,
+        error: bool = False,
+        status_code: int = 0,
+    ) -> None:
+        """Record a completed request. 2026-04-16 R-8: status_code param
+        added so metrics can distinguish 2xx/4xx/5xx — previously every
+        non-5xx was indistinguishable in aggregate stats."""
         with self._lock:
             key = self._normalize_path(path)
             stats = self._routes[key]
@@ -165,6 +191,12 @@ class MetricsBuffer:
             stats.latencies_ms.append(latency_ms)
             if error:
                 stats.errors += 1
+            # Per-status-band counters. Stored as attributes so legacy
+            # readers of stats don't break; new readers can access them.
+            if status_code:
+                band = status_code // 100
+                attr = f"status_{band}xx_count"
+                setattr(stats, attr, getattr(stats, attr, 0) + 1)
 
     def record_job_result(self, job_name: str, ok: bool, error: str = "") -> None:
         with self._lock:
@@ -192,7 +224,18 @@ class MetricsBuffer:
             self._last_backup_at = _now_iso()
             self._last_backup_ok = ok
 
-    def record_dispatch(self, ok: bool, duration_ms: int, rate_limited: bool, auth_failed: bool, attempts: int) -> None:
+    def record_hook_call(self, hook_name: str, agent: str) -> None:
+        """Track per-agent hook invocations (brain-active-recall adoption check)."""
+        with self._lock:
+            self._hook_calls[(hook_name, agent)] += 1
+
+    def record_hook_latency(self, hook_name: str, duration_ms: int) -> None:
+        with self._lock:
+            self._hook_latencies[hook_name].append(duration_ms)
+
+    def record_dispatch(
+        self, ok: bool, duration_ms: int, rate_limited: bool, auth_failed: bool, attempts: int
+    ) -> None:
         with self._lock:
             self._dispatch.attempts += attempts
             if ok:
@@ -244,7 +287,11 @@ class MetricsBuffer:
                 "rate_limited": self._dispatch.rate_limited,
                 "auth_failed": self._dispatch.auth_failed,
                 "mean_duration_ms": (
-                    round(self._dispatch.total_duration_ms / max(1, self._dispatch.successes + self._dispatch.failures), 1)
+                    round(
+                        self._dispatch.total_duration_ms
+                        / max(1, self._dispatch.successes + self._dispatch.failures),
+                        1,
+                    )
                 ),
             }
 
@@ -259,6 +306,25 @@ class MetricsBuffer:
                 if stats.count > 0
             }
 
+            # 2026-04-17 hook adoption: group per-hook per-agent counts +
+            # per-hook latency percentiles. Lets /metrics consumers verify
+            # brain-active-recall is firing for every OpenClaw agent, not
+            # just Claude Code.
+            hook_adoption: dict[str, Any] = {}
+            for (hook, agent), n in self._hook_calls.items():
+                hook_adoption.setdefault(hook, {"per_agent": {}, "total": 0})
+                hook_adoption[hook]["per_agent"][agent] = n
+                hook_adoption[hook]["total"] += n
+            for hook, lats in self._hook_latencies.items():
+                if not lats:
+                    continue
+                sorted_lats = sorted(lats)
+                p50 = sorted_lats[len(sorted_lats) // 2]
+                p95 = sorted_lats[min(len(sorted_lats) - 1, int(len(sorted_lats) * 0.95))]
+                hook_adoption.setdefault(hook, {"per_agent": {}, "total": 0})
+                hook_adoption[hook]["p50_ms"] = p50
+                hook_adoption[hook]["p95_ms"] = p95
+
             return {
                 "started_at": self._started_at,
                 "routes": routes,
@@ -266,6 +332,7 @@ class MetricsBuffer:
                 "jobs": jobs,
                 "memory_writes_1h": memory_writes_1h,
                 "dispatch": dispatch,
+                "hook_adoption": hook_adoption,
                 "last_learn_success_at": self._last_learn_success_at,
                 "last_backup_at": self._last_backup_at,
                 "last_backup_ok": self._last_backup_ok,
@@ -277,8 +344,10 @@ class MetricsBuffer:
         conn = sqlite3.connect(str(db_path), isolation_level=None)
         conn.execute("""CREATE TABLE IF NOT EXISTS metrics_snapshots (
             id INTEGER PRIMARY KEY, timestamp TEXT, payload TEXT)""")
-        conn.execute("INSERT INTO metrics_snapshots (timestamp, payload) VALUES (?, ?)",
-                     (datetime.now(timezone.utc).isoformat(), json.dumps(self.snapshot())))
+        conn.execute(
+            "INSERT INTO metrics_snapshots (timestamp, payload) VALUES (?, ?)",
+            (datetime.now(UTC).isoformat(), json.dumps(self.snapshot())),
+        )
         # Prune >90 days
         conn.execute("DELETE FROM metrics_snapshots WHERE timestamp < datetime('now', '-90 days')")
         conn.close()
@@ -313,6 +382,7 @@ class MetricsBuffer:
     def _normalize_path(path: str) -> str:
         """Collapse path parameters so /memory/abc123 → /memory/{id}."""
         import re
+
         path = re.sub(r"/memory/[^/]+$", "/memory/{id}", path)
         path = re.sub(r"/memory/contradictions/[^/]+/resolve$", "/memory/contradictions/{id}/resolve", path)
         path = re.sub(r"/boot-context/[^/]+$", "/boot-context/{agent}", path)

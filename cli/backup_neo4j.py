@@ -5,12 +5,11 @@ Dumps Neo4j database, compresses, uploads to rag-backups bucket.
 14-day retention (same as ChromaDB backup).
 """
 
-import os
 import subprocess
 import sys
 import tarfile
 import tempfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 BACKUP_BUCKET = "rag-backups"
@@ -23,7 +22,7 @@ from _minio import s3_client as _s3_client
 
 
 def backup():
-    date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    date_str = datetime.now(UTC).strftime("%Y-%m-%d")
     archive_name = f"neo4j-backup-{date_str}.tar.gz"
 
     if not NEO4J_DATA_DIR.exists():
@@ -38,15 +37,18 @@ def backup():
         print("[1/3] Dumping Neo4j database (consistent offline export)...")
         # Use neo4j-admin for consistent dump (handles transaction logs properly)
         dump_result = subprocess.run(
-            ["/opt/homebrew/bin/neo4j-admin", "database", "dump", "neo4j",
-             f"--to-path={dump_dir}"],
-            capture_output=True, text=True, timeout=120,
+            ["/opt/homebrew/bin/neo4j-admin", "database", "dump", "neo4j", f"--to-path={dump_dir}"],
+            capture_output=True,
+            text=True,
+            timeout=120,
         )
         neo4j_stopped = False
         if dump_result.returncode != 0:
             print(f"  neo4j-admin dump failed ({dump_result.stderr[:100]}), falling back to file copy")
             subprocess.run(["/opt/homebrew/bin/neo4j", "stop"], capture_output=True, timeout=30)
-            import time; time.sleep(2)
+            import time
+
+            time.sleep(2)
             neo4j_stopped = True
 
         try:
@@ -76,7 +78,7 @@ def backup():
             resp = s3.list_objects_v2(Bucket=BACKUP_BUCKET, Prefix="neo4j-backup-")
             objects = sorted(resp.get("Contents", []), key=lambda o: o["Key"])
             if len(objects) > MAX_BACKUPS:
-                to_delete = objects[:len(objects) - MAX_BACKUPS]
+                to_delete = objects[: len(objects) - MAX_BACKUPS]
                 for obj in to_delete:
                     s3.delete_object(Bucket=BACKUP_BUCKET, Key=obj["Key"])
                     print(f"  Pruned: {obj['Key']}")

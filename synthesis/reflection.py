@@ -42,11 +42,17 @@ def get_question():
 
 def send_telegram(text):
     cmd = [
-        OPENCLAW_BIN, "message", "send",
-        "--channel", "telegram",
-        "--target", CHAT_ID,
-        "--account", "jenna-bot",
-        "--message", text,
+        OPENCLAW_BIN,
+        "message",
+        "send",
+        "--channel",
+        "telegram",
+        "--target",
+        CHAT_ID,
+        "--account",
+        "jenna-bot",
+        "--message",
+        text,
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
     if result.returncode != 0:

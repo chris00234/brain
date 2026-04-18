@@ -22,7 +22,7 @@ except ImportError:
     BRAIN_LOGS_DIR = Path("/Users/chrischo/server/brain/logs")
     brain_config_store = None  # type: ignore[assignment]
 
-from safe_state import load_state, save_state  # noqa: F401  (kept for back-compat callers)
+from safe_state import load_state, save_state
 
 STATE_FILE = BRAIN_LOGS_DIR / "autopilot_state.json"
 

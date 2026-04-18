@@ -7,6 +7,7 @@ post-merge dedup), writes the result.
 Usage:
   eval_merge.py [--input PATH] [--eval-set PATH]
 """
+
 from __future__ import annotations
 
 import argparse
@@ -35,7 +36,7 @@ def main() -> int:
 
     existing = json.loads(args.eval_set.read_text())
     if not isinstance(existing, list):
-        print(f"FATAL: eval_set is not a list", file=sys.stderr)
+        print("FATAL: eval_set is not a list", file=sys.stderr)
         return 2
     print(f"existing eval_set entries: {len(existing)}")
 

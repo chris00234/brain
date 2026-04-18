@@ -18,13 +18,13 @@ from __future__ import annotations
 import hashlib
 import json
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, "/Users/chrischo/server/brain/brain_core")
-from indexer import chroma_api, _get_collection_id  # noqa: E402
-from safe_state import atomic_write_text  # noqa: E402
-from openclaw_dispatch import dispatch_with_schema  # noqa: E402
+from cli_llm import dispatch_with_schema  # migrated 2026-04-17
+from indexer import _get_collection_id, chroma_api
+from safe_state import atomic_write_text
 
 SEMANTIC_COLLECTION = "semantic_memory"
 INBOX_DIR = Path("/Users/chrischo/server/knowledge/raw/inbox")
@@ -40,7 +40,7 @@ REFLECT_SCHEMA = """{
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _log(msg: str) -> None:
@@ -66,7 +66,7 @@ def fetch_recent_memories() -> tuple[list[dict], list[dict]]:
         _log(f"ERROR chroma get: {e}")
         return [], []
 
-    cutoff = datetime.now(timezone.utc) - timedelta(days=LOOKBACK_DAYS)
+    cutoff = datetime.now(UTC) - timedelta(days=LOOKBACK_DAYS)
     ids = res.get("ids") or []
     docs = res.get("documents") or []
     metas = res.get("metadatas") or []
@@ -74,7 +74,7 @@ def fetch_recent_memories() -> tuple[list[dict], list[dict]]:
     new_memories: list[dict] = []
     all_preferences: list[dict] = []
 
-    for mem_id, doc, meta in zip(ids, docs, metas):
+    for mem_id, doc, meta in zip(ids, docs, metas, strict=False):
         meta = meta or {}
         ts_raw = meta.get("created_at") or meta.get("updated_at") or ""
         category = meta.get("category", "other")
@@ -99,7 +99,7 @@ def fetch_recent_memories() -> tuple[list[dict], list[dict]]:
         except (TypeError, ValueError):
             continue
         if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=timezone.utc)
+            ts = ts.replace(tzinfo=UTC)
         if ts >= cutoff:
             new_memories.append(entry)
 
@@ -143,14 +143,59 @@ ALL ACTIVE PREFERENCES ({pref_count} total):
 JSON:"""
 
 
+# 2026-04-16 Tier 3 #12: Chain-of-Note (Yu et al. 2023) — sequential pass
+# that maintains a running belief state. Reduces single-shot false-positive
+# contradictions by requiring temporal consistency before flagging.
+CHAIN_OF_NOTE_PROMPT = """You are Sage reviewing Chris's memories in chronological order. Maintain a running belief state as you read each memory, then report only contradictions that are supported across multiple observations (not single outliers).
+
+METHOD:
+1. Read memories chronologically (they're pre-sorted below).
+2. For each new memory, maintain internal belief state: what Chris currently prefers / what is true.
+3. Flag a contradiction ONLY when: (a) a new memory contradicts an entrenched earlier preference AND (b) no later memory reverts the change. Single transient mentions don't count.
+4. Patterns: report only when you see the same theme in 3+ memories.
+
+This reduces false positives — a one-off mention of "maybe I should try X" is not a real preference flip.
+
+Return JSON ONLY:
+
+{{
+  "patterns": [
+    {{"description": "<observed pattern>", "evidence_ids": [...], "confidence": 0.0-1.0, "occurrences": <int>}}
+  ],
+  "contradictions": [
+    {{"a_id": "<id>", "b_id": "<id>", "explanation": "<what A says vs what B says, and which is likely current>", "corroboration_count": <int>}}
+  ],
+  "missing_context": [
+    "<one-line gap that should be probed>"
+  ]
+}}
+
+Drop any contradiction with corroboration_count < 2. Maximum 5 per array. No prose outside JSON. No markdown fences.
+
+NEW MEMORIES IN CHRONOLOGICAL ORDER (last 7 days, {new_count} total):
+{new_memories}
+
+ALL ACTIVE PREFERENCES ({pref_count} total):
+{all_preferences}
+
+JSON:"""
+
+
 def dispatch_to_sage(new_memories: list[dict], all_preferences: list[dict]) -> dict | None:
     if not new_memories:
         return None
-    fmt = lambda m: f"- [{m['id'][:24]}] ({m['category']}, {m['agent']}, {m['created_at'][:10]}) {m['content'][:200]}"
-    new_fmt = "\n".join(fmt(m) for m in new_memories[:60])
+    # 2026-04-16 Tier 3 #12: Chain-of-Note. Sort memories chronologically
+    # so Sage can maintain a running belief state as it reads them. The
+    # prompt enforces corroboration_count >= 2 and occurrences >= 3, so
+    # single outlier mentions no longer trigger false contradictions.
+    sorted_new = sorted(new_memories, key=lambda m: m.get("created_at", ""))
+    fmt = (
+        lambda m: f"- [{m['id'][:24]}] ({m['category']}, {m['agent']}, {m['created_at'][:10]}) {m['content'][:200]}"
+    )
+    new_fmt = "\n".join(fmt(m) for m in sorted_new[:60])
     pref_fmt = "\n".join(fmt(m) for m in all_preferences[:500]) or "(none)"
-    prompt = REFLECT_PROMPT.format(
-        new_count=len(new_memories),
+    prompt = CHAIN_OF_NOTE_PROMPT.format(
+        new_count=len(sorted_new),
         new_memories=new_fmt,
         pref_count=len(all_preferences),
         all_preferences=pref_fmt,
@@ -191,14 +236,16 @@ def index_patterns(reflection: dict) -> int:
             desc = str(p)
         if len(desc) < 20:
             continue
-        docs.append({
-            "content": desc,
-            "source": "brain-reflect:nightly",
-            "type": "pattern",
-            "service": "",
-            "agent": "sage",
-            "section": "",
-        })
+        docs.append(
+            {
+                "content": desc,
+                "source": "brain-reflect:nightly",
+                "type": "pattern",
+                "service": "",
+                "agent": "sage",
+                "section": "",
+            }
+        )
 
     if not docs:
         return 0
@@ -206,6 +253,7 @@ def index_patterns(reflection: dict) -> int:
     try:
         sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "brain_core"))
         from indexer import add_documents
+
         count = add_documents("patterns", docs, skip_stale_cleanup=True)
         _log(f"indexed {count} patterns into patterns collection")
         return count
@@ -224,13 +272,19 @@ def write_to_inbox(reflection: dict, memory_count: int) -> Path | None:
         "generated_by": "brain_reflect",
     }
     ref_data = reflection or {}
-    content_parts = [f"Nightly Reflection ({payload.get('memory_window_days', 7)}-day window, {payload.get('memory_count', 0)} memories)\n"]
+    content_parts = [
+        f"Nightly Reflection ({payload.get('memory_window_days', 7)}-day window, {payload.get('memory_count', 0)} memories)\n"
+    ]
     patterns = ref_data.get("patterns", [])
     if patterns:
         content_parts.append("## Patterns Observed")
         for p in patterns:
             desc = p.get("description", p) if isinstance(p, dict) else str(p)
-            conf = f" (confidence: {p.get('confidence', '?')})" if isinstance(p, dict) and 'confidence' in p else ""
+            conf = (
+                f" (confidence: {p.get('confidence', '?')})"
+                if isinstance(p, dict) and "confidence" in p
+                else ""
+            )
             content_parts.append(f"- {desc}{conf}")
     contradictions = ref_data.get("contradictions", [])
     if contradictions:
@@ -268,7 +322,9 @@ def write_to_inbox(reflection: dict, memory_count: int) -> Path | None:
 def main() -> int:
     _log("=== brain_reflect start ===")
     new_memories, all_preferences = fetch_recent_memories()
-    _log(f"fetched {len(new_memories)} new memories from last {LOOKBACK_DAYS}d, {len(all_preferences)} active preferences")
+    _log(
+        f"fetched {len(new_memories)} new memories from last {LOOKBACK_DAYS}d, {len(all_preferences)} active preferences"
+    )
     if not new_memories:
         _log("nothing to reflect on, exiting")
         return 0
@@ -284,7 +340,16 @@ def main() -> int:
     # Index patterns into ChromaDB patterns collection
     pattern_count = index_patterns(reflection)
 
-    print(json.dumps({"status": "ok", "out": str(out), "memories": len(new_memories), "patterns_indexed": pattern_count}))
+    print(
+        json.dumps(
+            {
+                "status": "ok",
+                "out": str(out),
+                "memories": len(new_memories),
+                "patterns_indexed": pattern_count,
+            }
+        )
+    )
     return 0
 
 

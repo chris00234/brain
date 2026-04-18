@@ -26,28 +26,29 @@ import copy
 import json
 import logging
 import re
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-import sys
 sys.path.insert(0, str(Path(__file__).parent))
 
-import search_unified  # noqa: E402
-import rrf             # noqa: E402
-import rerank          # noqa: E402
-import time_decay      # noqa: E402
-from openclaw_dispatch import dispatch, DispatchResult  # noqa: E402
-from boot_context import get_chris_profile  # noqa: E402
+import rerank
+import rrf
+import search_unified
+import time_decay
+from boot_context import get_chris_state as get_chris_profile  # 2026-04-17 — alias at import-site
+from cli_llm import dispatch  # migrated 2026-04-17
 
 log = logging.getLogger("brain.reasoning")
 
 # ---------------------------------------------------------------------------
 # Data structures
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class DecisionOption:
@@ -113,6 +114,7 @@ def _cache_put(key: str, result: DecisionResult) -> None:
 # 1. gather_decision_context
 # ---------------------------------------------------------------------------
 
+
 def gather_decision_context(
     situation: str,
     options: list[DecisionOption],
@@ -123,10 +125,11 @@ def gather_decision_context(
 
     Returns (preference_hits, profile_text, context_text).
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     # Fan out three searches in parallel
     from concurrent.futures import ThreadPoolExecutor
+
     with ThreadPoolExecutor(max_workers=3) as pool:
         f_sem = pool.submit(_search_collection, situation, 10, ["semantic_memory"], None)
         f_can = pool.submit(_search_collection, situation, 10, ["canonical"], domain)
@@ -156,19 +159,18 @@ def gather_decision_context(
     # Build PreferenceHit list from top 8
     hits: list[PreferenceHit] = []
     for r in reranked[:8]:
-        created_at = (
-            r.get("created_at")
-            or (r.get("metadata") or {}).get("created_at")
-        )
+        created_at = r.get("created_at") or (r.get("metadata") or {}).get("created_at")
         age_days = _age_days(created_at, now)
-        hits.append(PreferenceHit(
-            content=(r.get("content") or r.get("title") or "")[:500],
-            category=(r.get("metadata") or {}).get("category", r.get("collection", "unknown")),
-            confidence=float(r.get("score", 0)),
-            age_days=age_days,
-            source=r.get("source", r.get("collection", "unknown")),
-            collection=r.get("collection", "unknown"),
-        ))
+        hits.append(
+            PreferenceHit(
+                content=(r.get("content") or r.get("title") or "")[:500],
+                category=(r.get("metadata") or {}).get("category", r.get("collection", "unknown")),
+                confidence=float(r.get("score", 0)),
+                age_days=age_days,
+                source=r.get("source", r.get("collection", "unknown")),
+                collection=r.get("collection", "unknown"),
+            )
+        )
 
     # Pull Chris's profile
     profile_text = get_chris_profile() or ""
@@ -189,7 +191,10 @@ def _search_collection(
     """Thin wrapper around search_unified.search_all, returns results list."""
     try:
         payload = search_unified.search_all(
-            query, limit=limit, collections=collections, domain=domain,
+            query,
+            limit=limit,
+            collections=collections,
+            domain=domain,
         )
         return payload.get("results", []) if isinstance(payload, dict) else []
     except Exception as exc:
@@ -205,9 +210,9 @@ def _age_days(created_at: Any, now: datetime) -> float:
             txt = created_at.replace("Z", "+00:00")
             dt = datetime.fromisoformat(txt)
             if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
+                dt = dt.replace(tzinfo=UTC)
         elif isinstance(created_at, datetime):
-            dt = created_at if created_at.tzinfo else created_at.replace(tzinfo=timezone.utc)
+            dt = created_at if created_at.tzinfo else created_at.replace(tzinfo=UTC)
         else:
             return 0.0
         return max(0.0, (now - dt).total_seconds() / 86400.0)
@@ -218,6 +223,7 @@ def _age_days(created_at: Any, now: datetime) -> float:
 # ---------------------------------------------------------------------------
 # 2. build_decision_prompt
 # ---------------------------------------------------------------------------
+
 
 def build_decision_prompt(
     situation: str,
@@ -280,6 +286,7 @@ Rules:
 # 3. evaluate_decision
 # ---------------------------------------------------------------------------
 
+
 def evaluate_decision(
     situation: str,
     options: list[DecisionOption],
@@ -324,7 +331,9 @@ def evaluate_decision(
 
     # Tier 2: If Tier 1 failed or confidence is low, escalate to Sage (expensive, thinking=low)
     if result is None or result.confidence < 0.6:
-        log.info("SOFAI-LM: escalating to Sage (tier1 confidence=%s)", result.confidence if result else "failed")
+        log.info(
+            "SOFAI-LM: escalating to Sage (tier1 confidence=%s)", result.confidence if result else "failed"
+        )
         sage_result = dispatch(
             agent="sage",
             message=prompt,
@@ -416,7 +425,16 @@ def _parse_sage_response(text: str, hits: list[PreferenceHit]) -> DecisionResult
 
 # Keyword signals per common domain. Extend as patterns emerge.
 _DOMAIN_KEYWORDS: dict[str, list[str]] = {
-    "infrastructure": ["docker", "container", "nginx", "cloudflare", "homelab", "launchd", "native", "orbstack"],
+    "infrastructure": [
+        "docker",
+        "container",
+        "nginx",
+        "cloudflare",
+        "homelab",
+        "launchd",
+        "native",
+        "orbstack",
+    ],
     "frontend": ["nextjs", "react", "tailwind", "shadcn", "typescript", "vite", "app router"],
     "backend": ["fastapi", "python", "api", "endpoint", "uvicorn"],
     "data": ["chromadb", "chroma", "ollama", "embedding", "vector", "rag"],
@@ -473,7 +491,7 @@ def _heuristic_decision(
     return DecisionResult(
         recommendation=best_label,
         reasoning=f"Keyword analysis of {len(hits)} memory hits favors '{best_label}' "
-                  f"(score: {best_score:.1f}/{total:.1f}). No LLM verification — treat as weak signal.",
+        f"(score: {best_score:.1f}/{total:.1f}). No LLM verification — treat as weak signal.",
         confidence=confidence,
         heuristic_fallback=True,
     )
@@ -485,28 +503,109 @@ def _heuristic_decision(
 
 _AGENT_KEYWORDS: dict[str, list[str]] = {
     "liz": [
-        "code", "implement", "build", "debug", "fix", "refactor", "test", "typescript",
-        "python", "react", "nextjs", "fastapi", "frontend", "backend", "api", "feature",
-        "pull request", "pr", "git", "architecture", "design pattern", "component",
+        "code",
+        "implement",
+        "build",
+        "debug",
+        "fix",
+        "refactor",
+        "test",
+        "typescript",
+        "python",
+        "react",
+        "nextjs",
+        "fastapi",
+        "frontend",
+        "backend",
+        "api",
+        "feature",
+        "pull request",
+        "pr",
+        "git",
+        "architecture",
+        "design pattern",
+        "component",
     ],
     "ellie": [
-        "docker", "container", "deploy", "infra", "infrastructure", "nginx", "cloudflare",
-        "server", "homelab", "orbstack", "launchd", "service", "uptime", "monitoring",
-        "dns", "ssl", "certificate", "network", "port", "firewall", "backup",
+        "docker",
+        "container",
+        "deploy",
+        "infra",
+        "infrastructure",
+        "nginx",
+        "cloudflare",
+        "server",
+        "homelab",
+        "orbstack",
+        "launchd",
+        "service",
+        "uptime",
+        "monitoring",
+        "dns",
+        "ssl",
+        "certificate",
+        "network",
+        "port",
+        "firewall",
+        "backup",
     ],
     "jenna": [
-        "schedule", "calendar", "reminder", "task", "organize", "prioritize", "plan",
-        "coordinate", "message", "email", "communication", "meeting", "daily", "weekly",
-        "status", "report", "summary", "brief", "delegate",
+        "schedule",
+        "calendar",
+        "reminder",
+        "task",
+        "organize",
+        "prioritize",
+        "plan",
+        "coordinate",
+        "message",
+        "email",
+        "communication",
+        "meeting",
+        "daily",
+        "weekly",
+        "status",
+        "report",
+        "summary",
+        "brief",
+        "delegate",
     ],
     "sage": [
-        "research", "analyze", "compare", "evaluate", "investigate", "study", "learn",
-        "knowledge", "synthesis", "pattern", "contradiction", "deep dive", "explore",
-        "question", "reasoning", "think", "reflect", "strategy",
+        "research",
+        "analyze",
+        "compare",
+        "evaluate",
+        "investigate",
+        "study",
+        "learn",
+        "knowledge",
+        "synthesis",
+        "pattern",
+        "contradiction",
+        "deep dive",
+        "explore",
+        "question",
+        "reasoning",
+        "think",
+        "reflect",
+        "strategy",
     ],
     "market": [
-        "content", "blog", "post", "seo", "analytics", "brand", "marketing", "ghost",
-        "social", "growth", "audience", "writing", "article", "publish", "newsletter",
+        "content",
+        "blog",
+        "post",
+        "seo",
+        "analytics",
+        "brand",
+        "marketing",
+        "ghost",
+        "social",
+        "growth",
+        "audience",
+        "writing",
+        "article",
+        "publish",
+        "newsletter",
     ],
 }
 
@@ -519,6 +618,7 @@ def suggest_delegation(task_description: str) -> dict[str, Any]:
     # Try learned routing first (MasRouter pattern — uses past outcome data)
     try:
         from task_queue import task_queue
+
         learned = task_queue.suggest_delegation_learned(task_description)
         if learned:
             return learned
@@ -585,6 +685,7 @@ def suggest_delegation(task_description: str) -> dict[str, Any]:
 # 5. reason_deep
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class DeepReasoningResult:
     answer: str
@@ -611,6 +712,7 @@ def reason_deep(
 
     # Gather relevant context — fan out per collection in parallel and RRF-fuse
     from concurrent.futures import ThreadPoolExecutor
+
     with ThreadPoolExecutor(max_workers=3) as pool:
         f_sem = pool.submit(_search_collection, question, 8, ["semantic_memory"], None)
         f_can = pool.submit(_search_collection, question, 8, ["canonical"], domain)
@@ -630,18 +732,20 @@ def reason_deep(
     time_decay.apply_to_results(reranked)
     memory_results = sorted(reranked, key=lambda r: r.get("score", 0), reverse=True)
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     provenance: list[PreferenceHit] = []
     for r in memory_results[:6]:
         created_at = r.get("created_at") or (r.get("metadata") or {}).get("created_at")
-        provenance.append(PreferenceHit(
-            content=(r.get("content") or r.get("title") or "")[:500],
-            category=(r.get("metadata") or {}).get("category", r.get("collection", "unknown")),
-            confidence=float(r.get("score", 0)),
-            age_days=_age_days(created_at, now),
-            source=r.get("source", r.get("collection", "unknown")),
-            collection=r.get("collection", "unknown"),
-        ))
+        provenance.append(
+            PreferenceHit(
+                content=(r.get("content") or r.get("title") or "")[:500],
+                category=(r.get("metadata") or {}).get("category", r.get("collection", "unknown")),
+                confidence=float(r.get("score", 0)),
+                age_days=_age_days(created_at, now),
+                source=r.get("source", r.get("collection", "unknown")),
+                collection=r.get("collection", "unknown"),
+            )
+        )
 
     profile_text = get_chris_profile() or ""
 
@@ -651,8 +755,7 @@ def reason_deep(
         sections.append(f"## Chris's Profile\n{profile_text[:1500]}")
     if provenance:
         evidence_lines = [
-            f"[{i+1}] ({p.category}, {p.age_days:.0f}d ago) {p.content}"
-            for i, p in enumerate(provenance)
+            f"[{i+1}] ({p.category}, {p.age_days:.0f}d ago) {p.content}" for i, p in enumerate(provenance)
         ]
         sections.append("## Evidence\n" + "\n".join(evidence_lines))
     if context:
@@ -698,8 +801,14 @@ Respond with ONLY a JSON object (no markdown fences):
     log.warning("Sage deep reasoning failed, returning evidence-only fallback")
     evidence_summary = "; ".join(p.content[:100] for p in provenance[:3])
     return DeepReasoningResult(
-        answer=f"Could not perform deep reasoning (Sage unavailable). Relevant evidence: {evidence_summary}" if evidence_summary else "No evidence found and Sage is unavailable.",
-        reasoning_steps=["Evidence gathered from memory", "LLM reasoning unavailable", "Returning raw evidence"],
+        answer=f"Could not perform deep reasoning (Sage unavailable). Relevant evidence: {evidence_summary}"
+        if evidence_summary
+        else "No evidence found and Sage is unavailable.",
+        reasoning_steps=[
+            "Evidence gathered from memory",
+            "LLM reasoning unavailable",
+            "Returning raw evidence",
+        ],
         provenance=provenance,
         model="heuristic",
         latency_ms=int((time.time() - t_start) * 1000),

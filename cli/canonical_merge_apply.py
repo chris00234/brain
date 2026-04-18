@@ -16,17 +16,18 @@ Usage:
 
 Default reads latest drafts/YYYY-MM-DD/ subdir.
 """
+
 from __future__ import annotations
 
 import argparse
 import json
 import shutil
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "pipeline"))
-from common import ROOT, parse_note, render_note, iter_note_paths, slugify  # noqa: E402
+from common import ROOT, iter_note_paths, parse_markdown_frontmatter, parse_note, render_note, slugify
 
 DRAFTS_BASE = ROOT / "reports" / "canonical_compaction" / "drafts"
 CANONICAL_DIR = ROOT / "canonical"
@@ -34,7 +35,7 @@ ARCHIVE_DIR = CANONICAL_DIR / "archived"
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _latest_drafts_dir() -> Path | None:
@@ -115,7 +116,11 @@ def _promote_draft(draft_path: Path, dry_run: bool) -> dict:
 
     # Derive final canonical id/slug
     draft_id = meta.get("id") or ""
-    canonical_id = draft_id.replace("draft_merge_", "merge_", 1) if draft_id.startswith("draft_merge_") else f"merge_{draft_id}"
+    canonical_id = (
+        draft_id.replace("draft_merge_", "merge_", 1)
+        if draft_id.startswith("draft_merge_")
+        else f"merge_{draft_id}"
+    )
     domain = meta.get("domain") or "decisions"
     title = meta.get("title") or draft_id
     slug = slugify(title)
@@ -190,7 +195,8 @@ def _promote_draft(draft_path: Path, dry_run: bool) -> dict:
     # Mirror as canonical atom + extract entities into Neo4j (same path as promote_canonical.py)
     try:
         sys.path.insert(0, "/Users/chrischo/server/brain/brain_core")
-        from atoms_store import upsert_atom  # noqa: E402
+        from atoms_store import upsert_atom
+
         text_preview = (title + "\n" + body)[:2000]
         upsert_atom(
             text=text_preview,
@@ -211,7 +217,8 @@ def _promote_draft(draft_path: Path, dry_run: bool) -> dict:
 
     # Extract entities into Neo4j — keeps graph UI synced with new consolidated pages
     try:
-        from entity_graph import extract_and_store_entities  # noqa: E402
+        from entity_graph import extract_and_store_entities
+
         note_text = f"{title} {body[:1500]}"
         extract_and_store_entities(note_text, canonical_id)
     except Exception:
@@ -246,7 +253,10 @@ def main() -> int:
         print(json.dumps({"status": "no_drafts", "drafts_dir": str(drafts_dir.relative_to(ROOT))}))
         return 0
 
-    print(f"[canonical_merge_apply] drafts_dir={drafts_dir.name} drafts={len(draft_paths)} dry_run={args.dry_run}", file=sys.stderr)
+    print(
+        f"[canonical_merge_apply] drafts_dir={drafts_dir.name} drafts={len(draft_paths)} dry_run={args.dry_run}",
+        file=sys.stderr,
+    )
 
     results = []
     for dp in draft_paths:

@@ -46,8 +46,10 @@ def batch_lock(job_name: str, timeout: int = LOCK_TIMEOUT):
                     holder = "unknown"
                 elapsed = int(time.monotonic() - start)
                 if elapsed % 30 == 0 and elapsed > 0:
-                    print(f"  [{job_name}] waiting for batch lock (held by: {holder}, {elapsed}s)...",
-                          file=sys.stderr)
+                    print(
+                        f"  [{job_name}] waiting for batch lock (held by: {holder}, {elapsed}s)...",
+                        file=sys.stderr,
+                    )
                 time.sleep(2)
 
         if not acquired:

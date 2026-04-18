@@ -31,6 +31,7 @@ def get_driver():
     with _driver_lock:
         if _driver is None:
             from neo4j import GraphDatabase
+
             _driver = GraphDatabase.driver(
                 NEO4J_BOLT_URI,
                 auth=None,
@@ -56,17 +57,21 @@ def run_query(cypher: str, params: dict[str, Any] | None = None) -> list[dict]:
     still use `execute_read` to hit followers, but Chris runs single-node
     local Neo4j so the difference is academic.
     """
+
     def _work(tx):
         result = tx.run(cypher, params or {})
         return [dict(record) for record in result]
+
     with get_driver().session() as session:
         return session.execute_write(_work)
 
 
 def run_write(cypher: str, params: dict[str, Any] | None = None) -> None:
     """Execute a write Cypher query (no return needed)."""
+
     def _work(tx):
         tx.run(cypher, params or {}).consume()
+
     with get_driver().session() as session:
         session.execute_write(_work)
 
@@ -112,7 +117,9 @@ def get_stats() -> dict:
     try:
         entities = run_query("MATCH (e:Entity) RETURN count(e) AS c")[0]["c"]
         relations = run_query("MATCH ()-[r]->() RETURN count(r) AS c")[0]["c"]
-        access = run_query("MATCH (m:MemoryAccess) RETURN count(m) AS c, coalesce(sum(m.access_count), 0) AS total")[0]
+        access = run_query(
+            "MATCH (m:MemoryAccess) RETURN count(m) AS c, coalesce(sum(m.access_count), 0) AS total"
+        )[0]
         return {
             "entities": entities,
             "relations": relations,

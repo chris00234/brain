@@ -1,5 +1,6 @@
 """Shared MinIO client factory. Used by backup_chroma, backup_neo4j,
 backup_verify, and restore_chroma — don't fork this."""
+
 from __future__ import annotations
 
 import os
@@ -17,6 +18,7 @@ def s3_client():
     """
     import boto3
     from botocore.config import Config
+
     env_path = Path("/Users/chrischo/server/minio/.env")
     creds: dict[str, str] = {}
     if env_path.exists():
@@ -41,10 +43,11 @@ def _resolve_minio_endpoint(creds: dict[str, str]) -> str:
         return creds["MINIO_ENDPOINT"]
     try:
         import subprocess
+
         out = subprocess.check_output(
-            ["docker", "inspect", "-f",
-             "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", "minio"],
-            text=True, timeout=3,
+            ["docker", "inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", "minio"],
+            text=True,
+            timeout=3,
         ).strip()
         if out:
             return f"http://{out}:9000"

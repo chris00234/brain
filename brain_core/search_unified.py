@@ -13,28 +13,62 @@ Results are deduplicated and ranked by normalized score with source trust weight
 """
 
 import argparse
+import atexit
 import json
 import re
+import sqlite3
 import subprocess
 import sys
 import threading
-import atexit
 from concurrent.futures import ThreadPoolExecutor as _TPE
 
 _search_bg_pool = _TPE(max_workers=2, thread_name_prefix="search_bg")
 _search_fanout_pool = _TPE(max_workers=6, thread_name_prefix="search_fanout")
+
+# 2026-04-16 R-7: thread-local sqlite connections for autonomy.db.
+# Previously every episodic-binding recall + every spreading-activation
+# store/load opened a fresh sqlite3.connect() and closed it — cheap
+# (~0.5ms) but additive under concurrent load. threading.local avoids
+# the connect overhead without cross-thread corruption since sqlite
+# connections are not thread-safe across threads.
+_autonomy_conn_local = threading.local()
+
+
+def _get_autonomy_conn():
+    """Return a thread-local connection to autonomy.db (WAL mode)."""
+    conn = getattr(_autonomy_conn_local, "conn", None)
+    if conn is None:
+        try:
+            autonomy_path = Path("/Users/chrischo/server/brain/logs/autonomy.db")
+            if not autonomy_path.exists():
+                return None
+            conn = sqlite3.connect(str(autonomy_path), check_same_thread=False, isolation_level=None)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=5000")
+            _autonomy_conn_local.conn = conn
+        except Exception:
+            return None
+    return conn
+
+
 # Shared single-worker pool for Neo4j timeout-wrapped calls in _graph_entity_boost.
 # Previously each call constructed + destroyed its own ThreadPoolExecutor — ~1–3ms
 # per recall of pool churn. The shared pool is reused across calls.
 _graph_boost_pool = _TPE(max_workers=2, thread_name_prefix="graph_boost")
+
+# 2026-04-17 fix: _search_rag previously created a fresh ThreadPoolExecutor
+# per call. shutdown(wait=False) signals but threads didn't always drain
+# before the next call created another pool — accumulated under load.
+_search_rag_split_pool = _TPE(max_workers=4, thread_name_prefix="rag_split")
 _cooccurrence_lock = threading.Lock()
 _cooccurrence_counter = [0]  # mutable container for thread-safe increment
 atexit.register(_search_bg_pool.shutdown, wait=False)  # Neo4j writes are best-effort
 atexit.register(_search_fanout_pool.shutdown, wait=False)
 atexit.register(_graph_boost_pool.shutdown, wait=False)
+atexit.register(_search_rag_split_pool.shutdown, wait=False)
 import time
+from datetime import UTC, datetime
 from pathlib import Path
-from datetime import datetime, timezone
 
 # Local module — same dir
 sys.path.insert(0, str(Path(__file__).parent))
@@ -43,7 +77,7 @@ import temporal  # noqa: E402
 # In-process search module imports (replaces subprocess calls in search_rag/search_canonical).
 # Failures fall back to subprocess so the existing CLI path keeps working.
 try:
-    import search as _rag_search  # noqa: E402
+    import search as _rag_search
 
     _RAG_IN_PROCESS = True
 except Exception:
@@ -66,7 +100,7 @@ except ImportError:
 if str(_PIPELINE_DIR) not in sys.path:
     sys.path.insert(0, str(_PIPELINE_DIR))
 try:
-    import search_memory as _canonical_search  # noqa: E402
+    import search_memory as _canonical_search
 
     _CANONICAL_IN_PROCESS = True
 except Exception:
@@ -455,9 +489,18 @@ def _graph_entity_boost(query: str, results: list[dict]) -> set[str]:
         rid = r.get("id") or ""
         if rid and rid in connected_ids:
             r["score"] = r.get("score", 0) * _GRAPH_BOOST_FACTOR
-            r.setdefault("metadata", {})["graph_boost"] = True
-            r.setdefault("_debug", {})["graph_boost"] = True
-            r.setdefault("_debug", {})["graph_entities"] = entity_names
+            # 2026-04-16 R-4: avoid mutating shared metadata dicts — the
+            # RRF copy is shallow so nested dicts like `metadata` are
+            # shared across calls. Assign fresh dicts scoped to THIS
+            # result so the boost marker can't bleed into other results
+            # that happen to share the same metadata source.
+            _meta = dict(r.get("metadata") or {})
+            _meta["graph_boost"] = True
+            r["metadata"] = _meta
+            _dbg = dict(r.get("_debug") or {})
+            _dbg["graph_boost"] = True
+            _dbg["graph_entities"] = entity_names
+            r["_debug"] = _dbg
             boosted.add(rid)
     return boosted
 
@@ -474,6 +517,55 @@ _PREFERENCE_PATTERNS = re.compile(
     r"(?:(?:does|what)\s+(?:chris\s+)?prefer|convention|coding\s+standard|(?:chris|he)\s+(?:likes?|always|never))",
     re.I,
 )
+# 2026-04-17: concrete infra lookup patterns — query is asking for a literal
+# config value (port, proxy host, rate limit, env var) rather than Chris's
+# philosophical preference. These should prefer actual config files in the
+# knowledge/code collections over canonical preference notes which only
+# meta-discuss the topic.
+_CONCRETE_INFRA_PATTERNS = re.compile(
+    r"\b(?:port|container|reverse\s*prox(?:y|ies)|rate\s+limit|limit_req|"
+    r"nginx\s+(?:config|conf|block|rule)|docker\s+compose|server\s+block|"
+    r"credentials?\s+(?:file|path|location)|env(?:ironment)?\s+var|"
+    r"upstream|listen\s+\d|proxy_pass)\b",
+    re.I,
+)
+
+# 2026-04-17 Phase 10 modality expansion (7 buckets) — inspired by friend's
+# SECONDBRAIN_MODALITY_WEIGHTS pattern. Each bucket shifts trust weights to
+# the sources most likely to contain the answer for that query type.
+#
+# Bucket inventory:
+#   1. relational   — "who uses X?", "what depends on Y?" → graph 1.3x
+#   2. temporal     — "when did…", "last week", "recent" → canonical 1.1x
+#   3. preference   — "Chris prefers", "convention" → canonical 1.1x
+#   4. concrete_infra — "nginx port", "rate_req config" → rag 1.25x
+#   5. code         — "function X", "import Y", "how does Z work" → rag 1.3x
+#   6. agent_role   — "Liz role", "Jenna AGENTS.md" → rag 1.2x, canonical 0.9x
+#   7. narrative    — "what happened when X", "why did Y" → canonical 1.15x
+
+_CODE_MODALITY_PATTERNS = re.compile(
+    r"\b(?:function|def\s+\w|class\s+[A-Z]|import\s+\w|from\s+\w+\s+import|"
+    r"how\s+does\s+\w+\s+(?:work|handle)|"
+    r"(?:api|endpoint|method|return\s+value|parameter|argument)\s+\w+|"
+    r"async\s+def|await\s+|throw\s+|catch\s+|try\s*\{|\.venv/|__init__\.py)\b",
+    re.I,
+)
+
+_AGENT_ROLE_PATTERNS = re.compile(
+    r"\b(?:jenna|liz|ellie|sage|market)\s+"
+    r"(?:role|responsibilit(?:y|ies)|duty|duties|primary|AGENTS?\.md|TOOLS?\.md|"
+    r"does|handle|owns?|scope)\b|"
+    r"\b(?:role|primary\s+role|domain)\s+of\s+(?:jenna|liz|ellie|sage|market)\b",
+    re.I,
+)
+
+_NARRATIVE_PATTERNS = re.compile(
+    r"\b(?:what\s+happened\s+(?:when|during|after)|"
+    r"why\s+did\s+\w+\s+(?:choose|decide|switch|move|archive|pick)|"
+    r"the\s+story\s+of|history\s+of|how\s+we\s+(?:got|arrived|ended\s+up))\b",
+    re.I,
+)
+
 _CAPITALIZED_WORD = re.compile(r"\b[A-Z][a-zA-Z0-9_-]{1,}\b")
 
 
@@ -522,15 +614,23 @@ def _prefetch_graph_neighbors(query: str, limit: int = 5) -> list[dict]:
     return boosted
 
 
-_provenance_cache: dict[str, list[str]] = {}
+# 2026-04-16 R-4: FIFO→LRU. Previous dict was ordered by insertion so
+# the first 50 evicted were always the oldest-inserted, never the
+# least-recently-used. Frequently-read canonical paths inserted early
+# were evicted every round, causing repeated disk reads. OrderedDict
+# with move_to_end on hit gives true LRU semantics.
+from collections import OrderedDict
+
+_provenance_cache: OrderedDict[str, list[str]] = OrderedDict()
 _provenance_lock = threading.Lock()
 _PROVENANCE_CACHE_MAX = 500
 
 
 def _extract_frontmatter_sources(path: str) -> list[str]:
-    """Extract sources list from canonical/distilled note frontmatter. Cached."""
+    """Extract sources list from canonical/distilled note frontmatter. LRU-cached."""
     with _provenance_lock:
         if path in _provenance_cache:
+            _provenance_cache.move_to_end(path)
             return _provenance_cache[path]
     sources = []
     try:
@@ -546,9 +646,8 @@ def _extract_frontmatter_sources(path: str) -> list[str]:
         pass
     with _provenance_lock:
         if len(_provenance_cache) >= _PROVENANCE_CACHE_MAX:
-            to_remove = list(_provenance_cache.keys())[:50]
-            for k in to_remove:
-                del _provenance_cache[k]
+            # LRU eviction: drop the oldest-accessed entry
+            _provenance_cache.popitem(last=False)
         _provenance_cache[path] = sources
     return sources
 
@@ -565,8 +664,27 @@ def _classify_intent(query: str) -> dict[str, float]:
     against semantic expected_content — that's a Phase 7B+ data plane change,
     not a search routing change.
     """
+    # 2026-04-17 Phase 10 modality: 7-bucket routing. Order matters — more
+    # specific patterns first (agent_role before preference; code before
+    # concrete_infra) so that a narrow query doesn't get captured by a
+    # broader bucket.
     if _RELATIONAL_PATTERNS.search(query):
         return {"graph": 1.3, "rag": 0.9, "canonical": 0.9}
+    if _AGENT_ROLE_PATTERNS.search(query):
+        # Agent role queries — answer lives in ~/.openclaw/workspace-*/AGENTS.md
+        # (indexed under 'knowledge' via rag), not canonical preference atoms.
+        return {"graph": 0.9, "rag": 1.2, "canonical": 0.9}
+    if _CODE_MODALITY_PATTERNS.search(query):
+        # Code questions — prefer `code` + `knowledge` collections over
+        # canonical which has prose about design decisions, not syntax.
+        return {"graph": 0.8, "rag": 1.3, "canonical": 0.8}
+    if _CONCRETE_INFRA_PATTERNS.search(query):
+        # Literal config values — boost rag (docker-compose/nginx conf) over
+        # canonical preference notes.
+        return {"graph": 0.8, "rag": 1.25, "canonical": 0.75}
+    if _NARRATIVE_PATTERNS.search(query):
+        # "what happened", "why did" — canonical synthesizes narrative arcs.
+        return {"graph": 0.9, "rag": 0.95, "canonical": 1.15}
     if _TEMPORAL_PATTERNS.search(query):
         return {"graph": 0.7, "rag": 1.0, "canonical": 1.1}
     if _PREFERENCE_PATTERNS.search(query):
@@ -669,12 +787,21 @@ def search_all(
     # for this query type (temporal, preference, code, relational).
     sources = _route_sources(original_query or query, sources)
 
-    # Bilingual query expansion (free, no LLM) — helps Korean queries find English docs
+    # Bilingual query expansion (free, no LLM) — helps Korean queries find English docs.
+    # 2026-04-16 R-3 fix: original bug joined variants into a mixed-language
+    # blob (broken on multilingual-e5); April-16 Tier-1 patch dropped
+    # concatenation but also dropped the alternates entirely. Final:
+    # primary query stays single-language; alternates are stashed on the
+    # `bilingual_variants` list so _search_rag can fan out and RRF-fuse
+    # per variant. Preserves Korean-query → English-doc bridge without
+    # corrupting the primary embedding.
+    bilingual_variants: list[str] = []
     try:
         if _RAG_IN_PROCESS:
-            variants = _rag_search.expand_query(query)
-            if variants and len(variants) > 1:
-                query = " ".join(variants)
+            _v = _rag_search.expand_query(query)
+            if _v and len(_v) > 1:
+                query = _v[0]
+                bilingual_variants = [x for x in _v[1:] if x and x != query][:2]
     except Exception:
         pass
 
@@ -725,7 +852,58 @@ def search_all(
                 local_where = {"$and": [local_where, _raw_exclude]}
             else:
                 local_where = _raw_exclude
-        raw_results = search_rag(query, limit * 2, where=local_where or None, collections=collections)
+        # 2026-04-17 perf: raw-* types live exclusively in the `experience`
+        # collection (verified 11,700 rows vs 0 elsewhere). Previously this
+        # applied `$nin` filter to every collection's query, adding ~25ms per
+        # call × 13 collections ≈ 320ms waste on a filter most collections
+        # don't even need. Split the fan-out: filter only the collection that
+        # actually holds raw rows; query the rest unfiltered.
+        _raw_collections = {"experience"}
+        # Resolve the actual collection list — None means "search all known".
+        _active_cols = list(collections) if collections else list(_ALL_COLLECTIONS)
+        filtered_cols = [c for c in _active_cols if c in _raw_collections]
+        plain_cols = [c for c in _active_cols if c not in _raw_collections]
+
+        # Preserve user-supplied `where` (source_type etc.) on plain side —
+        # strip only the auto-injected raw_exclude.
+        plain_where: dict | None = None
+        if source_type:
+            # Caller explicitly scoped by type — that filter belongs on every
+            # collection, so plain_where carries it.
+            plain_where = local_where
+
+        # Run filtered + plain fan-outs concurrently. Two-call split only
+        # pays off if the two halves overlap; otherwise this is sequential
+        # waste. Shared threadpool handles both; hybrid_search internally
+        # already parallelizes across its own collections.
+        _pool = _search_rag_split_pool
+        _futs = []
+        if filtered_cols:
+            _futs.append(_pool.submit(search_rag, query, limit * 2, local_where or None, filtered_cols))
+        if plain_cols:
+            _futs.append(_pool.submit(search_rag, query, limit * 2, plain_where or None, plain_cols))
+        # 2026-04-16 R-3: bilingual-variant expansion in parallel with the
+        # primary fan-outs — variants are independent queries so we can run
+        # them concurrently instead of after the fact.
+        try:
+            for _alt in (bilingual_variants or [])[:1]:
+                if filtered_cols:
+                    _futs.append(_pool.submit(search_rag, _alt, limit, local_where or None, filtered_cols))
+                if plain_cols:
+                    _futs.append(_pool.submit(search_rag, _alt, limit, plain_where or None, plain_cols))
+        except Exception:
+            pass
+
+        raw_results = []
+        for _fut in _futs:
+            try:
+                # 2026-04-17 fix: bound fan-out so a hung Chroma doesn't
+                # wedge /recall/v2 forever. 15s is well above warm p95.
+                _r = _fut.result(timeout=15)
+                if _r:
+                    raw_results.extend(_r)
+            except Exception:
+                continue
 
         # Phase 6: atoms-truth-layer batch lookup (BRAIN_ATOMS_READ).
         # Build chroma_id → atoms-row map in ONE SQL prepared statement so the
@@ -795,8 +973,15 @@ def search_all(
                 # these fields so they pass through unfiltered — gradual
                 # rollout without breaking historical data.
                 if atom_row:
-                    # Filter 1 — provisional excluded by default
+                    # Filter 1 — provisional excluded by default.
+                    # 2026-04-16 R-2: also unconditionally excludes
+                    # kind='conjecture' unless include_provisional is set,
+                    # so dream_replay's generative atoms never leak into
+                    # factual recall. Conjectures are explicitly
+                    # addressable via brain_recall with include_provisional=true.
                     if not include_provisional and atom_row.get("provisional"):
+                        continue
+                    if not include_provisional and (atom_row.get("kind") or "").lower() == "conjecture":
                         continue
                     # Filter 2 — speaker entity must be Chris (direct statement)
                     speaker = atom_row.get("speaker_entity") or "chris"
@@ -809,21 +994,18 @@ def search_all(
                         continue
                     # Filter 4 — trust_score floor at 0.3
                     ts_val = atom_row.get("trust_score")
-                    if (
-                        ts_val is not None
-                        and float(ts_val) < 0.3
-                        and not include_low_trust
-                    ):
+                    if ts_val is not None and float(ts_val) < 0.3 and not include_low_trust:
                         continue
                     # Filter 5 — valid_until in the future or NULL
-                    vu_full = (atom_row.get("valid_until") or "")
+                    vu_full = atom_row.get("valid_until") or ""
                     if vu_full and not include_expired:
                         import datetime as _dt
+
                         try:
                             vu_dt = _dt.datetime.fromisoformat(vu_full.replace("Z", "+00:00"))
                             if vu_dt.tzinfo is None:
-                                vu_dt = vu_dt.replace(tzinfo=_dt.timezone.utc)
-                            if vu_dt < _dt.datetime.now(_dt.timezone.utc):
+                                vu_dt = vu_dt.replace(tzinfo=_dt.UTC)
+                            if vu_dt < _dt.datetime.now(_dt.UTC):
                                 continue
                         except (ValueError, TypeError):
                             pass
@@ -873,6 +1055,17 @@ def search_all(
             from entity_graph import graph_search
 
             res = graph_search(query, limit=3)
+            # 2026-04-16 R-3: graph_search returns dicts without a `path`
+            # key, so RRF fusion (id_key="path") fell back to the
+            # content-hash anonymous bucket and cross-source agreement was
+            # lost for graph hits. Inject a deterministic synthetic path
+            # derived from the atom/entity id so graph results fuse
+            # correctly with rag/canonical hits on the same atom.
+            for r in res or []:
+                if isinstance(r, dict) and not r.get("path"):
+                    _rid = r.get("id") or r.get("memory_id") or r.get("entity") or ""
+                    if _rid:
+                        r["path"] = f"graph://{_rid}"
         except Exception:
             res = []
         source_timing["graph_ms"] = int((time.time() - t0) * 1000)
@@ -880,12 +1073,25 @@ def search_all(
 
     def _search_fts():
         t0 = time.time()
+        res: list[dict] = []
+        # 2026-04-17 T2.9: query both FTS indexes — Chroma-synced (fts_index, nightly rebuild)
+        # AND live raw_events FTS (triggered on brain.db writes). The live index catches
+        # literal-wording queries for env vars, model names, error messages that appear
+        # verbatim in raw event streams but are excluded from the semantic fan-out.
         try:
             from fts_index import search_fts
 
-            res = search_fts(query, limit=limit)
+            res = search_fts(query, limit=limit) or []
         except Exception:
             res = []
+        try:
+            from raw_events_fts import search as _raw_fts_search
+
+            raw_hits = _raw_fts_search(query, limit=max(3, limit // 2)) or []
+            if raw_hits:
+                res = list(res) + list(raw_hits)
+        except Exception:
+            pass
         source_timing["fts_ms"] = int((time.time() - t0) * 1000)
         return res
 
@@ -897,6 +1103,88 @@ def search_all(
         source_timing["graph_prefetch_ms"] = int((time.time() - t0) * 1000)
         return res
 
+    def _search_raptor():
+        """2026-04-16 R-1: query the RAPTOR hierarchical summary tree for
+        broad/multi-aspect queries. Pulls level≥1 summary nodes alongside
+        leaf canonical so wide queries can retrieve at the right
+        abstraction (Sarthi 2024). Does nothing when the canonical_raptor
+        collection is empty (pre-first-build state)."""
+        if collections:
+            return []
+        # Cheap heuristic: only query RAPTOR when the query looks broad —
+        # > 4 tokens or contains comparison/pattern words. Single-fact
+        # queries don't benefit from level-2 summaries.
+        q_lower = (relevance_query or "").lower()
+        token_count = len(q_lower.split())
+        is_broad = token_count > 4 or any(
+            w in q_lower
+            for w in (
+                "overall",
+                "pattern",
+                "summary",
+                "history",
+                "philosophy",
+                "approach",
+                "compare",
+                "difference",
+                "trend",
+                "evolution",
+                "strategy",
+                "state of",
+                "what is chris",
+                "how does chris",
+            )
+        )
+        if not is_broad:
+            return []
+        t0 = time.time()
+        try:
+            # 2026-04-17 fix: these helpers live in search.py (imported as
+            # _rag_search) but were never imported into module scope, so the
+            # bare calls below raised NameError every time, caught by the
+            # outer except. RAPTOR results silently never entered RRF fusion.
+            from search import get_collections, get_embedding, vector_search
+
+            col_map = get_collections()
+            col_id = col_map.get("canonical_raptor")
+            if not col_id:
+                return []
+            try:
+                emb = get_embedding(query, use_cache=True, prefix="query")
+            except Exception:
+                return []
+            data = vector_search(col_id, emb, n=min(limit, 5))
+            if not data:
+                return []
+            ids = (data.get("ids") or [[]])[0]
+            docs = (data.get("documents") or [[]])[0]
+            metas = (data.get("metadatas") or [[]])[0]
+            dists = (data.get("distances") or [[]])[0]
+            out: list[dict] = []
+            for i in range(len(docs)):
+                vector_sim = max(0.0, min(1.0, 1 - (dists[i] if i < len(dists) else 1.0)))
+                level = int((metas[i] or {}).get("level", 1) or 1)
+                title = f"RAPTOR summary L{level}"
+                out.append(
+                    {
+                        "id": ids[i] if i < len(ids) else "",
+                        "path": f"raptor://{ids[i]}" if i < len(ids) else "raptor://",
+                        "title": title,
+                        "content": docs[i] or "",
+                        "collection": "canonical_raptor",
+                        "type": "raptor-summary",
+                        "score": round(vector_sim * 100.0, 2),
+                        "vector_score": round(vector_sim, 4),
+                        "trust_tier": 3,  # derived from canonical, inherit trust
+                        "metadata": metas[i] or {},
+                    }
+                )
+            return out
+        except Exception:
+            return []
+        finally:
+            source_timing["raptor_ms"] = int((time.time() - t0) * 1000)
+
     # Phase D2 follow-up: temporal_events direct lookup was net-negative
     # (-0.7pt to -1.0pt content_hit on extended). raw_events content is
     # unsummarized and didn't match the eval's semantic expected_content.
@@ -904,19 +1192,30 @@ def search_all(
     # bumps). The temporal_router module stays for future use cases.
 
     # HR5 reverted (2026-04-14): graph/fts/graph_prefetch are always-on
-    # orthogonal sources, not opt-in via the `sources` kwarg. The default
-    # sources=["rag","canonical","obsidian"] never contained them, so
-    # HR5's filter made them silently return empty on every /recall/v2
-    # call — dropping eval from 97.1% → 95.7% content. They still honor
-    # their OWN early-return guards (collections filter, entity_query).
+    # orthogonal sources by default — the /recall/v2 default
+    # sources=["rag","canonical","obsidian"] relies on them for
+    # 97.1% content-hit. But when the caller explicitly asks for
+    # canonical-only mode (canonical_first=True → sources=["canonical"])
+    # the llm-wiki contract is "truth layer only, no retrieval noise";
+    # gating graph/fts/graph_prefetch here makes that hard rule real.
+    # Fix 2026-04-16: previously even canonical_first mixed FTS + graph
+    # results in, defeating the whole point of the flag.
+    _canonical_only = list(sources) == ["canonical"]
+    raptor_results: list[dict] = []
     search_fns = [
         (_search_rag, "rag"),
         (_search_canonical, "canonical"),
         (_search_obsidian, "obsidian"),
-        (_search_graph, "graph"),
-        (_search_fts, "fts"),
-        (_search_graph_prefetch, "graph_prefetch"),
     ]
+    if not _canonical_only:
+        search_fns.extend(
+            [
+                (_search_graph, "graph"),
+                (_search_fts, "fts"),
+                (_search_graph_prefetch, "graph_prefetch"),
+                (_search_raptor, "raptor"),  # 2026-04-16 R-1
+            ]
+        )
     result_lists = {
         "rag": rag_results,
         "canonical": canonical_results,
@@ -924,14 +1223,27 @@ def search_all(
         "graph": graph_results,
         "fts": fts_results,
         "graph_prefetch": graph_prefetch_results,
+        "raptor": raptor_results,
     }
 
     future_map = {_search_fanout_pool.submit(fn): name for fn, name in search_fns}
-    for fut in as_completed(future_map):
-        try:
-            result_lists[future_map[fut]].extend(fut.result())
-        except Exception:
-            pass
+    # 2026-04-17 fix: as_completed can block forever if one source hangs.
+    # Wall-clock bound the fan-out so /recall/v2 never wedges on a dead dep.
+    _FANOUT_DEADLINE_S = 15
+    try:
+        for fut in as_completed(future_map, timeout=_FANOUT_DEADLINE_S):
+            try:
+                result_lists[future_map[fut]].extend(fut.result(timeout=1))
+            except Exception:
+                pass
+    except Exception:
+        # timeout on as_completed — gather whatever already completed
+        for fut, name in future_map.items():
+            if fut.done():
+                try:
+                    result_lists[name].extend(fut.result(timeout=0.1))
+                except Exception:
+                    pass
 
     # Entity filter
     if entity:
@@ -1043,6 +1355,33 @@ def search_all(
     except ImportError:
         pass
 
+    # 2026-04-17: Emotional valence boost (biological: amygdala).
+    # Small multiplicative boost based on Chris's past positive/negative
+    # signals on individual atoms. Bounded to ±15% so a miscalibrated valence
+    # can't dominate cross-encoder signal. Batch SQL (one query per /recall).
+    # Fails open — if valence module or brain.db is unavailable, no boost.
+    try:
+        from valence import get_valence_batch, valence_to_boost
+
+        _atom_ids_for_valence = [r.get("id") for r in unique if isinstance(r, dict) and r.get("id")]
+        if _atom_ids_for_valence:
+            _val_map = get_valence_batch(_atom_ids_for_valence)
+            if _val_map:
+                for r in unique:
+                    rid = r.get("id")
+                    v = _val_map.get(rid)
+                    if v is None or v == 0.0:
+                        continue
+                    boost = valence_to_boost(v)
+                    try:
+                        r["score"] = max(0.0, min(100.0, float(r.get("score", 0)) * (1.0 + boost)))
+                        r["valence"] = round(v, 4)
+                        r["valence_boost"] = boost
+                    except (TypeError, ValueError):
+                        continue
+    except Exception:
+        pass
+
     # M7-WS3: apply linked-entity boost AFTER rerank (mirrors spreading
     # activation pattern below). +5pt bonus per matched entity, capped at
     # +15pt total, so it tiebreaks but never overrides cross-encoder.
@@ -1101,7 +1440,7 @@ def search_all(
         BRAIN_SPREADING_ACTIVATION_ENABLED = False
     if BRAIN_SPREADING_ACTIVATION_ENABLED and len(unique) >= 2:
         try:
-            from spreading_activation import warm_session, boost_results_by_activation
+            from spreading_activation import boost_results_by_activation, warm_session
 
             # Confidence skip: don't perturb a clear top-1.
             # Proportional threshold handles any upstream score range.
@@ -1127,7 +1466,7 @@ def search_all(
 
     # Phase 1E: trust_score multiplier (feature-flagged, legacy multiplicative path)
     try:
-        from config import BRAIN_TRUST_RANKING_ENABLED, BRAIN_SALIENCE_RANKING_ENABLED
+        from config import BRAIN_SALIENCE_RANKING_ENABLED, BRAIN_TRUST_RANKING_ENABLED
     except ImportError:
         BRAIN_TRUST_RANKING_ENABLED = False
         BRAIN_SALIENCE_RANKING_ENABLED = False
@@ -1148,7 +1487,7 @@ def search_all(
     # salience bonus (capped at +10pts) only matters when results are tied.
     if BRAIN_SALIENCE_RANKING_ENABLED and unique:
         import math as _math
-        from datetime import datetime as _dt, timezone as _tz
+        from datetime import datetime as _dt
 
         SALIENCE_BONUS_MAX = 10.0  # bounded — tiebreaks, doesn't dominate
         RECENCY_HALFLIFE_DAYS = 90.0
@@ -1159,8 +1498,8 @@ def search_all(
             try:
                 dt = _dt.fromisoformat(ts.rstrip("Zz"))
                 if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=_tz.utc)
-                age_days = (_dt.now(_tz.utc) - dt).total_seconds() / 86400
+                    dt = dt.replace(tzinfo=UTC)
+                age_days = (_dt.now(UTC) - dt).total_seconds() / 86400
                 if age_days < 0:
                     return 1.0
                 return _math.exp(-age_days * _math.log(2) / RECENCY_HALFLIFE_DAYS)
@@ -1206,16 +1545,68 @@ def search_all(
     except ImportError:
         pass
 
+    # 2026-04-17 Phase 3: learned-to-rank blend (sklearn LogisticRegression).
+    # No-op when BRAIN_LTR_ENABLED=false or weights missing. Applied AFTER
+    # time decay so recency + decay are features the model already sees
+    # upstream; avoids the module having to re-derive them.
+    try:
+        from ltr_blend import apply_if_enabled as _ltr_apply
+
+        unique = _ltr_apply(unique)
+        unique.sort(key=lambda x: x.get("score", 0), reverse=True)
+    except Exception:
+        pass
+
+    # 2026-04-16 Tier 2 fix: canonical trust override. trust_tier=3 marks
+    # authoritative canonical notes. R-10 calibration: initial CANON_FLOOR
+    # at 55 forced weakly-matching canonical into top-K and regressed
+    # content_hit@5 by ~2pt (non-canonical answers displaced). Now:
+    # additive bonus only, no floor. Canonical still gets a meaningful
+    # leg-up over vector-only hits (rerank.trust_boost 1.4× + this +8)
+    # without being artificially landed into top-K when irrelevant.
+    CANON_BONUS = 8.0
+    for r in unique:
+        trust_tier = r.get("trust_tier", 0)
+        if not isinstance(trust_tier, (int, float)):
+            trust_tier = 0
+        if trust_tier >= 3:
+            r["score"] = float(r.get("score", 0)) + CANON_BONUS
+            _dbg = dict(r.get("_debug") or {})
+            _dbg["canonical_trust_bonus"] = CANON_BONUS
+            r["_debug"] = _dbg
+    unique.sort(key=lambda x: x.get("score", 0), reverse=True)
+
     # Preference recency boost: for semantic_memory preferences, newer ones
     # get a significant boost to prevent stale preferences from dominating
     # via accumulated access_count reinforcement.
-    now_utc = datetime.now(timezone.utc)
+    now_utc = datetime.now(UTC)
+
+    def _infer_category(r: dict, content: str) -> str:
+        """2026-04-16 Tier 2 fix: older memories lack explicit `category`
+        metadata so the preference recency boost below never fired. Infer
+        from content + existing meta signals. Cheap keyword heuristic.
+        """
+        existing = (r.get("metadata") or {}).get("category")
+        if existing:
+            return existing
+        lower = (content or "").lower()
+        if any(kw in lower for kw in (" prefer", "prefer ", "preference", "선호", "좋아", "원해")):
+            return "preference"
+        if any(kw in lower for kw in ("decide", "decision", "will use", "going with", "결정")):
+            return "decision"
+        if any(kw in lower for kw in ("fact:", "is a ", "lives in ", "runs on ")):
+            return "fact"
+        return ""
+
     for r in unique:
         collection = r.get("collection", "")
         if collection != "semantic_memory":
             continue
         meta = r.get("metadata") or {}
-        if meta.get("category") != "preference":
+        # 2026-04-16 Tier 2: infer category when metadata lacks it so
+        # older unlabeled preference memories still decay appropriately.
+        category = meta.get("category") or _infer_category(r, r.get("content", ""))
+        if category != "preference":
             continue
         created_at_raw = meta.get("created_at") or meta.get("updated_at")
         if not created_at_raw:
@@ -1224,7 +1615,7 @@ def search_all(
             ts = created_at_raw.replace("Z", "+00:00")
             created_dt = datetime.fromisoformat(ts)
             if created_dt.tzinfo is None:
-                created_dt = created_dt.replace(tzinfo=timezone.utc)
+                created_dt = created_dt.replace(tzinfo=UTC)
             age_days = max(0, (now_utc - created_dt).total_seconds() / 86400)
             # 30-day half-life recency curve: a preference from today gets 1.0,
             # from 30 days ago gets 0.5, from 90 days ago gets 0.125
@@ -1269,17 +1660,15 @@ def search_all(
             top1 = float(unique[0].get("score", 0))
             top3 = float(unique[min(2, len(unique) - 1)].get("score", 0))
             if top1 > 0 and top3 > 0 and (top3 / top1) >= 0.90:
-                import sqlite3 as _sql
-                from pathlib import Path as _P
-
-                db_path = _P("/Users/chrischo/server/brain/logs/autonomy.db")
-                if db_path.exists():
+                # 2026-04-16 R-7: use thread-local pooled autonomy.db
+                # connection (was new connect() per recall).
+                _conn = _get_autonomy_conn()
+                if _conn is not None:
                     top_n = unique[:limit]
                     top_ids = [
                         r.get("id") or r.get("path", "") for r in top_n if r.get("id") or r.get("path")
                     ]
                     if top_ids:
-                        _conn = _sql.connect(str(db_path))
                         try:
                             placeholders = ",".join("?" * len(top_ids))
                             top_episodes = _conn.execute(
@@ -1319,7 +1708,8 @@ def search_all(
                                     source_timing["episode_peers_boosted"] = boosted_count
                                     unique.sort(key=lambda x: x.get("score", 0), reverse=True)
                         finally:
-                            _conn.close()
+                            # 2026-04-16 R-7: pooled connection — do NOT close
+                            pass
         except Exception:
             pass
 
@@ -1337,13 +1727,12 @@ def search_all(
     # reranking produced RRF-style scores (~100 range), cross-encoder sigmoid
     # outputs (~0-10 range), or token overlap ratios (~0-1 range).
     _mmr_should_run = BRAIN_MMR_DIVERSITY_ENABLED and len(unique) > limit
-    if _mmr_should_run:
-        _top_score = float(unique[0].get("score", 0))
-        _nth_score = float(unique[min(limit - 1, len(unique) - 1)].get("score", 0))
-        # Run MMR only if the nth result is >= 85% of top-1 (ambiguous spread).
-        # Non-positive scores disable the skip entirely — fall through to run
-        # MMR, which is the correct behavior when the whole top-N is weak.
-        _mmr_should_run = _top_score > 0 and _nth_score > 0 and (_nth_score / _top_score) >= 0.85
+    # 2026-04-16 Tier 2 fix: confidence-skip gate removed. Old logic only
+    # ran MMR when nth/top >= 0.85 — i.e. only when results were already
+    # near-identical, which is precisely the case where a lambda=0.85 MMR
+    # does nothing meaningful. With lambda=0.6, MMR now runs whenever
+    # there's enough surplus (len > limit) and produces real diversity on
+    # well-separated top-k, not just on the already-tied edge case.
     if _mmr_should_run:
         from tokenizer import tokenize as _tok
 
@@ -1363,6 +1752,12 @@ def search_all(
         # Always seed with the highest-scoring result
         selected_idx: list[int] = [0]
         remaining_idx: list[int] = list(range(1, len(unique)))
+        # 2026-04-16 R-7: early-exit when marginal gain falls below
+        # EARLY_EXIT_GAIN. For well-separated results the tail of the MMR
+        # selection contributes vanishing signal — cutting early drops
+        # O(k*n) latency with no measurable quality impact.
+        EARLY_EXIT_GAIN = 0.02
+        prev_best = None
         while remaining_idx and len(selected_idx) < limit * 2:
             best_idx, best_score = -1, -1e9
             for i in remaining_idx:
@@ -1374,6 +1769,12 @@ def search_all(
                     best_idx = i
             if best_idx < 0:
                 break
+            # Early exit: marginal gain vs prev iteration too small.
+            if prev_best is not None and (prev_best - best_score) < EARLY_EXIT_GAIN:
+                selected_idx.append(best_idx)
+                remaining_idx.remove(best_idx)
+                break
+            prev_best = best_score
             selected_idx.append(best_idx)
             remaining_idx.remove(best_idx)
         # Reorder unique to match MMR selection order
@@ -1447,32 +1848,59 @@ def search_all(
         try:
 
             def _reinforce_cooccurrence():
+                # 2026-04-16 Tier 2 fix: previous impl used
+                # `toLower(text) CONTAINS toLower(e.name)` with entity
+                # names as short as 2 chars. A 2-char entity like "ai"
+                # matched inside "pair", "chain", "aim" — dense noisy
+                # RELATES_TO edges polluted graph_entity_boost and
+                # spreading activation. Now:
+                #   1. min entity length = 4 chars (filters false-positive
+                #      substrings)
+                #   2. word-boundary regex so "ai" still matches "the AI"
+                #      but not "chain"
+                #   3. per-query hard cap (3 edges) preserved
+                import re
+
                 from entity_graph import _use_neo4j
 
                 if not _use_neo4j():
                     return
-                from neo4j_client import run_query as _rq, run_write as _rw
+                from neo4j_client import run_query as _rq
+                from neo4j_client import run_write as _rw
 
                 result_text = " ".join(
                     (r.get("content", "") + " " + r.get("title", ""))[:200] for r in final_results[:5]
                 ).lower()
                 if len(result_text) < 50:
                     return
+                # Pull entity candidates with length floor first so the
+                # Cypher job returns a tractable set; the expensive
+                # word-boundary check then runs Python-side.
                 matched = _rq(
-                    "MATCH (e:Entity) WHERE toLower($text) CONTAINS toLower(e.name) RETURN e.name AS name",
+                    "MATCH (e:Entity) WHERE size(e.name) >= 4 "
+                    "AND toLower($text) CONTAINS toLower(e.name) "
+                    "RETURN e.name AS name LIMIT 50",
                     {"text": result_text},
                 )
-                names = [m["name"] for m in matched]
+                names: list[str] = []
+                for m in matched:
+                    name = m["name"]
+                    if not name:
+                        continue
+                    # Require word boundary on at least one side — prevents
+                    # matching the name as a substring inside a larger token.
+                    pattern = r"(?:^|[^a-z0-9])" + re.escape(name.lower()) + r"(?:[^a-z0-9]|$)"
+                    if re.search(pattern, result_text):
+                        names.append(name)
                 if len(names) < 2:
                     return
                 pairs_done = 0
                 for i, a in enumerate(names[:5]):
                     for b in names[i + 1 : 5]:
                         if a != b and pairs_done < 3:
-                            from datetime import datetime as _dt, timezone as _tz
+                            from datetime import datetime as _dt
 
                             _rw(
-                                # Use separate MATCH clauses to avoid cartesian product warning.
                                 "MATCH (s:Entity {name: $a}) "
                                 "MATCH (t:Entity {name: $b}) "
                                 "MERGE (s)-[r:RELATES_TO {relationship: 'co_retrieved'}]->(t) "
@@ -1480,7 +1908,7 @@ def search_all(
                                 "ON MATCH SET r.co_occurrence_count = r.co_occurrence_count + 1, "
                                 "  r.weight = CASE WHEN r.weight + (0.05 * (1.0 - r.weight)) > 1.0 THEN 1.0 "
                                 "  ELSE r.weight + (0.05 * (1.0 - r.weight)) END",
-                                {"a": a, "b": b, "now": _dt.now(_tz.utc).isoformat(timespec="seconds")},
+                                {"a": a, "b": b, "now": _dt.now(UTC).isoformat(timespec="seconds")},
                             )
                             pairs_done += 1
 

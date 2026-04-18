@@ -38,7 +38,7 @@ from pathlib import Path
 
 sys.path.insert(0, "/Users/chrischo/server/brain/brain_core")
 
-from openclaw_dispatch import dispatch
+from cli_llm import dispatch  # migrated 2026-04-17
 
 BRAIN_ROOT = Path("/Users/chrischo/server/brain")
 SRC = BRAIN_ROOT / "cli" / "eval_set_extended.json"

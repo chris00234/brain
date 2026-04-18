@@ -17,7 +17,7 @@ import argparse
 import json
 import re
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 JOURNAL = Path("/Users/chrischo/server/brain/logs/brain_loop_journal.jsonl")
@@ -25,16 +25,19 @@ JOURNAL = Path("/Users/chrischo/server/brain/logs/brain_loop_journal.jsonl")
 
 def _parse_since(period: str) -> datetime:
     if not period:
-        return datetime.now(timezone.utc) - timedelta(days=1)
+        return datetime.now(UTC) - timedelta(days=1)
     m = re.match(r"^(\d+)([smhdw])$", period.strip())
     if not m:
-        return datetime.now(timezone.utc) - timedelta(days=1)
+        return datetime.now(UTC) - timedelta(days=1)
     n, unit = int(m.group(1)), m.group(2)
     delta = {
-        "s": timedelta(seconds=n), "m": timedelta(minutes=n),
-        "h": timedelta(hours=n), "d": timedelta(days=n), "w": timedelta(weeks=n),
+        "s": timedelta(seconds=n),
+        "m": timedelta(minutes=n),
+        "h": timedelta(hours=n),
+        "d": timedelta(days=n),
+        "w": timedelta(weeks=n),
     }[unit]
-    return datetime.now(timezone.utc) - delta
+    return datetime.now(UTC) - delta
 
 
 def _iter_lines():
@@ -55,7 +58,7 @@ def cmd_tail(args: argparse.Namespace) -> int:
     if not entries:
         print("(empty journal)")
         return 0
-    for e in entries[-args.n:]:
+    for e in entries[-args.n :]:
         ts = (e.get("ts", "") or "")[:19].replace("T", " ")
         tick = e.get("tick", "?")
         obs_count = len(e.get("observations", []))
@@ -80,7 +83,7 @@ def cmd_stats(args: argparse.Namespace) -> int:
         try:
             ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
             if ts.tzinfo is None:
-                ts = ts.replace(tzinfo=timezone.utc)
+                ts = ts.replace(tzinfo=UTC)
         except ValueError:
             continue
         if ts >= cutoff:

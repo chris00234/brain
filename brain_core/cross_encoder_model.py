@@ -12,6 +12,7 @@ Both models are lazily loaded so cold-start stays light. Override via env:
   BRAIN_CROSS_ENCODER_MODEL=BAAI/bge-reranker-v2-m3   (forces single model)
   BRAIN_CROSS_ENCODER_ADAPTIVE=false                   (disables dispatcher)
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -23,8 +24,8 @@ from collections import OrderedDict
 
 log = logging.getLogger("brain.cross_encoder_model")
 
-_BASE_NAME = os.getenv("BRAIN_CROSS_ENCODER_BASE",  "BAAI/bge-reranker-base")
-_BI_NAME   = os.getenv("BRAIN_CROSS_ENCODER_BILINGUAL", "BAAI/bge-reranker-v2-m3")
+_BASE_NAME = os.getenv("BRAIN_CROSS_ENCODER_BASE", "BAAI/bge-reranker-base")
+_BI_NAME = os.getenv("BRAIN_CROSS_ENCODER_BILINGUAL", "BAAI/bge-reranker-v2-m3")
 _FORCE_MODEL = os.getenv("BRAIN_CROSS_ENCODER_MODEL", "").strip()
 _ADAPTIVE = os.getenv("BRAIN_CROSS_ENCODER_ADAPTIVE", "false").lower() in ("true", "1", "yes")
 _DEVICE_OVERRIDE = os.getenv("BRAIN_CROSS_ENCODER_DEVICE")  # "mps" | "cpu" | "cuda"
@@ -42,7 +43,7 @@ _KOREAN_RE = re.compile(r"[\uac00-\ud7a3]")  # Hangul syllables
 # near-duplicate queries, so this halves cold-eval CE time on the first hit
 # and drops it to near-zero on repeat runs.
 _CACHE_SIZE = int(os.getenv("BRAIN_CE_CACHE_SIZE", "10000"))
-_score_cache: "OrderedDict[tuple[str, str, str], float]" = OrderedDict()
+_score_cache: OrderedDict[tuple[str, str, str], float] = OrderedDict()
 _cache_lock = threading.Lock()
 _cache_hits = 0
 _cache_misses = 0
@@ -75,6 +76,7 @@ def cache_stats() -> dict:
 def _device() -> str:
     try:
         import torch
+
         if _DEVICE_OVERRIDE:
             return _DEVICE_OVERRIDE
         if torch.backends.mps.is_available():
@@ -97,6 +99,7 @@ def _load_model(name: str):
         if name in _models:
             return _models[name]
         from sentence_transformers import CrossEncoder
+
         device = _device()
         log.info("loading cross-encoder %s on %s", name, device)
         # max_length=384: docs are truncated to 1500 chars (~375 BGE tokens)
@@ -159,7 +162,7 @@ def score_pairs(query: str, docs: list[str]) -> list[float]:
             raw = model.predict(pairs, show_progress_bar=False, convert_to_numpy=True)
             fresh = [float(s) for s in raw]
             with _cache_lock:
-                for i, score in zip(miss_indices, fresh):
+                for i, score in zip(miss_indices, fresh, strict=False):
                     scores[i] = score
                     key = (name, qh, _doc_hash(docs[i] or ""))
                     _score_cache[key] = score

@@ -21,9 +21,7 @@ Simple in-process LRU cache with 5-minute TTL keeps repeated queries fast.
 
 from __future__ import annotations
 
-import json
 import re
-import subprocess
 import sys
 import threading
 import time
@@ -32,8 +30,8 @@ from typing import Any
 
 # Reuse the sibling indexer's Ollama embedder + resilient dispatcher.
 sys.path.insert(0, str(Path(__file__).parent))
-from indexer import get_embedding  # noqa: E402
-from openclaw_dispatch import dispatch as _dispatch  # noqa: E402
+from indexer import get_embedding
+from openclaw_dispatch import dispatch as _dispatch
 
 try:
     from config import OPENCLAW_BIN
@@ -133,6 +131,7 @@ class _PersistentHydeCache:
     @staticmethod
     def _hash(query: str) -> str:
         import hashlib
+
         return hashlib.sha256(query.strip().encode("utf-8")).hexdigest()[:32]
 
     def get(self, query: str) -> str | None:
@@ -140,10 +139,14 @@ class _PersistentHydeCache:
             return None
         with self._lock:
             try:
-                row = self._get_conn().execute(
-                    "SELECT hypothetical FROM hyde_cache WHERE query_hash = ?",
-                    (self._hash(query),),
-                ).fetchone()
+                row = (
+                    self._get_conn()
+                    .execute(
+                        "SELECT hypothetical FROM hyde_cache WHERE query_hash = ?",
+                        (self._hash(query),),
+                    )
+                    .fetchone()
+                )
                 return row[0] if row else None
             except Exception:
                 return None
@@ -186,10 +189,23 @@ _expand_cache = _TTLCache(CACHE_TTL_SECONDS, MAX_CACHE_ENTRIES)
 _hyde_cache = _hyde_mem_cache
 
 
-# ── OpenClaw dispatch helper (thin wrapper around shared dispatcher) ─
+# ── CLI dispatch helper (2026-04-17) ─────────────────────────────────
+# Migrated from _dispatch(agent="jenna", ...) which hit OpenClaw and
+# dragged the 95MB interactive session into every HyDE call (~400K tokens
+# per dispatch, ~100 calls/day, $50+/day burn). cli_dispatch is stateless
+# — codex exec uses ChatGPT Pro subscription with <10K tokens/call.
 def _dispatch_to_jenna(prompt: str, thinking: str = "low", timeout: int = DISPATCH_TIMEOUT) -> str:
-    """Dispatch to Jenna via the resilient wrapper. Returns "" on any failure."""
-    result = _dispatch(agent="jenna", message=prompt, thinking=thinking, timeout=timeout)
+    """Stateless LLM call via codex/claude CLI. Returns "" on any failure.
+    Kept name for minimal call-site churn; no longer goes through Jenna
+    OpenClaw session.
+    """
+    try:
+        from cli_llm import cli_dispatch
+    except ImportError:
+        # Safety net: fall back to old openclaw dispatch if cli_llm missing
+        result = _dispatch(agent="jenna", message=prompt, thinking=thinking, timeout=timeout)
+        return result.text if result.ok else ""
+    result = cli_dispatch(prompt, backend="codex", timeout=timeout)
     return result.text if result.ok else ""
 
 
@@ -291,6 +307,21 @@ def expand_query(query: str, max_variants: int = 3) -> list[str]:
     if cached is not None:
         return cached
 
+    # 2026-04-17: skip Jenna expand when Claude Code session is active.
+    # Bilingual expansion in search_unified already provides KR<->EN coverage;
+    # the Jenna-generated alternative phrasings add maybe 5% recall but cost
+    # a 2s+ dispatch per /recall/v2. During session, Claude handles query
+    # variation in its own reasoning. Scheduled path (Telegram, OpenClaw
+    # agents) unaffected.
+    try:
+        from claude_session import is_session_active
+
+        if is_session_active():
+            _expand_cache[query] = [query]
+            return [query]
+    except Exception:
+        pass
+
     reply = _dispatch_to_jenna(EXPAND_PROMPT.format(query=query), thinking="low", timeout=30)
     variants: list[str] = [query]
     for line in reply.splitlines():
@@ -310,12 +341,24 @@ def expand_query(query: str, max_variants: int = 3) -> list[str]:
 
 
 def clear_cache() -> None:
+    """Clear both in-memory and on-disk HyDE caches.
+
+    2026-04-16 R-4 fix: previously only the in-memory cache was cleared;
+    `_hyde_disk_cache` survived clear_cache() despite the documented
+    'On prompt edits, call clear() or delete the db file' contract.
+    Prompt edits silently kept stale hypotheticals.
+    """
     _hyde_cache.clear()
     _expand_cache.clear()
+    try:
+        _hyde_disk_cache.clear()
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":
     import argparse
+
     parser = argparse.ArgumentParser(description="HyDE + query expansion smoke test")
     parser.add_argument("query")
     parser.add_argument("--expand", action="store_true")

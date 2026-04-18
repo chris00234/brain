@@ -1,10 +1,18 @@
 from __future__ import annotations
 
 import argparse
-import re
 from pathlib import Path
 
-from common import ROOT, dump_json, find_similar_canonical, iter_note_paths, parse_markdown_frontmatter, slugify, utc_now, write_markdown_frontmatter
+from common import (
+    ROOT,
+    dump_json,
+    find_similar_canonical,
+    iter_note_paths,
+    parse_markdown_frontmatter,
+    slugify,
+    utc_now,
+    write_markdown_frontmatter,
+)
 
 ENTITY_SKIP = {"chris cho", "chris", "daehyun", "daehyun cho", "chrischo"}
 
@@ -46,9 +54,7 @@ def _inject_entity_mentions(metadata: dict, body: str) -> int:
         return 0
     body_lower = body.lower()
     existing = {
-        (rel.get("type"), rel.get("target"))
-        for rel in metadata.get("relations", [])
-        if isinstance(rel, dict)
+        (rel.get("type"), rel.get("target")) for rel in metadata.get("relations", []) if isinstance(rel, dict)
     }
     added = 0
     relations = list(metadata.get("relations", []))
@@ -72,16 +78,129 @@ def load_proposal(path: Path) -> tuple[dict, str]:
     return metadata, body
 
 
-def deactivate_superseded(note_id: str, replacement_id: str) -> None:
+def _mirror_supersession_to_chroma(note_path: Path, replacement_id: str) -> None:
+    """2026-04-16 Tier 2 + R-17: supersession → Chroma metadata mirror.
+
+    Chroma's /update endpoint requires `ids`, not `where` — initial R-2
+    impl used `where` and silently 422'd on every call. Now: /get by
+    where=path → collect ids → /update with ids. Multiple chroma rows
+    per canonical MD path (chunking) are all flipped in one call.
+    """
+    try:
+        import sys as _sys
+
+        _sys.path.insert(0, str(Path("/Users/chrischo/server/brain/brain_core")))
+        from http_pool import http_json  # type: ignore
+        from search import get_collections  # type: ignore
+
+        cols = get_collections()
+        col_id = cols.get("canonical")
+        if not col_id:
+            return
+        base = f"http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}"
+        # Step 1: fetch matching rows' ids. Chroma metadata stores the
+        # filesystem path under `source`, not `path` (indexer convention).
+        resp = http_json(
+            "POST",
+            f"{base}/get",
+            {"where": {"source": str(note_path)}, "limit": 100, "include": []},
+        )
+        ids = resp.get("ids", []) or []
+        if not ids:
+            return
+        # Step 2: update each matching id with identical metadata patch.
+        patch = {
+            "status": "superseded",
+            "superseded_by": replacement_id,
+            "updated_at": utc_now(),
+        }
+        http_json(
+            "POST",
+            f"{base}/update",
+            {"ids": ids, "metadatas": [patch] * len(ids)},
+        )
+    except Exception:
+        pass
+
+
+def _reconsolidate_via_sage(old_body: str, new_body: str, title: str) -> str | None:
+    """2026-04-16 Tier 3 #1: memory reconsolidation (Nader 2000).
+
+    Instead of binary supersede (destroy old, replace with new), Sage
+    merges the two versions into a reconsolidated body that preserves
+    evidence from both. The old version is then superseded (as before),
+    but the replacement carries continuity of provenance.
+
+    Returns the reconsolidated body text or None on failure (caller
+    falls back to pure supersession).
+    """
+    try:
+        import sys as _s
+
+        _s.path.insert(0, str(Path(__file__).resolve().parent.parent / "brain_core"))
+        from cli_llm import dispatch as _dispatch
+
+        prompt = (
+            f"Reconsolidate two versions of a canonical knowledge note into "
+            f"ONE merged version that preserves all distinct facts and marks "
+            f"conflicts explicitly (never silently drops evidence).\n\n"
+            f"Title: {title}\n\n"
+            f"Existing version:\n---\n{old_body[:3000]}\n---\n\n"
+            f"New evidence version:\n---\n{new_body[:3000]}\n---\n\n"
+            f"Rules:\n"
+            f"- Keep every distinct factual claim from both versions.\n"
+            f"- If two claims conflict, mark with `**Conflict:**` and "
+            f"state both.\n"
+            f"- Prefer newer evidence for time-sensitive claims; note "
+            f"the older claim as historical context.\n"
+            f"- Preserve any existing structure (headings, lists).\n"
+            f"- Output ONLY the merged markdown body. No commentary.\n"
+        )
+        result = _dispatch(agent="sage", message=prompt, thinking="low", timeout=60)
+        if not getattr(result, "ok", False):
+            return None
+        merged = (result.text or "").strip()
+        # Safety: reject if Sage returned near-empty or suspiciously short
+        if len(merged) < min(len(old_body), len(new_body)) // 2:
+            return None
+        return merged
+    except Exception:
+        return None
+
+
+def deactivate_superseded(
+    note_id: str,
+    replacement_id: str,
+    replacement_body: str | None = None,
+    reconsolidate: bool = True,
+) -> None:
+    """Deactivate a canonical note because a replacement has landed.
+
+    2026-04-16 Tier 3 #1: when `reconsolidate` is True and the caller
+    passes the new body text, Sage merges old+new before the old version
+    is superseded. The replacement file body is rewritten to the merged
+    content. When reconsolidation fails or is disabled, falls back to
+    the original pure-supersession behavior.
+    """
     for note_path in iter_note_paths(ROOT / "canonical"):
         metadata, body = parse_markdown_frontmatter(note_path)
         if metadata.get("id") != note_id:
             continue
+        if reconsolidate and replacement_body is not None:
+            merged = _reconsolidate_via_sage(body, replacement_body, metadata.get("title", note_id))
+            if merged:
+                # Caller is expected to find the replacement note via
+                # replacement_id and overwrite its body with the merged
+                # text — we stash the merge on metadata so the caller can
+                # pick it up without a second Sage call.
+                metadata["reconsolidated_body"] = merged
+                metadata["reconsolidated_at"] = utc_now()
         metadata["status"] = "superseded"
         metadata["superseded_by"] = replacement_id
         metadata["updated_at"] = utc_now()
         metadata["valid_to"] = utc_now()
         write_markdown_frontmatter(note_path, metadata, body)
+        _mirror_supersession_to_chroma(note_path, replacement_id)
         return
     raise SystemExit(f"Superseded note not found: {note_id}")
 
@@ -109,8 +228,29 @@ def main() -> int:
     metadata["supersedes"] = args.supersede
     metadata["superseded_by"] = None
 
+    # 2026-04-16 Tier 3 #1: pass the new body into the superseder so Sage
+    # can reconsolidate old+new before the old version is marked stale.
+    # Collects any merged bodies so the replacement note can incorporate
+    # them before being written to disk.
+    reconsolidated_bodies: list[str] = []
     for superseded_id in args.supersede:
-        deactivate_superseded(superseded_id, canonical_id)
+        deactivate_superseded(
+            superseded_id,
+            canonical_id,
+            replacement_body=body,
+            reconsolidate=True,
+        )
+        # Re-read to see if reconsolidation produced a merged body.
+        for p in iter_note_paths(ROOT / "canonical"):
+            m2, _b2 = parse_markdown_frontmatter(p)
+            if m2.get("id") == superseded_id and m2.get("reconsolidated_body"):
+                reconsolidated_bodies.append(m2["reconsolidated_body"])
+                break
+    # If any reconsolidation landed, prefer the most recent merged body
+    # over the raw proposal body for the canonical record — ensures no
+    # evidence is silently dropped during promotion.
+    if reconsolidated_bodies:
+        body = reconsolidated_bodies[-1]
 
     file_name = slugify(metadata["title"]) + ".md"
     target = ROOT / "canonical" / metadata["domain"] / file_name
@@ -133,10 +273,17 @@ def main() -> int:
         print(f"  MERGED into existing: {existing.name}")
         try:
             import sys as _s
+
             _s.path.insert(0, str(Path(__file__).resolve().parent.parent / "brain_core"))
             from audit_log import log_event
-            log_event("merge", entity_a=str(existing), entity_b=str(target),
-                      resolution="canonical_merge", reason="Jaccard > 0.7 with existing canonical")
+
+            log_event(
+                "merge",
+                entity_a=str(existing),
+                entity_b=str(target),
+                resolution="canonical_merge",
+                reason="Jaccard > 0.7 with existing canonical",
+            )
         except Exception:
             pass
         target = existing  # for audit trail
@@ -146,16 +293,100 @@ def main() -> int:
     # Extract entities from promoted canonical note into Neo4j graph (best-effort)
     try:
         import sys as _sys
+
         _sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "brain_core"))
         from entity_graph import extract_and_store_entities
+
         note_text = f"{metadata.get('title', '')} {body[:500]}"
         extract_and_store_entities(note_text, canonical_id)
     except Exception:
         pass
 
+    # 2026-04-16 Tier 3 #10: HyDE at promote time (Gao et al. 2022).
+    # Generate 3-5 hypothetical queries the note would answer, embed
+    # them with prefix="query" (the asymmetric-retrieval lookup side of
+    # multilingual-e5), and index as additional vectors pointing to the
+    # same canonical doc. Dramatically improves recall on varied
+    # phrasings without re-ingesting or duplicating the document.
+    # Query-side embedding is the crucial trick: direct doc embedding
+    # (passage-prefixed) can miss queries that phrase the same concept
+    # very differently; query-prefixed HyDE vectors bridge that gap.
+    try:
+        _s.path.insert(0, str(Path(__file__).resolve().parent.parent / "brain_core"))
+        from hyde import generate_hypothetical as _gen_hyp
+        from indexer import chroma_api as _chroma_api_pc
+        from indexer import ensure_collection as _ensure_col_pc
+        from indexer import get_embedding as _get_emb_pc
+
+        hyp_title = metadata.get("title", "")[:100]
+        hyp_body = body[:500]
+        hyp_seed = f"{hyp_title}\n\n{hyp_body}"
+        # The hyde module's generate_hypothetical already returns a cached
+        # single hypothetical string per query. Build 3 different "seeds"
+        # so we get 3 diverse hypothetical queries.
+        hypothetical_queries: list[str] = []
+        for seed_prefix in (
+            "What is",
+            "How does",
+            "When should I",
+        ):
+            seed_q = f"{seed_prefix} {hyp_title}?"
+            try:
+                hyp = _gen_hyp(seed_q, allow_dispatch=True)
+                if hyp and len(hyp) > 20:
+                    hypothetical_queries.append(hyp[:500])
+            except Exception:
+                continue
+        # Index each hypothetical as a query-prefixed multi-vector
+        # pointing at the canonical_id. Uses a dedicated sub-id namespace
+        # so they don't collide with the canonical doc embedding.
+        if hypothetical_queries:
+            canonical_col = _ensure_col_pc("canonical")
+            ids = [f"{canonical_id}::hyde::{i}" for i in range(len(hypothetical_queries))]
+            embeddings = []
+            for hq in hypothetical_queries:
+                try:
+                    e = _get_emb_pc(hq, use_cache=True, prefix="query")
+                    if e:
+                        embeddings.append(e)
+                    else:
+                        embeddings.append(None)
+                except Exception:
+                    embeddings.append(None)
+            # Drop failed embeds
+            filtered = [
+                (i, h, e) for i, h, e in zip(ids, hypothetical_queries, embeddings, strict=False) if e
+            ]
+            if filtered:
+                _chroma_api_pc(
+                    "POST",
+                    f"/api/v2/tenants/default_tenant/databases/default_database/collections/{canonical_col}/upsert",
+                    {
+                        "ids": [f[0] for f in filtered],
+                        "embeddings": [f[2] for f in filtered],
+                        "documents": [f[1] for f in filtered],
+                        "metadatas": [
+                            {
+                                "type": "canonical-hyde",
+                                "canonical_id": canonical_id,
+                                "canonical_path": str(target),
+                                "title": hyp_title,
+                                "hyde_index": i,
+                                "created_at": utc_now(),
+                            }
+                            for i, (_, _, _) in enumerate(filtered)
+                        ],
+                    },
+                )
+                print(f"  HyDE: indexed {len(filtered)} hypothetical query vectors for {canonical_id}")
+    except Exception as _hyde_err:
+        # Never block promotion on HyDE failure — best-effort enrichment.
+        print(f"  HyDE skipped: {_hyde_err}")
+
     # Auto-extract structured facts from canonical note (best-effort)
     try:
         from fact_store import store_fact
+
         title = metadata.get("title", "")
         domain = metadata.get("domain", "")
         entities_list = metadata.get("entities", [])
@@ -178,6 +409,7 @@ def main() -> int:
     # Best-effort, gated by BRAIN_ATOMS_ENABLED.
     try:
         from atoms_store import upsert_atom
+
         title = metadata.get("title", "") or canonical_id
         body_preview = body.strip()[:500]
         text = (title + "\n" + body_preview)[:2000]

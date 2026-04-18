@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from common import ROOT, dump_json, read_all_notes
@@ -25,8 +25,8 @@ def age_in_days(value: str | None) -> int | None:
     try:
         timestamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
         if timestamp.tzinfo is None:
-            timestamp = timestamp.replace(tzinfo=timezone.utc)
-        return int((datetime.now(timezone.utc) - timestamp).days)
+            timestamp = timestamp.replace(tzinfo=UTC)
+        return int((datetime.now(UTC) - timestamp).days)
     except (ValueError, TypeError):
         return None
 
@@ -52,7 +52,9 @@ def main() -> int:
         if conf < LOW_CONFIDENCE_THRESHOLD:
             low_confidence.append({"id": metadata["id"], "confidence": conf})
         if metadata["type"] == "canonical" and metadata["status"] == "active":
-            active_canonical[(metadata["domain"], metadata["subtype"], metadata["title"])].append(metadata["id"])
+            active_canonical[(metadata["domain"], metadata["subtype"], metadata["title"])].append(
+                metadata["id"]
+            )
         for relation in metadata.get("relations", []):
             if relation["target"] not in note_ids:
                 orphans.append({"id": metadata["id"], "target": relation["target"]})
@@ -70,14 +72,18 @@ def main() -> int:
         args.root / "reports" / "review-queue" / "review-queue.json",
         {"low_confidence": low_confidence, "orphan_relations": orphans},
     )
-    print(json.dumps({
-        "status": "ok",
-        "stale": len(stale),
-        "duplicates": len(duplicates),
-        "conflicts": len(conflicts),
-        "low_confidence": len(low_confidence),
-        "orphan_relations": len(orphans),
-    }))
+    print(
+        json.dumps(
+            {
+                "status": "ok",
+                "stale": len(stale),
+                "duplicates": len(duplicates),
+                "conflicts": len(conflicts),
+                "low_confidence": len(low_confidence),
+                "orphan_relations": len(orphans),
+            }
+        )
+    )
     return 0
 
 

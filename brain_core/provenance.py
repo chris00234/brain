@@ -146,7 +146,7 @@ def trace(note_id: str, max_depth: int = 3) -> dict:
                 children.append(child)
 
         # Supersedes chain
-        for sup_id in (meta.get("supersedes") or []):
+        for sup_id in meta.get("supersedes") or []:
             if isinstance(sup_id, str):
                 child = _traverse(sup_id, depth + 1)
                 child["relation_type"] = "supersedes"

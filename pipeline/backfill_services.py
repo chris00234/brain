@@ -11,11 +11,12 @@ Usage:
   backfill_services.py              # dry-run
   backfill_services.py --apply      # write to Neo4j
 """
+
 from __future__ import annotations
 
 import re
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "brain_core"))
@@ -33,7 +34,7 @@ NATIVE_SERVICES = {
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 def parse_docker_compose(path: Path) -> list[dict]:
@@ -70,15 +71,19 @@ def parse_docker_compose(path: Path) -> list[dict]:
         if isinstance(depends, dict):
             depends = list(depends.keys())
 
-        services.append({
-            "name": name,
-            "dir": dir_name,
-            "image": config.get("image", ""),
-            "ports": ports,
-            "depends_on": depends,
-            "networks": list(config.get("networks", {}).keys()) if isinstance(config.get("networks"), dict) else config.get("networks", []),
-            "container": True,
-        })
+        services.append(
+            {
+                "name": name,
+                "dir": dir_name,
+                "image": config.get("image", ""),
+                "ports": ports,
+                "depends_on": depends,
+                "networks": list(config.get("networks", {}).keys())
+                if isinstance(config.get("networks"), dict)
+                else config.get("networks", []),
+                "container": True,
+            }
+        )
     return services
 
 
@@ -103,18 +108,20 @@ def _parse_compose_regex(path: Path) -> list[dict]:
         if not in_services:
             continue
         # Top-level service name (2-space indent, no dash)
-        if re.match(r'^  [a-zA-Z]', line) and ':' in stripped:
+        if re.match(r"^  [a-zA-Z]", line) and ":" in stripped:
             if current_service:
-                services.append({
-                    "name": current_service,
-                    "dir": dir_name,
-                    "image": "",
-                    "ports": current_ports,
-                    "depends_on": current_depends,
-                    "networks": [],
-                    "container": True,
-                })
-            current_service = stripped.rstrip(':').strip()
+                services.append(
+                    {
+                        "name": current_service,
+                        "dir": dir_name,
+                        "image": "",
+                        "ports": current_ports,
+                        "depends_on": current_depends,
+                        "networks": [],
+                        "container": True,
+                    }
+                )
+            current_service = stripped.rstrip(":").strip()
             current_ports = []
             current_depends = []
             in_depends_on = False
@@ -122,7 +129,7 @@ def _parse_compose_regex(path: Path) -> list[dict]:
         if stripped == "depends_on:":
             in_depends_on = True
             continue
-        elif re.match(r'^    [a-z]', line) and ':' in stripped and not stripped.startswith('-'):
+        if re.match(r"^    [a-z]", line) and ":" in stripped and not stripped.startswith("-"):
             in_depends_on = False
         # Port mapping
         port_match = re.match(r'\s*-\s*["\']?(\d+):\d+', line)
@@ -131,20 +138,22 @@ def _parse_compose_regex(path: Path) -> list[dict]:
             in_depends_on = False
         # depends_on entry
         if in_depends_on:
-            dep_match = re.match(r'\s*-\s*(\w[\w-]*)', line)
+            dep_match = re.match(r"\s*-\s*(\w[\w-]*)", line)
             if dep_match:
                 current_depends.append(dep_match.group(1))
 
     if current_service:
-        services.append({
-            "name": current_service,
-            "dir": dir_name,
-            "image": "",
-            "ports": current_ports,
-            "depends_on": current_depends,
-            "networks": [],
-            "container": True,
-        })
+        services.append(
+            {
+                "name": current_service,
+                "dir": dir_name,
+                "image": "",
+                "ports": current_ports,
+                "depends_on": current_depends,
+                "networks": [],
+                "container": True,
+            }
+        )
     return services
 
 
@@ -153,19 +162,21 @@ def parse_nginx_configs(conf_dir: Path) -> list[dict]:
     proxies = []
     for conf in conf_dir.glob("*.conf"):
         text = conf.read_text()
-        server_names = re.findall(r'server_name\s+([^;]+);', text)
-        proxy_targets = re.findall(r'proxy_pass\s+https?://([^/;:\s]+)', text)
+        server_names = re.findall(r"server_name\s+([^;]+);", text)
+        proxy_targets = re.findall(r"proxy_pass\s+https?://([^/;:\s]+)", text)
 
         for target in proxy_targets:
             # Clean target — could be container name or IP
-            target_clean = target.strip().rstrip('/')
+            target_clean = target.strip().rstrip("/")
             hostname = server_names[0].strip().split()[0] if server_names else conf.stem
 
-            proxies.append({
-                "hostname": hostname,
-                "target": target_clean,
-                "conf_file": conf.name,
-            })
+            proxies.append(
+                {
+                    "hostname": hostname,
+                    "target": target_clean,
+                    "conf_file": conf.name,
+                }
+            )
     return proxies
 
 
@@ -204,13 +215,14 @@ def backfill(apply: bool = False):
             ports = svc.get("ports", [])
             native = " (native)" if not svc.get("container") else ""
             print(f"  {name}{native}: ports={ports} depends_on={deps}")
-        print(f"\nProxy rules:")
+        print("\nProxy rules:")
         for p in proxies:
             print(f"  {p['hostname']} → {p['target']} ({p['conf_file']})")
         print("\nRun with --apply to write to Neo4j")
         return
 
     from neo4j_client import run_write
+
     now = _now_iso()
 
     # Create Service nodes
@@ -262,7 +274,9 @@ def backfill(apply: bool = False):
             )
             proxy_count += 1
 
-    print(f"Created {len(all_services)} Service nodes, {dep_count} DEPENDS_ON edges, {proxy_count} PROXIES edges")
+    print(
+        f"Created {len(all_services)} Service nodes, {dep_count} DEPENDS_ON edges, {proxy_count} PROXIES edges"
+    )
 
 
 if __name__ == "__main__":

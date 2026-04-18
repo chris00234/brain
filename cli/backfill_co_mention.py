@@ -12,15 +12,15 @@ Idempotent via NOT EXISTS guard — won't duplicate existing edges.
 Usage:
   backfill_co_mention.py [--min-co 2] [--dry-run]
 """
+
 from __future__ import annotations
 
 import argparse
 import json
 import sys
-from pathlib import Path
 
 sys.path.insert(0, "/Users/chrischo/server/brain/brain_core")
-from neo4j_client import run_query  # noqa: E402
+from neo4j_client import run_query
 
 DEFAULT_MIN_CO = 2
 
@@ -43,12 +43,16 @@ def main() -> int:
         RETURN count(*) AS would_create
         """
         r = list(run_query(candidate_cypher, {"min_co": args.min_co}))
-        print(json.dumps({
-            "status": "dry-run",
-            "pre_relates_to": pre_count,
-            "would_create": r[0]["would_create"],
-            "min_co": args.min_co,
-        }))
+        print(
+            json.dumps(
+                {
+                    "status": "dry-run",
+                    "pre_relates_to": pre_count,
+                    "would_create": r[0]["would_create"],
+                    "min_co": args.min_co,
+                }
+            )
+        )
         return 0
 
     cypher = """
@@ -74,17 +78,23 @@ def main() -> int:
 
     # Also reseal the orphan count for reporting
     orphan = list(run_query("MATCH (e:Entity) WHERE NOT (e)-[]-() RETURN count(e) AS c"))[0]["c"]
-    no_relates = list(run_query("MATCH (e:Entity) WHERE NOT (e)-[:RELATES_TO]-() RETURN count(e) AS c"))[0]["c"]
+    no_relates = list(run_query("MATCH (e:Entity) WHERE NOT (e)-[:RELATES_TO]-() RETURN count(e) AS c"))[0][
+        "c"
+    ]
 
-    print(json.dumps({
-        "status": "ok",
-        "pre_relates_to": pre_count,
-        "post_relates_to": post_count,
-        "created": created,
-        "min_co": args.min_co,
-        "orphan_entities": orphan,
-        "entities_without_relates_to": no_relates,
-    }))
+    print(
+        json.dumps(
+            {
+                "status": "ok",
+                "pre_relates_to": pre_count,
+                "post_relates_to": post_count,
+                "created": created,
+                "min_co": args.min_co,
+                "orphan_entities": orphan,
+                "entities_without_relates_to": no_relates,
+            }
+        )
+    )
     return 0
 
 

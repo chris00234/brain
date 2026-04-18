@@ -137,3 +137,62 @@ Re-derive with:
 - Repeated failures trigger the persistent breaker for the action_kind
   (e.g. `heal.reindex`) and back off 5m → 15m → 1h → 4h.
 - See RUNBOOK.md §2 for recovery.
+
+## 2026-04-16 Tier 1/2/3 additions
+
+New jobs registered in this session. Regenerate the full table from
+`JOB_SCHEDULE` when possible; this appendix documents only the deltas.
+
+| Time | Job | Owner | Purpose | Tier |
+|---|---|---|---|---|
+| 03:35 | `code_index_refresh` | system | Was 03:25 — staggered off `sm2_nightly` collision | T1 |
+| 03:50 | `answer_canonicalize` | system | Was 03:15 — staggered off `neo4j_backup` | T1 |
+| 03:55 | `retrieval_inhibition` | system | Bjork retrieval-induced inhibition nightly | T3 #4 |
+| 05:35 (Sun) | `lint_memory` | system | Was 05:30 — staggered off `canonical_design_drift` | T1 |
+| 05:50 (Sun) | `memory_leak_detector` | system | Was 05:45 — staggered off `canonical_lint` | T1 |
+| 06:20 (Sun) | `stale_superseded_cleanup` | system | Was 06:15 — staggered off `canonical_merge_draft` | T1 |
+| 06:50 (Sun) | `memory_nudge` | system | Was 06:45 — staggered off `canonicalize_entities_dryrun` | T1 |
+| 04:10 (Sun) | `confidence_calibration` | system | Platt-scale atoms.confidence vs eval outcomes | T3 #3 |
+| 07:15 (Sun) | `raptor_build` | sage | Hierarchical summary tree over canonical (Sarthi 2024) | T3 #9 |
+| 08:30 (Sun) | `dream_replay` | sage | REM-like generative conjectures across distant entities | T3 #7 |
+| 08:45 (Sun) | `schema_revision` | system | Friston free-energy schema-drift proposals | T3 #5 |
+| 04:25 (Jan/Apr/Jul/Oct 1st) | `prune_raw_orphaned` | system | Quarterly 180d prune of raw/orphaned/ | T2 |
+| 04:30 (2nd of month) | `re_examine_rejected` | system | Monthly rejected-proposal re-examination | T2 |
+
+### Interval-based additions
+- 15 s in-process: `completion_reaper` — polls subprocess PIDs, closes `_pending_completions` (T1)
+
+### SLO additions
+- `atoms_write_throughput_1h` — higher-is-better floor (≥5 writes/hr) to detect stuck writers (T1)
+
+### New endpoints
+- `GET /brain/doubt` — low-confidence atoms + unresolved contradictions + stale canonical (T3 #8)
+- `POST /brain/consolidate` — on-demand sleep consolidation trigger (T3 #8)
+- `GET /recall/stream` — SSE streaming recall with keepalive + fused terminator (T3 #13)
+
+### New MCP cognitive verbs
+- `brain_forget` — DELETE /memory/{id} wrapper (T3 #8)
+- `brain_consolidate` — POST /brain/consolidate wrapper (T3 #8)
+- `brain_doubt` — GET /brain/doubt wrapper (T3 #8)
+
+### New DB migration
+- `brain_db@10→11` — adds `retrieval_competition` table for Bjork inhibition log (T3 #4)
+
+### Environment flags added
+- `BRAIN_SELF_RAG_ENABLED` (default false) — toggles Jenna-backed Self-RAG critique in CRAG path (T3 #11)
+
+## 2026-04-17 Phase 3/4 additions
+
+| Time | Job | Owner | Purpose |
+|---|---|---|---|
+| 04:20 (Sun) | `ltr_train` | system | Weekly sklearn LogisticRegression fit over recall-feedback.jsonl (learned-to-rank blend) |
+
+### Env flags (2026-04-17)
+- `BRAIN_LTR_ENABLED` (default false) — toggles learned-to-rank LogisticRegression blend in `search_unified.py`
+- `BRAIN_FINETUNE_ENABLED` (default false) — required to run `cli/brain_finetune.py`
+
+### Recall response shape (2026-04-17)
+- `meta_note: str | None` added to `RecallV2Response`. Populated only when top-1 triggers an uncertainty heuristic. See `AGENT_HARNESS.md` §4.1.
+
+### Data bootstrap
+- `cli/bootstrap_feedback_from_eval.py` seeded `search-feedback.jsonl` with ~5k labeled pairs (4808 canonical + 126 eval positives, 20 eval negatives) on 2026-04-17. Idempotent — safe to rerun.

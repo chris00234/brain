@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
-from collections import Counter, defaultdict
-from datetime import datetime, timezone
+from collections import defaultdict
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +21,7 @@ def read_notes(root: Path, allow_missing: bool = True) -> list[tuple[Path, dict[
     if not root.exists():
         return []
     import logging
+
     log = logging.getLogger("brain.memory_observability.read_notes")
     notes: list[tuple[Path, dict[str, Any], str]] = []
     for path in iter_note_paths(root):
@@ -47,12 +48,12 @@ def stale_ratio(notes: list[tuple[Path, dict[str, Any], str]], *, field: str = "
         if not value:
             continue
         try:
-            when = datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(timezone.utc)
+            when = datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(UTC)
         except ValueError:
             continue
-        if (datetime.now(timezone.utc) - when).days > 180:
+        if (datetime.now(UTC) - when).days > 180:
             stale += 1
-    return (stale / max(len(notes), 1))
+    return stale / max(len(notes), 1)
 
 
 def low_confidence_count(notes: list[tuple[Path, dict[str, Any], str]], threshold: float) -> int:
@@ -69,7 +70,9 @@ def main() -> int:
     canonical = read_notes(CANONICAL_ROOT)
     distilled = read_notes(DISTILLED_ROOT)
     proposals = read_notes(args.review_queue)
-    rejected = read_notes(REJECTED_ROOT,)
+    rejected = read_notes(
+        REJECTED_ROOT,
+    )
 
     raw_count = len(list((RAW_ROOT).glob("raw_*.json"))) if RAW_ROOT.exists() else 0
 
@@ -82,7 +85,7 @@ def main() -> int:
 
     payload: dict[str, Any] = {
         "status": "ok",
-        "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+        "generated_at": datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
         "raw_inbox_count": raw_count,
         "distilled_count": len(distilled),
         "canonical_count": len(canonical),

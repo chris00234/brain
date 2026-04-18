@@ -33,7 +33,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 try:
-    from openclaw_dispatch import dispatch as _dispatch
+    from cli_llm import dispatch as _dispatch
 except ImportError:
     _dispatch = None  # type: ignore[assignment]
 
@@ -112,6 +112,7 @@ def _cache_put(key: str, classification: IngestClassification) -> None:
 
 # ── Heuristic fallback (no LLM) ──────────────────────────────────
 
+
 def _heuristic_classify(
     content: str,
     author_agent: str,
@@ -150,11 +151,7 @@ def _heuristic_classify(
     #   - quoted speaker (not Chris's own words)
     #   - session-scoped (not globally valid)
     #   - agent-inferred third-person without first-person anchor
-    provisional = (
-        is_quoted
-        or scope == "session"
-        or (speaker.startswith("agent:") and not has_first_person)
-    )
+    provisional = is_quoted or scope == "session" or (speaker.startswith("agent:") and not has_first_person)
 
     return IngestClassification(
         topic_key=topic_key,
@@ -228,6 +225,7 @@ def _llm_classify(
 
 
 # ── Public entry point ────────────────────────────────────────────
+
 
 def classify(
     content: str,

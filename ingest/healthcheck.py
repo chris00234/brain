@@ -25,14 +25,13 @@ Usage:
 """
 
 import argparse
-import hashlib
 import json
 import random
 import shutil
-import subprocess
 import sqlite3
+import subprocess
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 # ── Config ──────────────────────────────────────────────
@@ -53,15 +52,15 @@ DAILY_REPORT_DIR = BRAIN_DIR / "logs"
 # Intentionally NOT monitored: experience_compressed (transient),
 # semantic_contradictions (0 is a valid/desired state after resolution).
 MONITORED_COLLECTIONS = {
-    "knowledge":       {"min_docs": 300,  "source": "reindex"},
-    "experience":      {"min_docs": 1500, "source": "reindex"},
-    "canonical":       {"min_docs": 3000, "source": "canonical_pipeline"},
-    "context":         {"min_docs": 400,  "source": "reindex"},
-    "semantic_memory": {"min_docs": 150,  "source": "memory_store"},
-    "obsidian":        {"min_docs": 900,  "source": "obsidian_sync"},
-    "personal":        {"min_docs": 80,   "source": "personal_ingest"},
-    "code":            {"min_docs": 3500, "source": "code_index_refresh"},
-    "patterns":        {"min_docs": 5,    "source": "pattern_detector"},
+    "knowledge": {"min_docs": 300, "source": "reindex"},
+    "experience": {"min_docs": 1500, "source": "reindex"},
+    "canonical": {"min_docs": 3000, "source": "canonical_pipeline"},
+    "context": {"min_docs": 400, "source": "reindex"},
+    "semantic_memory": {"min_docs": 150, "source": "memory_store"},
+    "obsidian": {"min_docs": 900, "source": "obsidian_sync"},
+    "personal": {"min_docs": 80, "source": "personal_ingest"},
+    "code": {"min_docs": 3500, "source": "code_index_refresh"},
+    "patterns": {"min_docs": 5, "source": "pattern_detector"},
 }
 
 # Collections to sample for content integrity (metadata sanity check)
@@ -71,19 +70,19 @@ SAMPLE_SIZE = 5
 # How stale a scheduled job can be before we alert (in hours).
 # Source: scheduler_history.db most-recent successful run.
 EXPECTED_JOB_CADENCE_HOURS = {
-    "personal_ingest":      8,
-    "canonical_pipeline":   26,
-    "reindex":              14,
-    "eval_run":             26,
-    "backup":               26,
-    "neo4j_backup":         26,
-    "chroma_integrity":     26,
+    "personal_ingest": 8,
+    "canonical_pipeline": 26,
+    "reindex": 14,
+    "eval_run": 26,
+    "backup": 26,
+    "neo4j_backup": 26,
+    "chroma_integrity": 26,
     "memory_consolidation": 26,
-    "gmail_ingest":         26,
-    "code_index_refresh":   26,
+    "gmail_ingest": 26,
+    "code_index_refresh": 26,
     "memory_leak_detector": 192,  # weekly
-    "near_dedup":           192,
-    "lint_memory":          192,
+    "near_dedup": 192,
+    "lint_memory": 192,
 }
 
 OPENCLAW_BIN = "/Users/chrischo/.local/bin/openclaw"
@@ -102,7 +101,8 @@ sys.path.insert(0, str(BRAIN_DIR / "brain_core"))
 sys.path.insert(0, str(BRAIN_DIR / "cli"))
 
 try:
-    from config import CHROMA_URL as _CHROMA_URL  # noqa: F401
+    from config import CHROMA_URL as _CHROMA_URL
+
     CHROMA_URL = _CHROMA_URL
 except ImportError:
     pass
@@ -119,6 +119,7 @@ except ImportError:
 def get_collection_counts() -> dict[str, int | str]:
     """Live counts via ChromaDB HTTP API on localhost."""
     import urllib.request
+
     try:
         resp = urllib.request.urlopen(CHROMA_API, timeout=10)
         cols = json.loads(resp.read())
@@ -142,6 +143,7 @@ def get_collection_counts() -> dict[str, int | str]:
 def get_collection_id(name: str) -> str | None:
     """Return the ChromaDB v2 collection ID for a given name, or None."""
     import urllib.request
+
     try:
         resp = urllib.request.urlopen(CHROMA_API, timeout=10)
         cols = json.loads(resp.read())
@@ -155,13 +157,17 @@ def get_collection_id(name: str) -> str | None:
 
 # ── State (uses safe_state for file locking) ──────────────
 try:
-    from safe_state import load_state as _safe_load, save_state as _safe_save
+    from safe_state import load_state as _safe_load
+    from safe_state import save_state as _safe_save
+
     def load_state() -> dict:
         return _safe_load(STATE_FILE)
+
     def save_state(state: dict) -> None:
-        state["last_check"] = datetime.now(timezone.utc).isoformat()
+        state["last_check"] = datetime.now(UTC).isoformat()
         _safe_save(STATE_FILE, state)
 except ImportError:
+
     def load_state() -> dict:
         if STATE_FILE.exists():
             try:
@@ -169,8 +175,9 @@ except ImportError:
             except Exception:
                 return {}
         return {}
+
     def save_state(state: dict) -> None:
-        state["last_check"] = datetime.now(timezone.utc).isoformat()
+        state["last_check"] = datetime.now(UTC).isoformat()
         STATE_FILE.write_text(json.dumps(state, indent=2))
 
 
@@ -179,7 +186,7 @@ def recent_failures(hours: int = 24) -> list[dict]:
     """Return failure entries newer than `hours` ago (UTC-aware comparison)."""
     if not FAILURE_LOG.exists():
         return []
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+    cutoff = datetime.now(UTC) - timedelta(hours=hours)
     out = []
     try:
         for line in FAILURE_LOG.read_text().splitlines():
@@ -193,7 +200,7 @@ def recent_failures(hours: int = 24) -> list[dict]:
                     continue
                 ts = datetime.fromisoformat(ts_raw.rstrip("Zz"))
                 if ts.tzinfo is None:
-                    ts = ts.replace(tzinfo=timezone.utc)
+                    ts = ts.replace(tzinfo=UTC)
                 if ts >= cutoff:
                     out.append(entry)
             except Exception:
@@ -240,7 +247,7 @@ def latest_backup_age_hours() -> tuple[float | None, str]:
     if not tarballs:
         return None, "no_backups"
     newest = max(tarballs, key=lambda o: o["LastModified"])
-    age = (datetime.now(timezone.utc) - newest["LastModified"]).total_seconds() / 3600
+    age = (datetime.now(UTC) - newest["LastModified"]).total_seconds() / 3600
     return age, "ok"
 
 
@@ -259,13 +266,16 @@ def check_disk_space() -> tuple[list[str], float]:
 def check_ollama_embedding() -> list[str]:
     """Verify Ollama can produce an embedding. Catches model unload / service death."""
     import urllib.request
+
     try:
         req = urllib.request.Request(
             f"{OLLAMA_URL}/api/embeddings",
-            data=json.dumps({
-                "model": "blaifa/multilingual-e5-large-instruct",
-                "prompt": "healthcheck probe",
-            }).encode(),
+            data=json.dumps(
+                {
+                    "model": "blaifa/multilingual-e5-large-instruct",
+                    "prompt": "healthcheck probe",
+                }
+            ).encode(),
             headers={"Content-Type": "application/json"},
             method="POST",
         )
@@ -285,6 +295,7 @@ def check_chroma_write() -> list[str]:
     Catches: ChromaDB down, sqlite read-only, HNSW corrupted, write path broken.
     """
     import urllib.request
+
     probe_name = "healthcheck_probe"
     try:
         # Ensure collection exists
@@ -304,17 +315,19 @@ def check_chroma_write() -> list[str]:
         if not col_id:
             return ["❌ ChromaDB write probe: cannot resolve probe collection id"]
         # Upsert one probe doc
-        probe_id = f"probe:{datetime.now(timezone.utc).isoformat()}"
+        probe_id = f"probe:{datetime.now(UTC).isoformat()}"
         # Use a cheap 8-dim embedding so we don't hit Ollama on every probe
         probe_emb = [0.1] * 1024
         upsert_req = urllib.request.Request(
             f"{CHROMA_API}/{col_id}/upsert",
-            data=json.dumps({
-                "ids": [probe_id],
-                "embeddings": [probe_emb],
-                "documents": ["healthcheck probe"],
-                "metadatas": [{"type": "probe", "created_at": datetime.now(timezone.utc).isoformat()}],
-            }).encode(),
+            data=json.dumps(
+                {
+                    "ids": [probe_id],
+                    "embeddings": [probe_emb],
+                    "documents": ["healthcheck probe"],
+                    "metadatas": [{"type": "probe", "created_at": datetime.now(UTC).isoformat()}],
+                }
+            ).encode(),
             headers={"Content-Type": "application/json"},
             method="POST",
         )
@@ -351,6 +364,7 @@ def check_recall_vector() -> list[str]:
     any other silent recall-path breakage.
     """
     import urllib.request
+
     secret = _bearer_secret()
     if not secret:
         return []  # can't probe without bearer
@@ -371,11 +385,12 @@ def check_recall_vector() -> list[str]:
 def check_recall_vector_temporal() -> list[str]:
     """Hit /recall with since/until — specifically catches the string-operand bug."""
     import urllib.request
+
     secret = _bearer_secret()
     if not secret:
         return []
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d")
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
+    week_ago = (datetime.now(UTC) - timedelta(days=7)).strftime("%Y-%m-%d")
     try:
         req = urllib.request.Request(
             f"{BRAIN_URL}/recall?q=homelab&since={week_ago}&until={today}&n=3",
@@ -395,6 +410,7 @@ def check_content_integrity() -> list[str]:
     document, non-empty source, and recognizable embed_model_version.
     """
     import urllib.request
+
     issues = []
     for coll in SAMPLED_COLLECTIONS:
         col_id = get_collection_id(coll)
@@ -411,11 +427,13 @@ def check_content_integrity() -> list[str]:
             offset = random.randint(0, max(0, total - limit))
             req = urllib.request.Request(
                 f"{CHROMA_API}/{col_id}/get",
-                data=json.dumps({
-                    "limit": limit,
-                    "offset": offset,
-                    "include": ["documents", "metadatas"],
-                }).encode(),
+                data=json.dumps(
+                    {
+                        "limit": limit,
+                        "offset": offset,
+                        "include": ["documents", "metadatas"],
+                    }
+                ).encode(),
                 headers={"Content-Type": "application/json"},
                 method="POST",
             )
@@ -423,7 +441,7 @@ def check_content_integrity() -> list[str]:
             body = json.loads(resp.read())
             docs = body.get("documents") or []
             metas = body.get("metadatas") or []
-            sample = list(zip(docs, metas))
+            sample = list(zip(docs, metas, strict=False))
             random.shuffle(sample)
             sample = sample[:SAMPLE_SIZE]
             empty_docs = sum(1 for d, _ in sample if not d or not str(d).strip())
@@ -432,7 +450,9 @@ def check_content_integrity() -> list[str]:
             missing_source = sum(1 for _, m in sample if not (m or {}).get("source"))
             if missing_source > SAMPLE_SIZE // 2:
                 # Some collections (semantic_memory) don't use 'source'; tolerate up to 50%.
-                issues.append(f"⚠️ {coll}: {missing_source}/{SAMPLE_SIZE} sampled docs missing metadata.source")
+                issues.append(
+                    f"⚠️ {coll}: {missing_source}/{SAMPLE_SIZE} sampled docs missing metadata.source"
+                )
         except Exception as e:
             issues.append(f"⚠️ content integrity probe failed for {coll}: {e}")
     return issues
@@ -441,8 +461,8 @@ def check_content_integrity() -> list[str]:
 # ── Eval regression detector ───────────────────────────
 def check_eval_regression() -> list[str]:
     """Read the last 3 entries of eval-history.jsonl. Alert if:
-      - latest hit_content@5 < 85, OR
-      - 2+ consecutive entries show delta <= -5 vs baseline
+    - latest hit_content@5 < 85, OR
+    - 2+ consecutive entries show delta <= -5 vs baseline
     """
     issues = []
     if not EVAL_HISTORY.exists():
@@ -464,7 +484,9 @@ def check_eval_regression() -> list[str]:
             if "REGRESSION" in err and "hit_content@5" in err:
                 regressions += 1
         if regressions >= 2:
-            issues.append(f"⚠️ Eval regression: {regressions} consecutive hit_content@5 drops (check eval-history.jsonl)")
+            issues.append(
+                f"⚠️ Eval regression: {regressions} consecutive hit_content@5 drops (check eval-history.jsonl)"
+            )
     except Exception as e:
         issues.append(f"⚠️ Eval regression probe failed: {e}")
     return issues
@@ -502,12 +524,10 @@ def check_job_staleness() -> list[str]:
                     except ValueError:
                         continue
                     if dt.tzinfo is None:
-                        dt = dt.replace(tzinfo=timezone.utc)
-                    age_h = (datetime.now(timezone.utc) - dt).total_seconds() / 3600
+                        dt = dt.replace(tzinfo=UTC)
+                    age_h = (datetime.now(UTC) - dt).total_seconds() / 3600
                     if age_h > max_hours:
-                        issues.append(
-                            f"⚠️ Job `{job_name}` last success {age_h:.0f}h ago (max {max_hours}h)"
-                        )
+                        issues.append(f"⚠️ Job `{job_name}` last success {age_h:.0f}h ago (max {max_hours}h)")
             except sqlite3.OperationalError:
                 continue
         conn.close()
@@ -521,11 +541,17 @@ def send_telegram(text: str) -> bool:
     try:
         result = subprocess.run(
             [
-                OPENCLAW_BIN, "message", "send",
-                "--channel", "telegram",
-                "--target", TELEGRAM_CHAT_ID,
-                "--account", TELEGRAM_ACCOUNT,
-                "--message", text,
+                OPENCLAW_BIN,
+                "message",
+                "send",
+                "--channel",
+                "telegram",
+                "--target",
+                TELEGRAM_CHAT_ID,
+                "--account",
+                TELEGRAM_ACCOUNT,
+                "--message",
+                text,
             ],
             capture_output=True,
             text=True,
@@ -544,7 +570,7 @@ def main() -> None:
     args = parser.parse_args()
 
     issues: list[str] = []
-    report: dict = {"timestamp": datetime.now(timezone.utc).isoformat(), "checks": {}}
+    report: dict = {"timestamp": datetime.now(UTC).isoformat(), "checks": {}}
 
     # 1. Collection growth + floors
     counts = get_collection_counts()
@@ -582,9 +608,7 @@ def main() -> None:
     failures = recent_failures(hours=24)
     if failures:
         adapters = sorted({f.get("adapter", "?") for f in failures})
-        issues.append(
-            f"⚠️ {len(failures)} ingest failures in last 24h (adapters: {', '.join(adapters)})"
-        )
+        issues.append(f"⚠️ {len(failures)} ingest failures in last 24h (adapters: {', '.join(adapters)})")
     report["checks"]["recent_failures_24h"] = len(failures)
 
     # 4. Full Disk Access regression
@@ -594,14 +618,17 @@ def main() -> None:
 
     # 5. Adapter watermark staleness (legacy check, kept for compat)
     ADAPTER_STATES = {
-        "git_activity":       (BRAIN_DIR / "logs" / "git-activity-state.json", 48),
-        "screen_time":        (BRAIN_DIR / "logs" / "screen-time-state.json", 192),
-        "gmail":              (Path("/Users/chrischo/.openclaw/workspace-jenna/.gmail_ingest_state.json"), 48),
-        "browser":            (Path("/Users/chrischo/.openclaw/workspace-sage/.brain_state/browser_ingest_state.json"), 48),
-        "obsidian_sync":      (Path("/Users/chrischo/.openclaw/workspace-jenna/.obsidian_sync_state.json"), 6),
-        "shell":              (BRAIN_DIR / "logs" / "shell-ingest-state.json", 48),
+        "git_activity": (BRAIN_DIR / "logs" / "git-activity-state.json", 48),
+        "screen_time": (BRAIN_DIR / "logs" / "screen-time-state.json", 192),
+        "gmail": (Path("/Users/chrischo/.openclaw/workspace-jenna/.gmail_ingest_state.json"), 48),
+        "browser": (
+            Path("/Users/chrischo/.openclaw/workspace-sage/.brain_state/browser_ingest_state.json"),
+            48,
+        ),
+        "obsidian_sync": (Path("/Users/chrischo/.openclaw/workspace-jenna/.obsidian_sync_state.json"), 6),
+        "shell": (BRAIN_DIR / "logs" / "shell-ingest-state.json", 48),
         "claude_code_sessions": (BRAIN_DIR / "logs" / "claude-code-sessions-state.json", 48),
-        "code_index":         (BRAIN_DIR / "logs" / "code-index-state.json", 48),
+        "code_index": (BRAIN_DIR / "logs" / "code-index-state.json", 48),
     }
     for adapter, (state_path, max_hours) in ADAPTER_STATES.items():
         try:
@@ -612,8 +639,8 @@ def main() -> None:
             if last_run:
                 last_dt = datetime.fromisoformat(last_run.replace("Z", "+00:00"))
                 if last_dt.tzinfo is None:
-                    last_dt = last_dt.replace(tzinfo=timezone.utc)
-                age_hours = (datetime.now(timezone.utc) - last_dt).total_seconds() / 3600
+                    last_dt = last_dt.replace(tzinfo=UTC)
+                age_hours = (datetime.now(UTC) - last_dt).total_seconds() / 3600
                 if age_hours > max_hours:
                     issues.append(
                         f"⚠️ Adapter `{adapter}` stale — last run {age_hours:.0f}h ago (max: {max_hours}h)"
@@ -675,7 +702,7 @@ def main() -> None:
 
     # Write daily JSON report
     try:
-        day_path = DAILY_REPORT_DIR / f"healthcheck-{datetime.now(timezone.utc).strftime('%Y-%m-%d')}.json"
+        day_path = DAILY_REPORT_DIR / f"healthcheck-{datetime.now(UTC).strftime('%Y-%m-%d')}.json"
         day_path.write_text(json.dumps(report, indent=2))
     except Exception as e:
         print(f"WARNING: failed to write daily report: {e}")
@@ -696,7 +723,8 @@ def main() -> None:
             "🧠 Brain healthcheck — issues detected:\n\n"
             + "\n".join(issues)
             + "\n\nFull report: ~/server/brain/logs/healthcheck-"
-            + datetime.now(timezone.utc).strftime("%Y-%m-%d") + ".json"
+            + datetime.now(UTC).strftime("%Y-%m-%d")
+            + ".json"
         )
         send_telegram(msg)
     elif args.force:

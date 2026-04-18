@@ -33,10 +33,8 @@ from __future__ import annotations
 
 import argparse
 import re
-import sqlite3
 import sys
 import time
-from pathlib import Path
 
 sys.path.insert(0, "/Users/chrischo/server/brain/brain_core")
 
@@ -45,8 +43,9 @@ from config import BRAIN_LOGS_DIR
 
 BRAIN_DB = BRAIN_LOGS_DIR / "brain.db"
 MIN_TEXT_LEN = 40
-MIN_NAME_LEN = 3   # skip 1-2 char "entities" that match everything
+MIN_NAME_LEN = 3  # skip 1-2 char "entities" that match everything
 MAX_NAME_LEN = 50  # skip long-sentence entities
+
 
 # Case-insensitive, word-boundary substring match
 def _build_matcher(name: str):
@@ -62,6 +61,7 @@ def _build_matcher(name: str):
 def fetch_neo4j_entities() -> list[dict]:
     """Pull every Entity with name, type, aliases from Neo4j."""
     from neo4j_client import run_query
+
     rows = run_query(
         "MATCH (e:Entity) "
         "RETURN e.name AS name, e.entity_type AS etype, "
@@ -77,8 +77,7 @@ def fetch_atoms(limit: int = 0) -> list[dict]:
         cursor = conn.execute(
             "SELECT id, chroma_id, text FROM atoms "
             "WHERE tier != 'obsolete' AND length(text) >= ? "
-            "ORDER BY created_at DESC"
-            + (f" LIMIT {int(limit)}" if limit > 0 else ""),
+            "ORDER BY created_at DESC" + (f" LIMIT {int(limit)}" if limit > 0 else ""),
             (MIN_TEXT_LEN,),
         )
         return [dict(row) for row in cursor]
@@ -107,6 +106,7 @@ def neo4j_link_mentions(memory_id: str, entity_name: str) -> bool:
     """Create MENTIONS edge from MemoryAccess → Entity. Idempotent via MERGE."""
     try:
         from neo4j_client import run_write
+
         run_write(
             "MERGE (m:MemoryAccess {memory_id: $mid}) "
             "  ON CREATE SET m.utility_score = 0.5, m.access_count = 0, "
@@ -131,8 +131,9 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true", help="Print matches, don't write")
     parser.add_argument("--limit", type=int, default=0, help="Max atoms to process (0=all)")
     parser.add_argument("--skip-neo4j", action="store_true", help="Only rebuild sqlite mirror")
-    parser.add_argument("--min-mentions", type=int, default=0,
-                        help="Skip entities with fewer than N Neo4j mentions")
+    parser.add_argument(
+        "--min-mentions", type=int, default=0, help="Skip entities with fewer than N Neo4j mentions"
+    )
     args = parser.parse_args()
 
     if not BRAIN_ATOMS_ENABLED:

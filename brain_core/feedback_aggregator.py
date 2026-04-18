@@ -5,11 +5,12 @@ logs suggestions for SOURCE_TRUST weight adjustments. Does NOT auto-adjust
 SOURCE_TRUST, but does update per-agent preference weights in autonomy.db
 via agent_preferences.record_feedback() / recompute_weights().
 """
+
 import json
 import sys
-from pathlib import Path
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -43,12 +44,13 @@ def aggregate_feedback(days: int = 7) -> dict:
         return {"error": "no feedback log", "per_source": {}}
 
     try:
-        from agent_preferences import record_feedback, recompute_weights
+        from agent_preferences import recompute_weights, record_feedback
+
         _prefs_available = True
     except Exception:
         _prefs_available = False
 
-    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    cutoff = datetime.now(UTC) - timedelta(days=days)
     per_source: dict[str, dict] = defaultdict(lambda: {"useful": 0, "total": 0})
     per_agent_source: dict[tuple[str, str], dict] = defaultdict(lambda: {"useful": 0, "total": 0})
     # Only call record_feedback() on entries newer than the last run — otherwise
@@ -66,7 +68,7 @@ def aggregate_feedback(days: int = 7) -> dict:
                     continue
                 ts = datetime.fromisoformat(ts_raw.rstrip("Zz"))
                 if ts.tzinfo is None:
-                    ts = ts.replace(tzinfo=timezone.utc)
+                    ts = ts.replace(tzinfo=UTC)
                 if ts < cutoff:
                     continue
                 source = entry.get("source") or _infer_source(entry.get("result_id", ""))
@@ -121,9 +123,13 @@ def aggregate_feedback(days: int = 7) -> dict:
         if s["total"] < 5:
             continue  # not enough data
         if s["rate"] < 0.3:
-            suggestions.append(f"Source '{source}' has low usefulness ({s['rate']*100:.0f}%) — consider reducing SOURCE_TRUST weight")
+            suggestions.append(
+                f"Source '{source}' has low usefulness ({s['rate']*100:.0f}%) — consider reducing SOURCE_TRUST weight"
+            )
         elif s["rate"] > 0.8:
-            suggestions.append(f"Source '{source}' has high usefulness ({s['rate']*100:.0f}%) — consider increasing SOURCE_TRUST weight")
+            suggestions.append(
+                f"Source '{source}' has high usefulness ({s['rate']*100:.0f}%) — consider increasing SOURCE_TRUST weight"
+            )
 
     # Recompute per-agent weights from the freshly recorded feedback
     prefs_updated = {}
@@ -156,6 +162,7 @@ def _infer_source(result_id: str) -> str:
 
 if __name__ == "__main__":
     import sys
+
     result = aggregate_feedback()
     print(json.dumps(result, indent=2))
     sys.exit(0)

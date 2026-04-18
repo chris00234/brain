@@ -32,7 +32,7 @@ import re
 import sqlite3
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -85,7 +85,7 @@ def _query_atoms() -> dict[str, list[dict]]:
             "SELECT id, text, provenance_json, created_at, updated_at, "
             "       confidence, tier, superseded_by "
             "FROM atoms "
-            "WHERE provenance_json LIKE '%\"source\":\"claude_auto_memory:%' "
+            'WHERE provenance_json LIKE \'%"source":"claude_auto_memory:%\' '
             "   OR provenance_json LIKE '%claude_auto_memory:%' "
             "ORDER BY created_at ASC"
         ).fetchall()
@@ -111,7 +111,7 @@ def _query_atoms() -> dict[str, list[dict]]:
                 continue
 
         # Extract filename and optional chunk index (format: claude_auto_memory:<file>#<n>)
-        tail = source[len(SOURCE_PREFIX):]
+        tail = source[len(SOURCE_PREFIX) :]
         if "#" in tail:
             filename, _, idx = tail.partition("#")
             try:
@@ -126,14 +126,16 @@ def _query_atoms() -> dict[str, list[dict]]:
         # SAME file as updates of each other (similar content), so the
         # supersession chain would hide most of each file. Auto-memory
         # chunks are complementary — we want the full set.
-        files.setdefault(filename, []).append({
-            "atom_id": row["id"],
-            "chunk_idx": chunk_idx,
-            "text": row["text"] or "",
-            "created_at": row["created_at"] or "",
-            "updated_at": row["updated_at"] or "",
-            "confidence": row["confidence"] or 0.0,
-        })
+        files.setdefault(filename, []).append(
+            {
+                "atom_id": row["id"],
+                "chunk_idx": chunk_idx,
+                "text": row["text"] or "",
+                "created_at": row["created_at"] or "",
+                "updated_at": row["updated_at"] or "",
+                "confidence": row["confidence"] or 0.0,
+            }
+        )
 
     # Sort chunks within each file. If the same chunk_idx appears multiple
     # times (re-runs of migration → multiple atoms for same #N), keep the
@@ -175,7 +177,7 @@ def _reassemble(chunks: list[dict]) -> tuple[str, str]:
         # Strip repeated header from subsequent chunks
         for pref in (f"# {name}\n\n", f"# {name}\n"):
             if pref and text.startswith(pref):
-                text = text[len(pref):]
+                text = text[len(pref) :]
                 break
         # Strip trailing "(part N/M)" marker
         text = re.sub(r"\s*\(part \d+/\d+\)\s*$", "", text).strip()
@@ -203,7 +205,7 @@ def _render_stub(name: str, body: str) -> str:
         f"name: {safe_name}\n"
         f"description: {desc}\n"
         "source: brain_atoms (regenerated)\n"
-        f"generated_at: {datetime.now(timezone.utc).isoformat(timespec='seconds')}\n"
+        f"generated_at: {datetime.now(UTC).isoformat(timespec='seconds')}\n"
         "---\n\n"
         f"# {safe_name}\n\n"
         f"{body}\n"
@@ -217,8 +219,7 @@ def _render_index(files: dict[str, tuple[str, str]]) -> str:
     """
     out: list[str] = ["# Claude Code Auto-Memory", ""]
     out.append("> Regenerated from brain atoms. Brain is the source of truth — ")
-    out.append("> edits here get re-imported on next session with "
-               "`provenance.reason=manual_edit`.")
+    out.append("> edits here get re-imported on next session with " "`provenance.reason=manual_edit`.")
     out.append("")
     out.append("## Index")
 
@@ -254,7 +255,7 @@ def _render_index(files: dict[str, tuple[str, str]]) -> str:
 
     out.append("")
     out.append("---")
-    out.append(f"*Regenerated {datetime.now(timezone.utc).isoformat(timespec='seconds')} from brain.db atoms*")
+    out.append(f"*Regenerated {datetime.now(UTC).isoformat(timespec='seconds')} from brain.db atoms*")
     return "\n".join(out) + "\n"
 
 
@@ -318,6 +319,7 @@ def run(force: bool = False) -> dict:
 
 if __name__ == "__main__":
     import argparse
+
     parser = argparse.ArgumentParser(description="Regenerate MEMORY.md from brain atoms.")
     parser.add_argument("--force", action="store_true", help="Skip 60s throttle")
     args = parser.parse_args()

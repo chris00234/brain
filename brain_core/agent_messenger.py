@@ -14,7 +14,7 @@ import logging
 import sqlite3
 import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -60,11 +60,13 @@ _init_db()
 
 # ── Helpers ──────────────────────────────────────────────
 
+
 def _row_to_dict(row: sqlite3.Row) -> dict:
     return dict(row)
 
 
 from contextlib import contextmanager
+
 
 @contextmanager
 def _conn():
@@ -79,6 +81,7 @@ def _conn():
 
 # ── Public API ───────────────────────────────────────────
 
+
 def send_message(
     from_agent: str,
     to_agent: str,
@@ -90,7 +93,7 @@ def send_message(
 ) -> dict:
     """Insert a message and route it. Returns the message dict."""
     msg_id = uuid.uuid4().hex[:12]
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    now = datetime.now(UTC).isoformat(timespec="seconds")
     meta_json = json.dumps(metadata or {}, ensure_ascii=False)
 
     with _conn() as conn:
@@ -98,8 +101,7 @@ def send_message(
             "INSERT INTO messages (id, from_agent, to_agent, content, message_type, "
             "priority, status, parent_task_id, created_at, metadata) "
             "VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)",
-            (msg_id, from_agent, to_agent, content, message_type,
-             priority, parent_task_id, now, meta_json),
+            (msg_id, from_agent, to_agent, content, message_type, priority, parent_task_id, now, meta_json),
         )
 
     msg = {
@@ -169,7 +171,7 @@ def deliver_message(message_id: str) -> dict:
     after the UPDATE could race with a concurrent delete or return stale data,
     so we key off "did the update touch any row" instead.
     """
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    now = datetime.now(UTC).isoformat(timespec="seconds")
     with _conn() as conn:
         cursor = conn.execute(
             "UPDATE messages SET status = 'delivered', delivered_at = ? WHERE id = ?",
@@ -185,7 +187,7 @@ def deliver_message(message_id: str) -> dict:
 
 def dismiss_all(agent: str) -> int:
     """Bulk-mark all pending messages for an agent as delivered. Returns count."""
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    now = datetime.now(UTC).isoformat(timespec="seconds")
     with _conn() as conn:
         count = conn.execute(
             "UPDATE messages SET status = 'delivered', delivered_at = ? "
@@ -197,10 +199,12 @@ def dismiss_all(agent: str) -> int:
 
 # ── Internal ─────────────────────────────────────────────
 
+
 def _escalate(from_agent: str, to_agent: str, content: str) -> None:
     """Dispatch escalation to Jenna for Chris notification."""
     try:
-        from openclaw_dispatch import dispatch
+        from cli_llm import dispatch
+
         dispatch(
             agent="jenna",
             message=f"[AGENT MSG] {from_agent}\u2192{to_agent}: {content[:300]}",
@@ -215,6 +219,7 @@ def _create_handoff_task(message: dict) -> None:
     """Create a task for the target agent via task_queue (if available)."""
     try:
         from task_queue import task_queue
+
         task_queue.create_task(
             title=f"Handoff from {message['from_agent']}: {message['content'][:120]}",
             assigned_agent=message["to_agent"],

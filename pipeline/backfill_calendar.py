@@ -7,23 +7,24 @@ Usage:
   backfill_calendar.py              # dry-run
   backfill_calendar.py --apply      # write to Neo4j
 """
+
 from __future__ import annotations
 
 import re
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "brain_core"))
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 def collect_events() -> list[dict]:
     """Query calendar collection from ChromaDB."""
-    from indexer import chroma_api, _get_collection_id
+    from indexer import _get_collection_id, chroma_api
 
     # Try personal (post-migration), fall back to calendar (pre-migration)
     col_id = _get_collection_id("personal") or _get_collection_id("calendar")
@@ -31,17 +32,21 @@ def collect_events() -> list[dict]:
         print("neither personal nor calendar collection found")
         return []
 
-    resp = chroma_api("POST", f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/get", {
-        "limit": 200,
-        "include": ["documents", "metadatas"],
-        "where": {"type": "event"},
-    })
+    resp = chroma_api(
+        "POST",
+        f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/get",
+        {
+            "limit": 200,
+            "include": ["documents", "metadatas"],
+            "where": {"type": "event"},
+        },
+    )
 
     docs = resp.get("documents", [])
     metas = resp.get("metadatas", [])
 
     events = []
-    for doc, meta in zip(docs, metas):
+    for doc, meta in zip(docs, metas, strict=False):
         if not doc or len(doc.strip()) < 10:
             continue
         title = meta.get("title", "")
@@ -50,18 +55,20 @@ def collect_events() -> list[dict]:
 
         # Extract a date-qualified name to prevent collisions (e.g., multiple "lunch" events)
         raw_name = title.strip()[:60] if title else doc.strip().split("\n")[0][:60]
-        raw_name = re.sub(r'[^\w\s가-힣-]', '', raw_name).strip().lower()
+        raw_name = re.sub(r"[^\w\s가-힣-]", "", raw_name).strip().lower()
         if len(raw_name) < 3:
             continue
         # Qualify with date to prevent MERGE collisions
         name = f"{raw_name} {event_date}" if event_date else raw_name
 
-        events.append({
-            "name": name,
-            "event_date": event_date,
-            "calendar": service,
-            "content": doc[:200],
-        })
+        events.append(
+            {
+                "name": name,
+                "event_date": event_date,
+                "calendar": service,
+                "content": doc[:200],
+            }
+        )
     return events
 
 
@@ -79,6 +86,7 @@ def backfill(apply: bool = False):
         return
 
     from neo4j_client import run_write
+
     now = _now_iso()
 
     created = 0

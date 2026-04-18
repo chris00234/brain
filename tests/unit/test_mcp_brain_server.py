@@ -34,6 +34,10 @@ EXPECTED_TOOLS = {
     "brain_wm_list",
     # v3 vision support
     "brain_ingest_image",
+    # 2026-04-16 Tier 3 #8: cognitive verbs
+    "brain_forget",
+    "brain_consolidate",
+    "brain_doubt",
 }
 
 

@@ -19,7 +19,7 @@ import hashlib
 import json
 import re
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 # ── Config ──────────────────────────────────────────────
@@ -32,22 +32,22 @@ BUCKET_SECONDS = 5 * 60  # 5-minute work buckets
 # Drop entire line on these patterns — secret-bearing
 SECRET_DROP_PATTERNS = [
     re.compile(r"\b(password|passwd|pwd|secret|api[_-]?key|api[_-]?token|bearer|authorization)\b", re.I),
-    re.compile(r"\bsk-[a-zA-Z0-9_-]{20,}"),                       # API keys
-    re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{36,}"),                 # GitHub tokens
-    re.compile(r"\bxox[bp]-[A-Za-z0-9-]{10,}"),                   # Slack tokens
-    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),                          # AWS keys
-    re.compile(r"\b[A-Za-z0-9+/]{64,}={0,2}\b"),                  # Long base64 (catches most embedded tokens)
-    re.compile(r"@chris980113|chris980113@", re.I),               # Personal password leak guard
-    re.compile(r"\bexport\s+\w+="),                                # env var assignments often have secrets
-    re.compile(r"\b(set|setenv)\s+\w+="),                          # ditto
+    re.compile(r"\bsk-[a-zA-Z0-9_-]{20,}"),  # API keys
+    re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{36,}"),  # GitHub tokens
+    re.compile(r"\bxox[bp]-[A-Za-z0-9-]{10,}"),  # Slack tokens
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),  # AWS keys
+    re.compile(r"\b[A-Za-z0-9+/]{64,}={0,2}\b"),  # Long base64 (catches most embedded tokens)
+    re.compile(r"@chris980113|chris980113@", re.I),  # Personal password leak guard
+    re.compile(r"\bexport\s+\w+="),  # env var assignments often have secrets
+    re.compile(r"\b(set|setenv)\s+\w+="),  # ditto
 ]
 
 # Drop low-signal noise (interactive shell mistakes, ls/cd/clear)
 NOISE_PATTERNS = [
     re.compile(r"^\s*(ls|cd|pwd|clear|exit|history|echo|cat|less|more|man|which|type)\b"),
-    re.compile(r"^\s*\.\.+\s*$"),                                  # ..  ...
-    re.compile(r"^\s*$"),                                          # blank
-    re.compile(r"^\s*#"),                                          # comments
+    re.compile(r"^\s*\.\.+\s*$"),  # ..  ...
+    re.compile(r"^\s*$"),  # blank
+    re.compile(r"^\s*#"),  # comments
 ]
 
 # ── Command family classification ────────────────────────
@@ -169,9 +169,9 @@ def bucket_commands(commands: list[tuple[int, str]]) -> list[dict]:
     out = []
     for bucket_start in sorted(buckets.keys()):
         cmds = buckets[bucket_start]
-        start_dt = datetime.fromtimestamp(bucket_start, tz=timezone.utc)
+        start_dt = datetime.fromtimestamp(bucket_start, tz=UTC)
         end_ts = max(t for t, _ in cmds)
-        end_dt = datetime.fromtimestamp(end_ts, tz=timezone.utc)
+        end_dt = datetime.fromtimestamp(end_ts, tz=UTC)
         cmd_lines = [cmd for _, cmd in cmds]
         # Detect dominant context: which directory/repo did Chris work in?
         cwd_hint = ""
@@ -188,15 +188,17 @@ def bucket_commands(commands: list[tuple[int, str]]) -> list[dict]:
             + "\n".join(f"  $ {c}" for c in cmd_lines[:30])
             + ("\n  ...truncated..." if len(cmd_lines) > 30 else "")
         )
-        out.append({
-            "bucket_start_ts": bucket_start,
-            "start_iso": start_dt.isoformat().replace("+00:00", "Z"),
-            "end_iso": end_dt.isoformat().replace("+00:00", "Z"),
-            "command_count": len(cmd_lines),
-            "cwd_hint": cwd_hint,
-            "commands": cmd_lines,
-            "summary": summary,
-        })
+        out.append(
+            {
+                "bucket_start_ts": bucket_start,
+                "start_iso": start_dt.isoformat().replace("+00:00", "Z"),
+                "end_iso": end_dt.isoformat().replace("+00:00", "Z"),
+                "command_count": len(cmd_lines),
+                "cwd_hint": cwd_hint,
+                "commands": cmd_lines,
+                "summary": summary,
+            }
+        )
     return out
 
 
@@ -225,14 +227,12 @@ def detect_shell_workflows(buckets: list[dict]) -> list[dict]:
     groups: list[list[tuple[dict, str]]] = []
     current_group: list[tuple[dict, str]] = [annotated[0]]
 
-    for prev, cur in zip(annotated, annotated[1:]):
+    for prev, cur in zip(annotated, annotated[1:], strict=False):
         prev_b, prev_fam = prev
         cur_b, cur_fam = cur
         gap = cur_b["bucket_start_ts"] - prev_b["bucket_start_ts"]
-        cwd_changed = (cur_b["cwd_hint"] and prev_b["cwd_hint"]
-                        and cur_b["cwd_hint"] != prev_b["cwd_hint"])
-        family_shifted = (cur_fam != "other" and prev_fam != "other"
-                          and cur_fam != prev_fam)
+        cwd_changed = cur_b["cwd_hint"] and prev_b["cwd_hint"] and cur_b["cwd_hint"] != prev_b["cwd_hint"]
+        family_shifted = cur_fam != "other" and prev_fam != "other" and cur_fam != prev_fam
 
         if gap > 600 or cwd_changed or family_shifted:
             groups.append(current_group)
@@ -267,13 +267,15 @@ def detect_shell_workflows(buckets: list[dict]) -> list[dict]:
             continue
 
         title = f"{dominant} workflow" + (f" in {cwd}" if cwd else "")
-        workflows.append({
-            "task_type": f"{dominant}_workflow",
-            "title": title,
-            "steps": all_cmds,
-            "tools": [dominant],
-            "source": "shell",
-        })
+        workflows.append(
+            {
+                "task_type": f"{dominant}_workflow",
+                "title": title,
+                "steps": all_cmds,
+                "tools": [dominant],
+                "source": "shell",
+            }
+        )
 
     return workflows
 
@@ -333,7 +335,7 @@ def main() -> None:
 
     if args.max_buckets and len(buckets) > args.max_buckets:
         # Keep newest
-        buckets = buckets[-args.max_buckets:]
+        buckets = buckets[-args.max_buckets :]
         print(f"Capped to newest {args.max_buckets} buckets")
 
     # Detect and store shell workflows as procedures
@@ -342,6 +344,7 @@ def main() -> None:
         try:
             sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "brain_core"))
             from task_queue import task_queue
+
             stored = 0
             for wf in workflows:
                 try:
@@ -376,7 +379,9 @@ def main() -> None:
     print(f"State updated: offset={new_offset}")
 
     if written == 0 and len(buckets) > 0:
-        sys.stderr.write(f"WARN adapter=shell_history buckets={len(buckets)} written=0 — possible duplicate or write failure\n")
+        sys.stderr.write(
+            f"WARN adapter=shell_history buckets={len(buckets)} written=0 — possible duplicate or write failure\n"
+        )
 
 
 if __name__ == "__main__":

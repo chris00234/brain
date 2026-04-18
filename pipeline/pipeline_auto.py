@@ -10,20 +10,28 @@ import json
 import re
 import subprocess
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 # Code now lives at /server/brain/pipeline/; data is at /server/knowledge/.
-SCRIPTS_DIR = Path(__file__).parent              # /server/brain/pipeline
+SCRIPTS_DIR = Path(__file__).parent  # /server/brain/pipeline
 sys.path.insert(0, str(SCRIPTS_DIR))
-from common import find_similar_canonical, parse_markdown_frontmatter, write_markdown_frontmatter, slugify, utc_now  # noqa: E402
+from common import (  # noqa: E402
+    find_similar_canonical,
+    parse_markdown_frontmatter,
+    slugify,
+    utc_now,
+    write_markdown_frontmatter,
+)
+
 ROOT = Path("/Users/chrischo/server/knowledge")  # data tree
 REVIEW_QUEUE_DIR = ROOT / "review_queue"
 AGENTS_DIR = Path("/Users/chrischo/.openclaw")
-STATE_FILE = ROOT / ".pipeline_state.json"       # state tracks data, so lives with data
+STATE_FILE = ROOT / ".pipeline_state.json"  # state tracks data, so lives with data
 DIGEST_FILE = ROOT / "reports" / "weekly-digest.md"
 try:
     import sys as _sys
+
     _sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "brain_core"))
     from config import PYTHON
 except ImportError:
@@ -64,16 +72,18 @@ def scan_new_content(state):
                 content = f.read_text()
                 if len(content.strip()) < 100:
                     continue
-                entries = re.split(r'\n(?=\d{4}-\d{2}-\d{2}|#{1,3}\s+)', content)
+                entries = re.split(r"\n(?=\d{4}-\d{2}-\d{2}|#{1,3}\s+)", content)
                 for entry in entries:
                     entry = entry.strip()
                     if len(entry) > 50:
-                        new_entries.append({
-                            "content": entry[:2000],
-                            "source_file": fkey,
-                            "agent": agent,
-                            "source_type": "agent_learning",
-                        })
+                        new_entries.append(
+                            {
+                                "content": entry[:2000],
+                                "source_file": fkey,
+                                "agent": agent,
+                                "source_type": "agent_learning",
+                            }
+                        )
                 scanned[fkey] = current_size
 
         mem_dir = ws / "memory"
@@ -94,12 +104,14 @@ def scan_new_content(state):
                 content = f.read_text()
                 if len(content.strip()) < 100:
                     continue
-                new_entries.append({
-                    "content": content[:2000],
-                    "source_file": fkey,
-                    "agent": agent,
-                    "source_type": "session_memory",
-                })
+                new_entries.append(
+                    {
+                        "content": content[:2000],
+                        "source_file": fkey,
+                        "agent": agent,
+                        "source_type": "session_memory",
+                    }
+                )
                 scanned[fkey] = current_size
 
     state["scanned_files"] = scanned
@@ -112,8 +124,7 @@ def run_script(script_name, args_list, dry_run=False):
         print(f"  [DRY RUN] Would run: {' '.join(cmd)}")
         return {"status": "dry_run"}
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120,
-                                cwd=str(SCRIPTS_DIR))
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120, cwd=str(SCRIPTS_DIR))
         if result.stdout.strip():
             try:
                 return json.loads(result.stdout)
@@ -127,12 +138,20 @@ def run_script(script_name, args_list, dry_run=False):
 def ingest_entries(entries, dry_run=False):
     ingested = 0
     for entry in entries:
-        result = run_script("ingest.py", [
-            "--content", entry["content"],
-            "--source-type", entry["source_type"],
-            "--source-ref", f"{entry['source_type']}:{entry['agent']}:{entry['source_file']}",
-            "--actor", entry["agent"],
-        ], dry_run=dry_run)
+        result = run_script(
+            "ingest.py",
+            [
+                "--content",
+                entry["content"],
+                "--source-type",
+                entry["source_type"],
+                "--source-ref",
+                f"{entry['source_type']}:{entry['agent']}:{entry['source_file']}",
+                "--actor",
+                entry["agent"],
+            ],
+            dry_run=dry_run,
+        )
         if result.get("status") != "error":
             ingested += 1
     return ingested
@@ -282,14 +301,18 @@ def main():
         "## Promoted to Canonical",
     ]
     for item in promoted:
-        digest_lines.append(f"- [{item.get('domain', '?')}] {item.get('title', '?')} (score: {item.get('score', 0)})")
+        digest_lines.append(
+            f"- [{item.get('domain', '?')}] {item.get('title', '?')} (score: {item.get('score', 0)})"
+        )
     if not promoted:
         digest_lines.append("- None")
 
     digest_lines.append("")
     digest_lines.append("## Held for Review")
     for item in held:
-        digest_lines.append(f"- [{item.get('domain', '?')}] {item.get('title', '?')} (score: {item.get('score', 0)})")
+        digest_lines.append(
+            f"- [{item.get('domain', '?')}] {item.get('title', '?')} (score: {item.get('score', 0)})"
+        )
     if not held:
         digest_lines.append("- None")
 
@@ -297,7 +320,9 @@ def main():
     digest_lines.append("## Auto-Rejected")
     for item in rejected:
         reasons = ", ".join(item.get("reasons", []))
-        digest_lines.append(f"- [{item.get('domain', '?')}] {item.get('title', '?')} (score: {item.get('score', 0)}, reasons: {reasons})")
+        digest_lines.append(
+            f"- [{item.get('domain', '?')}] {item.get('title', '?')} (score: {item.get('score', 0)}, reasons: {reasons})"
+        )
     if not rejected:
         digest_lines.append("- None")
 
@@ -313,11 +338,11 @@ def main():
         inbox = ROOT / "raw" / "inbox"
         orphaned = ROOT / "raw" / "orphaned"
         orphaned.mkdir(parents=True, exist_ok=True)
-        cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+        cutoff = datetime.now(UTC) - timedelta(days=30)
         cleaned = 0
         for f in inbox.glob("*.json"):
             try:
-                if datetime.fromtimestamp(f.stat().st_mtime, tz=timezone.utc) < cutoff:
+                if datetime.fromtimestamp(f.stat().st_mtime, tz=UTC) < cutoff:
                     dest = orphaned / f.name
                     # If a file of the same name already exists in orphaned,
                     # append an epoch suffix so we don't overwrite prior quarantines.
@@ -344,7 +369,10 @@ def main():
             "pending_review": pending_review,
             "canonical_before": canonical_before,
             "canonical_after": canonical_after,
-            "promoted_items": [{"domain": i.get("domain"), "title": i.get("title"), "score": i.get("score")} for i in promoted],
+            "promoted_items": [
+                {"domain": i.get("domain"), "title": i.get("title"), "score": i.get("score")}
+                for i in promoted
+            ],
         }
         trace_log = ROOT / "reports" / "pipeline-trace.jsonl"
         trace_log.parent.mkdir(parents=True, exist_ok=True)
@@ -356,11 +384,11 @@ def main():
     # Chain reindex if anything changed so new canonical notes become searchable
     # immediately (without waiting for the next scheduled reindex).
     if not args.dry_run and (distill_created or promoted):
-        import os
         secret_file = Path.home() / ".openclaw/credentials/.personal_webhook_secret"
         if secret_file.exists():
             try:
                 import urllib.request
+
                 req = urllib.request.Request(
                     "http://127.0.0.1:8791/jobs/reindex",
                     method="POST",
@@ -376,5 +404,5 @@ def main():
     print("=" * 60)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

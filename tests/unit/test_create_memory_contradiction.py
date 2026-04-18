@@ -35,9 +35,7 @@ def learn_with_stub(monkeypatch, tmp_path):
     atoms_store.init_schema(fake_db)
 
     stored_contradictions: list[dict] = []
-    monkeypatch.setattr(
-        learn, "_store_contradiction", lambda c: stored_contradictions.append(c)
-    )
+    monkeypatch.setattr(learn, "_store_contradiction", lambda c: stored_contradictions.append(c))
     monkeypatch.setattr(learn, "ensure_collection", lambda _name: None)
     monkeypatch.setattr(learn, "_get_collection_id", lambda _name: "sem_col_123")
 
@@ -92,7 +90,9 @@ def test_hot_path_skips_when_sym_diff_all_stopwords(learn_with_stub):
         "ids": [["sem:dup"]],
         "documents": [["Chris likes coffee"]],
         "distances": [[0.05]],
-        "metadatas": [[{"category": "preference", "confidence": "0.5", "created_at": "2025-10-01T00:00:00Z"}]],
+        "metadatas": [
+            [{"category": "preference", "confidence": "0.5", "created_at": "2025-10-01T00:00:00Z"}]
+        ],
     }
 
     def _fake_chroma(method, path, body=None):
@@ -101,13 +101,15 @@ def test_hot_path_skips_when_sym_diff_all_stopwords(learn_with_stub):
         return {}
 
     import importlib
+
     importlib.reload(learn)
     from unittest.mock import patch
 
-    with patch.object(learn, "chroma_api", _fake_chroma), patch.object(
-        learn, "ensure_collection", lambda _n: None
-    ), patch.object(learn, "_get_collection_id", lambda _n: "sem_col_123"), patch.object(
-        learn, "_store_contradiction", lambda _c: None
+    with (
+        patch.object(learn, "chroma_api", _fake_chroma),
+        patch.object(learn, "ensure_collection", lambda _n: None),
+        patch.object(learn, "_get_collection_id", lambda _n: "sem_col_123"),
+        patch.object(learn, "_store_contradiction", lambda _c: None),
     ):
         contradictions = learn.check_contradictions_for_memory(
             mem_id="sem:new",
@@ -128,7 +130,9 @@ def test_hot_path_skips_when_different_category(learn_with_stub):
         "ids": [["sem:other"]],
         "documents": [["Chris lives in Irvine"]],
         "distances": [[0.05]],
-        "metadatas": [[{"category": "preference", "confidence": "0.5", "created_at": "2025-10-01T00:00:00Z"}]],
+        "metadatas": [
+            [{"category": "preference", "confidence": "0.5", "created_at": "2025-10-01T00:00:00Z"}]
+        ],
     }
 
     def _fake_chroma(method, path, body=None):
@@ -137,13 +141,15 @@ def test_hot_path_skips_when_different_category(learn_with_stub):
         return {}
 
     import importlib
+
     importlib.reload(learn)
     from unittest.mock import patch
 
-    with patch.object(learn, "chroma_api", _fake_chroma), patch.object(
-        learn, "ensure_collection", lambda _n: None
-    ), patch.object(learn, "_get_collection_id", lambda _n: "sem_col_123"), patch.object(
-        learn, "_store_contradiction", lambda _c: None
+    with (
+        patch.object(learn, "chroma_api", _fake_chroma),
+        patch.object(learn, "ensure_collection", lambda _n: None),
+        patch.object(learn, "_get_collection_id", lambda _n: "sem_col_123"),
+        patch.object(learn, "_store_contradiction", lambda _c: None),
     ):
         contradictions = learn.check_contradictions_for_memory(
             mem_id="sem:new",

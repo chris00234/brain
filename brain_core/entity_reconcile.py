@@ -66,7 +66,7 @@ def _find_missing_atoms() -> list[tuple[str, str]]:
                 ORDER BY a.created_at DESC
                 LIMIT ?
                 """,
-                (MIN_TEXT_LEN, f'-{FRESH_DAYS} days', MAX_PER_RUN),
+                (MIN_TEXT_LEN, f"-{FRESH_DAYS} days", MAX_PER_RUN),
             )
             for row in cursor:
                 rows.append((row["id"], row["text"] or ""))
@@ -79,6 +79,7 @@ def _extract_for_atom(atom_id: str, text: str) -> bool:
     """Run extract_and_store_entities for an atom. Returns True on success."""
     try:
         from entity_graph import extract_and_store_entities
+
         extract_and_store_entities(text[:1500], atom_id)
         return True
     except Exception as e:
@@ -124,4 +125,5 @@ def run() -> dict:
 
 if __name__ == "__main__":
     import json
+
     print(json.dumps(run()))

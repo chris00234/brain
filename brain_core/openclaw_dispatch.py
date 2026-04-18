@@ -69,7 +69,7 @@ log = logging.getLogger("brain.dispatch")
 # ─────────────────────────────────────────────────────────────────────────────
 
 try:
-    from config import OPENCLAW_BIN, BRAIN_LOGS_DIR, BRAIN_DISPATCH_CACHE_ENABLED
+    from config import BRAIN_DISPATCH_CACHE_ENABLED, BRAIN_LOGS_DIR, OPENCLAW_BIN
 
     FAILURE_LOG = BRAIN_LOGS_DIR / "dispatch-failures.jsonl"
 except ImportError:
@@ -99,12 +99,12 @@ def _ensure_usage_schema(conn):
     # block later ones. v3 (2026-04-14) adds the provider/model/cache/cost
     # columns needed for real metering.
     for col, col_type in (
-        ("skipped_cb",           "INTEGER DEFAULT 0"),
-        ("provider",             "TEXT NOT NULL DEFAULT ''"),
-        ("model",                "TEXT NOT NULL DEFAULT ''"),
-        ("cache_read_tokens",    "INTEGER DEFAULT 0"),
-        ("cache_write_tokens",   "INTEGER DEFAULT 0"),
-        ("cost_usd",             "REAL DEFAULT 0.0"),
+        ("skipped_cb", "INTEGER DEFAULT 0"),
+        ("provider", "TEXT NOT NULL DEFAULT ''"),
+        ("model", "TEXT NOT NULL DEFAULT ''"),
+        ("cache_read_tokens", "INTEGER DEFAULT 0"),
+        ("cache_write_tokens", "INTEGER DEFAULT 0"),
+        ("cost_usd", "REAL DEFAULT 0.0"),
     ):
         try:
             conn.execute(f"ALTER TABLE llm_usage ADD COLUMN {col} {col_type}")
@@ -263,7 +263,7 @@ def _dispatch_cache_lookup(message: str) -> str | None:
         # Evict expired
         _dispatch_cache[:] = [e for e in _dispatch_cache if now - e[0] < _DISPATCH_CACHE_TTL]
         for _ts, cached_emb, _cached_msg, resp in _dispatch_cache:
-            dot = sum(a * b for a, b in zip(emb, cached_emb))
+            dot = sum(a * b for a, b in zip(emb, cached_emb, strict=False))
             na = math.sqrt(sum(x * x for x in emb))
             nb = math.sqrt(sum(x * x for x in cached_emb))
             sim = dot / (na * nb) if na and nb else 0.0
@@ -368,7 +368,7 @@ def _check_struggle(agent: str, message: str, duration_ms: int, ok: bool, attemp
                 task_description=message[:300],
                 failure_reason="; ".join(signals),
                 agent_id=agent,
-                context=f"Struggle signal detected automatically",
+                context="Struggle signal detected automatically",
             )
         except Exception as e:
             log.debug("record_failure_lesson failed: %s", e)
@@ -481,13 +481,13 @@ _COST_TABLE = {
     # (provider, model_prefix) → (input_per_m, output_per_m)
     ("openai-codex", "gpt-5.4"): (15.0, 75.0),
     ("openai-codex", "gpt-5.3"): (15.0, 75.0),
-    ("openai-codex", "gpt-5"):   (15.0, 75.0),
-    ("openai-codex", "gpt-4o"):  (5.0, 20.0),
-    ("anthropic", "claude-opus-4-6"):   (15.0, 75.0),
+    ("openai-codex", "gpt-5"): (15.0, 75.0),
+    ("openai-codex", "gpt-4o"): (5.0, 20.0),
+    ("anthropic", "claude-opus-4-6"): (15.0, 75.0),
     ("anthropic", "claude-sonnet-4-6"): (3.0, 15.0),
-    ("anthropic", "claude-haiku-4-5"):  (1.0, 5.0),
-    ("ollama", ""):     (0.0, 0.0),  # local, free
-    ("gemini", ""):     (0.0, 0.0),  # free tier
+    ("anthropic", "claude-haiku-4-5"): (1.0, 5.0),
+    ("ollama", ""): (0.0, 0.0),  # local, free
+    ("gemini", ""): (0.0, 0.0),  # free tier
 }
 
 
@@ -680,12 +680,21 @@ def dispatch(
                 "--timeout",
                 str(timeout),
             ]
-            if session_id:
-                _cmd.extend(["--session-id", session_id])
+            # 2026-04-17 cost fix: brain dispatches MUST NOT land in the
+            # agent's interactive session (Chris's Telegram chat with
+            # Jenna accumulates 30k+ events / 95MB over 2 weeks, and every
+            # call replays the full history — ~140k tokens avg per call,
+            # $150+/day). Use a stable brain-owned session that rotates
+            # daily to cap prompt size. Telegram interactive session is
+            # untouched.
+            if session_id is None:
+                session_id = f"brain-auto-{agent}-{datetime.now().strftime('%Y-%m-%d')}"
+            _cmd.extend(["--session-id", session_id])
             import tempfile as _tempfile
+
             stdout_f = _tempfile.TemporaryFile(mode="w+", encoding="utf-8")
             stderr_f = _tempfile.TemporaryFile(mode="w+", encoding="utf-8")
-            popen = subprocess.Popen(  # noqa: S603
+            popen = subprocess.Popen(
                 _cmd,
                 stdout=stdout_f,
                 stderr=stderr_f,
@@ -854,9 +863,7 @@ def dispatch(
         backlog_kind,
         backlog_payload,
         reason=(
-            "rate_limited"
-            if result.rate_limited
-            else ("auth_failed" if result.auth_failed else "exhausted")
+            "rate_limited" if result.rate_limited else ("auth_failed" if result.auth_failed else "exhausted")
         ),
     )
     return result
@@ -873,6 +880,7 @@ def _enqueue_backlog_if_requested(
         return
     try:
         from llm_backlog import enqueue as _backlog_enqueue
+
         final_payload = dict(payload or {})
         final_payload.setdefault("failure_reason", reason)
         _backlog_enqueue(kind, final_payload)

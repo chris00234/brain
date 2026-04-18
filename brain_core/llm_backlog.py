@@ -53,7 +53,7 @@ import sys
 import time
 from collections.abc import Callable
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -79,13 +79,13 @@ VALID_KINDS = {
 # than retried. Telegram has the tightest TTL because a 12-hour-old alert
 # is noise, not signal. Content work has long TTL because it's idempotent.
 KIND_TTL_SECONDS = {
-    "classify":  7 * 24 * 3600,   # a week
-    "entities":  7 * 24 * 3600,
-    "distill":   3 * 24 * 3600,
+    "classify": 7 * 24 * 3600,  # a week
+    "entities": 7 * 24 * 3600,
+    "distill": 3 * 24 * 3600,
     "synthesis": 2 * 24 * 3600,
-    "proactive": 12 * 3600,       # 12h
-    "telegram":  6 * 3600,        # 6h — critical alerts
-    "reflect":   3 * 24 * 3600,
+    "proactive": 12 * 3600,  # 12h
+    "telegram": 6 * 3600,  # 6h — critical alerts
+    "reflect": 3 * 24 * 3600,
 }
 
 # Max retries before abandoning. After N failed drains the entry is marked
@@ -129,6 +129,7 @@ def _ensure_schema() -> None:
         return
     if _schema_lock is None:
         import threading
+
         _schema_lock = threading.Lock()
     with _schema_lock:
         if _schema_ready:
@@ -154,7 +155,7 @@ def _connect():
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 def _hash_payload(kind: str, payload: dict) -> str:
@@ -165,6 +166,7 @@ def _hash_payload(kind: str, payload: dict) -> str:
 
 
 # ── Public API: enqueue ───────────────────────────────────────────
+
 
 def enqueue(kind: str, payload: dict, content_hash: str | None = None) -> int | None:
     """Add work to the backlog. Returns the row id, or None on failure
@@ -202,6 +204,7 @@ def enqueue(kind: str, payload: dict, content_hash: str | None = None) -> int | 
 
 # ── Public API: handler registration ─────────────────────────────
 
+
 def register_handler(kind: str, fn: Callable[[dict], bool]) -> None:
     """Register a handler for a backlog kind. fn(payload) → bool (True=done)."""
     if kind not in VALID_KINDS:
@@ -221,6 +224,7 @@ def _wire_default_handlers() -> None:
     def _handle_classify(payload: dict) -> bool:
         try:
             from ingest_classifier import classify
+
             # CR6 fix: force_llm=True bypasses the per-content cache so
             # a backlog retry actually hits the LLM. Without it, the
             # cached heuristic result is served and the handler can
@@ -273,6 +277,7 @@ def _wire_default_handlers() -> None:
         # retry on -1.
         try:
             from entity_graph import extract_and_store_entities
+
             n = extract_and_store_entities(
                 payload.get("text", "")[:1500],
                 payload.get("chroma_id", ""),
@@ -287,7 +292,8 @@ def _wire_default_handlers() -> None:
     # ── distill ─────────────────────────────────────────────
     def _handle_distill(payload: dict) -> bool:
         try:
-            from openclaw_dispatch import dispatch
+            from cli_llm import dispatch
+
             result = dispatch(
                 agent="jenna",
                 message=payload.get("prompt", ""),
@@ -315,7 +321,8 @@ def _wire_default_handlers() -> None:
         out_path (legacy payloads from before the fix), the retry
         just validates dispatch worked — degraded but not wrong."""
         try:
-            from openclaw_dispatch import dispatch
+            from cli_llm import dispatch
+
             result = dispatch(
                 agent=payload.get("agent", "jenna"),
                 message=payload.get("prompt", ""),
@@ -346,6 +353,7 @@ def _wire_default_handlers() -> None:
     def _handle_proactive(payload: dict) -> bool:
         try:
             from proactive import run_proactive_sweep
+
             run_proactive_sweep()
             return True
         except Exception as e:
@@ -360,7 +368,8 @@ def _wire_default_handlers() -> None:
         urgency hint by falling through to the generic default.
         """
         try:
-            from openclaw_dispatch import dispatch
+            from cli_llm import dispatch
+
             body = payload.get("body", "")
             severity = (payload.get("severity", "info") or "info").lower()
             # Normalize severity aliases
@@ -387,7 +396,8 @@ def _wire_default_handlers() -> None:
     # ── reflect ─────────────────────────────────────────────
     def _handle_reflect(payload: dict) -> bool:
         try:
-            from openclaw_dispatch import dispatch
+            from cli_llm import dispatch
+
             result = dispatch(
                 agent="sage",
                 message=payload.get("prompt", ""),
@@ -399,24 +409,28 @@ def _wire_default_handlers() -> None:
             log.debug("handle_reflect failed: %s", e)
             return False
 
-    _handlers.update({
-        "classify":  _handle_classify,
-        "entities":  _handle_entities,
-        "distill":   _handle_distill,
-        "synthesis": _handle_synthesis,
-        "proactive": _handle_proactive,
-        "telegram":  _handle_telegram,
-        "reflect":   _handle_reflect,
-    })
+    _handlers.update(
+        {
+            "classify": _handle_classify,
+            "entities": _handle_entities,
+            "distill": _handle_distill,
+            "synthesis": _handle_synthesis,
+            "proactive": _handle_proactive,
+            "telegram": _handle_telegram,
+            "reflect": _handle_reflect,
+        }
+    )
 
 
 # ── Drain ─────────────────────────────────────────────────────────
+
 
 def _breaker_open() -> bool:
     """Return True if llm.dispatch breaker is open — means LLM is still
     unavailable and we should not waste drain attempts."""
     try:
         from breakers import peek_breaker
+
         return peek_breaker("llm.dispatch").is_open
     except Exception:
         return False
@@ -424,8 +438,8 @@ def _breaker_open() -> bool:
 
 def _ttl_cutoff(kind: str) -> str:
     ttl = KIND_TTL_SECONDS.get(kind, 7 * 24 * 3600)
-    cutoff = datetime.now(timezone.utc).timestamp() - ttl
-    return datetime.fromtimestamp(cutoff, tz=timezone.utc).isoformat(timespec="seconds")
+    cutoff = datetime.now(UTC).timestamp() - ttl
+    return datetime.fromtimestamp(cutoff, tz=UTC).isoformat(timespec="seconds")
 
 
 def drain(limit: int = DEFAULT_DRAIN_LIMIT, abort_on_breaker: bool = True) -> dict:
@@ -484,8 +498,7 @@ def drain(limit: int = DEFAULT_DRAIN_LIMIT, abort_on_breaker: bool = True) -> di
                 handler = _handlers.get(kind)
                 if handler is None:
                     conn.execute(
-                        "UPDATE llm_backlog SET status='failed', "
-                        "last_error='no handler' WHERE id=?",
+                        "UPDATE llm_backlog SET status='failed', " "last_error='no handler' WHERE id=?",
                         (rid,),
                     )
                     failed += 1
@@ -535,12 +548,11 @@ def drain(limit: int = DEFAULT_DRAIN_LIMIT, abort_on_breaker: bool = True) -> di
 
 # ── Stats + SLO helpers ──────────────────────────────────────────
 
+
 def pending_count() -> int:
     try:
         with _connect() as conn:
-            row = conn.execute(
-                "SELECT COUNT(*) AS c FROM llm_backlog WHERE status='pending'"
-            ).fetchone()
+            row = conn.execute("SELECT COUNT(*) AS c FROM llm_backlog WHERE status='pending'").fetchone()
             return int(row["c"]) if row else 0
     except sqlite3.Error:
         return 0
@@ -550,15 +562,14 @@ def oldest_pending_age_seconds() -> float:
     try:
         with _connect() as conn:
             row = conn.execute(
-                "SELECT created_at FROM llm_backlog WHERE status='pending' "
-                "ORDER BY created_at ASC LIMIT 1"
+                "SELECT created_at FROM llm_backlog WHERE status='pending' " "ORDER BY created_at ASC LIMIT 1"
             ).fetchone()
             if not row:
                 return 0.0
             dt = datetime.fromisoformat(row["created_at"].replace("Z", "+00:00"))
             if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            return max(0.0, (datetime.now(timezone.utc) - dt).total_seconds())
+                dt = dt.replace(tzinfo=UTC)
+            return max(0.0, (datetime.now(UTC) - dt).total_seconds())
     except (sqlite3.Error, ValueError):
         return 0.0
 
@@ -567,8 +578,7 @@ def stats() -> dict:
     try:
         with _connect() as conn:
             rows = conn.execute(
-                "SELECT kind, status, COUNT(*) AS c FROM llm_backlog "
-                "GROUP BY kind, status"
+                "SELECT kind, status, COUNT(*) AS c FROM llm_backlog " "GROUP BY kind, status"
             ).fetchall()
             out: dict[str, dict[str, int]] = {}
             for r in rows:
@@ -583,6 +593,7 @@ def stats() -> dict:
 
 
 # ── Scheduler entry point ────────────────────────────────────────
+
 
 def run() -> dict:
     """Cron entry point. Returns JSON-serializable dict."""

@@ -8,41 +8,80 @@ Usage:
   backfill_decisions.py              # dry-run (show what would be created)
   backfill_decisions.py --apply      # actually write to Neo4j
 """
+
 from __future__ import annotations
 
 import re
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "brain_core"))
 
 try:
     from config import KNOWLEDGE_DIR
+
     DECISIONS_DIR = KNOWLEDGE_DIR / "canonical" / "decisions"
 except ImportError:
     DECISIONS_DIR = Path("/Users/chrischo/server/knowledge/canonical/decisions")
 
 # Common prose/heading words that are NOT entities
-_HEADING_WORDS = frozenset({
-    "the", "this", "that", "review", "summary", "statement", "source",
-    "decision", "background", "rationale", "impact", "alternative",
-    "conclusion", "notes", "context", "details", "overview", "update",
-    "status", "action", "item", "section", "date", "author", "evidence",
-    "observations", "candidate", "proposed", "confirmed", "domain",
-    "never", "always", "should", "when", "where", "what", "how",
-    "merged", "summarized", "distilled",
-})
+_HEADING_WORDS = frozenset(
+    {
+        "the",
+        "this",
+        "that",
+        "review",
+        "summary",
+        "statement",
+        "source",
+        "decision",
+        "background",
+        "rationale",
+        "impact",
+        "alternative",
+        "conclusion",
+        "notes",
+        "context",
+        "details",
+        "overview",
+        "update",
+        "status",
+        "action",
+        "item",
+        "section",
+        "date",
+        "author",
+        "evidence",
+        "observations",
+        "candidate",
+        "proposed",
+        "confirmed",
+        "domain",
+        "never",
+        "always",
+        "should",
+        "when",
+        "where",
+        "what",
+        "how",
+        "merged",
+        "summarized",
+        "distilled",
+    }
+)
 
 # Known tech entities to always capture
 _TECH_ENTITIES = re.compile(
-    r'\b(?:docker|nginx|chromadb|ollama|neo4j|cloudflare|openclaw|brain|ghost|minio|'
-    r'vaultwarden|searxng|nextjs|next\.js|fastapi|react|vite|typescript|python|'
-    r'cloudflared|grafana|uptime.kuma|watchtower|couchdb|glance|orbstack|launchd)\b', re.I)
+    r"\b(?:docker|nginx|chromadb|ollama|neo4j|cloudflare|openclaw|brain|ghost|minio|"
+    r"vaultwarden|searxng|nextjs|next\.js|fastapi|react|vite|typescript|python|"
+    r"cloudflared|grafana|uptime.kuma|watchtower|couchdb|glance|orbstack|launchd)\b",
+    re.I,
+)
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 def extract_decision(md_file: Path) -> dict | None:
@@ -58,12 +97,12 @@ def extract_decision(md_file: Path) -> dict | None:
     name = md_file.stem.replace("-", " ").replace("_", " ")
 
     # Extract summary from markdown
-    summary_match = re.search(r'(?:^|\n)#+ (?:Summary|Statement)\s*\n(.+?)(?:\n#|\Z)', text, re.S)
+    summary_match = re.search(r"(?:^|\n)#+ (?:Summary|Statement)\s*\n(.+?)(?:\n#|\Z)", text, re.S)
     summary = summary_match.group(1).strip()[:300] if summary_match else text[:300]
 
     # Extract capitalized proper nouns (filter aggressively)
     entities = set()
-    for word in re.findall(r'\b[A-Z][a-z]+(?:\s[A-Z][a-z]+)*\b', text):
+    for word in re.findall(r"\b[A-Z][a-z]+(?:\s[A-Z][a-z]+)*\b", text):
         if len(word) >= 3 and word.lower() not in _HEADING_WORDS:
             entities.add(word.lower())
     # Add known tech entities
@@ -104,7 +143,7 @@ def backfill(apply: bool = False):
         print("\nRun with --apply to write to Neo4j")
         return
 
-    from entity_graph import resolve_entity, add_alias
+    from entity_graph import add_alias, resolve_entity
     from neo4j_client import run_write
 
     now = _now_iso()

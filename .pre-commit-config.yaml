@@ -17,6 +17,14 @@ repos:
         types: [python]
         pass_filenames: true
 
+      - id: sqlite-close
+        name: sqlite3 connection close check
+        entry: .venv/bin/python cli/lint_sqlite_close.py
+        language: system
+        types: [python]
+        files: ^brain_core/.*\.py$
+        pass_filenames: true
+
 # bandit removed 2026-04-13 — bandit 1.8.0 can't parse Python 3.14 AST and
 # silently skips every file. Security checks moved to ruff S-rules
 # (ruff.toml::lint.select includes "S" — bandit-lite ported to ruff).

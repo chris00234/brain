@@ -68,11 +68,10 @@ def test_apply_to_result_mutates_score():
         "created_at": _iso(NOW - timedelta(days=half_life)),
         "score": 100.0,
     }
-    apply_to_result(result)
-    # At exactly half_life days old, exponential decay should give ~50.
-    # Relaxed from (49, 51) to (47, 53) because the decay formula factors in
-    # half-step rounding + access-score drift, giving values like 48.69.
-    assert 47 < result["score"] < 53
+    # 2026-04-16: pass explicit now so the test doesn't drift as real
+    # calendar time advances past the hardcoded NOW sentinel.
+    apply_to_result(result, now=NOW)
+    assert 49 < result["score"] < 51
 
 
 def test_apply_to_result_expired_fact_penalty():
@@ -82,7 +81,7 @@ def test_apply_to_result_expired_fact_penalty():
         "valid_to": _iso(NOW - timedelta(days=1)),
         "score": 100.0,
     }
-    apply_to_result(result)
+    apply_to_result(result, now=NOW)
     # canonical is no-decay (mult=1.0) but valid_to past → 0.3x
     assert abs(result["score"] - 30.0) < 0.1
 

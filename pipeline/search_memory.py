@@ -4,7 +4,7 @@ import argparse
 import json
 import subprocess
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +25,7 @@ def _parse_dt(raw: str | None) -> datetime | None:
     if not raw:
         return None
     try:
-        return datetime.fromisoformat(str(raw).replace("Z", "+00:00")).astimezone(timezone.utc)
+        return datetime.fromisoformat(str(raw).replace("Z", "+00:00")).astimezone(UTC)
     except ValueError:
         return None
 
@@ -77,7 +77,7 @@ def score_note(query: str, metadata: dict, body: str, *, filter_domain: str | No
 
     updated_at = _parse_dt(metadata.get("updated_at"))
     if updated_at:
-        age_days = (datetime.now(timezone.utc) - updated_at).days
+        age_days = (datetime.now(UTC) - updated_at).days
         if age_days <= 30:
             score += 6
         elif age_days > 365:
@@ -168,7 +168,9 @@ def collect_notes() -> list[tuple[Path, dict, str]]:
         return _notes_cache
 
 
-def search_notes(query: str, limit: int, filter_domain: str | None = None) -> list[tuple[int, Path, dict, str]]:
+def search_notes(
+    query: str, limit: int, filter_domain: str | None = None
+) -> list[tuple[int, Path, dict, str]]:
     scored: list[tuple[int, Path, dict, str]] = []
     for path, metadata, body in collect_notes():
         score = score_note(query, metadata, body, filter_domain=filter_domain)
@@ -199,7 +201,52 @@ def search_rag(query: str, limit: int, command: Path) -> list[dict[str, Any]]:
     return payload
 
 
+_PROPOSAL_BOILERPLATE = (
+    "## Statement",
+    "Review this proposed canonical note",
+    "## Source Summary",
+    "## Distilled Evidence",
+    "## Observations",
+    "- Derived from raw evidence",
+    "## Merge Suggestion",
+)
+
+
+def _strip_proposal_boilerplate(body: str) -> str:
+    """2026-04-17: canonical proposal notes are structured as
+        ## Statement\n\nReview this proposed canonical note.\n\n
+        ## Source Summary\n\n# Summary\n\n<real content>\n\n
+        ## Observations\n\n- Derived from raw evidence.\n\n
+        ## Merge Suggestion\n\n<refs>
+    When the file-based search takes the first 180 chars as the summary,
+    it grabs only the stub headers — users see "## Statement Review this
+    proposed canonical note. ## Source Summary..." instead of the actual
+    claim. Strip leading stub sections to surface the substantive body.
+    Non-destructive fallback — if stripping removes everything, return
+    the original body unchanged.
+    """
+    lines = body.splitlines()
+    out: list[str] = []
+    skip_section = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("## "):
+            header_text = stripped[3:].strip()
+            if any(bp[3:].strip() == header_text for bp in _PROPOSAL_BOILERPLATE if bp.startswith("## ")):
+                skip_section = True
+                continue
+            skip_section = False
+        if skip_section:
+            continue
+        if any(stripped.startswith(bp) for bp in _PROPOSAL_BOILERPLATE if not bp.startswith("## ")):
+            continue
+        out.append(line)
+    cleaned = "\n".join(out).strip()
+    return cleaned if cleaned else body
+
+
 def build_note_hit(score: int, path: Path, metadata: dict[str, Any], body: str) -> dict[str, Any]:
+    clean_body = _strip_proposal_boilerplate(body)
     return {
         "kind": "note",
         "rank_score": score,
@@ -208,7 +255,7 @@ def build_note_hit(score: int, path: Path, metadata: dict[str, Any], body: str) 
         "id": metadata["id"],
         "title": metadata["title"],
         "path": str(path.relative_to(ROOT)),
-        "summary": " ".join(body.split())[:180],
+        "summary": " ".join(clean_body.split())[:180],
         "metadata": {
             "domain": metadata.get("domain"),
             "subtype": metadata.get("subtype"),
@@ -242,8 +289,12 @@ def build_rag_hit(hit: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def collapse_results(note_hits: list[dict[str, Any]], rag_hits: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
-    merged = sorted(note_hits + rag_hits, key=lambda item: (item["rank_score"], item["trust_tier"]), reverse=True)
+def collapse_results(
+    note_hits: list[dict[str, Any]], rag_hits: list[dict[str, Any]], limit: int
+) -> list[dict[str, Any]]:
+    merged = sorted(
+        note_hits + rag_hits, key=lambda item: (item["rank_score"], item["trust_tier"]), reverse=True
+    )
     collapsed: list[dict[str, Any]] = []
     seen: set[str] = set()
     note_titles = {hit["title"].strip().lower() for hit in note_hits}
@@ -264,18 +315,27 @@ def collapse_results(note_hits: list[dict[str, Any]], rag_hits: list[dict[str, A
     return collapsed
 
 
-def package_results(query: str, limit: int, include_rag: bool, rag_limit: int, rag_command: Path, domain: str | None = None) -> dict[str, Any]:
+def package_results(
+    query: str, limit: int, include_rag: bool, rag_limit: int, rag_command: Path, domain: str | None = None
+) -> dict[str, Any]:
     note_results = [
         build_note_hit(score, path, metadata, body)
         for score, path, metadata, body in search_notes(query, limit, filter_domain=domain)
     ]
-    rag_results = [build_rag_hit(hit) for hit in search_rag(query, rag_limit, rag_command)] if include_rag else []
+    rag_results = (
+        [build_rag_hit(hit) for hit in search_rag(query, rag_limit, rag_command)] if include_rag else []
+    )
     combined = collapse_results(note_results, rag_results, limit)
 
     for hit in combined:
         if hit["kind"] == "note" and include_rag:
             hit["evidence"] = [
-                {"kind": "rag", "path": rag_hit["path"], "summary": rag_hit["summary"], "score": rag_hit["metadata"]["score"]}
+                {
+                    "kind": "rag",
+                    "path": rag_hit["path"],
+                    "summary": rag_hit["summary"],
+                    "score": rag_hit["metadata"]["score"],
+                }
                 for rag_hit in rag_results[:2]
             ]
     return {
@@ -288,18 +348,26 @@ def package_results(query: str, limit: int, include_rag: bool, rag_limit: int, r
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Search personal intelligence notes with canonical-first ranking")
+    parser = argparse.ArgumentParser(
+        description="Search personal intelligence notes with canonical-first ranking"
+    )
     parser.add_argument("query")
     parser.add_argument("--limit", type=int, default=5)
     parser.add_argument("--include-rag", action="store_true")
     parser.add_argument("--rag-limit", type=int, default=3)
     parser.add_argument("--rag-command", default=str(DEFAULT_RAG_SEARCH))
     parser.add_argument("--json", action="store_true")
-    parser.add_argument("--domain", default=None, choices=["chris", "projects", "infra", "decisions", "incidents"],
-                        help="limit note search to a specific domain")
+    parser.add_argument(
+        "--domain",
+        default=None,
+        choices=["chris", "projects", "infra", "decisions", "incidents"],
+        help="limit note search to a specific domain",
+    )
     args = parser.parse_args()
 
-    payload = package_results(args.query, args.limit, args.include_rag, args.rag_limit, Path(args.rag_command), domain=args.domain)
+    payload = package_results(
+        args.query, args.limit, args.include_rag, args.rag_limit, Path(args.rag_command), domain=args.domain
+    )
     if args.json:
         print(json.dumps(payload, indent=2, ensure_ascii=False))
         return 0

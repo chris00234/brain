@@ -40,18 +40,18 @@ from pathlib import Path
 # Reuse helpers from brain_core.indexer (single source of truth).
 sys.path.insert(0, "/Users/chrischo/server/brain/brain_core")
 
-from indexer import (  # noqa: E402
+from indexer import (
+    _get_collection_id,
     chroma_api,
     chunk_text,
     ensure_collection,
     get_embedding,
-    _get_collection_id,
 )
 
 # M8.2: optional semantic chunking. Module-level kill switch via
 # BRAIN_SEMANTIC_CHUNKING env var. Falls back to indexer.chunk_text otherwise.
 try:
-    from semantic_chunk import chunk_with_fallback  # noqa: E402
+    from semantic_chunk import chunk_with_fallback
 except Exception:
     chunk_with_fallback = None  # type: ignore[assignment]
 

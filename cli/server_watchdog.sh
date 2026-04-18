@@ -43,8 +43,19 @@ if [ -f "$STATE_FILE" ]; then
 fi
 
 touch "$STATE_FILE"
+
+# 2026-04-16 Tier 2 fix: before alerting, attempt self-recovery via
+# launchctl kickstart. Previously the watchdog only sent an alert and
+# exited 1 — which is fine when launchd's own KeepAlive detects the
+# crash, but useless when the process is HUNG (alive but not serving).
+# KeepAlive only catches exit codes, not stalls. kickstart -k forces a
+# restart whether the process has crashed or hung.
+LAUNCHD_LABEL="ai.openclaw.brain-server"
+GUI_TARGET="gui/$(id -u)/${LAUNCHD_LABEL}"
+launchctl kickstart -k "$GUI_TARGET" >/dev/null 2>&1 || true
+
 "$OPENCLAW_BIN" agent --agent jenna \
-    --message "[BRAIN DOWN] brain-server at $BRAIN_URL returned HTTP $status. Launchd should auto-restart. Check: launchctl list ai.openclaw.brain-server" \
+    --message "[BRAIN DOWN] brain-server at $BRAIN_URL returned HTTP $status. Watchdog issued \`launchctl kickstart -k $GUI_TARGET\`. Re-check in 30s." \
     --deliver --json --thinking off --timeout 30 2>/dev/null
 
 exit 1

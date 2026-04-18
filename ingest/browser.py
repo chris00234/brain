@@ -15,14 +15,13 @@ Usage:
 import argparse
 import hashlib
 import json
-import os
 import re
 import shutil
 import sqlite3
 import subprocess
 import sys
 import tempfile
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 # ── Config ──────────────────────────────────────────────
@@ -36,7 +35,7 @@ DISPATCH_TIMEOUT = 240
 BATCH_SIZE = 50
 
 CHROME_EPOCH_OFFSET = 11644473600  # seconds between 1601-01-01 and 1970-01-01
-SAFARI_EPOCH_OFFSET = 978307200    # seconds between 1970-01-01 and 2001-01-01
+SAFARI_EPOCH_OFFSET = 978307200  # seconds between 1970-01-01 and 2001-01-01
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "brain_core"))
 from inbox_utils import is_near_duplicate as _is_near_duplicate_shared
@@ -45,23 +44,34 @@ from inbox_utils import is_near_duplicate as _is_near_duplicate_shared
 def _is_near_duplicate(content: str, inbox_dir: Path, window: int = 50, threshold: float = 0.7) -> bool:
     return _is_near_duplicate_shared(content, window=window, threshold=threshold, inbox_dir=inbox_dir)
 
+
 BROWSER_PATHS = {
     "chrome": Path("/Users/chrischo/Library/Application Support/Google/Chrome/Default/History"),
-    "brave":  Path("/Users/chrischo/Library/Application Support/BraveSoftware/Brave-Browser/Default/History"),
-    "arc":    Path("/Users/chrischo/Library/Application Support/Arc/User Data/Default/History"),
+    "brave": Path("/Users/chrischo/Library/Application Support/BraveSoftware/Brave-Browser/Default/History"),
+    "arc": Path("/Users/chrischo/Library/Application Support/Arc/User Data/Default/History"),
     "safari": Path("/Users/chrischo/Library/Safari/History.db"),
 }
 
 # Domain-level noise filter — drop these before LLM ever sees them
 NOISE_DOMAINS = {
-    "google.com", "google.co.kr", "duckduckgo.com", "bing.com",
-    "youtube.com", "youtu.be",
-    "twitter.com", "x.com", "facebook.com", "instagram.com", "tiktok.com",
+    "google.com",
+    "google.co.kr",
+    "duckduckgo.com",
+    "bing.com",
+    "youtube.com",
+    "youtu.be",
+    "twitter.com",
+    "x.com",
+    "facebook.com",
+    "instagram.com",
+    "tiktok.com",
     "reddit.com",
     "github.com",  # too noisy — code browsing isn't research
     "stackoverflow.com",  # ditto
-    "localhost", "127.0.0.1",
-    "chrome://newtab", "about:blank",
+    "localhost",
+    "127.0.0.1",
+    "chrome://newtab",
+    "about:blank",
 }
 
 
@@ -76,12 +86,16 @@ def log_failure(reason: str) -> None:
 
 try:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "brain_core"))
-    from safe_state import load_state as _safe_load, save_state as _safe_save
+    from safe_state import load_state as _safe_load
+    from safe_state import save_state as _safe_save
+
     def load_state() -> dict:
         return _safe_load(STATE_FILE) or {}
+
     def save_state(state: dict) -> None:
         _safe_save(STATE_FILE, state)
 except ImportError:
+
     def load_state() -> dict:
         if STATE_FILE.exists():
             try:
@@ -89,6 +103,7 @@ except ImportError:
             except Exception:
                 return {}
         return {}
+
     def save_state(state: dict) -> None:
         STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
         STATE_FILE.write_text(json.dumps(state))
@@ -132,13 +147,16 @@ def read_chrome(db_path: Path, since_unix: int) -> list[dict]:
             cur = conn.cursor()
             # Chrome time = microseconds since 1601-01-01
             chrome_since = (since_unix + CHROME_EPOCH_OFFSET) * 1_000_000
-            cur.execute("""
+            cur.execute(
+                """
                 SELECT urls.url, urls.title, visits.visit_time, urls.visit_count
                 FROM visits
                 JOIN urls ON visits.url = urls.id
                 WHERE visits.visit_time > ?
                 ORDER BY visits.visit_time
-            """, (chrome_since,))
+            """,
+                (chrome_since,),
+            )
             rows = cur.fetchall()
             conn.close()
         except Exception as e:
@@ -149,14 +167,16 @@ def read_chrome(db_path: Path, since_unix: int) -> list[dict]:
         unix_ts = (vt / 1_000_000) - CHROME_EPOCH_OFFSET
         if is_noise_domain(url):
             continue
-        out.append({
-            "url": url,
-            "title": (title or "")[:200],
-            "domain": domain_of(url),
-            "ts": int(unix_ts),
-            "iso": datetime.fromtimestamp(unix_ts, tz=timezone.utc).isoformat().replace("+00:00", "Z"),
-            "visit_count": vcount or 0,
-        })
+        out.append(
+            {
+                "url": url,
+                "title": (title or "")[:200],
+                "domain": domain_of(url),
+                "ts": int(unix_ts),
+                "iso": datetime.fromtimestamp(unix_ts, tz=UTC).isoformat().replace("+00:00", "Z"),
+                "visit_count": vcount or 0,
+            }
+        )
     return out
 
 
@@ -174,13 +194,16 @@ def read_safari(db_path: Path, since_unix: int) -> list[dict]:
             conn = sqlite3.connect(f"file:{tmp_db}?mode=ro", uri=True)
             cur = conn.cursor()
             safari_since = since_unix - SAFARI_EPOCH_OFFSET
-            cur.execute("""
+            cur.execute(
+                """
                 SELECT history_items.url, history_visits.title, history_visits.visit_time, history_items.visit_count
                 FROM history_visits
                 JOIN history_items ON history_visits.history_item = history_items.id
                 WHERE history_visits.visit_time > ?
                 ORDER BY history_visits.visit_time
-            """, (safari_since,))
+            """,
+                (safari_since,),
+            )
             rows = cur.fetchall()
             conn.close()
         except Exception as e:
@@ -191,21 +214,23 @@ def read_safari(db_path: Path, since_unix: int) -> list[dict]:
         unix_ts = vt + SAFARI_EPOCH_OFFSET
         if is_noise_domain(url):
             continue
-        out.append({
-            "url": url,
-            "title": (title or "")[:200],
-            "domain": domain_of(url),
-            "ts": int(unix_ts),
-            "iso": datetime.fromtimestamp(unix_ts, tz=timezone.utc).isoformat().replace("+00:00", "Z"),
-            "visit_count": vcount or 0,
-        })
+        out.append(
+            {
+                "url": url,
+                "title": (title or "")[:200],
+                "domain": domain_of(url),
+                "ts": int(unix_ts),
+                "iso": datetime.fromtimestamp(unix_ts, tz=UTC).isoformat().replace("+00:00", "Z"),
+                "visit_count": vcount or 0,
+            }
+        )
     return out
 
 
 READERS = {
     "chrome": read_chrome,
-    "brave":  read_chrome,
-    "arc":    read_chrome,
+    "brave": read_chrome,
+    "arc": read_chrome,
     "safari": read_safari,
 }
 
@@ -234,7 +259,9 @@ def collect_visits(browsers: list[str], since_unix: int) -> list[dict]:
 def build_classification_prompt(batch: list[dict]) -> str:
     lines = []
     lines.append("You are Sage, Chris's research and synthesis agent.")
-    lines.append("Classify these browser visits: was this INTENTIONAL research/learning, or PASSIVE browsing?")
+    lines.append(
+        "Classify these browser visits: was this INTENTIONAL research/learning, or PASSIVE browsing?"
+    )
     lines.append("")
     lines.append("Keep examples: tutorial reading, library docs, technical articles, academic papers,")
     lines.append("comparison shopping with intent, reference lookups Chris will revisit, longform analysis.")
@@ -254,9 +281,17 @@ def build_classification_prompt(batch: list[dict]) -> str:
 
 def dispatch_classification(prompt: str) -> dict | None:
     cmd = [
-        OPENCLAW_BIN, "agent", "--agent", AGENT,
-        "--message", prompt, "--json",
-        "--timeout", str(DISPATCH_TIMEOUT), "--thinking", "off",
+        OPENCLAW_BIN,
+        "agent",
+        "--agent",
+        AGENT,
+        "--message",
+        prompt,
+        "--json",
+        "--timeout",
+        str(DISPATCH_TIMEOUT),
+        "--thinking",
+        "off",
     ]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=DISPATCH_TIMEOUT + 30)
@@ -318,8 +353,11 @@ def write_kept_visit(visit: dict, summary: str) -> Path | None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Browser history intelligent ingest")
     parser.add_argument("--days-back", type=int, default=2, help="Lookback window in days")
-    parser.add_argument("--browsers", default="chrome,safari,brave,arc",
-                        help="Comma-separated browsers (auto-detected if installed)")
+    parser.add_argument(
+        "--browsers",
+        default="chrome,safari,brave,arc",
+        help="Comma-separated browsers (auto-detected if installed)",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Print what would be classified")
     args = parser.parse_args()
 
@@ -350,11 +388,12 @@ def main() -> None:
     kept_count = 0
     any_dispatch_ok = False  # any batch successfully processed (even if kept=0)
     for i in range(0, len(visits), BATCH_SIZE):
-        batch = visits[i:i + BATCH_SIZE]
+        batch = visits[i : i + BATCH_SIZE]
         prompt = build_classification_prompt(batch)
         result = dispatch_classification(prompt)
         if result is None:
             import time
+
             time.sleep(10)
             result = dispatch_classification(prompt)
         if not result:
@@ -383,7 +422,7 @@ def main() -> None:
         save_state(state)
         print(f"[4/4] State updated: last_ts={state['last_ts']} (kept={kept_count})")
     else:
-        print(f"[4/4] Watermark NOT advanced — all dispatches failed (will retry next run)")
+        print("[4/4] Watermark NOT advanced — all dispatches failed (will retry next run)")
 
 
 if __name__ == "__main__":

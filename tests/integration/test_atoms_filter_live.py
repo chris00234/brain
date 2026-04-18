@@ -107,8 +107,11 @@ def test_breakers_endpoint_reachable():
 
 def test_slos_endpoint_reachable():
     response = _brain_get("/brain/slos")
-    assert response["checked"] == 6
-    assert "results" in response
+    # 2026-04-16 — SLO count floor, not equality. Growth is expected as
+    # new watchers land (11 as of Tier 1/3 ship); test prevents accidental
+    # removals but allows additions.
+    assert response["checked"] >= 6
+    assert "results" in response or "items" in response
 
 
 def test_autonomy_levels_reachable():

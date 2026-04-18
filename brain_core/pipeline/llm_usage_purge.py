@@ -1,5 +1,6 @@
 #!/opt/homebrew/bin/python3
 """Weekly purge of llm_usage.db — keeps last 90 days of dispatches."""
+
 import sys
 from pathlib import Path
 

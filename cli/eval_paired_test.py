@@ -24,6 +24,7 @@ Protocol per combination:
 
 Runs all combinations, then prints summary table + best combo.
 """
+
 from __future__ import annotations
 
 import json
@@ -46,7 +47,9 @@ BRAIN_URL = "http://127.0.0.1:8791"
 SEARCH_UNIFIED = BRAIN_ROOT / "brain_core" / "search_unified.py"
 
 # Anchor templates (match existing file)
-FANOUT_TPL = "        raw_results = search_rag(query, limit * {v}, where=local_where or None, collections=collections)"
+FANOUT_TPL = (
+    "        raw_results = search_rag(query, limit * {v}, where=local_where or None, collections=collections)"
+)
 RERANK_TPL = "        unique = _rerank(relevance_query, unique, top_k=limit * {v})"
 
 # (fanout_multiplier, rerank_window_multiplier)
@@ -54,8 +57,8 @@ GRID = [
     (4, 4),
     (6, 6),
     (10, 10),
-    (8, 4),     # wide fanout, narrow rerank
-    (4, 10),    # narrow fanout, wide rerank
+    (8, 4),  # wide fanout, narrow rerank
+    (4, 10),  # narrow fanout, wide rerank
     (15, 15),
     (6, 10),
     (10, 6),
@@ -114,8 +117,9 @@ def _warm() -> None:
 
 def _restart() -> bool:
     try:
-        subprocess.run(["launchctl", "kickstart", "-k", LAUNCHD_LABEL],
-                       capture_output=True, text=True, timeout=30)
+        subprocess.run(
+            ["launchctl", "kickstart", "-k", LAUNCHD_LABEL], capture_output=True, text=True, timeout=30
+        )
     except Exception as e:
         print(f"  restart failed: {e}", file=sys.stderr)
         return False
@@ -137,7 +141,10 @@ def _patch(old: str, new: str) -> bool:
 def _run_eval() -> dict | None:
     r = subprocess.run(
         [str(VENV_PY), str(EVAL_COMPARE), "--json", "--eval-set", str(TRAIN)],
-        capture_output=True, text=True, timeout=600, cwd=str(BRAIN_ROOT),
+        capture_output=True,
+        text=True,
+        timeout=600,
+        cwd=str(BRAIN_ROOT),
     )
     if r.returncode != 0:
         print(f"  eval failed: {r.stderr[-300:]}", file=sys.stderr)
@@ -163,8 +170,10 @@ def main() -> int:
     if not baseline:
         print("baseline measurement failed", file=sys.stderr)
         return 2
-    print(f"  baseline: source={baseline['hit_source_pct']}% content={baseline['hit_content_pct']}% "
-          f"loose={baseline.get('hit_content_loose_pct', 0)}% lat={baseline['mean_latency_ms']}ms")
+    print(
+        f"  baseline: source={baseline['hit_source_pct']}% content={baseline['hit_content_pct']}% "
+        f"loose={baseline.get('hit_content_loose_pct', 0)}% lat={baseline['mean_latency_ms']}ms"
+    )
 
     LOG.parent.mkdir(parents=True, exist_ok=True)
     results: list[dict] = []
@@ -199,15 +208,22 @@ def main() -> int:
         dc = v2["hit_content_pct"] - baseline["hit_content_pct"]
         dl = v2["mean_latency_ms"] - baseline["mean_latency_ms"]
         d_acc = (ds + dc) / 2
-        print(f"  result: source={v2['hit_source_pct']}% content={v2['hit_content_pct']}% "
-              f"loose={v2.get('hit_content_loose_pct', 0)}% lat={v2['mean_latency_ms']}ms")
+        print(
+            f"  result: source={v2['hit_source_pct']}% content={v2['hit_content_pct']}% "
+            f"loose={v2.get('hit_content_loose_pct', 0)}% lat={v2['mean_latency_ms']}ms"
+        )
         print(f"  delta:  Δsrc={ds:+.1f}pt Δcon={dc:+.1f}pt Δlat={dl:+.0f}ms Δacc={d_acc:+.2f}pt")
 
         record = {
             "ts": datetime.now().isoformat(timespec="seconds"),
-            "fanout": fan, "rerank_window": rer,
-            "baseline": baseline, "current": v2,
-            "d_source": ds, "d_content": dc, "d_latency": dl, "d_acc_avg": d_acc,
+            "fanout": fan,
+            "rerank_window": rer,
+            "baseline": baseline,
+            "current": v2,
+            "d_source": ds,
+            "d_content": dc,
+            "d_latency": dl,
+            "d_acc_avg": d_acc,
         }
         results.append(record)
         with LOG.open("a") as f:
@@ -223,12 +239,16 @@ def main() -> int:
     print(f"{'fanout':>7} {'rerank':>7} {'source':>8} {'content':>8} {'loose':>7} {'lat':>6} {'Δacc':>7}")
     for r in sorted(results, key=lambda x: x["d_acc_avg"], reverse=True):
         c = r["current"]
-        print(f"{r['fanout']:>7} {r['rerank_window']:>7} "
-              f"{c['hit_source_pct']:>7}% {c['hit_content_pct']:>7}% {c.get('hit_content_loose_pct', 0):>6}% "
-              f"{c['mean_latency_ms']:>5}ms {r['d_acc_avg']:>+6.2f}pt")
+        print(
+            f"{r['fanout']:>7} {r['rerank_window']:>7} "
+            f"{c['hit_source_pct']:>7}% {c['hit_content_pct']:>7}% {c.get('hit_content_loose_pct', 0):>6}% "
+            f"{c['mean_latency_ms']:>5}ms {r['d_acc_avg']:>+6.2f}pt"
+        )
     if results:
         best = max(results, key=lambda x: x["d_acc_avg"])
-        print(f"\nbest: fanout={best['fanout']} rerank_window={best['rerank_window']} → Δacc={best['d_acc_avg']:+.2f}pt")
+        print(
+            f"\nbest: fanout={best['fanout']} rerank_window={best['rerank_window']} → Δacc={best['d_acc_avg']:+.2f}pt"
+        )
     return 0
 
 

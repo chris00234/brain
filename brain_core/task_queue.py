@@ -17,7 +17,7 @@ import sqlite3
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 log = logging.getLogger("brain.task_queue")
@@ -26,15 +26,26 @@ log = logging.getLogger("brain.task_queue")
 # Prevents unbounded thread spawning under burst load.
 _bg_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="tq_bg")
 
+
+def _materialize_proc_bg(proc: dict) -> None:
+    """Background pool task: materialize procedure as SKILL.md files."""
+    try:
+        from skill_materializer import materialize
+
+        materialize(proc)
+    except Exception as exc:
+        log.debug("skill materialize bg failed: %s", exc)
+
+
 # ── Valid state transitions ──────────────────────────────────
 TRANSITIONS = {
-    "approve":  ({"pending"},                                  "approved"),
-    "assign":   ({"approved"},                                 "assigned"),
-    "start":    ({"approved", "assigned", "resumed"},          "running"),
-    "complete": ({"running"},                                  "completed"),
-    "fail":     ({"pending", "approved", "assigned", "running"}, "failed"),
-    "pause":    ({"running"},                                  "paused"),
-    "resume":   ({"paused"},                                   "resumed"),
+    "approve": ({"pending"}, "approved"),
+    "assign": ({"approved"}, "assigned"),
+    "start": ({"approved", "assigned", "resumed"}, "running"),
+    "complete": ({"running"}, "completed"),
+    "fail": ({"pending", "approved", "assigned", "running"}, "failed"),
+    "pause": ({"running"}, "paused"),
+    "resume": ({"paused"}, "resumed"),
 }
 
 _SCHEMA = """
@@ -150,10 +161,10 @@ class TaskQueue:
         # via try/except — SQLite rejects duplicates with OperationalError, which
         # we ignore so re-running migrate on subsequent starts is a no-op.
         goal_extensions = [
-            ("next_check_at",  "TEXT"),
-            ("owner_agent",    "TEXT DEFAULT 'chris'"),
-            ("brain_notes",    "TEXT DEFAULT ''"),
-            ("interventions",  "TEXT DEFAULT '[]'"),
+            ("next_check_at", "TEXT"),
+            ("owner_agent", "TEXT DEFAULT 'chris'"),
+            ("brain_notes", "TEXT DEFAULT ''"),
+            ("interventions", "TEXT DEFAULT '[]'"),
         ]
         for col, col_type in goal_extensions:
             try:
@@ -167,7 +178,7 @@ class TaskQueue:
 
     @staticmethod
     def _now() -> str:
-        return datetime.now(timezone.utc).isoformat(timespec="seconds")
+        return datetime.now(UTC).isoformat(timespec="seconds")
 
     @staticmethod
     def _gen_id(prefix: str = "task") -> str:
@@ -212,9 +223,18 @@ class TaskQueue:
                VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?,
                        '[]', ?)""",
             (
-                task_id, title, description, priority, assigned_agent,
-                parent_goal_id, json.dumps(depends_on or []),
-                confidence, confidence_reasoning, created_by, now, now,
+                task_id,
+                title,
+                description,
+                priority,
+                assigned_agent,
+                parent_goal_id,
+                json.dumps(depends_on or []),
+                confidence,
+                confidence_reasoning,
+                created_by,
+                now,
+                now,
                 json.dumps(metadata or {}),
             ),
         )
@@ -348,7 +368,9 @@ class TaskQueue:
                 pass  # already completed or cancelled
 
     def fail_task(self, task_id: str, error: str = "", by: str = "system") -> dict:
-        return self._transition(task_id, {"pending", "approved", "assigned", "running"}, "failed", by=by, error=error)
+        return self._transition(
+            task_id, {"pending", "approved", "assigned", "running"}, "failed", by=by, error=error
+        )
 
     def pause_task(self, task_id: str, by: str = "system") -> dict:
         return self._transition(task_id, {"running"}, "paused", by=by)
@@ -458,6 +480,7 @@ class TaskQueue:
         """
         import sys as _sys
         from pathlib import Path as _Path
+
         _bc = str(_Path(__file__).parent)
         if _bc not in _sys.path:
             _sys.path.insert(0, _bc)
@@ -483,7 +506,8 @@ class TaskQueue:
                 if not gate.allowed:
                     log.info(
                         "autonomy gate blocked task.approve for %s: %s",
-                        task["id"], gate.reason,
+                        task["id"],
+                        gate.reason,
                     )
                     escalation_needed.append(task)
                     continue
@@ -498,15 +522,14 @@ class TaskQueue:
                 try:
                     updated = self.approve_task(task["id"], by="autopilot")
                     approved.append(updated)
-                    log.info(
-                        "auto-approved %s (confidence=%.2f)", task["id"], task["confidence"]
-                    )
+                    log.info("auto-approved %s (confidence=%.2f)", task["id"], task["confidence"])
                 except ValueError as exc:
                     log.warning("auto-approve failed for %s: %s", task["id"], exc)
             else:
                 log.debug(
                     "task %s below threshold (confidence=%.2f), needs escalation",
-                    task["id"], task["confidence"],
+                    task["id"],
+                    task["confidence"],
                 )
                 escalation_needed.append(task)
 
@@ -518,7 +541,8 @@ class TaskQueue:
     def _escalate_tasks(self, tasks: list[dict]) -> None:
         """Send below-threshold tasks to Jenna for Telegram relay. 4h cooldown per task."""
         from datetime import timedelta
-        now = datetime.now(timezone.utc)
+
+        now = datetime.now(UTC)
         cooldown = timedelta(hours=4)
 
         to_escalate = []
@@ -529,7 +553,7 @@ class TaskQueue:
                 try:
                     last_dt = datetime.fromisoformat(last)
                     if last_dt.tzinfo is None:
-                        last_dt = last_dt.replace(tzinfo=timezone.utc)
+                        last_dt = last_dt.replace(tzinfo=UTC)
                     if now - last_dt < cooldown:
                         continue
                 except Exception:
@@ -550,10 +574,12 @@ class TaskQueue:
         try:
             import sys as _sys
             from pathlib import Path as _Path
+
             _bc = str(_Path(__file__).parent)
             if _bc not in _sys.path:
                 _sys.path.insert(0, _bc)
-            from openclaw_dispatch import dispatch
+            from cli_llm import dispatch
+
             result = dispatch(
                 agent="jenna",
                 message="\n".join(lines),
@@ -580,6 +606,7 @@ class TaskQueue:
         """
         import sys as _sys
         from pathlib import Path as _Path
+
         _bc = str(_Path(__file__).parent)
         if _bc not in _sys.path:
             _sys.path.insert(0, _bc)
@@ -588,7 +615,7 @@ class TaskQueue:
         if not ready:
             return []
 
-        from openclaw_dispatch import dispatch
+        from cli_llm import dispatch
 
         # Phase 5 autonomy gate
         try:
@@ -613,7 +640,8 @@ class TaskQueue:
                 if not gate.allowed:
                     log.info(
                         "autonomy gate blocked task.dispatch for %s: %s",
-                        tid, gate.reason,
+                        tid,
+                        gate.reason,
                     )
                     continue
                 if gate.requires_ack:
@@ -631,10 +659,20 @@ class TaskQueue:
             # Inject past heuristics into prompt
             heuristic_context, retrieved_heuristic_ids = self._get_relevant_heuristics(title + " " + desc)
 
+            # Inject proven procedures (successful workflows) + lessons (past failures)
+            procedure_context = self._get_relevant_procedures(title + " " + desc)
+            lesson_context = self._get_relevant_lessons(title + " " + desc, agent)
+
             # Dispatch to OpenClaw agent
             prompt = f"Execute this task:\n\nTitle: {title}\nDescription: {desc}"
             if heuristic_context:
-                prompt += f"\n\nRelevant lessons from past tasks:\n{heuristic_context}"
+                prompt += f"\n\nRelevant heuristics from past tasks:\n{heuristic_context}"
+            if procedure_context:
+                prompt += (
+                    f"\n\nProven procedures for similar work (follow if applicable):\n{procedure_context}"
+                )
+            if lesson_context:
+                prompt += f"\n\nPast failures to AVOID (honor strictly):\n{lesson_context}"
             prompt += "\n\nDo the work and report the result concisely."
 
             domain = (task.get("metadata") or {}).get("domain", "general")
@@ -653,15 +691,18 @@ class TaskQueue:
                     for hid in retrieved_heuristic_ids:
                         try:
                             from entity_graph import reinforce_memory
+
                             reinforce_memory(hid, success=True)
                         except Exception:
                             pass
                     # Extract heuristic + procedure in capped background pool (don't block tick)
                     _result_text = result.text[:1000]
-                    _bg_pool.submit(lambda t=task, r=_result_text, d=dispatch: (
-                        self._extract_heuristic(t, r, d),
-                        self._extract_procedure(t, r, d),
-                    ))
+                    _bg_pool.submit(
+                        lambda t=task, r=_result_text, d=dispatch: (
+                            self._extract_heuristic(t, r, d),
+                            self._extract_procedure(t, r, d),
+                        )
+                    )
                 else:
                     error_msg = result.error or "agent returned empty response"
                     updated = self.fail_task(tid, error=error_msg[:500], by="executor")
@@ -781,7 +822,8 @@ class TaskQueue:
         set_clause = ", ".join(f"{k} = ?" for k in updates)
         vals = list(updates.values()) + [goal_id, current]
         cursor = conn.execute(
-            f"UPDATE goals SET {set_clause} WHERE id = ? AND status = ?", vals,
+            f"UPDATE goals SET {set_clause} WHERE id = ? AND status = ?",
+            vals,
         )
         conn.commit()
         if cursor.rowcount == 0:
@@ -817,8 +859,15 @@ class TaskQueue:
                 chris_override, override_reason, confidence_was, created_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                outcome_id, task_id, domain, brain_recommendation, actual_action,
-                int(chris_override), override_reason, confidence_was, now,
+                outcome_id,
+                task_id,
+                domain,
+                brain_recommendation,
+                actual_action,
+                int(chris_override),
+                override_reason,
+                confidence_was,
+                now,
             ),
         )
         # Update accuracy tracker
@@ -845,7 +894,10 @@ class TaskQueue:
         log.info("recorded outcome for task %s (override=%s)", task_id, chris_override)
 
     def list_outcomes(
-        self, domain: str | None = None, limit: int = 50, offset: int = 0,
+        self,
+        domain: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
     ) -> list[dict]:
         conn = self._conn()
         if domain:
@@ -875,19 +927,33 @@ class TaskQueue:
             resp = dispatch_fn(agent="sage", message=prompt, thinking="low", timeout=30)
             if resp.ok and resp.text and len(resp.text.strip()) > 20:
                 heuristic = resp.text.strip()[:300]
-                from indexer import chroma_api, get_embedding, _get_collection_id
+                from indexer import _get_collection_id, chroma_api, get_embedding
+
                 col_id = _get_collection_id("semantic_memory")
                 if col_id:
                     import hashlib
+
                     h_id = f"heuristic:{hashlib.md5(heuristic.encode()).hexdigest()[:16]}"
                     emb = get_embedding(heuristic[:1000], prefix="passage")
                     if emb:
-                        chroma_api("POST",
+                        chroma_api(
+                            "POST",
                             f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/upsert",
-                            {"ids": [h_id], "embeddings": [emb], "documents": [heuristic],
-                             "metadatas": [{"category": "heuristic", "agent": agent,
-                                           "source": "erl_extraction", "type": "self_learning",
-                                           "created_at": self._now()}]})
+                            {
+                                "ids": [h_id],
+                                "embeddings": [emb],
+                                "documents": [heuristic],
+                                "metadatas": [
+                                    {
+                                        "category": "heuristic",
+                                        "agent": agent,
+                                        "source": "erl_extraction",
+                                        "type": "self_learning",
+                                        "created_at": self._now(),
+                                    }
+                                ],
+                            },
+                        )
                         log.info("extracted heuristic for task %s: %s", task["id"], heuristic[:80])
         except Exception as e:
             log.warning("heuristic extraction failed for %s: %s", task.get("id"), e)
@@ -897,18 +963,24 @@ class TaskQueue:
         Returns (context_text, retrieved_ids) for utility reinforcement."""
         retrieved_ids: list[str] = []
         try:
-            from indexer import chroma_api, get_embedding, _get_collection_id
+            from indexer import _get_collection_id, chroma_api, get_embedding
+
             col_id = _get_collection_id("semantic_memory")
             if not col_id:
                 return "", []
             query_emb = get_embedding(task_description[:500], prefix="query")
             if not query_emb:
                 return "", []
-            resp = chroma_api("POST",
+            resp = chroma_api(
+                "POST",
                 f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/query",
-                {"query_embeddings": [query_emb], "n_results": limit,
-                 "include": ["documents", "metadatas", "distances"],
-                 "where": {"category": {"$eq": "heuristic"}}})
+                {
+                    "query_embeddings": [query_emb],
+                    "n_results": limit,
+                    "include": ["documents", "metadatas", "distances"],
+                    "where": {"category": {"$eq": "heuristic"}},
+                },
+            )
             docs = (resp.get("documents") or [[]])[0]
             ids = (resp.get("ids") or [[]])[0]
             retrieved_ids = [i for i in ids if i]
@@ -918,7 +990,103 @@ class TaskQueue:
         except Exception:
             return "", []
 
+    def _get_relevant_procedures(self, task_description: str, limit: int = 2) -> str:
+        """Retrieve procedures whose task_type+title share meaningful words with the task.
+
+        Simple word-overlap scorer (cheap, no embedding call). Procedures are ranked
+        server-side by success_count DESC so the top-20 window is already warm hits.
+        """
+        try:
+            words = {w.lower() for w in task_description.split() if len(w) > 3}
+            if not words:
+                return ""
+            conn = self._conn()
+            rows = conn.execute(
+                "SELECT id, task_type, title, steps, success_count FROM procedures "
+                "ORDER BY success_count DESC, last_used DESC LIMIT 20"
+            ).fetchall()
+            scored = []
+            for r in rows:
+                pt_text = (r["task_type"] or "").replace("_", " ")
+                pt = {w.lower() for w in (pt_text + " " + (r["title"] or "")).split() if len(w) > 3}
+                overlap = len(words & pt)
+                if overlap >= 2:
+                    scored.append((overlap, int(r["success_count"] or 1), r))
+            scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+            top = scored[:limit]
+            if not top:
+                return ""
+            lines = []
+            for _, _, r in top:
+                try:
+                    steps = json.loads(r["steps"]) if isinstance(r["steps"], str) else r["steps"]
+                except (json.JSONDecodeError, TypeError):
+                    steps = []
+                step_preview = "; ".join((steps or [])[:4])
+                lines.append(
+                    f"- [{r['task_type']}] {r['title']} (used {r['success_count']}x): {step_preview}"
+                )
+            return "\n".join(lines)
+        except Exception:
+            return ""
+
+    def _get_relevant_lessons(self, task_description: str, agent_id: str, limit: int = 2) -> str:
+        """Retrieve similar past failure lessons for this agent (Reflexion pattern).
+
+        Delegates to failure_memory.get_similar_lessons which uses Jaro-Winkler
+        similarity via Neo4j APOC. Formats avoid + try_next prominently.
+        """
+        try:
+            import failure_memory
+
+            lessons = failure_memory.get_similar_lessons(
+                task_description,
+                agent_id=agent_id,
+                limit=limit,
+            )
+            if not lessons:
+                return ""
+            lines = []
+            for lesson in lessons:
+                fragment = (lesson.get("reflection") or lesson.get("task") or "")[:140]
+                avoid = (lesson.get("avoid") or "").strip()
+                try_next = (lesson.get("try_next") or "").strip()
+                line = f"- {fragment}"
+                if avoid:
+                    line += f" [AVOID: {avoid[:100]}]"
+                if try_next:
+                    line += f" [TRY_NEXT: {try_next[:100]}]"
+                lines.append(line)
+            return "\n".join(lines)
+        except Exception:
+            return ""
+
     # ── Procedural memory ─────────────────────────────────────
+
+    def _maybe_materialize_procedure(self, proc_id: str) -> None:
+        """Submit SKILL.md materialization to bg pool for a procedure.
+
+        Voyager/Hermes-style auto-skill creation: once a procedure is proven
+        (success_count ≥ 2 in skill_materializer), write it out as a SKILL.md
+        for Claude Code + OpenClaw so the agents can discover and invoke it.
+        Runs in background so procedure writes don't block on filesystem I/O.
+        """
+        try:
+            conn = self._conn()
+            row = conn.execute("SELECT * FROM procedures WHERE id = ?", (proc_id,)).fetchone()
+            if not row:
+                return
+            proc_dict = dict(row)
+            for key in ("steps", "tools"):
+                v = proc_dict.get(key)
+                if isinstance(v, str):
+                    try:
+                        proc_dict[key] = json.loads(v)
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+            _bg_pool.submit(_materialize_proc_bg, proc_dict)
+        except Exception:
+            pass
 
     def _store_procedure(
         self,
@@ -935,9 +1103,7 @@ class TaskQueue:
         step_tokens = set(" ".join(steps).lower().split())
 
         # Check existing procedures with same task_type for dedup
-        rows = conn.execute(
-            "SELECT id, steps FROM procedures WHERE task_type = ?", (task_type,)
-        ).fetchall()
+        rows = conn.execute("SELECT id, steps FROM procedures WHERE task_type = ?", (task_type,)).fetchall()
         for row in rows:
             try:
                 existing_steps = json.loads(row["steps"])
@@ -955,6 +1121,7 @@ class TaskQueue:
                 )
                 conn.commit()
                 log.debug("deduped procedure %s (jaccard=%.2f)", row["id"], jaccard)
+                self._maybe_materialize_procedure(row["id"])
                 return row["id"]
 
         # Insert new procedure
@@ -965,17 +1132,27 @@ class TaskQueue:
                 last_used, created_at, source)
                VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)""",
             (
-                proc_id, task_type, title, json.dumps(steps),
-                preconditions, json.dumps(tools or []),
-                now, now, source,
+                proc_id,
+                task_type,
+                title,
+                json.dumps(steps),
+                preconditions,
+                json.dumps(tools or []),
+                now,
+                now,
+                source,
             ),
         )
         conn.commit()
         log.info("stored procedure %s: %s (%d steps)", proc_id, task_type, len(steps))
+        self._maybe_materialize_procedure(proc_id)
         return proc_id
 
     def get_procedures(
-        self, task_type: str | None = None, source: str | None = None, limit: int = 10,
+        self,
+        task_type: str | None = None,
+        source: str | None = None,
+        limit: int = 10,
     ) -> list[dict]:
         """Retrieve procedures, ordered by success_count DESC, last_used DESC."""
         clauses: list[str] = []
@@ -1024,6 +1201,7 @@ class TaskQueue:
                 return
             text = resp.text.strip()
             import re as _re
+
             text = _re.sub(r"^```(?:json)?\s*", "", text)
             text = _re.sub(r"\s*```$", "", text)
             data = json.loads(text.strip())
@@ -1031,23 +1209,38 @@ class TaskQueue:
             if len(steps) < 3:
                 return  # not a multi-step procedure
 
-            procedure_text = f"Procedure: {data.get('task_type', title)}\nSteps:\n" + "\n".join(f"  {i+1}. {s}" for i, s in enumerate(steps))
+            procedure_text = f"Procedure: {data.get('task_type', title)}\nSteps:\n" + "\n".join(
+                f"  {i+1}. {s}" for i, s in enumerate(steps)
+            )
             if data.get("preconditions"):
                 procedure_text += f"\nPreconditions: {data['preconditions']}"
 
-            from indexer import chroma_api, get_embedding, _get_collection_id
+            from indexer import _get_collection_id, chroma_api, get_embedding
+
             col_id = _get_collection_id("patterns")
             if col_id:
                 import hashlib
+
                 p_id = f"proc:{hashlib.md5(procedure_text[:200].encode()).hexdigest()[:16]}"
                 emb = get_embedding(procedure_text[:1000], prefix="passage")
                 if emb:
-                    chroma_api("POST",
+                    chroma_api(
+                        "POST",
                         f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/upsert",
-                        {"ids": [p_id], "embeddings": [emb], "documents": [procedure_text],
-                         "metadatas": [{"type": "procedure", "agent": agent,
-                                       "source": "voyager_extraction",
-                                       "created_at": self._now()}]})
+                        {
+                            "ids": [p_id],
+                            "embeddings": [emb],
+                            "documents": [procedure_text],
+                            "metadatas": [
+                                {
+                                    "type": "procedure",
+                                    "agent": agent,
+                                    "source": "voyager_extraction",
+                                    "created_at": self._now(),
+                                }
+                            ],
+                        },
+                    )
                     log.info("extracted procedure for task %s (%d steps)", task["id"], len(steps))
             # Structured storage for typed retrieval and dedup
             try:
@@ -1107,9 +1300,7 @@ class TaskQueue:
     def get_domain_accuracy(self, domain: str | None = None) -> dict:
         conn = self._conn()
         if domain:
-            rows = conn.execute(
-                "SELECT * FROM accuracy_tracker WHERE domain = ?", (domain,)
-            ).fetchall()
+            rows = conn.execute("SELECT * FROM accuracy_tracker WHERE domain = ?", (domain,)).fetchall()
         else:
             rows = conn.execute("SELECT * FROM accuracy_tracker").fetchall()
         result = {}

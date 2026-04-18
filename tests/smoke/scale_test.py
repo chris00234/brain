@@ -1,5 +1,6 @@
 #!/opt/homebrew/bin/python3
 """Scale test for brain system — generates synthetic data, measures SLOs."""
+
 from __future__ import annotations
 
 import argparse
@@ -16,7 +17,18 @@ SECRET_FILE = Path("/Users/chrischo/.openclaw/credentials/.personal_webhook_secr
 BASELINE_FILE = Path("/Users/chrischo/server/brain/tests/slo_baseline.json")
 
 # Synthetic content templates
-TOPICS = ["docker", "python", "neo4j", "chromadb", "openclaw", "brain", "agent", "memory", "search", "canonical"]
+TOPICS = [
+    "docker",
+    "python",
+    "neo4j",
+    "chromadb",
+    "openclaw",
+    "brain",
+    "agent",
+    "memory",
+    "search",
+    "canonical",
+]
 ACTIONS = ["configures", "implements", "tests", "debugs", "deploys", "monitors", "refactors"]
 OBJECTS = ["service", "pipeline", "endpoint", "database", "cache", "index", "schema"]
 
@@ -180,4 +192,5 @@ def main() -> int:
 
 if __name__ == "__main__":
     import sys
+
     sys.exit(main())

@@ -110,7 +110,7 @@ Output ONLY a JSON object: {{"score": <float 0.0-1.0>, "reason": "<one sentence>
 def _dispatch_judge(prompt: str, *, timeout: int = 30) -> str | None:
     """Send a judge prompt to Sage via openclaw_dispatch. Returns text or None."""
     try:
-        from openclaw_dispatch import dispatch
+        from cli_llm import dispatch
 
         result = dispatch("sage", prompt, thinking="off", timeout=timeout)
         if result.ok and result.text:

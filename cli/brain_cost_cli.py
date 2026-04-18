@@ -23,7 +23,7 @@ from __future__ import annotations
 import argparse
 import sqlite3
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 
 LLM_USAGE_DB = Path("/Users/chrischo/server/brain/logs/llm_usage.db")
@@ -63,16 +63,20 @@ def cmd_today(args: argparse.Namespace) -> int:
 
     print(f"=== LLM usage today ({cutoff}) — subscription-aware ===")
     print(f"total calls:       {row['calls']}")
-    print(f"metered calls:     {metered}  ({'some calls pre-metering-fix' if metered < row['calls'] else 'all metered'})")
+    print(
+        f"metered calls:     {metered}  ({'some calls pre-metering-fix' if metered < row['calls'] else 'all metered'})"
+    )
     print(f"input tokens:      {row['in_tok']:>12,}")
     print(f"output tokens:     {row['out_tok']:>12,}")
     print(f"cache read tokens: {row['cache_tok']:>12,}  (subscription: counts toward quota at reduced rate)")
     print(f"total duration:    {row['total_seconds']:.0f}s  ({row['total_seconds']/3600:.1f}h)")
     if metered:
-        print(f"retail-$ estimate: ${row['cost']:.2f}  (REFERENCE ONLY — not what Chris pays on subscription)")
+        print(
+            f"retail-$ estimate: ${row['cost']:.2f}  (REFERENCE ONLY — not what Chris pays on subscription)"
+        )
         print(f"avg per call:      ${row['cost']/metered:.4f}")
     if row["calls"] >= 200:
-        print(f"⚠ High call volume — check OpenClaw rate-limit headroom before bulk work")
+        print("⚠ High call volume — check OpenClaw rate-limit headroom before bulk work")
     return 0
 
 
@@ -113,12 +117,16 @@ def cmd_agent(args: argparse.Namespace) -> int:
             (cutoff,),
         ).fetchall()
     print("=== Per-agent breakdown (last 24h) ===")
-    print(f"{'agent':<12} {'calls':>6} {'in_tok':>10} {'out_tok':>8} {'cache':>10} {'avg_ms':>8} {'cost':>10}")
+    print(
+        f"{'agent':<12} {'calls':>6} {'in_tok':>10} {'out_tok':>8} {'cache':>10} {'avg_ms':>8} {'cost':>10}"
+    )
     total_cost = 0.0
     for r in rows:
         total_cost += r["cost"]
-        print(f"{r['agent']:<12} {r['calls']:>6} {r['in_tok']:>10,} {r['out_tok']:>8,} "
-              f"{r['cache_tok']:>10,} {r['avg_ms']:>8.0f} ${r['cost']:>8.4f}")
+        print(
+            f"{r['agent']:<12} {r['calls']:>6} {r['in_tok']:>10,} {r['out_tok']:>8,} "
+            f"{r['cache_tok']:>10,} {r['avg_ms']:>8.0f} ${r['cost']:>8.4f}"
+        )
     print(f"{'TOTAL':<12} {'':>6} {'':>10} {'':>8} {'':>10} {'':>8} ${total_cost:>8.4f}")
     return 0
 
@@ -142,7 +150,9 @@ def cmd_model(args: argparse.Namespace) -> int:
         total_cost += r["cost"]
         provider = r["provider"] or "(unknown)"
         model = r["model"] or "(unknown)"
-        print(f"{provider:<15} {model:<25} {r['calls']:>6} {r['in_tok']:>12,} {r['out_tok']:>10,} ${r['cost']:>10.4f}")
+        print(
+            f"{provider:<15} {model:<25} {r['calls']:>6} {r['in_tok']:>12,} {r['out_tok']:>10,} ${r['cost']:>10.4f}"
+        )
     print(f"{'TOTAL':<15} {'':<25} {'':<6} {'':<12} {'':<10} ${total_cost:>10.4f}")
     return 0
 

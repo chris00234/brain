@@ -40,14 +40,13 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import re
 import sqlite3
 import sys
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import UTC
 from pathlib import Path
-from typing import Any
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -57,7 +56,7 @@ except ImportError:
     yaml = None
 
 try:
-    from config import BRAIN_CORE_DIR, BRAIN_LOGS_DIR, AUTONOMY_DB, HOME
+    from config import AUTONOMY_DB, BRAIN_CORE_DIR, BRAIN_LOGS_DIR, HOME
 except ImportError:
     HOME = Path.home()
     BRAIN_CORE_DIR = Path(__file__).parent
@@ -97,9 +96,9 @@ class InjectionBlock:
     id: str
     title: str
     content: str
-    source: str      # canonical | semantic | proactive | doorbell | confidence_sentinel
+    source: str  # canonical | semantic | proactive | doorbell | confidence_sentinel
     score: float
-    priority: str    # critical | high | medium | low
+    priority: str  # critical | high | medium | low
     path: str | None = None
 
     def to_dict(self) -> dict:
@@ -160,6 +159,7 @@ def _load_routes(force_reload: bool = False) -> dict:
 
 # ── Intent matching ───────────────────────────────────────────────
 
+
 def _match_canonical_routes(prompt: str) -> list[IntentMatch]:
     """Return all intents whose keywords match the prompt. An intent matches
     if ANY of its keywords (EN or KO) is a substring of the lowercased prompt.
@@ -189,13 +189,15 @@ def _match_canonical_routes(prompt: str) -> list[IntentMatch]:
                     hit = True
                     break
         if hit:
-            matches.append(IntentMatch(
-                intent=intent_name,
-                canonical_paths=list(cfg.get("canonical_paths") or []),
-                always_push_queries=list(cfg.get("always_push_queries") or []),
-                priority=cfg.get("priority", "medium"),
-                max_tokens=int(cfg.get("max_tokens", 600)),
-            ))
+            matches.append(
+                IntentMatch(
+                    intent=intent_name,
+                    canonical_paths=list(cfg.get("canonical_paths") or []),
+                    always_push_queries=list(cfg.get("always_push_queries") or []),
+                    priority=cfg.get("priority", "medium"),
+                    max_tokens=int(cfg.get("max_tokens", 600)),
+                )
+            )
     return matches
 
 
@@ -261,19 +263,22 @@ def _canonical_blocks_from_matches(
             if match.priority != "critical" and h in seen_hashes:
                 continue
             hashes_this_call.add(h)
-            blocks.append(InjectionBlock(
-                id=h,
-                title=title,
-                content=content[: match.max_tokens * 4],  # rough token→char estimate
-                source="canonical",
-                score=1.0,  # bypass scoring — guaranteed
-                priority=match.priority,
-                path=raw,
-            ))
+            blocks.append(
+                InjectionBlock(
+                    id=h,
+                    title=title,
+                    content=content[: match.max_tokens * 4],  # rough token→char estimate
+                    source="canonical",
+                    score=1.0,  # bypass scoring — guaranteed
+                    priority=match.priority,
+                    path=raw,
+                )
+            )
     return blocks
 
 
 # ── Semantic layer via search_all ─────────────────────────────────
+
 
 def _semantic_blocks(
     prompt: str,
@@ -325,21 +330,24 @@ def _semantic_blocks(
         hashes_this_call.add(h)
         # Normalize score 0..1 from the brain's 0..100 range
         norm_score = min(1.0, max(0.0, score / 100.0))
-        blocks.append(InjectionBlock(
-            id=h,
-            title=title,
-            content=content,
-            source=f"semantic:{collection}" if collection else "semantic",
-            score=norm_score,
-            priority="high" if norm_score >= 0.6 else "medium",
-            path=r.get("path"),
-        ))
+        blocks.append(
+            InjectionBlock(
+                id=h,
+                title=title,
+                content=content,
+                source=f"semantic:{collection}" if collection else "semantic",
+                score=norm_score,
+                priority="high" if norm_score >= 0.6 else "medium",
+                path=r.get("path"),
+            )
+        )
         if len(blocks) >= limit:
             break
     return blocks
 
 
 # ── Proactive layer ───────────────────────────────────────────────
+
 
 def _proactive_blocks(seen_hashes: set[str]) -> list[InjectionBlock]:
     """Pull urgent insights from proactive.get_current_insights (existing module).
@@ -364,18 +372,21 @@ def _proactive_blocks(seen_hashes: set[str]) -> list[InjectionBlock]:
         if h in seen_hashes or h in hashes_this_call:
             continue
         hashes_this_call.add(h)
-        blocks.append(InjectionBlock(
-            id=h,
-            title=f"⚠ {title}",
-            content=content,
-            source="proactive",
-            score=0.9 if severity == "urgent" else 0.7,
-            priority="critical" if severity == "urgent" else "high",
-        ))
+        blocks.append(
+            InjectionBlock(
+                id=h,
+                title=f"⚠ {title}",
+                content=content,
+                source="proactive",
+                score=0.9 if severity == "urgent" else 0.7,
+                priority="critical" if severity == "urgent" else "high",
+            )
+        )
     return blocks
 
 
 # ── Doorbell layer ────────────────────────────────────────────────
+
 
 def _doorbell_blocks(session_id: str) -> list[InjectionBlock]:
     """Read /tmp/.brain_doorbell.<session_id>.jsonl if present. DOES NOT clear
@@ -402,20 +413,23 @@ def _doorbell_blocks(session_id: str) -> list[InjectionBlock]:
             priority = rec.get("priority", "high")
             source_tag = rec.get("source", "brain_loop")
             h = _hash(f"doorbell:{title}:{content[:100]}")
-            blocks.append(InjectionBlock(
-                id=h,
-                title=f"🔔 {title}",
-                content=content,
-                source=f"doorbell:{source_tag}",
-                score=1.0,  # brain explicitly pushed this — always show
-                priority=priority if priority in PRIORITY_ORDER else "high",
-            ))
+            blocks.append(
+                InjectionBlock(
+                    id=h,
+                    title=f"🔔 {title}",
+                    content=content,
+                    source=f"doorbell:{source_tag}",
+                    score=1.0,  # brain explicitly pushed this — always show
+                    priority=priority if priority in PRIORITY_ORDER else "high",
+                )
+            )
     except Exception as e:
         log.debug("doorbell read failed: %s", e)
     return blocks
 
 
 # ── Session seen tracking (dedup with decay tiers) ────────────────
+
 
 @contextmanager
 def _autonomy_db_conn():
@@ -438,8 +452,7 @@ def _get_seen(session_id: str, agent: str) -> dict[str, dict]:
     try:
         with _autonomy_db_conn() as conn:
             row = conn.execute(
-                "SELECT value FROM session_context "
-                "WHERE session_id=? AND agent=? AND key='recall_seen'",
+                "SELECT value FROM session_context " "WHERE session_id=? AND agent=? AND key='recall_seen'",
                 (session_id, agent),
             ).fetchone()
             if not row:
@@ -472,9 +485,7 @@ def _update_seen(
         pri = meta.get("priority", "medium")
         if pri == "critical":
             continue
-        if pri == "high" and turn_idx - last > 40:
-            garbage.append(h)
-        elif turn_idx - last > 20:
+        if (pri == "high" and turn_idx - last > 40) or turn_idx - last > 20:
             garbage.append(h)
     for h in garbage:
         del current[h]
@@ -526,6 +537,7 @@ def _apply_decay_filter(
 
 # ── Confidence sentinel ───────────────────────────────────────────
 
+
 def _confidence_sentinel() -> InjectionBlock:
     return InjectionBlock(
         id=_hash("sentinel:low_confidence"),
@@ -542,6 +554,7 @@ def _confidence_sentinel() -> InjectionBlock:
 
 
 # ── Budget enforcement ────────────────────────────────────────────
+
 
 def _rough_tokens(text: str) -> int:
     # ~4 chars per token on average for mixed EN/KO content
@@ -573,7 +586,9 @@ def _enforce_budget(blocks: list[InjectionBlock], limit: int) -> list[InjectionB
             if b.priority == "critical":
                 log.warning(
                     "budget_overflow_critical id=%s tokens=%d remaining=%d",
-                    b.id, tokens, limit - budget_used,
+                    b.id,
+                    tokens,
+                    limit - budget_used,
                 )
             continue
         kept.append(b)
@@ -582,6 +597,7 @@ def _enforce_budget(blocks: list[InjectionBlock], limit: int) -> list[InjectionB
 
 
 # ── Observability ─────────────────────────────────────────────────
+
 
 def _audit(
     prompt: str,
@@ -610,13 +626,11 @@ def _audit(
     # Neo4j MemRL). Fire-and-forget through the shared bg pool so retrieval
     # latency stays under the 1.2s hook budget.
     try:
-        sem_ids = [
-            b.id for b in blocks
-            if b.source.startswith("semantic") and b.score >= 0.5
-        ][:5]
+        sem_ids = [b.id for b in blocks if b.source.startswith("semantic") and b.score >= 0.5][:5]
         if sem_ids:
             import search_unified
             from memory_lifecycle import reinforce_on_access
+
             search_unified._search_bg_pool.submit(reinforce_on_access, sem_ids)
     except Exception:
         pass
@@ -624,16 +638,19 @@ def _audit(
 
 # ── Helpers ───────────────────────────────────────────────────────
 
+
 def _hash(s: str) -> str:
     return hashlib.sha256(s.encode()).hexdigest()[:16]
 
 
 def _now_iso() -> str:
-    from datetime import datetime, timezone
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    from datetime import datetime
+
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 # ── Public entry point ────────────────────────────────────────────
+
 
 def build_injection(
     prompt: str,

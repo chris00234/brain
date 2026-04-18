@@ -55,7 +55,7 @@ def _post(path: str, body: dict, timeout: int = 15) -> dict:
     )
     req.add_header("Authorization", f"Bearer {_token()}")
     req.add_header("Content-Type", "application/json")
-    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read())
 
 
@@ -63,7 +63,7 @@ def _delete(path: str, timeout: int = 10) -> None:
     req = urllib.request.Request(BRAIN_URL + path, method="DELETE")
     req.add_header("Authorization", f"Bearer {_token()}")
     try:
-        with urllib.request.urlopen(req, timeout=timeout):  # noqa: S310
+        with urllib.request.urlopen(req, timeout=timeout):
             pass
     except Exception:
         pass
@@ -103,20 +103,60 @@ def test_r1_contradictions_land_in_response_and_audit():
 
         # action_audit must carry the predictive_error audit
         rows = _query_brain_db(
-            "SELECT COUNT(*) FROM action_audit "
-            "WHERE tool='predictive_error' AND query_text LIKE ?",
+            "SELECT COUNT(*) FROM action_audit " "WHERE tool='predictive_error' AND query_text LIKE ?",
             (f"%{tag}%",),
         )
         assert rows and rows[0][0] >= 1, "R1 failed — no predictive_error audit row"
     finally:
+        # 2026-04-17: also sweep the semantic_contradictions rows this test
+        # just triggered — previously the test orphaned them, polluting
+        # /brain/doubt with stale test fixtures on every run.
         for mid in cleanup_ids:
             if mid:
                 _delete(f"/memory/{mid}")
+        try:
+            import json as _json
+            import urllib.request as _ur
+            from pathlib import Path as _P
+
+            _secret = _P("~/.openclaw/credentials/.personal_webhook_secret").expanduser().read_text().strip()
+            # Pull open contradictions containing the test tag and delete them.
+            _req_get = _ur.Request(
+                "http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections",
+                method="GET",
+            )
+            with _ur.urlopen(_req_get, timeout=3) as resp:
+                _cols = _json.loads(resp.read())
+            _contra_id = next((c["id"] for c in _cols if c["name"] == "semantic_contradictions"), None)
+            if _contra_id:
+                _get_req = _ur.Request(
+                    f"http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections/{_contra_id}/get",
+                    data=_json.dumps({"limit": 100, "include": ["documents"]}).encode(),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with _ur.urlopen(_get_req, timeout=3) as r:
+                    _data = _json.loads(r.read())
+                _orphans = [
+                    cid
+                    for cid, doc in zip(_data.get("ids", []), _data.get("documents", []) or [], strict=False)
+                    if tag in (doc or "")
+                ]
+                if _orphans:
+                    _del_req = _ur.Request(
+                        f"http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections/{_contra_id}/delete",
+                        data=_json.dumps({"ids": _orphans}).encode(),
+                        headers={"Content-Type": "application/json"},
+                        method="POST",
+                    )
+                    _ur.urlopen(_del_req, timeout=3).read()
+        except Exception:
+            pass
 
 
 # ── R2: mutable Bayesian confidence via ledger ─────────────────────────
 def test_r2_confidence_history_accumulates():
-    from brain_core.atoms_store import (  # noqa: E402
+    from brain_core.atoms_store import (
         derive_atom_id,
         get_confidence_history,
         update_atom_confidence,
@@ -158,8 +198,7 @@ def test_r4_sleep_cycle_runs_and_logs():
     completed = None
     while time.time() < deadline:
         after = _query_brain_db(
-            "SELECT id, ended_at, replay_count FROM sleep_cycles "
-            "WHERE id > ? ORDER BY id DESC LIMIT 1",
+            "SELECT id, ended_at, replay_count FROM sleep_cycles " "WHERE id > ? ORDER BY id DESC LIMIT 1",
             (baseline,),
         )
         if after and after[0][1]:
@@ -177,7 +216,7 @@ def test_r5_atom_entity_link_path_live():
     writes to entities, link_atom_entity writes to atom_entity, and both
     idempotent. Production telemetry will confirm the density.
     """
-    from brain_core.atoms_store import (  # noqa: E402
+    from brain_core.atoms_store import (
         derive_atom_id,
         link_atom_entity,
         upsert_atom,
@@ -199,9 +238,7 @@ def test_r5_atom_entity_link_path_live():
     linked = link_atom_entity(atom_id, eid, role="subject")
     assert linked, "R5 failed — link_atom_entity returned False"
 
-    rows = _query_brain_db(
-        "SELECT COUNT(*) FROM atom_entity WHERE atom_id = ?", (atom_id,)
-    )
+    rows = _query_brain_db("SELECT COUNT(*) FROM atom_entity WHERE atom_id = ?", (atom_id,))
     assert rows and rows[0][0] == 1
 
 
@@ -223,8 +260,7 @@ def test_r7_predictive_error_pair():
     )
     try:
         audit = _query_brain_db(
-            "SELECT COUNT(*) FROM action_audit WHERE tool='predictive_error' "
-            "AND query_text LIKE ?",
+            "SELECT COUNT(*) FROM action_audit WHERE tool='predictive_error' " "AND query_text LIKE ?",
             (f"%{tag}%",),
         )
         assert audit and audit[0][0] >= 1, "R7 failed — no predictive_error audit"

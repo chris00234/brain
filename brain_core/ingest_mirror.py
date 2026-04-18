@@ -130,13 +130,10 @@ def mirror_memory(
         return result
 
     # 4. llm_backlog catch-up — queue LLM re-classify if we fell to heuristic
-    if (
-        classification
-        and classification.source == "heuristic"
-        and result.atom_id
-    ):
+    if classification and classification.source == "heuristic" and result.atom_id:
         try:
             from llm_backlog import enqueue as _backlog_enqueue
+
             _backlog_enqueue(
                 "classify",
                 {
@@ -154,6 +151,7 @@ def mirror_memory(
     if classification and classification.topic_key:
         try:
             from atoms_store import _conn as _atoms_conn
+
             with _atoms_conn() as _c:
                 _c.execute("BEGIN IMMEDIATE")
                 cursor = _c.execute(

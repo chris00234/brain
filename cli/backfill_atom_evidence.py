@@ -17,6 +17,7 @@ Idempotent — every atom gets at most one backfill row. Safe to re-run.
 Usage:
     .venv/bin/python cli/backfill_atom_evidence.py [--dry-run]
 """
+
 from __future__ import annotations
 
 import argparse
@@ -38,9 +39,7 @@ def run(dry_run: bool = False) -> dict:
     try:
         total_atoms = conn.execute("SELECT COUNT(*) FROM atoms").fetchone()[0]
         missing = conn.execute(
-            "SELECT a.id FROM atoms a "
-            "LEFT JOIN atom_evidence e ON e.atom_id = a.id "
-            "WHERE e.id IS NULL"
+            "SELECT a.id FROM atoms a " "LEFT JOIN atom_evidence e ON e.atom_id = a.id " "WHERE e.id IS NULL"
         ).fetchall()
         missing_ids = [r["id"] for r in missing]
         if dry_run:

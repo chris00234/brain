@@ -12,6 +12,7 @@ Pass criteria (10-collection fan-out, single-user system):
 Usage:
   load_test.py --duration 30 --concurrency 50
 """
+
 from __future__ import annotations
 
 import argparse
@@ -69,6 +70,7 @@ async def worker(endpoint_template: str, end_at: float, results: list, loop, exe
 
 def urllib_quote(s: str) -> str:
     import urllib.parse
+
     return urllib.parse.quote_plus(s)
 
 
@@ -80,8 +82,7 @@ async def run_test(endpoint: str, duration_s: int, concurrency: int) -> dict[str
 
     with ThreadPoolExecutor(max_workers=concurrency) as executor:
         tasks = [
-            asyncio.create_task(worker(endpoint, end_at, results, loop, executor))
-            for _ in range(concurrency)
+            asyncio.create_task(worker(endpoint, end_at, results, loop, executor)) for _ in range(concurrency)
         ]
         await asyncio.gather(*tasks)
 
@@ -120,7 +121,7 @@ async def main() -> int:
 
     endpoints = [
         ("/healthz", "/healthz"),
-        ("/recall",   "/recall?q={q}&n=5"),
+        ("/recall", "/recall?q={q}&n=5"),
         ("/recall/v2", "/recall/v2?q={q}&n=5"),
     ]
 
@@ -134,7 +135,9 @@ async def main() -> int:
         results.append((name, report))
         print(f"  rps: {report['rps']}")
         print(f"  ok/err: {report['ok']}/{report['errors']}")
-        print(f"  p50/p95/p99/max: {report['p50_ms']}/{report['p95_ms']}/{report['p99_ms']}/{report['max_ms']} ms")
+        print(
+            f"  p50/p95/p99/max: {report['p50_ms']}/{report['p95_ms']}/{report['p99_ms']}/{report['max_ms']} ms"
+        )
 
     # Pass criteria
     print("\n" + "=" * 68)
@@ -157,4 +160,5 @@ async def main() -> int:
 
 if __name__ == "__main__":
     import sys
+
     sys.exit(asyncio.run(main()))

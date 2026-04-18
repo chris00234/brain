@@ -6,14 +6,14 @@ Classifies memories as durable/obsolete/pattern, then takes real action:
 - obsolete → mark memory_class=obsolete (hidden from default search)
 - pattern  → store as new semantic_memory with category=preference
 """
-import sys
+
 import json
-import re
+import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from openclaw_dispatch import dispatch_with_schema
+from cli_llm import dispatch_with_schema  # migrated 2026-04-17
 from http_pool import http_json
 from search import get_collections
 
@@ -32,6 +32,7 @@ except ImportError:
 
     def load_bearer_secret() -> str:
         return SECRET_FILE.read_text().strip()
+
 
 PROMPT_TEMPLATE = """Review these recent memories from Chris's brain. For each, classify as:
 - durable: should be promoted to canonical knowledge
@@ -58,19 +59,21 @@ def fetch_recent(days: int = 7) -> list[dict]:
     ids = resp.get("ids", [])
     docs = resp.get("documents", []) or []
     metas = resp.get("metadatas", []) or []
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
     recent = []
-    for i, d, m in zip(ids, docs, metas):
+    for i, d, m in zip(ids, docs, metas, strict=False):
         m = m or {}
         if (m.get("memory_class") or "") == "obsolete":
             continue  # skip already-obsolete
         ts = m.get("created_at", "")
         if ts >= cutoff:
-            recent.append({
-                "id": i,
-                "content": (d or "")[:200],
-                "category": m.get("category", "other"),
-            })
+            recent.append(
+                {
+                    "id": i,
+                    "content": (d or "")[:200],
+                    "category": m.get("category", "other"),
+                }
+            )
     return recent[:50]  # cap for prompt size
 
 
@@ -102,7 +105,7 @@ def mark_promotion_candidate(sem_id: str, memory_ids: list[str]) -> int:
             {
                 "ids": memory_ids,
                 "metadatas": [
-                    {"promotion_candidate": "true", "promotion_flagged_at": datetime.now(timezone.utc).isoformat()}
+                    {"promotion_candidate": "true", "promotion_flagged_at": datetime.now(UTC).isoformat()}
                     for _ in memory_ids
                 ],
             },
@@ -125,20 +128,27 @@ def store_patterns(patterns: list[dict]) -> int:
     except Exception:
         return 0
     import urllib.request
+
     stored = 0
     for p in patterns:
         rule = (p.get("rule") or "").strip()
         if not rule or len(rule) < 10:
             continue
         from_ids = p.get("from") or []
-        reason = f"Derived from memories: {', '.join(str(i) for i in from_ids[:5])}" if from_ids else "Pattern extracted by memory_nudge"
-        payload = json.dumps({
-            "content": rule[:500],
-            "category": "preference",
-            "agent": "jenna",
-            "source": "memory_nudge_pattern",
-            "reason": reason[:200],
-        }).encode()
+        reason = (
+            f"Derived from memories: {', '.join(str(i) for i in from_ids[:5])}"
+            if from_ids
+            else "Pattern extracted by memory_nudge"
+        )
+        payload = json.dumps(
+            {
+                "content": rule[:500],
+                "category": "preference",
+                "agent": "jenna",
+                "source": "memory_nudge_pattern",
+                "reason": reason[:200],
+            }
+        ).encode()
         req = urllib.request.Request(
             f"{BRAIN_URL}/memory",
             data=payload,
@@ -168,8 +178,15 @@ def main():
         print("semantic_memory collection not found")
         return 1
 
+    # 2026-04-17 token-spike fix: cap per-memory content at 500 chars + cap
+    # total memory count to 80. Prior unbounded concat of 7 days of memories
+    # was a candidate source of the 760K-token Jenna prompts that blew the
+    # weekly cache budget with 2-5% cache hit rate.
+    _MAX_MEMS = 80
+    _MAX_CHARS_PER_MEM = 500
+    _trimmed = recent[:_MAX_MEMS]
     memory_text = "\n".join(
-        f"- [{m['id']}] ({m['category']}) {m['content']}" for m in recent
+        f"- [{m['id']}] ({m['category']}) {(m['content'] or '')[:_MAX_CHARS_PER_MEM]}" for m in _trimmed
     )
     prompt = PROMPT_TEMPLATE.format(memories=memory_text)
 
@@ -230,13 +247,14 @@ def main():
                 try:
                     last_dt = datetime.fromisoformat(last_iso.replace("Z", "+00:00"))
                     if last_dt.tzinfo is None:
-                        last_dt = last_dt.replace(tzinfo=timezone.utc)
-                    age_hours = (datetime.now(timezone.utc) - last_dt).total_seconds() / 3600
+                        last_dt = last_dt.replace(tzinfo=UTC)
+                    age_hours = (datetime.now(UTC) - last_dt).total_seconds() / 3600
                     should_dispatch = age_hours >= DISPATCH_COOLDOWN_HOURS
                 except Exception:
                     pass
             if should_dispatch:
-                from openclaw_dispatch import dispatch as _dispatch
+                from cli_llm import dispatch as _dispatch
+
                 msg = (
                     f"[BRAIN MEMORY NUDGE] Reviewed {len(recent)} recent memories.\n"
                     f"  Promoted to canonical-candidate: {promoted_count}\n"
@@ -246,15 +264,20 @@ def main():
                 )
                 _dispatch(agent="jenna", message=msg, thinking="off", timeout=30)
                 DISPATCH_STATE.parent.mkdir(parents=True, exist_ok=True)
-                DISPATCH_STATE.write_text(json.dumps({
-                    "last_dispatched_at": datetime.now(timezone.utc).isoformat(),
-                    "promoted": promoted_count,
-                    "archived": archived_count,
-                    "patterns": len(patterns),
-                }, indent=2))
-                print(f"  → dispatched memory nudge to Jenna (Telegram)")
+                DISPATCH_STATE.write_text(
+                    json.dumps(
+                        {
+                            "last_dispatched_at": datetime.now(UTC).isoformat(),
+                            "promoted": promoted_count,
+                            "archived": archived_count,
+                            "patterns": len(patterns),
+                        },
+                        indent=2,
+                    )
+                )
+                print("  → dispatched memory nudge to Jenna (Telegram)")
             else:
-                print(f"  → dispatch skipped (cooldown active)")
+                print("  → dispatch skipped (cooldown active)")
         except Exception as e:
             print(f"  → dispatch failed: {e}")
     return 0

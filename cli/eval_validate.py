@@ -11,6 +11,7 @@ Usage:
   eval_validate.py [--input PATH] [--output PATH] [--private PATH]
                    [--n-results 10] [--limit N]
 """
+
 from __future__ import annotations
 
 import argparse
@@ -54,12 +55,7 @@ def _hit_in_topk(results: list, expected_source: str, expected_content: str) -> 
         content = (r.get("content") or "").lower()
         coll = (r.get("collection") or "").lower()
         stype = (r.get("source_type") or "").lower()
-        if exp_src and (
-            exp_src in path
-            or exp_src in title
-            or exp_src == coll
-            or exp_src == stype
-        ):
+        if exp_src and (exp_src in path or exp_src in title or exp_src == coll or exp_src == stype):
             return True
         if exp_con and exp_con in content:
             return True
@@ -70,10 +66,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Validate mined eval candidates")
     parser.add_argument("--input", type=Path, default=DEFAULT_INPUT)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
-    parser.add_argument("--private", type=Path, default=DEFAULT_PRIVATE,
-                        help="Path for candidates flagged sensitive")
-    parser.add_argument("--n-results", type=int, default=10,
-                        help="Top-N to check (widened from eval's default 5)")
+    parser.add_argument(
+        "--private", type=Path, default=DEFAULT_PRIVATE, help="Path for candidates flagged sensitive"
+    )
+    parser.add_argument(
+        "--n-results", type=int, default=10, help="Top-N to check (widened from eval's default 5)"
+    )
     parser.add_argument("--limit", type=int, default=0, help="Only process first N (0 = all)")
     args = parser.parse_args()
 
@@ -97,7 +95,7 @@ def main() -> int:
             continue
 
     if args.limit > 0:
-        candidates = candidates[:args.limit]
+        candidates = candidates[: args.limit]
 
     print(f"loaded {len(candidates)} candidates from {args.input}")
 

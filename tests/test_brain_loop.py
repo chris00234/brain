@@ -10,9 +10,7 @@ Run:
 
 from __future__ import annotations
 
-import sqlite3
 import sys
-import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -20,10 +18,10 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "brain_core"))
 
-import brain_loop  # noqa: E402
-
+import brain_loop
 
 # ── Fixtures ──────────────────────────────────────────────
+
 
 @pytest.fixture(autouse=True)
 def _isolate_seen_table(tmp_path, monkeypatch):
@@ -49,6 +47,7 @@ def sample_obs():
 
 
 # ── Seen / cooldown tests ────────────────────────────────
+
 
 def test_mark_seen_persists_across_calls(sample_obs):
     """First mark_seen → row present; seen_recently returns True."""
@@ -87,6 +86,7 @@ def test_seen_cooldown_default_used_for_unknown_kind():
 
 
 # ── Reflect tests ────────────────────────────────────────
+
 
 def test_reflect_stalled_goal_chris_owned_pushes_to_claude():
     """Chris-owned stalled goal + active claude session → PUSH_TO_CLAUDE."""
@@ -153,9 +153,9 @@ def test_reflect_contradiction_dispatches_sage():
     )
     decisions = brain_loop._reflect([obs])
     agent_dispatches = [
-        d for d in decisions
-        if d.kind == brain_loop.DecisionKind.DISPATCH_AGENT
-        and d.action_payload.get("agent") == "sage"
+        d
+        for d in decisions
+        if d.kind == brain_loop.DecisionKind.DISPATCH_AGENT and d.action_payload.get("agent") == "sage"
     ]
     assert len(agent_dispatches) == 1
 
@@ -178,6 +178,7 @@ def test_reflect_empty_observations_returns_empty():
 
 
 # ── Decide gate tests ────────────────────────────────────
+
 
 def test_decide_downgrades_l0_to_observe():
     """When autonomy.authorize returns L0, the decision downgrades to OBSERVE_ONLY."""
@@ -238,6 +239,7 @@ def test_decide_l2_preserves_kind():
 
 def test_decide_rate_limits_repeated_pair():
     """Per (kind, subject) rate limit caps at 3/hour."""
+
     class _FakeDecision:
         level = "L3"
         allowed = True
@@ -262,6 +264,7 @@ def test_decide_rate_limits_repeated_pair():
 
 
 # ── Tick end-to-end (mocked sensors) ─────────────────────
+
 
 def test_tick_runs_all_phases_without_crash(monkeypatch):
     """tick() should run PERCEIVE → REFLECT → DECIDE → ACT → JOURNAL even when

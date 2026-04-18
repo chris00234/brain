@@ -3,6 +3,7 @@
 Prevents concurrent ingest adapters from corrupting shared state files.
 Uses fcntl.flock for advisory locking + atomic rename for crash safety.
 """
+
 import fcntl
 import json
 import os
@@ -22,7 +23,7 @@ def load_state(path: Path) -> dict:
     try:
         if not path.exists():
             return {}
-        with open(path, "r") as f:
+        with open(path) as f:
             return json.loads(f.read())
     except (json.JSONDecodeError, FileNotFoundError):
         return {}

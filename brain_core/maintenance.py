@@ -10,19 +10,18 @@ to Jenna if integrity check fails.
 from __future__ import annotations
 
 import json
-import os
 import re
 import sqlite3
 import subprocess
+import subprocess as _sp
 import sys
 import tempfile
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-import subprocess as _sp
-
 try:
-    from config import BRAIN_LOGS_DIR as LOGS_DIR, JOBS_LOGS_DIR, CHROMA_DB, OPENCLAW_BIN
+    from config import BRAIN_LOGS_DIR as LOGS_DIR
+    from config import CHROMA_DB, JOBS_LOGS_DIR, OPENCLAW_BIN
 except ImportError:
     LOGS_DIR = Path("/Users/chrischo/server/brain/logs")
     JOBS_LOGS_DIR = LOGS_DIR / "jobs"
@@ -41,8 +40,9 @@ def rotate_logs() -> dict:
     opened `w` mode which truncates, racing any in-flight writes).
     """
     import os as _os
+
     rotated = 0
-    cutoff = datetime.now(timezone.utc) - timedelta(days=MAX_LOG_AGE_DAYS)
+    cutoff = datetime.now(UTC) - timedelta(days=MAX_LOG_AGE_DAYS)
 
     def _atomic_tail_rewrite(f: Path, lines: int) -> bool:
         try:
@@ -60,7 +60,7 @@ def rotate_logs() -> dict:
         for f in log_dir.glob("*.log"):
             try:
                 stat = f.stat()
-                too_old = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc) < cutoff
+                too_old = datetime.fromtimestamp(stat.st_mtime, tz=UTC) < cutoff
                 too_big = stat.st_size > MAX_LOG_SIZE
                 if too_old or too_big:
                     if _atomic_tail_rewrite(f, 100):
@@ -104,6 +104,7 @@ def check_chroma_integrity() -> dict:
         tmp_db = Path(tmpdir) / "check.sqlite3"
         try:
             import shutil
+
             shutil.copy2(CHROMA_DB, tmp_db)
             for suffix in ("-shm", "-wal"):
                 src = CHROMA_DB.parent / f"chroma.sqlite3{suffix}"
@@ -129,7 +130,8 @@ def check_chroma_integrity() -> dict:
     print(f"[chroma_integrity] {msg}")
     try:
         sys.path.insert(0, str(Path(__file__).parent))
-        from openclaw_dispatch import dispatch
+        from cli_llm import dispatch
+
         dispatch(
             agent="jenna",
             message=msg,
@@ -177,13 +179,23 @@ def vacuum_embed_cache(max_size_mb: int = 100, max_age_days: int = 14) -> dict:
         else:
             # Fallback: rowid-based for legacy entries without timestamps
             keep = int(count_before * 0.8)
-            conn.execute("DELETE FROM embeddings WHERE rowid NOT IN (SELECT rowid FROM embeddings ORDER BY rowid DESC LIMIT ?)", (keep,))
+            conn.execute(
+                "DELETE FROM embeddings WHERE rowid NOT IN (SELECT rowid FROM embeddings ORDER BY rowid DESC LIMIT ?)",
+                (keep,),
+            )
         conn.execute("VACUUM")
         count_after = conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
         conn.close()
         new_size = EMBED_CACHE_DB.stat().st_size / 1024 / 1024
-        print(f"[embed_cache_vacuum] {count_before} → {count_after} entries, {size_mb:.0f}MB → {new_size:.0f}MB")
-        return {"status": "vacuumed", "before": count_before, "after": count_after, "size_mb": round(new_size, 1)}
+        print(
+            f"[embed_cache_vacuum] {count_before} → {count_after} entries, {size_mb:.0f}MB → {new_size:.0f}MB"
+        )
+        return {
+            "status": "vacuumed",
+            "before": count_before,
+            "after": count_after,
+            "size_mb": round(new_size, 1),
+        }
     except Exception as e:
         return {"status": "error", "reason": str(e)}
 
@@ -223,6 +235,7 @@ def rotate_jsonl_logs(max_lines: int = 500) -> dict:
     known-noisy logs.
     """
     import os as _os
+
     AGGRESSIVE_CAPS = {
         "dispatch-failures.jsonl": 100,  # ~5KB per line → ~500KB ceiling
     }
@@ -264,7 +277,9 @@ def prune_scheduler_history(keep_days: int = 30) -> dict:
         conn.close()
         deleted = before - after
         if deleted:
-            print(f"[prune_scheduler_history] {before} → {after} rows (deleted {deleted} older than {keep_days}d)")
+            print(
+                f"[prune_scheduler_history] {before} → {after} rows (deleted {deleted} older than {keep_days}d)"
+            )
         return {"status": "ok", "before": before, "after": after, "deleted": deleted}
     except Exception as e:
         return {"status": "error", "reason": str(e)}
@@ -278,19 +293,52 @@ def prune_raw_inbox(max_age_days: int = 30) -> dict:
             return {"status": "skip"}
         orphaned_dir = inbox.parent / "orphaned"
         orphaned_dir.mkdir(parents=True, exist_ok=True)
-        cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
+        cutoff = datetime.now(UTC) - timedelta(days=max_age_days)
         moved = 0
         for f in inbox.glob("*.json"):
             try:
-                if datetime.fromtimestamp(f.stat().st_mtime, tz=timezone.utc) < cutoff:
+                if datetime.fromtimestamp(f.stat().st_mtime, tz=UTC) < cutoff:
                     f.rename(orphaned_dir / f.name)
                     moved += 1
             except Exception:
                 pass
         orphaned_count = sum(1 for _ in orphaned_dir.glob("*.json"))
         if moved:
-            print(f"[prune_raw_inbox] moved {moved} records older than {max_age_days}d to raw/orphaned/ (total orphaned: {orphaned_count})")
+            print(
+                f"[prune_raw_inbox] moved {moved} records older than {max_age_days}d to raw/orphaned/ (total orphaned: {orphaned_count})"
+            )
         return {"status": "ok", "moved": moved, "orphaned_total": orphaned_count}
+    except Exception as e:
+        return {"status": "error", "reason": str(e)}
+
+
+def prune_raw_orphaned(max_age_days: int = 180) -> dict:
+    """Delete raw/orphaned/ records older than max_age_days.
+
+    2026-04-16 Tier 2 fix: prune_raw_inbox only moves old inbox records
+    into raw/orphaned/; nothing ever cleaned orphaned itself, so the
+    directory grew without bound. 180-day retention is long enough to
+    preserve any forensic lookups after a bad promotion decision.
+    """
+    try:
+        orphaned = Path("/Users/chrischo/server/knowledge/raw/orphaned")
+        if not orphaned.exists():
+            return {"status": "skip"}
+        cutoff = datetime.now(UTC) - timedelta(days=max_age_days)
+        deleted = 0
+        for f in orphaned.glob("*.json"):
+            try:
+                if datetime.fromtimestamp(f.stat().st_mtime, tz=UTC) < cutoff:
+                    f.unlink()
+                    deleted += 1
+            except Exception:
+                pass
+        remaining = sum(1 for _ in orphaned.glob("*.json"))
+        if deleted:
+            print(
+                f"[prune_raw_orphaned] deleted {deleted} records older than {max_age_days}d (remaining: {remaining})"
+            )
+        return {"status": "ok", "deleted": deleted, "remaining": remaining}
     except Exception as e:
         return {"status": "error", "reason": str(e)}
 
@@ -318,8 +366,13 @@ INFRA_KEYWORDS = re.compile(
     r"\b(docker|container|service|port|launchd|plist|nginx|chromadb|ollama|neo4j|orbstack)\b",
     re.IGNORECASE,
 )
-PORT_RE = re.compile(r"\bport\s*[:=]?\s*(\d{2,5})\b|\b(\d{4,5})\s*/\s*tcp\b|localhost:(\d{2,5})|127\.0\.0\.1:(\d{2,5})", re.IGNORECASE)
-DOCKER_NAME_RE = re.compile(r"\b(container|service|name)\s*[:=]?\s*[\"']?([a-z][a-z0-9_-]+)[\"']?", re.IGNORECASE)
+PORT_RE = re.compile(
+    r"\bport\s*[:=]?\s*(\d{2,5})\b|\b(\d{4,5})\s*/\s*tcp\b|localhost:(\d{2,5})|127\.0\.0\.1:(\d{2,5})",
+    re.IGNORECASE,
+)
+DOCKER_NAME_RE = re.compile(
+    r"\b(container|service|name)\s*[:=]?\s*[\"']?([a-z][a-z0-9_-]+)[\"']?", re.IGNORECASE
+)
 LAUNCHD_RE = re.compile(r"\b(ai\.openclaw\.[a-z0-9._-]+)\b")
 
 
@@ -365,13 +418,15 @@ def validate_infra_facts() -> dict:
     """
     notes = _find_infra_notes()
     if not notes:
-        return {"checked": 0, "stale": [], "timestamp": datetime.now(timezone.utc).isoformat()}
+        return {"checked": 0, "stale": [], "timestamp": datetime.now(UTC).isoformat()}
 
     # Gather live state
     try:
         docker_out = subprocess.run(
             ["docker", "ps", "--format", "{{.Names}}"],
-            capture_output=True, text=True, timeout=15,
+            capture_output=True,
+            text=True,
+            timeout=15,
         )
         live_docker = set(docker_out.stdout.strip().splitlines()) if docker_out.returncode == 0 else set()
     except Exception:
@@ -380,7 +435,9 @@ def validate_infra_facts() -> dict:
     try:
         launchd_out = subprocess.run(
             ["launchctl", "list"],
-            capture_output=True, text=True, timeout=15,
+            capture_output=True,
+            text=True,
+            timeout=15,
         )
         live_launchd = set()
         for line in launchd_out.stdout.splitlines()[1:]:  # skip header
@@ -394,7 +451,9 @@ def validate_infra_facts() -> dict:
         try:
             r = subprocess.run(
                 ["lsof", "-i", f":{port}", "-sTCP:LISTEN"],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             return r.returncode == 0 and len(r.stdout.strip().splitlines()) > 1
         except Exception:
@@ -429,7 +488,7 @@ def validate_infra_facts() -> dict:
     result = {
         "checked": checked,
         "stale": stale,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
     }
 
     # Persist
@@ -453,7 +512,7 @@ def incremental_stale_cleanup() -> dict:
     whose source files no longer exist on disk. Does not require re-embedding.
     """
     try:
-        from indexer import chroma_api, _get_collection_id
+        from indexer import _get_collection_id, chroma_api
     except ImportError:
         return {"status": "error", "reason": "indexer not importable"}
 
@@ -465,26 +524,37 @@ def incremental_stale_cleanup() -> dict:
         if not col_id:
             continue
         try:
-            count = chroma_api("GET", f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/count")
+            count = chroma_api(
+                "GET", f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/count"
+            )
             count = int(count) if isinstance(count, (int, str)) else 0
             if count == 0:
                 continue
-            resp = chroma_api("POST", f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/get", {
-                "limit": count, "include": ["metadatas"],
-            })
+            resp = chroma_api(
+                "POST",
+                f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/get",
+                {
+                    "limit": count,
+                    "include": ["metadatas"],
+                },
+            )
             ids = resp.get("ids", [])
             metas = resp.get("metadatas", [])
             stale = []
-            for doc_id, meta in zip(ids, metas):
+            for doc_id, meta in zip(ids, metas, strict=False):
                 source = (meta or {}).get("source", "")
                 if source and source.startswith("/") and not Path(source).exists():
                     stale.append(doc_id)
             if stale:
                 BATCH = 20
                 for s in range(0, len(stale), BATCH):
-                    chroma_api("POST", f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/delete", {
-                        "ids": stale[s:s+BATCH],
-                    })
+                    chroma_api(
+                        "POST",
+                        f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/delete",
+                        {
+                            "ids": stale[s : s + BATCH],
+                        },
+                    )
                 print(f"[stale_cleanup] {col_name}: removed {len(stale)} orphaned docs")
                 total_cleaned += len(stale)
         except Exception as e:
@@ -495,13 +565,25 @@ def incremental_stale_cleanup() -> dict:
 
 if __name__ == "__main__":
     import argparse
+
     parser = argparse.ArgumentParser()
-    parser.add_argument("task", choices=[
-        "rotate_logs", "chroma_integrity", "vacuum_embed_cache",
-        "prune_memory_access", "rotate_jsonl", "prune_raw_inbox",
-        "vacuum_autonomy_db", "stale_cleanup", "validate_infra", "all_cleanup",
-        "prune_scheduler_history",
-    ])
+    parser.add_argument(
+        "task",
+        choices=[
+            "rotate_logs",
+            "chroma_integrity",
+            "vacuum_embed_cache",
+            "prune_memory_access",
+            "rotate_jsonl",
+            "prune_raw_inbox",
+            "prune_raw_orphaned",
+            "vacuum_autonomy_db",
+            "stale_cleanup",
+            "validate_infra",
+            "all_cleanup",
+            "prune_scheduler_history",
+        ],
+    )
     args = parser.parse_args()
 
     if args.task == "rotate_logs":
@@ -516,6 +598,8 @@ if __name__ == "__main__":
         print(json.dumps(rotate_jsonl_logs()))
     elif args.task == "prune_raw_inbox":
         print(json.dumps(prune_raw_inbox()))
+    elif args.task == "prune_raw_orphaned":
+        print(json.dumps(prune_raw_orphaned()))
     elif args.task == "vacuum_autonomy_db":
         print(json.dumps(vacuum_autonomy_db()))
     elif args.task == "stale_cleanup":

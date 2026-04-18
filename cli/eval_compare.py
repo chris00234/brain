@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
 import sys
 import time
 import urllib.parse
@@ -291,6 +290,12 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=0, help="Only run first N cases (0 = all)")
     parser.add_argument("--json", action="store_true")
     parser.add_argument(
+        "--include-per-test",
+        action="store_true",
+        help="Keep per_test case results in JSON output. Required by LoRA A/B gate "
+        "for per-query worst-regression check (2026-04-16 fix).",
+    )
+    parser.add_argument(
         "--eval-set",
         type=Path,
         default=DEFAULT_EVAL_SET,
@@ -375,8 +380,8 @@ def main() -> int:
     report = {
         "cases": len(cases),
         "v2_mode": mode,
-        "baseline": {k: v for k, v in baseline.items() if k != "per_test"},
-        "v2": {k: v for k, v in v2.items() if k != "per_test"},
+        "baseline": {k: v for k, v in baseline.items() if k != "per_test" or args.include_per_test},
+        "v2": {k: v for k, v in v2.items() if k != "per_test" or args.include_per_test},
     }
     if ragas_agg:
         report["ragas"] = ragas_agg

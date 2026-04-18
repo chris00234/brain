@@ -24,8 +24,7 @@ import json
 import sqlite3
 import sys
 import time
-from datetime import datetime, timezone
-from pathlib import Path
+from datetime import UTC, datetime
 
 sys.path.insert(0, "/Users/chrischo/server/brain/brain_core")
 
@@ -53,19 +52,25 @@ def _save_state(state: dict) -> None:
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Backfill v3 hygiene + entity extraction for existing atoms.")
+    parser = argparse.ArgumentParser(
+        description="Backfill v3 hygiene + entity extraction for existing atoms."
+    )
     parser.add_argument("--limit", type=int, default=0, help="Max atoms to process (0=all)")
     parser.add_argument("--dry-run", action="store_true", help="Show count, don't call LLM")
     parser.add_argument("--skip-entities", action="store_true", help="Hygiene only (skip entity extraction)")
     parser.add_argument("--skip-classify", action="store_true", help="Entity only (skip classifier)")
-    parser.add_argument("--use-llm-classify", action="store_true",
-                        help="Use Sage LLM for classification (default: heuristic fallback, 10x faster)")
-    parser.add_argument("--min-text-len", type=int, default=40,
-                        help="Skip atoms with text shorter than N chars")
+    parser.add_argument(
+        "--use-llm-classify",
+        action="store_true",
+        help="Use Sage LLM for classification (default: heuristic fallback, 10x faster)",
+    )
+    parser.add_argument(
+        "--min-text-len", type=int, default=40, help="Skip atoms with text shorter than N chars"
+    )
     args = parser.parse_args()
 
     state = _load_state()
@@ -97,8 +102,8 @@ def main() -> int:
         return 0
 
     # Lazy imports — keep dry-run fast
-    from ingest_classifier import classify
     from entity_graph import extract_and_store_entities
+    from ingest_classifier import classify
 
     processed_this_run = 0
     errors = 0

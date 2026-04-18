@@ -12,7 +12,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "brain_core"))
 
-from neo4j_client import run_query, run_write, is_healthy, ensure_schema
+from datetime import UTC
+
+from neo4j_client import ensure_schema, is_healthy, run_query, run_write
 
 DB_PATH = Path("/Users/chrischo/server/brain/logs/autonomy.db")
 ONTOLOGY_PATH = Path("/Users/chrischo/.openclaw/memory/ontology/graph.jsonl")
@@ -43,12 +45,15 @@ def migrate_sqlite():
         )
 
     # Relations
-    relations = [dict(r) for r in conn.execute(
-        "SELECT r.*, s.name AS src_name, t.name AS tgt_name "
-        "FROM entity_relations r "
-        "JOIN entities s ON r.source_entity = s.id "
-        "JOIN entities t ON r.target_entity = t.id"
-    ).fetchall()]
+    relations = [
+        dict(r)
+        for r in conn.execute(
+            "SELECT r.*, s.name AS src_name, t.name AS tgt_name "
+            "FROM entity_relations r "
+            "JOIN entities s ON r.source_entity = s.id "
+            "JOIN entities t ON r.target_entity = t.id"
+        ).fetchall()
+    ]
     print(f"SQLite relations: {len(relations)}")
     for rel in relations:
         run_write(
@@ -58,9 +63,12 @@ def migrate_sqlite():
             "ON CREATE SET r.relationship = $rel_type, r.confidence = $conf, "
             "  r.created_at = $created, r.source_memory_id = $mid",
             {
-                "src": rel["src_name"], "tgt": rel["tgt_name"],
-                "rid": rel["id"], "rel_type": rel["relationship"],
-                "conf": rel["confidence"], "created": rel["created_at"],
+                "src": rel["src_name"],
+                "tgt": rel["tgt_name"],
+                "rid": rel["id"],
+                "rel_type": rel["relationship"],
+                "conf": rel["confidence"],
+                "created": rel["created_at"],
                 "mid": rel.get("source_memory_id", ""),
             },
         )
@@ -100,18 +108,21 @@ def migrate_ontology():
         if record.get("op") == "create" and "entity" in record:
             ent = record["entity"]
             props = ent.get("properties", {})
-            entities.append({
-                "id": ent["id"],
-                "name": props.get("name", ent["id"]).lower(),
-                "entity_type": ent.get("type", "concept").lower(),
-            })
+            entities.append(
+                {
+                    "id": ent["id"],
+                    "name": props.get("name", ent["id"]).lower(),
+                    "entity_type": ent.get("type", "concept").lower(),
+                }
+            )
         elif record.get("op") == "relate":
             relations.append({"from_id": record["from"], "to_id": record["to"]})
 
     print(f"Ontology entities: {len(entities)}")
     if entities:
-        from datetime import datetime, timezone
-        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        from datetime import datetime
+
+        now = datetime.now(UTC).isoformat(timespec="seconds")
         run_write(
             "UNWIND $entities AS e "
             "MERGE (n:Entity {name: e.name}) "
@@ -144,7 +155,9 @@ def verify():
     )
     if stats:
         s = stats[0]
-        print(f"\nNeo4j counts: entities={s['entities']}, relations={s['relations']}, memory_access={s['access']}")
+        print(
+            f"\nNeo4j counts: entities={s['entities']}, relations={s['relations']}, memory_access={s['access']}"
+        )
     else:
         print("\nVerification query returned no results")
 

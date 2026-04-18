@@ -133,10 +133,17 @@ if [ "$BASELINE_NEEDED" = "1" ]; then
     fi
   fi
 else
-  # Serve cached baseline without spawning python.
-  if [ -f "$CACHE_FILE" ]; then
-    cat "$CACHE_FILE"
-  fi
+  # 2026-04-17 injection-noise fix: the full baseline (15 context blocks,
+  # recent sessions, recent agent conversations, ~15KB) was being printed
+  # on EVERY turn. Claude already has the baseline from turn 0 — repeating
+  # it wastes context + makes UserPromptSubmit output visually noisy.
+  #
+  # New behavior: turn 1+ skips baseline entirely. Only per-turn active
+  # recall (prompt-relevant blocks) and doorbell messages are injected.
+  # Baseline only re-emits when cache expires AND a refresh actually
+  # happened (BASELINE_NEEDED=1 path above), giving Claude an up-to-date
+  # snapshot of focus/sessions/messages every ~5 minutes.
+  :
 fi
 
 # ── Step 3: Per-turn active recall ────────────────────────────────
@@ -146,7 +153,19 @@ fi
 # Endpoint: POST /recall/active (deployed in Phase 1.2). Until that ships, this
 # block silently no-ops (curl returns 404 → jq returns empty → nothing printed).
 if [ -n "$PROMPT" ]; then
-  SECRET=$(cat "$HOME/.openclaw/credentials/.personal_webhook_secret" 2>/dev/null || echo "")
+  # 2026-04-16 R-6: secret passed via header file to avoid process-table
+  # exposure (matches server_watchdog.sh posture). Previous `-H "Auth: Bearer $SECRET"`
+  # made the secret visible in `ps aux` for any user.
+  SECRET_FILE_CB="$HOME/.openclaw/credentials/.personal_webhook_secret"
+  if [ -r "$SECRET_FILE_CB" ]; then
+    HEADER_FILE_CB=$(mktemp -t claude_boot_hdr_XXXXXX)
+    trap 'rm -f "$HEADER_FILE_CB" 2>/dev/null' EXIT HUP INT TERM
+    { printf 'Authorization: Bearer '; cat "$SECRET_FILE_CB"; printf '\n'; } > "$HEADER_FILE_CB"
+    chmod 600 "$HEADER_FILE_CB"
+    SECRET="present"  # sentinel — actual bytes stay in HEADER_FILE_CB
+  else
+    SECRET=""
+  fi
   if [ -n "$SECRET" ]; then
     REQ_BODY=$(printf '%s' "$PAYLOAD" | jq -nc \
       --arg p "$PROMPT" \
@@ -157,7 +176,7 @@ if [ -n "$PROMPT" ]; then
       '{prompt:$p, session_id:$s, turn_idx:$t, agent:$a, cwd:$c}' 2>/dev/null || echo "")
     if [ -n "$REQ_BODY" ]; then
       ACTIVE_RESP=$(curl -sS --max-time 1.2 \
-        -H "Authorization: Bearer $SECRET" \
+        -H "@$HEADER_FILE_CB" \
         -H "Content-Type: application/json" \
         --data "$REQ_BODY" \
         "${BRAIN_URL}/recall/active" 2>/dev/null || echo "")
@@ -202,13 +221,25 @@ CWD=$(pwd)
 CWD_NAME=$(basename "$CWD")
 
 if [ -n "$CWD_NAME" ] && [ "$CWD_NAME" != "~" ] && [ "$CWD_NAME" != "/" ] && [ "$CWD_NAME" != "chrischo" ]; then
-  SECRET=$(cat "$HOME/.openclaw/credentials/.personal_webhook_secret" 2>/dev/null || echo "")
+  # 2026-04-16 R-6: secret passed via header file to avoid process-table
+  # exposure (matches server_watchdog.sh posture). Previous `-H "Auth: Bearer $SECRET"`
+  # made the secret visible in `ps aux` for any user.
+  SECRET_FILE_CB="$HOME/.openclaw/credentials/.personal_webhook_secret"
+  if [ -r "$SECRET_FILE_CB" ]; then
+    HEADER_FILE_CB=$(mktemp -t claude_boot_hdr_XXXXXX)
+    trap 'rm -f "$HEADER_FILE_CB" 2>/dev/null' EXIT HUP INT TERM
+    { printf 'Authorization: Bearer '; cat "$SECRET_FILE_CB"; printf '\n'; } > "$HEADER_FILE_CB"
+    chmod 600 "$HEADER_FILE_CB"
+    SECRET="present"  # sentinel — actual bytes stay in HEADER_FILE_CB
+  else
+    SECRET=""
+  fi
   if [ -n "$SECRET" ]; then
     export BRAIN_BOOT_CONTEXT="$RESULT"
     ENCODED_CWD=$(printf '%s' "$CWD_NAME" | "$BRAIN_PY" -c "import sys, urllib.parse; print(urllib.parse.quote(sys.stdin.read().strip(), safe=''))" 2>/dev/null)
     [ -z "$ENCODED_CWD" ] && ENCODED_CWD="$CWD_NAME"
     curl -s --max-time 2 \
-      -H "Authorization: Bearer $SECRET" \
+      -H "@$HEADER_FILE_CB" \
       "${BRAIN_URL}/recall?q=${ENCODED_CWD}&collection=canonical&n=5" 2>/dev/null | \
       "$BRAIN_PY" -c "
 import sys, json, os

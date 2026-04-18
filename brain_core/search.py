@@ -29,7 +29,7 @@ import threading
 import time
 
 log = logging.getLogger("brain.search")
-from collections import OrderedDict, defaultdict
+from collections import OrderedDict
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -49,10 +49,15 @@ _embed_mem_cache: "OrderedDict[str, list[float]]" = OrderedDict()
 _EMBED_CACHE_MAX = 2048
 
 try:
-    from embed_cache import cache_get as _db_cache_get, cache_put as _db_cache_put
+    from embed_cache import cache_get as _db_cache_get
+    from embed_cache import cache_put as _db_cache_put
 except ImportError:
-    def _db_cache_get(key): return None
-    def _db_cache_put(key, emb): pass
+
+    def _db_cache_get(key):
+        return None
+
+    def _db_cache_put(key, emb):
+        pass
 
 
 def _cache_key(text: str) -> str:
@@ -61,12 +66,30 @@ def _cache_key(text: str) -> str:
     except ImportError:
         _model = "blaifa/multilingual-e5-large-instruct"
     # Scope by model so stale vectors from a prior model can't hit.
-    return hashlib.md5(f"{_model}:{text[:1200]}".encode("utf-8")).hexdigest()
+    return hashlib.md5(f"{_model}:{text[:1200]}".encode()).hexdigest()
 
 
 def get_embedding(text, prefix="query"):
     prompted = f"{prefix}: {text[:1000]}" if prefix else text[:1000]
-    key = _cache_key(prompted)
+
+    # 2026-04-17: LoRA adapter aware. When brain_core.indexer has a loaded
+    # adapter (via POST /admin/embed_adapter), route through it. The cache
+    # key folds in the adapter path so base + adapter vectors don't collide.
+    # Previously this function was the ACTUAL recall-path embedder (search.py
+    # is what hybrid_search calls) while indexer.py had its own get_embedding
+    # that carried my LoRA integration — zero-delta on A/B gate because the
+    # adapter was loaded but never consulted on the hot path.
+    _adapter_path = None
+    try:
+        import indexer as _idx
+
+        if _idx._lora_embedder is not None:
+            _adapter_path = _idx._lora_embedder[0]
+    except Exception:
+        pass
+
+    key_material = prompted if _adapter_path is None else f"{_adapter_path}|{prompted}"
+    key = _cache_key(key_material)
     with _embed_lock:
         cached = _embed_mem_cache.get(key)
         if cached is not None:
@@ -80,6 +103,22 @@ def get_embedding(text, prefix="query"):
             if len(_embed_mem_cache) > _EMBED_CACHE_MAX:
                 _embed_mem_cache.popitem(last=False)
         return db_cached
+
+    # LoRA path: delegate to indexer's in-process sentence-transformers
+    if _adapter_path is not None:
+        try:
+            import indexer as _idx
+
+            emb = _idx._embed_via_lora(text, prefix)
+            if emb:
+                with _embed_lock:
+                    _embed_mem_cache[key] = emb
+                    if len(_embed_mem_cache) > _EMBED_CACHE_MAX:
+                        _embed_mem_cache.popitem(last=False)
+                _db_cache_put(key, emb)
+                return emb
+        except Exception:
+            pass  # fall through to Ollama on any LoRA failure
 
     try:
         from config import EMBED_MODEL as _model
@@ -145,42 +184,77 @@ def vector_search(col_id, embedding, n=10, where=None):
 
 def keyword_score(query, document):
     """Word-boundary keyword matching score (0-1)."""
-    query_terms = set(re.findall(r'\w+', query.lower()))
+    query_terms = set(re.findall(r"\w+", query.lower()))
     if not query_terms:
         return 0.0
-    doc_terms = set(re.findall(r'\w+', document.lower()))
+    doc_terms = set(re.findall(r"\w+", document.lower()))
     matches = len(query_terms & doc_terms)
     return matches / len(query_terms)
 
 
 # Infrastructure topic keywords (English + Korean) — when present, boost config files
 INFRA_KEYWORDS = {
-    'docker', 'container', 'service', 'port', 'network', 'volume', 'compose',
-    'nginx', 'proxy', 'server', 'config', 'configuration', 'database', 'storage',
-    'backup', 'monitoring', 'resource', 'limit', 'cpu', 'memory',
-    '도커', '컨테이너', '서비스', '포트', '네트워크', '볼륨',
-    '엔진엑스', '프록시', '서버', '설정', '구성', '데이터베이스', '저장소',
-    '백업', '모니터링', '리소스', '제한', '메모리',
+    "docker",
+    "container",
+    "service",
+    "port",
+    "network",
+    "volume",
+    "compose",
+    "nginx",
+    "proxy",
+    "server",
+    "config",
+    "configuration",
+    "database",
+    "storage",
+    "backup",
+    "monitoring",
+    "resource",
+    "limit",
+    "cpu",
+    "memory",
+    "도커",
+    "컨테이너",
+    "서비스",
+    "포트",
+    "네트워크",
+    "볼륨",
+    "엔진엑스",
+    "프록시",
+    "서버",
+    "설정",
+    "구성",
+    "데이터베이스",
+    "저장소",
+    "백업",
+    "모니터링",
+    "리소스",
+    "제한",
+    "메모리",
 }
 
 CONFIG_PATH_HINTS = (
-    'docker-compose', '/nginx/', '.conf', 'conf.d',
+    "docker-compose",
+    "/nginx/",
+    ".conf",
+    "conf.d",
 )
 
 
 def source_boost(query, metadata):
     """Boost score when query mentions a service or infra topic that matches the source."""
     query_lower = query.lower()
-    source = metadata.get('source', '').lower()
-    service = metadata.get('service', '').lower()
+    source = metadata.get("source", "").lower()
+    service = metadata.get("service", "").lower()
     best = 0.0
 
     # Service-name boost (English ASCII terms)
-    terms = set(re.findall(r'[a-z][a-z0-9_-]+', query_lower))
+    terms = set(re.findall(r"[a-z][a-z0-9_-]+", query_lower))
     for term in terms:
         if len(term) >= 3:
             # Strong boost: exact service directory or service metadata match
-            if f'/{term}/' in source or f'/{term}.' in source or term == service:
+            if f"/{term}/" in source or f"/{term}." in source or term == service:
                 best = max(best, 0.45)
             # Medium boost: term anywhere in source path
             elif term in source:
@@ -193,7 +267,7 @@ def source_boost(query, metadata):
     if has_infra_term:
         if any(hint in source for hint in CONFIG_PATH_HINTS):
             best = max(best, 0.15)
-        elif source.endswith(('agents.md', 'memory.md', 'tools.md', 'soul.md', 'identity.md')):
+        elif source.endswith(("agents.md", "memory.md", "tools.md", "soul.md", "identity.md")):
             # Slight penalty: agent docs match Korean infra keywords too easily
             best -= 0.05
 
@@ -205,15 +279,16 @@ def expand_query(query):
     variants = [query]
     # Korean/English mix — add both
     # Simple heuristic: if query has Korean, also search key English terms
-    english_words = re.findall(r'[a-zA-Z][a-zA-Z0-9_.-]+', query)
-    korean_parts = re.findall(r'[가-힣]+', query)
+    english_words = re.findall(r"[a-zA-Z][a-zA-Z0-9_.-]+", query)
+    korean_parts = re.findall(r"[가-힣]+", query)
     if english_words and korean_parts:
-        variants.append(' '.join(english_words))
+        variants.append(" ".join(english_words))
     return variants[:2]  # max 2 variants
 
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import atexit as _atexit
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 # Pool sized to cover the typical fan-out in one wave:
 # 7 _ALL_COLLECTIONS × up to 2 bilingual variants = up to 14 tasks.
 # Earlier note said "bump to 16 showed zero rag_ms delta" — that was measured
@@ -289,35 +364,51 @@ def hybrid_search(query, collections, limit=5, use_keyword=True, where=None, ded
             # Source/service name boost
             s_boost = source_boost(query, metas[i]) if use_keyword else 0
 
-            # Combined: 55% vector + 35% keyword + 10% source match. Clamp to
-            # [0,1] on BOTH sides — source_boost can return a small negative
-            # agent-doc penalty which would otherwise push combined below 0,
-            # breaking the sort path and propagating a negative RRF input.
-            # s_boost range is [-0.05, 0.45]; normalize to [0,1] then weight by 0.10.
-            s_normalized = max(0.0, min(1.0, s_boost / 0.45)) if s_boost > 0 else 0.0
-            combined = max(0.0, min(1.0, (0.55 * vector_sim) + (0.35 * kw_score) + (0.10 * s_normalized)))
+            # 2026-04-16 Tier 2 fix: source_boost negative path was
+            # zero-clamped before blending, so the agent-doc penalty at
+            # `source_boost:198` (best -= 0.05 for infra queries hitting
+            # AGENTS.md) silently did nothing. Now:
+            #   1. preserve the sign through normalization — negative
+            #      s_boost maps to a negative s_signed that actually lands
+            #      in the blend (so penalties apply).
+            #   2. renormalize the 55/35/10 weights when source signal is
+            #      absent rather than systematically penalizing all docs
+            #      without a path match by 10%. s_present=1 if there was
+            #      any source signal (pos or neg), else redistribute the
+            #      0.10 weight onto vector (0.61) + keyword (0.39).
+            # s_boost range: [-0.05, +0.45]; normalize preserving sign.
+            s_signed = s_boost / 0.45  # [-0.111, 1.0]
+            s_signed = max(-0.2, min(1.0, s_signed))  # bound penalty at -0.02 in combined
+            s_present = s_boost != 0
+            if s_present:
+                combined = (0.55 * vector_sim) + (0.35 * kw_score) + (0.10 * s_signed)
+            else:
+                combined = (0.61 * vector_sim) + (0.39 * kw_score)
+            combined = max(0.0, min(1.0, combined))
 
-            all_results.append({
-                "id": ids[i] if i < len(ids) else "",
-                "content": docs[i],
-                "source": metas[i].get("source", ""),
-                "agent": metas[i].get("agent", ""),
-                "type": metas[i].get("type", ""),
-                "service": metas[i].get("service", ""),
-                "collection": col_name,
-                "vector_score": round(vector_sim, 4),
-                "keyword_score": round(kw_score, 4),
-                "score": round(combined, 4),
-                "created_at": metas[i].get("created_at", ""),
-                "section": metas[i].get("section", ""),
-                # M9.2: parent-child chunking fields. Propagated from ChromaDB
-                # metadata so search_unified.normalize_rag_result can put them
-                # in the output metadata and parent_child_expand can swap
-                # child content for parent content at recall time.
-                "parent_id": metas[i].get("parent_id"),
-                "is_parent": metas[i].get("is_parent", False),
-                "chunk_id": metas[i].get("chunk_id"),
-            })
+            all_results.append(
+                {
+                    "id": ids[i] if i < len(ids) else "",
+                    "content": docs[i],
+                    "source": metas[i].get("source", ""),
+                    "agent": metas[i].get("agent", ""),
+                    "type": metas[i].get("type", ""),
+                    "service": metas[i].get("service", ""),
+                    "collection": col_name,
+                    "vector_score": round(vector_sim, 4),
+                    "keyword_score": round(kw_score, 4),
+                    "score": round(combined, 4),
+                    "created_at": metas[i].get("created_at", ""),
+                    "section": metas[i].get("section", ""),
+                    # M9.2: parent-child chunking fields. Propagated from ChromaDB
+                    # metadata so search_unified.normalize_rag_result can put them
+                    # in the output metadata and parent_child_expand can swap
+                    # child content for parent content at recall time.
+                    "parent_id": metas[i].get("parent_id"),
+                    "is_parent": metas[i].get("is_parent", False),
+                    "chunk_id": metas[i].get("chunk_id"),
+                }
+            )
 
     # Sort by combined score, optionally deduplicate by full content hash.
     # When deduplicate=False (RRF path), keep duplicates so RRF can count
@@ -347,9 +438,10 @@ def hybrid_search(query, collections, limit=5, use_keyword=True, where=None, ded
 # Module-level ref tracking state (initialized at import time — no first-call race)
 try:
     from config import BRAIN_LOGS_DIR as _BRAIN_LOGS_DIR2
-    _REF_FILE = _BRAIN_LOGS_DIR2 / 'reference_counts.json'
+
+    _REF_FILE = _BRAIN_LOGS_DIR2 / "reference_counts.json"
 except ImportError:
-    _REF_FILE = Path('/Users/chrischo/server/brain/logs/reference_counts.json')
+    _REF_FILE = Path("/Users/chrischo/server/brain/logs/reference_counts.json")
 _ref_lock = threading.Lock()
 _ref_counts: dict[str, int] = {}
 _ref_writes: int = 0
@@ -379,19 +471,30 @@ def _track_references(results):
 def main():
     parser = argparse.ArgumentParser(description="RAG Hybrid Search")
     parser.add_argument("query", help="Search query")
-    parser.add_argument("-c", "--collection", default="all",
-                        help="Collection(s): knowledge, experience, context, all")
+    parser.add_argument(
+        "-c", "--collection", default="all", help="Collection(s): knowledge, experience, context, all"
+    )
     parser.add_argument("-n", "--limit", type=int, default=5, help="Number of results")
-    parser.add_argument("-k", "--keyword", action="store_true", default=True,
-                        help="Enable keyword boost")
+    parser.add_argument("-k", "--keyword", action="store_true", default=True, help="Enable keyword boost")
     parser.add_argument("--no-keyword", action="store_true", help="Disable keyword boost")
-    parser.add_argument("--where", default=None,
-                        help="ChromaDB metadata filter as JSON (e.g. '{\"created_at\":{\"$gte\":\"2026-04-01\"}}')")
+    parser.add_argument(
+        "--where",
+        default=None,
+        help='ChromaDB metadata filter as JSON (e.g. \'{"created_at":{"$gte":"2026-04-01"}}\')',
+    )
     parser.add_argument("--json", action="store_true", help="Output JSON")
     args = parser.parse_args()
 
     if args.collection == "all":
-        collections = ["knowledge", "experience", "context", "semantic_memory", "obsidian", "canonical", "personal"]
+        collections = [
+            "knowledge",
+            "experience",
+            "context",
+            "semantic_memory",
+            "obsidian",
+            "canonical",
+            "personal",
+        ]
     else:
         collections = [c.strip() for c in args.collection.split(",")]
 
@@ -416,11 +519,13 @@ def main():
     print(f"Results: {len(results)}")
 
     for i, r in enumerate(results):
-        print(f"\n#{i+1} (score: {r['score']:.3f} | vec: {r['vector_score']:.3f} | kw: {r['keyword_score']:.3f})")
+        print(
+            f"\n#{i+1} (score: {r['score']:.3f} | vec: {r['vector_score']:.3f} | kw: {r['keyword_score']:.3f})"
+        )
         print(f"  [{r['collection']}] {r['source']}")
         print(f"  Agent: {r['agent'] or '-'} | Service: {r['service'] or '-'} | Type: {r['type'] or '-'}")
         print(f"  {r['content'][:200]}...")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

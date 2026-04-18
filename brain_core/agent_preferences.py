@@ -4,12 +4,13 @@ Each agent learns which sources give them the most useful results via
 feedback signals. Weights are stored in SQLite and updated weekly by
 feedback_aggregator.
 """
+
 from __future__ import annotations
 
-import sqlite3
 import logging
+import sqlite3
+from datetime import UTC, datetime
 from pathlib import Path
-from datetime import datetime, timezone
 
 log = logging.getLogger("brain.agent_prefs")
 
@@ -54,8 +55,7 @@ def get_agent_weights(agent: str) -> dict[str, float]:
     conn = _conn()
     try:
         rows = conn.execute(
-            "SELECT source, weight FROM agent_source_prefs WHERE agent = ?",
-            (agent,)
+            "SELECT source, weight FROM agent_source_prefs WHERE agent = ?", (agent,)
         ).fetchall()
         return {source: float(weight) for source, weight in rows}
     finally:
@@ -67,16 +67,19 @@ def record_feedback(agent: str, source: str, useful: bool) -> None:
     ensure_schema()
     conn = _conn()
     try:
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         # Upsert pattern
-        conn.execute("""
+        conn.execute(
+            """
             INSERT INTO agent_source_prefs (agent, source, weight, useful_count, total_count, updated_at)
             VALUES (?, ?, 1.0, ?, 1, ?)
             ON CONFLICT(agent, source) DO UPDATE SET
                 useful_count = useful_count + ?,
                 total_count = total_count + 1,
                 updated_at = ?
-        """, (agent, source, 1 if useful else 0, now, 1 if useful else 0, now))
+        """,
+            (agent, source, 1 if useful else 0, now, 1 if useful else 0, now),
+        )
         conn.commit()
     finally:
         conn.close()
@@ -101,7 +104,7 @@ def recompute_weights() -> dict:
             weight = 0.5 + ratio
             conn.execute(
                 "UPDATE agent_source_prefs SET weight = ? WHERE agent = ? AND source = ?",
-                (weight, agent, source)
+                (weight, agent, source),
             )
             updated += 1
 
@@ -113,4 +116,5 @@ def recompute_weights() -> dict:
 
 if __name__ == "__main__":
     import json
+
     print(json.dumps(recompute_weights(), indent=2))

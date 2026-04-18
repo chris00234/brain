@@ -11,17 +11,18 @@ Usage:
   entity_resolution.py              # dry-run (show proposals)
   entity_resolution.py --apply      # auto-merge high-confidence pairs (>0.95 similarity)
 """
+
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "brain_core"))
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 def find_merge_candidates(min_mentions: int = 3, similarity_threshold: float = 0.90) -> list[dict]:
@@ -54,11 +55,11 @@ def find_merge_candidates(min_mentions: int = 3, similarity_threshold: float = 0
     names = list(name_embeddings.keys())
     for i, name_a in enumerate(names):
         emb_a, meta_a = name_embeddings[name_a]
-        for name_b in names[i+1:]:
+        for name_b in names[i + 1 :]:
             emb_b, meta_b = name_embeddings[name_b]
 
             # Cosine similarity
-            dot = sum(a * b for a, b in zip(emb_a, emb_b))
+            dot = sum(a * b for a, b in zip(emb_a, emb_b, strict=False))
             norm_a = sum(a * a for a in emb_a) ** 0.5
             norm_b = sum(b * b for b in emb_b) ** 0.5
             if norm_a == 0 or norm_b == 0:
@@ -76,28 +77,45 @@ def find_merge_candidates(min_mentions: int = 3, similarity_threshold: float = 0
                 else:
                     canonical, alias = name_b, name_a
 
-                candidates.append({
-                    "canonical": canonical,
-                    "alias": alias,
-                    "similarity": round(sim, 4),
-                    "canonical_mentions": meta_a["mentions"] if canonical == name_a else meta_b["mentions"],
-                    "alias_mentions": meta_b["mentions"] if canonical == name_a else meta_a["mentions"],
-                })
+                candidates.append(
+                    {
+                        "canonical": canonical,
+                        "alias": alias,
+                        "similarity": round(sim, 4),
+                        "canonical_mentions": meta_a["mentions"]
+                        if canonical == name_a
+                        else meta_b["mentions"],
+                        "alias_mentions": meta_b["mentions"] if canonical == name_a else meta_a["mentions"],
+                    }
+                )
 
     candidates.sort(key=lambda c: c["similarity"], reverse=True)
     return candidates
 
 
-PROTECTED_ENTITIES = frozenset({
-    "chris cho", "jenna", "liz", "ellie", "sage", "market",  # people/agents
-    "brain", "nginx", "docker", "chromadb", "ollama", "neo4j",  # core infrastructure
-})
+PROTECTED_ENTITIES = frozenset(
+    {
+        "chris cho",
+        "jenna",
+        "liz",
+        "ellie",
+        "sage",
+        "market",  # people/agents
+        "brain",
+        "nginx",
+        "docker",
+        "chromadb",
+        "ollama",
+        "neo4j",  # core infrastructure
+    }
+)
 
 
 def merge_entity(canonical: str, alias: str):
     """Merge alias entity into canonical: transfer edges, add alias, delete alias node."""
-    from neo4j_client import run_write
     from entity_graph import add_alias
+    from neo4j_client import run_write
+
     now = _now_iso()
 
     # Transfer outbound edges (alias -> other) preserving direction
@@ -148,6 +166,7 @@ def merge_entity(canonical: str, alias: str):
 def _cascade_merge_edges(canonical: str):
     """After entity merge, consolidate parallel edges with same relationship type."""
     from neo4j_client import run_write
+
     # Outbound edges
     run_write(
         "MATCH (a:Entity {name: $name})-[r:RELATES_TO]->(b:Entity) "
@@ -197,7 +216,9 @@ def run(apply: bool = False, auto_merge_threshold: float = 0.95):
 
     print(f"\nAuto-merge candidates (sim >= {auto_merge_threshold}): {len(auto_merge)}")
     for c in auto_merge:
-        print(f"  {c['alias']} → {c['canonical']}  sim={c['similarity']}  mentions={c['alias_mentions']}→{c['canonical_mentions']}")
+        print(
+            f"  {c['alias']} → {c['canonical']}  sim={c['similarity']}  mentions={c['alias_mentions']}→{c['canonical_mentions']}"
+        )
 
     print(f"\nReview candidates: {len(review)}")
     for c in review:
@@ -211,6 +232,7 @@ def run(apply: bool = False, auto_merge_threshold: float = 0.95):
                 print(f"  merged: {c['alias']} → {c['canonical']}")
                 try:
                     from audit_log import log_event
+
                     log_event(
                         event_type="merge",
                         entity_a=c["canonical"],

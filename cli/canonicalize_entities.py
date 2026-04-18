@@ -27,16 +27,13 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import json
 import math
 import sys
-import time
-from pathlib import Path
 
 sys.path.insert(0, "/Users/chrischo/server/brain/brain_core")
 
-from neo4j_client import run_query
 from indexer import get_embedding
+from neo4j_client import run_query
 
 DEFAULT_THRESHOLD = 0.92
 EMBED_MAX_CHARS = 80
@@ -46,10 +43,13 @@ EMBED_MAX_CHARS = 80
 # "openclaw session 2026-02-27", "r1 probe 1776198240" vs
 # "r7 probe 1776197989", and "5 tasks" vs "6 tasks".
 import re as _re
+
 _DATE_RE = _re.compile(r"\b(?:19|20)\d{2}[-_/ ]?\d{1,2}[-_/ ]?\d{1,2}\b")
 _NUMSEQ_RE = _re.compile(r"\b\d{4,}\b")
 _HEX_UID_RE = _re.compile(r"\b[0-9a-f]{8,}\b", _re.IGNORECASE)
-_SHORT_ENUM_RE = _re.compile(r"\b(\d+)\s+(?:tasks?|probes?|items?|runs?|agents?|notes?|probe|users?)\b", _re.IGNORECASE)
+_SHORT_ENUM_RE = _re.compile(
+    r"\b(\d+)\s+(?:tasks?|probes?|items?|runs?|agents?|notes?|probe|users?)\b", _re.IGNORECASE
+)
 
 
 def _safe_to_merge(a_name: str, b_name: str) -> tuple[bool, str]:
@@ -69,9 +69,8 @@ def _safe_to_merge(a_name: str, b_name: str) -> tuple[bool, str]:
     # Surface-string similarity gate. SequenceMatcher.ratio() is in [0, 1];
     # 0.75 rejects semantic-opposite pairs that still embed close.
     import difflib
-    ratio = difflib.SequenceMatcher(
-        None, a_name.lower().strip(), b_name.lower().strip()
-    ).ratio()
+
+    ratio = difflib.SequenceMatcher(None, a_name.lower().strip(), b_name.lower().strip()).ratio()
     if ratio < 0.75:
         return False, f"string_ratio_{ratio:.2f}"
     return True, "ok"
@@ -80,7 +79,7 @@ def _safe_to_merge(a_name: str, b_name: str) -> tuple[bool, str]:
 def _cosine(a: list[float], b: list[float]) -> float:
     if not a or not b or len(a) != len(b):
         return 0.0
-    dot = sum(x * y for x, y in zip(a, b))
+    dot = sum(x * y for x, y in zip(a, b, strict=False))
     na = math.sqrt(sum(x * x for x in a))
     nb = math.sqrt(sum(y * y for y in b))
     return dot / (na * nb) if na and nb else 0.0
@@ -186,11 +185,19 @@ def _merge_pair(winner: dict, loser: dict) -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Merge duplicate / cross-language entities in Neo4j.")
-    parser.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD,
-                        help=f"Cosine similarity threshold (default {DEFAULT_THRESHOLD})")
+    parser.add_argument(
+        "--threshold",
+        type=float,
+        default=DEFAULT_THRESHOLD,
+        help=f"Cosine similarity threshold (default {DEFAULT_THRESHOLD})",
+    )
     parser.add_argument("--apply", action="store_true", help="Actually merge (default: dry-run)")
-    parser.add_argument("--type", default=None, help="Restrict to one entity_type (person/service/project/...)")
-    parser.add_argument("--max-merges", type=int, default=0, help="Cap on number of merges per run (0=unlimited)")
+    parser.add_argument(
+        "--type", default=None, help="Restrict to one entity_type (person/service/project/...)"
+    )
+    parser.add_argument(
+        "--max-merges", type=int, default=0, help="Cap on number of merges per run (0=unlimited)"
+    )
     args = parser.parse_args()
 
     entities = _fetch_entities(args.type)
@@ -219,7 +226,7 @@ def main() -> int:
         for i, aid in enumerate(ids):
             if aid not in embeddings:
                 continue
-            for bid in ids[i + 1:]:
+            for bid in ids[i + 1 :]:
                 if bid not in embeddings:
                     continue
                 compared += 1
@@ -234,10 +241,12 @@ def main() -> int:
                     candidates.append((sim, a, b))
 
     candidates.sort(key=lambda x: -x[0])
-    print(f"compared {compared} pairs, {len(candidates)} above threshold {args.threshold}, "
-          f"{len(rejected_by_safeguard)} rejected by safeguards")
+    print(
+        f"compared {compared} pairs, {len(candidates)} above threshold {args.threshold}, "
+        f"{len(rejected_by_safeguard)} rejected by safeguards"
+    )
     if rejected_by_safeguard:
-        print(f"\nSafeguard rejections (first 10):")
+        print("\nSafeguard rejections (first 10):")
         for sim, a_n, b_n, reason in rejected_by_safeguard[:10]:
             print(f"  [{reason}] [{sim:.3f}] {a_n}  ≠  {b_n}")
 
@@ -251,13 +260,15 @@ def main() -> int:
         if a["id"] in seen_ids or b["id"] in seen_ids:
             continue  # already merged in this pass
         winner, loser = _pick_winner(a, b)
-        merges_planned.append({
-            "sim": sim,
-            "winner": f"{winner['name']} ({winner['type']}, {winner['count']} mentions)",
-            "loser": f"{loser['name']} ({loser['type']}, {loser['count']} mentions)",
-            "winner_id": winner["id"],
-            "loser_id": loser["id"],
-        })
+        merges_planned.append(
+            {
+                "sim": sim,
+                "winner": f"{winner['name']} ({winner['type']}, {winner['count']} mentions)",
+                "loser": f"{loser['name']} ({loser['type']}, {loser['count']} mentions)",
+                "winner_id": winner["id"],
+                "loser_id": loser["id"],
+            }
+        )
         seen_ids.add(winner["id"])
         seen_ids.add(loser["id"])
         if args.max_merges and len(merges_planned) >= args.max_merges:

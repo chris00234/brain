@@ -18,7 +18,7 @@ from __future__ import annotations
 import argparse
 import sqlite3
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 BRAIN_DB = Path("/Users/chrischo/server/brain/logs/brain.db")
@@ -32,7 +32,7 @@ DECAY_DAYS_BY_KIND = {
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _parse_iso(ts: str) -> datetime | None:
@@ -41,7 +41,7 @@ def _parse_iso(ts: str) -> datetime | None:
     try:
         dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
+            dt = dt.replace(tzinfo=UTC)
         return dt
     except ValueError:
         return None
@@ -107,9 +107,7 @@ def cmd_audit(args: argparse.Namespace) -> int:
 def cmd_obsolete(args: argparse.Namespace) -> int:
     with sqlite3.connect(str(BRAIN_DB), timeout=5) as conn:
         conn.row_factory = sqlite3.Row
-        row = conn.execute(
-            "SELECT id, tier, text FROM atoms WHERE id = ?", (args.atom_id,)
-        ).fetchone()
+        row = conn.execute("SELECT id, tier, text FROM atoms WHERE id = ?", (args.atom_id,)).fetchone()
         if not row:
             print(f"atom {args.atom_id} not found", file=sys.stderr)
             return 1
@@ -156,10 +154,8 @@ def main() -> int:
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_audit = sub.add_parser("audit", help="List stale atom candidates")
-    p_audit.add_argument("--kind", default="any",
-                         choices=["any", "preference", "fact", "decision", "entity"])
-    p_audit.add_argument("--min-age-days", type=int, default=None,
-                         help="Override per-kind decay threshold")
+    p_audit.add_argument("--kind", default="any", choices=["any", "preference", "fact", "decision", "entity"])
+    p_audit.add_argument("--min-age-days", type=int, default=None, help="Override per-kind decay threshold")
     p_audit.add_argument("--limit", type=int, default=30)
     p_audit.set_defaults(func=cmd_audit)
 
@@ -168,8 +164,7 @@ def main() -> int:
     p_obs.set_defaults(func=cmd_obsolete)
 
     p_bulk = sub.add_parser("bulk-obsolete", help="Mark all audit candidates obsolete")
-    p_bulk.add_argument("--kind", default="any",
-                        choices=["any", "preference", "fact", "decision", "entity"])
+    p_bulk.add_argument("--kind", default="any", choices=["any", "preference", "fact", "decision", "entity"])
     p_bulk.add_argument("--min-age-days", type=int, default=None)
     p_bulk.add_argument("--dry", action="store_true", help="Preview only")
     p_bulk.set_defaults(func=cmd_bulk_obsolete)

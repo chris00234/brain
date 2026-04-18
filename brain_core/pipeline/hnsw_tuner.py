@@ -1,10 +1,13 @@
 #!/opt/homebrew/bin/python3
 """Tune HNSW ef_search per collection. One-time setup script."""
-import sys
+
 import json
+import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # brain_core/
+from datetime import UTC
+
 from http_pool import http_json
 
 CHROMA_API = "http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections"
@@ -16,12 +19,12 @@ CHROMA_API = "http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/defa
 # time; these values are the source of truth for fresh-machine / restore-from-
 # backup paths and the nightly hnsw_tune adaptive job.
 SETTINGS = {
-    "canonical": 120,       # was 200; 4301 chunks, 200 was overkill
-    "knowledge": 100,       # medium
-    "experience": 75,       # was 100; 4775 chunks, speed-prioritized
+    "canonical": 120,  # was 200; 4301 chunks, 200 was overkill
+    "knowledge": 100,  # medium
+    "experience": 75,  # was 100; 4775 chunks, speed-prioritized
     "context": 100,
-    "semantic_memory": 100, # was 150
-    "obsidian": 50,         # large, speed-prioritized
+    "semantic_memory": 100,  # was 150
+    "obsidian": 50,  # large, speed-prioritized
     "notes": 50,
     "messages": 50,
     "calendar": 50,
@@ -63,6 +66,7 @@ def measure_collection_p95(col_name: str) -> float | None:
     otherwise returns the global p95 (all collections treated the same)."""
     try:
         from metrics_buffer import metrics_buffer as mb
+
         if hasattr(mb, "per_collection_latency"):
             stats = mb.per_collection_latency(col_name)
             return stats.get("p95") if stats else None
@@ -135,9 +139,10 @@ def adaptive_tune(dry_run: bool = False) -> dict:
 
 
 def _log_tuning(entry: dict) -> None:
-    from datetime import datetime, timezone
+    from datetime import datetime
+
     TUNING_LOG.parent.mkdir(parents=True, exist_ok=True)
-    entry["timestamp"] = datetime.now(timezone.utc).isoformat()
+    entry["timestamp"] = datetime.now(UTC).isoformat()
     try:
         with TUNING_LOG.open("a") as f:
             f.write(json.dumps(entry) + "\n")
@@ -166,9 +171,13 @@ def update_collection_hnsw(col_id: str, ef_search: int) -> bool:
     advisory write, not a live retuning.
     """
     try:
-        http_json("PUT", f"{CHROMA_API}/{col_id}", payload={
-            "new_metadata": {"hnsw:search_ef": ef_search},
-        })
+        http_json(
+            "PUT",
+            f"{CHROMA_API}/{col_id}",
+            payload={
+                "new_metadata": {"hnsw:search_ef": ef_search},
+            },
+        )
         return True
     except Exception as e:
         print(f"  failed to update {col_id}: {e}")
@@ -177,11 +186,13 @@ def update_collection_hnsw(col_id: str, ef_search: int) -> bool:
 
 def main():
     import argparse
+
     parser = argparse.ArgumentParser(description="Tune HNSW ef_search per collection")
     parser.add_argument("--verify", action="store_true", help="Only verify current settings")
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--adaptive", action="store_true",
-                        help="Measure actual p95 and adjust ef_search dynamically")
+    parser.add_argument(
+        "--adaptive", action="store_true", help="Measure actual p95 and adjust ef_search dynamically"
+    )
     args = parser.parse_args()
 
     if args.adaptive:

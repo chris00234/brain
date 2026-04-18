@@ -3,17 +3,18 @@
 
 Usage: reembed_migrator.py <collection_name> [--dry-run]
 """
+
 import sys
-import json
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from http_pool import http_json
-from indexer import get_embeddings_batch, EMBED_MODEL, EMBED_MODEL_VERSION
+from indexer import EMBED_MODEL_VERSION, get_embeddings_batch
 
 CHROMA_URL = "http://127.0.0.1:8000"
 CHROMA_API = f"{CHROMA_URL}/api/v2/tenants/default_tenant/databases/default_database/collections"
+
 
 def get_collection_id(name: str) -> str | None:
     cols = http_json("GET", CHROMA_API)
@@ -23,30 +24,37 @@ def get_collection_id(name: str) -> str | None:
                 return c.get("id")
     return None
 
+
 def create_collection(name: str) -> str | None:
     resp = http_json("POST", CHROMA_API, payload={"name": name, "metadata": {"source": "reembed_migrator"}})
     return resp.get("id") if isinstance(resp, dict) else None
 
+
 def fetch_all_docs(col_id: str, batch: int = 500):
     offset = 0
     while True:
-        resp = http_json("POST", f"{CHROMA_API}/{col_id}/get",
-            {"limit": batch, "offset": offset, "include": ["documents", "metadatas"]})
+        resp = http_json(
+            "POST",
+            f"{CHROMA_API}/{col_id}/get",
+            {"limit": batch, "offset": offset, "include": ["documents", "metadatas"]},
+        )
         ids = resp.get("ids", [])
         if not ids:
             break
         docs = resp.get("documents", []) or []
         metas = resp.get("metadatas", []) or []
-        for i, d, m in zip(ids, docs, metas):
+        for i, d, m in zip(ids, docs, metas, strict=False):
             yield i, d, m
         if len(ids) < batch:
             break
         offset += batch
 
+
 def _embed_batch(docs: list, model: str = "") -> list:
     """Embed a batch of docs. Uses LoRA adapter if model starts with 'lora:'."""
     if model.startswith("lora:"):
         from lora_embedder import get_lora_embeddings_batch
+
         adapter_path = model[5:]
         return get_lora_embeddings_batch(docs, adapter_path, prefix="passage")
     return get_embeddings_batch(docs, prefix="passage")
@@ -57,20 +65,24 @@ def _flush_batch(shadow_id: str, ids: list, docs: list, metas: list, model: str 
     if not ids:
         return 0
     embs = _embed_batch(docs, model=model)
-    valid = [(i, d, m, e) for i, d, m, e in zip(ids, docs, metas, embs) if e]
+    valid = [(i, d, m, e) for i, d, m, e in zip(ids, docs, metas, embs, strict=False) if e]
     if not valid:
         print(f"  WARNING: entire batch of {len(ids)} failed embedding, skipped")
         return 0
     if len(valid) < len(ids):
         print(f"  WARNING: {len(ids) - len(valid)} docs in batch failed embedding, skipped")
-    v_ids, v_docs, v_metas, v_embs = zip(*valid)
+    v_ids, v_docs, v_metas, v_embs = zip(*valid, strict=False)
     try:
-        http_json("POST", f"{CHROMA_API}/{shadow_id}/upsert", {
-            "ids": list(v_ids),
-            "embeddings": list(v_embs),
-            "documents": list(v_docs),
-            "metadatas": list(v_metas),
-        })
+        http_json(
+            "POST",
+            f"{CHROMA_API}/{shadow_id}/upsert",
+            {
+                "ids": list(v_ids),
+                "embeddings": list(v_embs),
+                "documents": list(v_docs),
+                "metadatas": list(v_metas),
+            },
+        )
         return len(valid)
     except Exception as e:
         print(f"  upsert failed: {e}")
@@ -91,10 +103,13 @@ def _derive_shadow_name(collection: str, model: str) -> str:
 
 def main():
     import argparse
+
     parser = argparse.ArgumentParser(description="Re-embed a collection with current model")
     parser.add_argument("collection", help="Source collection name")
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--model", default="", help="Override embedding model. Use 'lora:<path>' for LoRA adapter")
+    parser.add_argument(
+        "--model", default="", help="Override embedding model. Use 'lora:<path>' for LoRA adapter"
+    )
     args = parser.parse_args()
 
     source_id = get_collection_id(args.collection)
@@ -121,7 +136,7 @@ def main():
     # Create shadow
     shadow_id = create_collection(shadow_name)
     if not shadow_id:
-        print(f"ERROR: failed to create shadow collection")
+        print("ERROR: failed to create shadow collection")
         return 2
 
     def _delete_shadow():
@@ -167,11 +182,14 @@ def main():
         return 2
 
     print(f"\nMigrated {total} documents to {shadow_name}")
-    print(f"\nNext steps (manual):")
-    print(f"  1. Verify shadow with eval set")
-    print(f"  2. Atomic rename: {args.collection} → {args.collection}_v1_backup, {shadow_name} → {args.collection}")
-    print(f"  3. Keep backup for 30 days before delete")
+    print("\nNext steps (manual):")
+    print("  1. Verify shadow with eval set")
+    print(
+        f"  2. Atomic rename: {args.collection} → {args.collection}_v1_backup, {shadow_name} → {args.collection}"
+    )
+    print("  3. Keep backup for 30 days before delete")
     return 0
+
 
 if __name__ == "__main__":
     sys.exit(main())

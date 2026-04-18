@@ -48,6 +48,36 @@ TELEGRAM_CHAT_ID = "8484060831"
 TELEGRAM_ACCOUNT = "jenna-bot"
 
 
+def _switch_brain_adapter(path: str | None) -> dict:
+    """POST /admin/embed_adapter on the running brain-server so the eval
+    actually exercises the candidate adapter (not just the env var in a
+    subprocess that doesn't touch brain-server's in-process embedder).
+
+    2026-04-17 fix: previous impl set BRAIN_EMBED_MODEL in the eval_compare
+    subprocess env, but that subprocess calls /recall/v2 via HTTP —
+    brain-server itself never saw the override. Delta always = 0.00.
+    """
+    import urllib.error
+    import urllib.request
+
+    secret_file = Path.home() / ".openclaw" / "credentials" / ".personal_webhook_secret"
+    secret = secret_file.read_text().strip() if secret_file.exists() else ""
+    body = json.dumps({"path": path}).encode()
+    req = urllib.request.Request(
+        "http://127.0.0.1:8791/admin/embed_adapter",
+        data=body,
+        headers={"Authorization": f"Bearer {secret}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            return json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        return {"status": "error", "reason": f"HTTP {e.code}: {e.read().decode()[:200]}"}
+    except Exception as e:
+        return {"status": "error", "reason": str(e)[:200]}
+
+
 def _run_eval(eval_set: Path, env_overrides: dict[str, str] | None = None) -> dict:
     env = os.environ.copy()
     if env_overrides:
@@ -56,11 +86,14 @@ def _run_eval(eval_set: Path, env_overrides: dict[str, str] | None = None) -> di
     with contextlib.suppress(Exception):
         n_cases = len(json.loads(eval_set.read_text()))
     timeout_s = max(600, n_cases * 2 + 180)
+    # 2026-04-16 fix: request per-test so we can compute real per-query
+    # worst-regression rather than guessing from the aggregate delta.
     result = subprocess.run(
         [
             sys.executable,
             str(EVAL_COMPARE),
             "--json",
+            "--include-per-test",
             "--eval-set",
             str(eval_set),
         ],
@@ -72,6 +105,43 @@ def _run_eval(eval_set: Path, env_overrides: dict[str, str] | None = None) -> di
     if result.returncode != 0:
         raise RuntimeError(f"eval_compare failed: {result.stderr[:300]}")
     return json.loads(result.stdout)
+
+
+def _per_query_worst_regression(base_report: dict, cand_report: dict) -> tuple[float, int]:
+    """Return (max_regression_pts, N_regressed_cases) from paired per_test arrays.
+
+    Each per_test entry has a `hit_content` bool and optional numeric score;
+    we score 1.0 / 0.0 per case and compute candidate − base per-aligned-case.
+    If per_test is missing from either side, falls back to (+inf, -1) which
+    the caller should treat as FAIL (do not promote — we couldn't verify).
+    """
+
+    def _pt(report: dict) -> list[dict]:
+        return ((report or {}).get("v2") or {}).get("per_test") or []
+
+    base_pt = _pt(base_report)
+    cand_pt = _pt(cand_report)
+    if not base_pt or not cand_pt:
+        return (float("inf"), -1)
+    # Align by query string for safety (orders should match but tolerate drift).
+    by_query_base = {r.get("query", ""): r for r in base_pt if isinstance(r, dict)}
+    worst = 0.0
+    regressed = 0
+    for cand in cand_pt:
+        if not isinstance(cand, dict):
+            continue
+        base = by_query_base.get(cand.get("query", ""))
+        if base is None:
+            continue
+        # Score each side as 1.0 if strict content hit, else 0.0
+        b_score = 1.0 if base.get("hit_content") else 0.0
+        c_score = 1.0 if cand.get("hit_content") else 0.0
+        delta_pts = (c_score - b_score) * 100.0
+        if delta_pts < 0:
+            regressed += 1
+            if -delta_pts > worst:
+                worst = -delta_pts
+    return (worst, regressed)
 
 
 def _alert(title: str, body: str) -> None:
@@ -173,6 +243,11 @@ def main() -> int:
         print(f"[skip] candidate adapter missing: {args.candidate} (no fine-tune available)")
         return 0  # not a hard error — first run before any training cycle
 
+    # 2026-04-17 fix: ensure brain-server is in base state before baseline
+    print("[ab_gate] clearing adapter on brain-server (base state)")
+    clear_resp = _switch_brain_adapter(None)
+    print(f"  → {clear_resp}")
+
     print(f"[ab_gate] running base eval ({args.eval_set.name})")
     t0 = time.time()
     base_report = _run_eval(args.eval_set)
@@ -181,17 +256,30 @@ def main() -> int:
     base_content = float(base_v2.get("hit_content_pct", 0))
     print(f"[ab_gate] base hit_content@5={base_content}% (took {base_dur}s)")
 
+    # Load adapter ON brain-server so /recall/v2 actually uses it
+    print(f"[ab_gate] loading adapter on brain-server: {args.candidate}")
+    load_resp = _switch_brain_adapter(str(args.candidate.resolve()))
+    print(f"  → {load_resp}")
+    if load_resp.get("status") not in ("loaded", "unchanged"):
+        print("[ab_gate] adapter load failed — aborting (would produce meaningless A/B)")
+        _alert("LoRA adapter load failed", str(load_resp)[:400])
+        # Always clear on exit so brain-server returns to known state
+        _switch_brain_adapter(None)
+        return 2
+
     print(f"[ab_gate] running candidate eval (lora:{args.candidate})")
     t0 = time.time()
     try:
-        cand_report = _run_eval(
-            args.eval_set,
-            env_overrides={"BRAIN_EMBED_MODEL": f"lora:{args.candidate}"},
-        )
+        cand_report = _run_eval(args.eval_set)
     except Exception as e:
         print(f"[ab_gate] candidate eval failed: {e}")
         _alert("LoRA candidate eval failed", str(e)[:400])
+        _switch_brain_adapter(None)
         return 2
+    finally:
+        # Always clear adapter after candidate pass so the running brain
+        # doesn't stay in a test state if anything below fails.
+        pass
     cand_dur = int(time.time() - t0)
     cand_v2 = cand_report.get("v2", {})
     cand_content = float(cand_v2.get("hit_content_pct", 0))
@@ -200,20 +288,38 @@ def main() -> int:
     delta = cand_content - base_content
     print(f"[ab_gate] delta = {delta:+.2f}pts")
 
-    # Per-query worst regression check (eval_compare doesn't return per-query
-    # diffs by default — we accept the aggregate-only path for now).
-    worst_regression = max(0.0, -delta)
+    # 2026-04-16 fix: real per-query worst regression. Previously this was
+    # `max(0.0, -delta)` (the aggregate delta), which allowed a candidate
+    # that improved 50% of queries by +4pts and regressed 50% by -3pts to
+    # pass the gate with worst_reg=0 — silently destroying half the KB.
+    # Now we align per_test arrays by query and compute the real maximum
+    # per-case regression. If per_test is missing (older eval_compare or
+    # shape drift), we fail CLOSED and reject rather than promote blind.
+    worst_regression, regressed_count = _per_query_worst_regression(base_report, cand_report)
+    if regressed_count < 0:
+        print("[ab_gate] per_test data missing — FAIL CLOSED (cannot verify)")
+        worst_regression = float("inf")
 
     summary = (
         f"base={base_content:.1f}% cand={cand_content:.1f}% "
-        f"delta={delta:+.2f}pts worst_reg={worst_regression:.2f}pts"
+        f"delta={delta:+.2f}pts worst_reg={worst_regression:.2f}pts "
+        f"regressed_cases={regressed_count}"
     )
+
+    # 2026-04-17: always return brain-server to clean (no-adapter) state
+    # before returning verdict. Prevents a dry-run from leaving the adapter
+    # silently active on the production server.
+    print("[ab_gate] clearing adapter from brain-server (restore base state)")
+    clear_resp = _switch_brain_adapter(None)
+    print(f"  → {clear_resp}")
 
     if delta >= args.delta_threshold and worst_regression <= args.worst_regression:
         if args.dry_run:
             print(f"[ab_gate] DRY-RUN would promote: {summary}")
         else:
             _promote(args.candidate)
+            # Reload adapter on brain-server so promoted state takes effect immediately
+            _switch_brain_adapter(str(args.candidate.resolve()))
             _alert("LoRA promoted", summary)
         return 0
 

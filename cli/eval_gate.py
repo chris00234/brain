@@ -21,6 +21,7 @@ Usage:
   eval_gate.py --threshold 7                      # allow 7% drop before failing
   eval_gate.py --no-heal                          # don't dispatch heal on regression (extended track)
 """
+
 from __future__ import annotations
 
 import argparse
@@ -109,11 +110,15 @@ def run_current_eval(eval_set_path: Path) -> dict:
     except Exception:
         n_cases = 500
     timeout_s = max(600, n_cases * 2 + 180)
+    # 2026-04-17 Phase 1 enabler: include per_test so eval-report-stable.json
+    # carries labeled case-by-case results (hit_content + top_ids), which the
+    # bootstrap_feedback_from_eval.py script + future LtR trainer consume.
     result = subprocess.run(
         [
             sys.executable,
             str(EVAL_COMPARE),
             "--json",
+            "--include-per-test",
             "--eval-set",
             str(eval_set_path),
         ],
@@ -149,13 +154,21 @@ def alert_chris(message: str) -> None:
     try:
         subprocess.run(
             [
-                OPENCLAW_BIN, "message", "send",
-                "--channel", "telegram",
-                "--target", TELEGRAM_CHAT_ID,
-                "--account", TELEGRAM_ACCOUNT,
-                "--message", f"[BRAIN EVAL ALERT] {message}",
+                OPENCLAW_BIN,
+                "message",
+                "send",
+                "--channel",
+                "telegram",
+                "--target",
+                TELEGRAM_CHAT_ID,
+                "--account",
+                TELEGRAM_ACCOUNT,
+                "--message",
+                f"[BRAIN EVAL ALERT] {message}",
             ],
-            capture_output=True, text=True, timeout=20,
+            capture_output=True,
+            text=True,
+            timeout=20,
         )
     except Exception:
         pass  # alerting must never block the gate
@@ -229,8 +242,7 @@ def main() -> int:
     current_content = float(current.get("hit_content_pct", 0))
     current_source = float(current.get("hit_source_pct", 0))
     print(
-        f"[eval_gate] current /recall/v2: "
-        f"hit_content@5={current_content}% hit_source@5={current_source}%"
+        f"[eval_gate] current /recall/v2: " f"hit_content@5={current_content}% hit_source@5={current_source}%"
     )
 
     if args.update_baseline:
@@ -372,9 +384,7 @@ def _score_holdout_candidates() -> None:
             continue
         results = payload.get("results", [])[:5]
         alternates = [
-            (a or "").strip().lower()
-            for a in (cand.get("expected_alternates") or [])
-            if isinstance(a, str)
+            (a or "").strip().lower() for a in (cand.get("expected_alternates") or []) if isinstance(a, str)
         ]
         forms = [expected] + [a for a in alternates if a]
         hit = False

@@ -26,7 +26,7 @@ import os
 import re
 import subprocess
 import sys
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
 from email.header import decode_header
 from pathlib import Path
 
@@ -45,10 +45,12 @@ from inbox_utils import is_near_duplicate as _is_near_duplicate_shared
 
 def _is_near_duplicate(content: str, inbox_dir: Path, window: int = 50, threshold: float = 0.7) -> bool:
     return _is_near_duplicate_shared(content, window=window, threshold=threshold, inbox_dir=inbox_dir)
+
+
 DISPATCH_TIMEOUT = 240
 SIGNAL_THRESHOLD = 6
 BATCH_SIZE = 50
-MAX_BODY_CHARS = 1500   # cap body sent to Jenna; she only needs subject + first chunk
+MAX_BODY_CHARS = 1500  # cap body sent to Jenna; she only needs subject + first chunk
 
 
 def load_env_file(path: Path) -> None:
@@ -104,13 +106,17 @@ def log_failure(reason: str) -> None:
 
 try:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "brain_core"))
-    from safe_state import load_state as _safe_load, save_state as _safe_save
+    from safe_state import load_state as _safe_load
+    from safe_state import save_state as _safe_save
+
     def load_state() -> dict:
         state = _safe_load(STATE_FILE)
         return state if state else {"last_uid": 0}
+
     def save_state(state: dict) -> None:
         _safe_save(STATE_FILE, state)
 except ImportError:
+
     def load_state() -> dict:
         if STATE_FILE.exists():
             try:
@@ -118,6 +124,7 @@ except ImportError:
             except Exception:
                 return {"last_uid": 0}
         return {"last_uid": 0}
+
     def save_state(state: dict) -> None:
         STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
         STATE_FILE.write_text(json.dumps(state))
@@ -146,13 +153,17 @@ def extract_body(msg) -> str:
                 continue
             if ctype == "text/plain":
                 try:
-                    text = part.get_payload(decode=True).decode(part.get_content_charset() or "utf-8", errors="ignore")
+                    text = part.get_payload(decode=True).decode(
+                        part.get_content_charset() or "utf-8", errors="ignore"
+                    )
                     break
                 except Exception:
                     continue
             elif ctype == "text/html" and not text:
                 try:
-                    raw = part.get_payload(decode=True).decode(part.get_content_charset() or "utf-8", errors="ignore")
+                    raw = part.get_payload(decode=True).decode(
+                        part.get_content_charset() or "utf-8", errors="ignore"
+                    )
                     text = re.sub(r"<[^>]+>", " ", raw)
                 except Exception:
                     continue
@@ -197,7 +208,7 @@ def fetch_candidates(days_back: int, lookback: int) -> tuple[list[dict], int]:
         M.select("INBOX")
 
         since_str = (datetime.now() - timedelta(days=days_back)).strftime("%d-%b-%Y")
-        typ, data = M.uid('search', None, f'(SINCE "{since_str}")')
+        typ, data = M.uid("search", None, f'(SINCE "{since_str}")')
         if typ != "OK" or not data or not data[0]:
             return [], last_uid
 
@@ -216,7 +227,7 @@ def fetch_candidates(days_back: int, lookback: int) -> tuple[list[dict], int]:
                 continue
             new_max_uid = max(new_max_uid, uid_int)
 
-            typ, msg_data = M.uid('fetch', uid, "(RFC822)")
+            typ, msg_data = M.uid("fetch", uid, "(RFC822)")
             if typ != "OK" or not msg_data or not msg_data[0]:
                 continue
 
@@ -232,13 +243,15 @@ def fetch_candidates(days_back: int, lookback: int) -> tuple[list[dict], int]:
             if not passes_prefilter(sender, subject, list_unsubscribe, list_id, len(body)):
                 continue
 
-            candidates.append({
-                "uid": uid_int,
-                "subject": subject,
-                "sender": sender,
-                "date": date_hdr,
-                "body": body,
-            })
+            candidates.append(
+                {
+                    "uid": uid_int,
+                    "subject": subject,
+                    "sender": sender,
+                    "date": date_hdr,
+                    "body": body,
+                }
+            )
 
         return candidates, new_max_uid
     finally:
@@ -266,8 +279,10 @@ def build_classification_prompt(batch: list[dict]) -> str:
     lines.append("=" * 60)
     lines.append("OUTPUT FORMAT (return ONLY valid JSON, no markdown fences):")
     lines.append('{"classifications": [')
-    lines.append('  {"uid": <int>, "keep": <bool>, "category": "personal|work|financial|legal|medical|travel|deadline|other|noise", "summary": "<1 sentence>", "signal_score": <0-10>}')
-    lines.append(']}')
+    lines.append(
+        '  {"uid": <int>, "keep": <bool>, "category": "personal|work|financial|legal|medical|travel|deadline|other|noise", "summary": "<1 sentence>", "signal_score": <0-10>}'
+    )
+    lines.append("]}")
     lines.append("")
     lines.append("STRICT: only the JSON object. Empty list allowed if all are noise.")
     return "\n".join(lines)
@@ -275,9 +290,17 @@ def build_classification_prompt(batch: list[dict]) -> str:
 
 def dispatch_classification(prompt: str) -> dict | None:
     cmd = [
-        OPENCLAW_BIN, "agent", "--agent", AGENT,
-        "--message", prompt, "--json",
-        "--timeout", str(DISPATCH_TIMEOUT), "--thinking", "low",
+        OPENCLAW_BIN,
+        "agent",
+        "--agent",
+        AGENT,
+        "--message",
+        prompt,
+        "--json",
+        "--timeout",
+        str(DISPATCH_TIMEOUT),
+        "--thinking",
+        "low",
     ]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=DISPATCH_TIMEOUT + 30)
@@ -313,7 +336,7 @@ def write_kept_email(email_data: dict, classification: dict) -> Path | None:
         f"Body excerpt:\n{email_data['body'][:600]}"
     )
     digest = hashlib.sha256(f"{email_data['uid']}:{text}".encode()).hexdigest()
-    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     date_part = now[:10].replace("-", "_")
     rec_id = f"raw_gmail_{date_part}_{digest[:8]}"
     record = {
@@ -344,7 +367,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Gmail intelligent ingest — Jenna classifies survivors")
     parser.add_argument("--days-back", type=int, default=2, help="IMAP search lookback in days")
     parser.add_argument("--lookback", type=int, default=200, help="Max recent UIDs to consider")
-    parser.add_argument("--dry-run", action="store_true", help="Print pre-filter survivors without dispatching")
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Print pre-filter survivors without dispatching"
+    )
     args = parser.parse_args()
 
     print(f"Gmail ingest — IMAP {IMAP_HOST}, days_back={args.days_back}")
@@ -373,11 +398,12 @@ def main() -> None:
     all_classifications: list[dict] = []
     any_batch_failed = False
     for i in range(0, len(candidates), BATCH_SIZE):
-        batch = candidates[i:i + BATCH_SIZE]
+        batch = candidates[i : i + BATCH_SIZE]
         prompt = build_classification_prompt(batch)
         result = dispatch_classification(prompt)
         if result is None:
             import time
+
             time.sleep(10)
             result = dispatch_classification(prompt)
         if not result:
@@ -414,7 +440,9 @@ def main() -> None:
     print(f"[4/4] Wrote {written} schema-compliant raw records to {INBOX_DIR}")
 
     if written == 0 and len(candidates) > 0:
-        sys.stderr.write(f"WARN adapter=gmail candidates={len(candidates)} written=0 — dispatch may have failed\n")
+        sys.stderr.write(
+            f"WARN adapter=gmail candidates={len(candidates)} written=0 — dispatch may have failed\n"
+        )
 
 
 if __name__ == "__main__":

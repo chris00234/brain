@@ -225,6 +225,23 @@ CREATE INDEX IF NOT EXISTS idx_eval_lifecycle_promoted ON eval_holdout_lifecycle
 CREATE INDEX IF NOT EXISTS idx_eval_lifecycle_unresolved
   ON eval_holdout_lifecycle(promoted_at)
   WHERE auto_stable_at IS NULL AND rejected_at IS NULL;
+
+-- 2026-04-16 Tier 3 #4 (brain_db@11): retrieval-induced inhibition log
+-- (Bjork 1994). Records (winner, loser) atom competitions per query cue
+-- so a nightly job can apply small confidence decrements to consistent
+-- losers — counters the rich-get-richer spiral where frequently-accessed
+-- memories stay dominant whether or not they're the right answer.
+CREATE TABLE IF NOT EXISTS retrieval_competition (
+  winner_atom_id  TEXT NOT NULL REFERENCES atoms(id) ON DELETE CASCADE,
+  loser_atom_id   TEXT NOT NULL REFERENCES atoms(id) ON DELETE CASCADE,
+  query_cue_hash  TEXT NOT NULL,
+  n_observations  INTEGER NOT NULL DEFAULT 1,
+  last_seen_at    TEXT NOT NULL,
+  PRIMARY KEY (winner_atom_id, loser_atom_id, query_cue_hash),
+  CHECK (winner_atom_id != loser_atom_id)
+);
+CREATE INDEX IF NOT EXISTS idx_retrcomp_loser     ON retrieval_competition(loser_atom_id);
+CREATE INDEX IF NOT EXISTS idx_retrcomp_last_seen ON retrieval_competition(last_seen_at);
 """
 
 
@@ -274,6 +291,7 @@ def _submit_bg_extract(text: str, chroma_id: str) -> bool:
         # Queue for catch-up
         try:
             from llm_backlog import enqueue as _backlog_enqueue
+
             _backlog_enqueue("entities", {"text": text, "chroma_id": chroma_id})
         except Exception:
             pass
@@ -282,6 +300,7 @@ def _submit_bg_extract(text: str, chroma_id: str) -> bool:
     def _run():
         try:
             from entity_graph import extract_and_store_entities
+
             n = extract_and_store_entities(text, chroma_id)
             # CR8 fix: -1 means LLM failure (retryable), queue backlog.
             # Zero or positive means ran — even 0 entities is legit for
@@ -289,6 +308,7 @@ def _submit_bg_extract(text: str, chroma_id: str) -> bool:
             if n < 0:
                 try:
                     from llm_backlog import enqueue as _backlog_enqueue
+
                     _backlog_enqueue("entities", {"text": text, "chroma_id": chroma_id})
                 except Exception:
                     pass
@@ -297,6 +317,7 @@ def _submit_bg_extract(text: str, chroma_id: str) -> bool:
             # so the work isn't lost.
             try:
                 from llm_backlog import enqueue as _backlog_enqueue
+
                 _backlog_enqueue("entities", {"text": text, "chroma_id": chroma_id})
             except Exception:
                 pass
@@ -315,6 +336,7 @@ def _submit_bg_extract(text: str, chroma_id: str) -> bool:
             _BG_EXTRACT_DROPPED += 1
         try:
             from llm_backlog import enqueue as _backlog_enqueue
+
             _backlog_enqueue("entities", {"text": text, "chroma_id": chroma_id})
         except Exception:
             pass
@@ -770,9 +792,7 @@ def update_atom_confidence(
     try:
         with _conn(db_path) as conn:
             conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute(
-                "SELECT confidence FROM atoms WHERE id = ?", (atom_id,)
-            ).fetchone()
+            row = conn.execute("SELECT confidence FROM atoms WHERE id = ?", (atom_id,)).fetchone()
             if not row:
                 conn.rollback()
                 return None
@@ -801,9 +821,7 @@ def update_atom_confidence(
         return None
 
 
-def get_confidence_history(
-    atom_id: str, *, limit: int = 50, db_path: Path | None = None
-) -> list[dict]:
+def get_confidence_history(atom_id: str, *, limit: int = 50, db_path: Path | None = None) -> list[dict]:
     """Return the atom_evidence ledger for an atom, most recent first.
 
     Caller can audit every logit delta that moved an atom's confidence.
@@ -841,9 +859,7 @@ def rollback_confidence(
     try:
         with _conn(db_path) as conn:
             conn.execute("BEGIN IMMEDIATE")
-            atom = conn.execute(
-                "SELECT confidence FROM atoms WHERE id = ?", (atom_id,)
-            ).fetchone()
+            atom = conn.execute("SELECT confidence FROM atoms WHERE id = ?", (atom_id,)).fetchone()
             if not atom:
                 conn.rollback()
                 return None
@@ -853,9 +869,7 @@ def rollback_confidence(
                 "WHERE atom_id = ? AND id < ? ORDER BY id ASC",
                 (atom_id, int(back_to_event_id) or 0),
             ).fetchall()
-            replay_logit = base_logit + sum(
-                (r["weight"] / max(1, r["cluster_size"])) for r in surviving
-            )
+            replay_logit = base_logit + sum((r["weight"] / max(1, r["cluster_size"])) for r in surviving)
             new_conf = _logit_to_conf(replay_logit)
             conn.execute(
                 "UPDATE atoms SET confidence = ?, updated_at = ? WHERE id = ?",
@@ -915,7 +929,7 @@ def cluster_size_for(
 
     try:
         sys.path.insert(0, str(Path(__file__).resolve().parent))
-        from indexer import _get_collection_id, chroma_api  # noqa: E402
+        from indexer import _get_collection_id, chroma_api
 
         col_id = _get_collection_id("semantic_memory")
         if not col_id:
@@ -997,8 +1011,7 @@ def upsert_entity(
             ).fetchone()
             if existing:
                 conn.execute(
-                    "UPDATE entities SET last_seen_at = ?, mention_count = mention_count + 1 "
-                    "WHERE id = ?",
+                    "UPDATE entities SET last_seen_at = ?, mention_count = mention_count + 1 " "WHERE id = ?",
                     (_now(), existing["id"]),
                 )
                 conn.commit()
@@ -1037,8 +1050,7 @@ def link_atom_entity(
     try:
         with _conn(db_path) as conn:
             conn.execute(
-                "INSERT OR IGNORE INTO atom_entity (atom_id, entity_id, role) "
-                "VALUES (?, ?, ?)",
+                "INSERT OR IGNORE INTO atom_entity (atom_id, entity_id, role) " "VALUES (?, ?, ?)",
                 (atom_id, entity_id, role),
             )
             conn.commit()

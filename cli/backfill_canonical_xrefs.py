@@ -14,16 +14,17 @@ Reads the most recent lint report and applies each flagged note. Idempotent
 Usage:
   backfill_canonical_xrefs.py [--dry-run] [--lint-report PATH]
 """
+
 from __future__ import annotations
 
 import argparse
 import json
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "pipeline"))
-from common import ROOT, parse_note, render_note  # noqa: E402
+from common import ROOT, parse_note, render_note
 
 REPORT_DIR = ROOT / "reports" / "canonical_lint"
 
@@ -36,7 +37,7 @@ def _latest_report() -> Path | None:
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _backfill_note(note_path: Path, entity_page_id: str, dry_run: bool) -> str:
@@ -85,7 +86,7 @@ def main() -> int:
         print(json.dumps({"status": "bad_report", "error": str(e)}))
         return 1
 
-    items = (report.get("checks", {}).get("missing_cross_refs", {}).get("items", []))
+    items = report.get("checks", {}).get("missing_cross_refs", {}).get("items", [])
     if not items:
         print(json.dumps({"status": "ok", "report": report_path.name, "candidates": 0}))
         return 0
@@ -102,21 +103,28 @@ def main() -> int:
         note_path = ROOT / note_rel
         result = _backfill_note(note_path, entity_page_id, args.dry_run)
         counts[result] += 1
-        details.append({
-            "note_id": item.get("note_id"),
-            "entity": item.get("entity"),
-            "target": entity_page_id,
-            "result": result,
-        })
+        details.append(
+            {
+                "note_id": item.get("note_id"),
+                "entity": item.get("entity"),
+                "target": entity_page_id,
+                "result": result,
+            }
+        )
 
-    print(json.dumps({
-        "status": "ok",
-        "report": report_path.name,
-        "dry_run": args.dry_run,
-        "candidates": len(items),
-        **counts,
-        "details": details,
-    }, indent=2))
+    print(
+        json.dumps(
+            {
+                "status": "ok",
+                "report": report_path.name,
+                "dry_run": args.dry_run,
+                "candidates": len(items),
+                **counts,
+                "details": details,
+            },
+            indent=2,
+        )
+    )
     return 0
 
 

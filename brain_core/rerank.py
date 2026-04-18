@@ -111,8 +111,14 @@ def score_result(query: str, result: dict[str, Any], debug: bool = False) -> flo
     # ingest jobs run. They carry query-like language that matches vector search
     # but are rarely the actual canonical answer to a retrieval query.
     # Penalize them so canonical notes win on matched topics.
-    _doc_type = (result.get("type") or (result.get("metadata") or {}).get("type") or "")
-    if _doc_type in ("raw-openclaw_session", "raw-claude_code_session", "raw-screen_time", "raw-browser", "raw-git_activity"):
+    _doc_type = result.get("type") or (result.get("metadata") or {}).get("type") or ""
+    if _doc_type in (
+        "raw-openclaw_session",
+        "raw-claude_code_session",
+        "raw-screen_time",
+        "raw-browser",
+        "raw-git_activity",
+    ):
         source_boost *= 0.4  # ~60% penalty
     # Removed 2026-04-12: "## Statement" penalty was hitting EVERY canonical note
     # (standard heading) not just derivative proposals, causing 5 of 7 eval
@@ -121,32 +127,40 @@ def score_result(query: str, result: dict[str, Any], debug: bool = False) -> flo
     reranked = base * relevance * pos_mult * trust_boost * semantic_boost * source_boost
 
     if debug:
-        result.setdefault("_debug", {}).update({
-            "rerank_base": base,
-            "rerank_title_overlap": round(title_overlap, 3),
-            "rerank_body_overlap": round(body_overlap, 3),
-            "rerank_first_pos": first_pos,
-            "rerank_pos_mult": round(pos_mult, 3),
-            "rerank_relevance": round(relevance, 3),
-            "rerank_score": round(reranked, 2),
-        })
+        result.setdefault("_debug", {}).update(
+            {
+                "rerank_base": base,
+                "rerank_title_overlap": round(title_overlap, 3),
+                "rerank_body_overlap": round(body_overlap, 3),
+                "rerank_first_pos": first_pos,
+                "rerank_pos_mult": round(pos_mult, 3),
+                "rerank_relevance": round(relevance, 3),
+                "rerank_score": round(reranked, 2),
+            }
+        )
 
     return reranked
 
 
-def rerank(query: str, results: list[dict[str, Any]], top_k: int | None = None, debug: bool = False) -> list[dict[str, Any]]:
+def rerank(
+    query: str, results: list[dict[str, Any]], top_k: int | None = None, debug: bool = False
+) -> list[dict[str, Any]]:
     """Rerank results in place by token-overlap score.
 
     Each result gets a `rerank_score` field added to its top level so the
     caller can inspect or sort on the reranked value. Returns a new list
     sorted desc by rerank_score, optionally truncated to top_k.
+    Idempotent — if all results already carry `_rerank_applied`, skip the
+    score recomputation and only re-sort + truncate.
     """
     if not results:
         return []
 
     scored = list(results)
-    for r in scored:
-        r["rerank_score"] = round(score_result(query, r, debug=debug), 2)
+    if not all(r.get("_rerank_applied") for r in scored):
+        for r in scored:
+            r["rerank_score"] = round(score_result(query, r, debug=debug), 2)
+            r["_rerank_applied"] = True
 
     scored.sort(key=lambda r: r.get("rerank_score", 0), reverse=True)
 
@@ -159,7 +173,11 @@ def rerank(query: str, results: list[dict[str, Any]], top_k: int | None = None, 
 if __name__ == "__main__":
     # Smoke test
     test_results = [
-        {"title": "OpenClaw gateway config", "content": "The openclaw gateway runs on port 18789", "score": 50},
+        {
+            "title": "OpenClaw gateway config",
+            "content": "The openclaw gateway runs on port 18789",
+            "score": 50,
+        },
         {"title": "Random notes", "content": "Something about docker and nginx setups", "score": 80},
         {"title": "Gateway docs", "content": "openclaw gateway openclaw openclaw", "score": 30},
     ]

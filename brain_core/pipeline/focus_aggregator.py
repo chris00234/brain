@@ -19,15 +19,15 @@ Output:
 
 Run via the `focus_aggregate` cron job, daily at 4:35am.
 """
+
 from __future__ import annotations
 
 import json
 import os
 import subprocess
 import sys
-import time
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 INBOX_DIR = Path("/Users/chrischo/server/knowledge/raw/inbox")
@@ -74,7 +74,7 @@ def collect_git_commits_with_timestamps(since: datetime) -> list[tuple[datetime,
                 try:
                     dt = datetime.fromisoformat(ts_raw.strip())
                     if dt.tzinfo is None:
-                        dt = dt.replace(tzinfo=timezone.utc)
+                        dt = dt.replace(tzinfo=UTC)
                 except Exception:
                     continue
                 out.append((dt, repo.name, sha.strip()))
@@ -90,6 +90,7 @@ def collect_screentime_days(since: datetime) -> dict[str, float]:
     Cheap regex: sum all "Nh" + "Nm" mentions in the content blob.
     """
     import re
+
     out: dict[str, float] = {}
     if not INBOX_DIR.exists():
         return out
@@ -105,7 +106,7 @@ def collect_screentime_days(since: datetime) -> dict[str, float]:
         try:
             dt = datetime.fromisoformat(ts.rstrip("Zz"))
             if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
+                dt = dt.replace(tzinfo=UTC)
         except Exception:
             continue
         if dt < since:
@@ -126,8 +127,8 @@ def collect_screentime_days(since: datetime) -> dict[str, float]:
 
 
 def main() -> int:
-    print(f"[focus_aggregate] starting at {datetime.now(timezone.utc).isoformat()}", flush=True)
-    since = datetime.now(timezone.utc) - timedelta(days=WINDOW_DAYS)
+    print(f"[focus_aggregate] starting at {datetime.now(UTC).isoformat()}", flush=True)
+    since = datetime.now(UTC) - timedelta(days=WINDOW_DAYS)
 
     # ── Hour-of-day grid from git commits (real timestamps) ──
     commits = collect_git_commits_with_timestamps(since)
@@ -151,7 +152,7 @@ def main() -> int:
 
     # ── Build output rows ──
     OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
-    now_iso = datetime.now(timezone.utc).isoformat()
+    now_iso = datetime.now(UTC).isoformat()
 
     # Daily rows: one per (date, hour) cell that has any activity, plus
     # one summary row per day with the screen_time total.
@@ -165,14 +166,16 @@ def main() -> int:
             dow = d.weekday()
         except Exception:
             continue
-        rows.append({
-            "kind": "commits_hour",
-            "date": date_key,
-            "dow": DOW_NAMES[dow],
-            "hour": hour,
-            "commit_count": count,
-            "computed_at": now_iso,
-        })
+        rows.append(
+            {
+                "kind": "commits_hour",
+                "date": date_key,
+                "dow": DOW_NAMES[dow],
+                "hour": hour,
+                "commit_count": count,
+                "computed_at": now_iso,
+            }
+        )
         row_count += 1
 
     # Per-day screen time totals
@@ -182,25 +185,29 @@ def main() -> int:
             dow = d.weekday()
         except Exception:
             continue
-        rows.append({
-            "kind": "screentime_day",
-            "date": date_key,
-            "dow": DOW_NAMES[dow],
-            "minutes": round(minutes, 1),
-            "computed_at": now_iso,
-        })
+        rows.append(
+            {
+                "kind": "screentime_day",
+                "date": date_key,
+                "dow": DOW_NAMES[dow],
+                "minutes": round(minutes, 1),
+                "computed_at": now_iso,
+            }
+        )
         row_count += 1
 
     # Rolling (dow, hour) aggregates — the actual "best work window" signal.
     for (dow, hour), total in sorted(by_dow_hour.items()):
-        rows.append({
-            "kind": "dow_hour_rollup",
-            "dow": DOW_NAMES[dow],
-            "hour": hour,
-            "commit_count_total": total,
-            "window_days": WINDOW_DAYS,
-            "computed_at": now_iso,
-        })
+        rows.append(
+            {
+                "kind": "dow_hour_rollup",
+                "dow": DOW_NAMES[dow],
+                "hour": hour,
+                "commit_count_total": total,
+                "window_days": WINDOW_DAYS,
+                "computed_at": now_iso,
+            }
+        )
         row_count += 1
 
     # Write atomically
@@ -214,9 +221,7 @@ def main() -> int:
 
     # Top-3 productive hour windows for the log line
     top_cells = sorted(by_dow_hour.items(), key=lambda kv: -kv[1])[:3]
-    top_summary = ", ".join(
-        f"{DOW_NAMES[d]}@{h:02d}h={c}" for (d, h), c in top_cells
-    )
+    top_summary = ", ".join(f"{DOW_NAMES[d]}@{h:02d}h={c}" for (d, h), c in top_cells)
     print(f"[focus_aggregate] wrote {row_count} rows; top productive cells: {top_summary}", flush=True)
     return 0
 

@@ -3,11 +3,12 @@
 Classify incoming memories as ADD / UPDATE / DELETE / NOOP before storing.
 Prevents memory accumulation without intent over long time horizons.
 """
+
 from __future__ import annotations
 
 import logging
 import re
-from typing import Literal, Optional
+from typing import Literal
 
 from http_pool import http_json
 
@@ -16,15 +17,15 @@ log = logging.getLogger("brain.memory_operations")
 Operation = Literal["ADD", "UPDATE", "DELETE", "NOOP"]
 
 # Thresholds tuned from audit data
-DUPLICATE_COSINE = 0.05       # near-exact match → NOOP
-UPDATE_COSINE = 0.15          # semantic similarity → potential UPDATE
-TOKEN_OVERLAP_MAX = 0.7       # below this + high semantic sim → refinement (UPDATE)
+DUPLICATE_COSINE = 0.05  # near-exact match → NOOP
+UPDATE_COSINE = 0.15  # semantic similarity → potential UPDATE
+TOKEN_OVERLAP_MAX = 0.7  # below this + high semantic sim → refinement (UPDATE)
 PREFERENCE_UPDATE_COSINE = 0.40  # preferences about similar topics (vs 0.15 default)
 
 _WORD_RE = re.compile(r"[a-z0-9_\-]{3,}")
 
 _PREF_VERB_RE = re.compile(
-    r'\b(?:prefer|like|use|uses|using|switch(?:ed)?\s+to|chose|moved?\s+to|adopted|favor|favou?rs?)\s+(.+?)(?:\s+(?:for|over|instead|because|when|but|$))',
+    r"\b(?:prefer|like|use|uses|using|switch(?:ed)?\s+to|chose|moved?\s+to|adopted|favor|favou?rs?)\s+(.+?)(?:\s+(?:for|over|instead|because|when|but|$))",
     re.IGNORECASE,
 )
 
@@ -56,7 +57,7 @@ def classify_operation(
     sem_col_id: str,
     category: str = "",
     chroma_url: str = "http://127.0.0.1:8000",
-) -> tuple[Operation, Optional[str], dict]:
+) -> tuple[Operation, str | None, dict]:
     """Classify a new memory against existing ones.
 
     Returns:

@@ -220,7 +220,7 @@ def expand_query(
     def _do_dispatch() -> str:
         if dispatch_fn is not None:
             return dispatch_fn("jenna", prompt) or ""
-        from openclaw_dispatch import dispatch as _dispatch_real
+        from cli_llm import dispatch as _dispatch_real
 
         result = _dispatch_real(
             "jenna",

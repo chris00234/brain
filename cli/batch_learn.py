@@ -11,6 +11,7 @@ Usage:
   batch_learn.py --limit 10          # process only 10 sessions
   batch_learn.py --dry-run           # show what would be processed
 """
+
 from __future__ import annotations
 
 import argparse
@@ -59,8 +60,7 @@ def _extract_user_messages(session_path: Path) -> str:
             content = msg.get("content")
             if isinstance(content, list):
                 text = " ".join(
-                    c.get("text", "") for c in content
-                    if isinstance(c, dict) and c.get("type") == "text"
+                    c.get("text", "") for c in content if isinstance(c, dict) and c.get("type") == "text"
                 )
             elif isinstance(content, str):
                 text = content
@@ -75,11 +75,13 @@ def _extract_user_messages(session_path: Path) -> str:
 
 
 def _post_learn(transcript: str, source: str, token: str) -> dict:
-    body = json.dumps({
-        "transcript": transcript[:50000],
-        "source": source,
-        "agent": "claude",
-    }).encode()
+    body = json.dumps(
+        {
+            "transcript": transcript[:50000],
+            "source": source,
+            "agent": "claude",
+        }
+    ).encode()
     req = urllib.request.Request(
         BRAIN_URL,
         data=body,
@@ -109,7 +111,7 @@ def main() -> int:
 
     to_process = [s for s in sessions if s.name not in processed]
     if args.limit > 0:
-        to_process = to_process[:args.limit]
+        to_process = to_process[: args.limit]
 
     total_queued = 0
     for i, session in enumerate(to_process, 1):
@@ -120,8 +122,10 @@ def main() -> int:
             continue
 
         # Chunk large transcripts
-        chunks = [transcript[j:j + CHUNK_SIZE] for j in range(0, len(transcript), CHUNK_SIZE)]
-        print(f"  [{i}/{len(to_process)}] {session.name}: {len(transcript)} chars, {len(chunks)} chunks", end="")
+        chunks = [transcript[j : j + CHUNK_SIZE] for j in range(0, len(transcript), CHUNK_SIZE)]
+        print(
+            f"  [{i}/{len(to_process)}] {session.name}: {len(transcript)} chars, {len(chunks)} chunks", end=""
+        )
 
         if args.dry_run:
             print(" (dry-run)")
@@ -140,7 +144,9 @@ def main() -> int:
         _save_state(processed)
         time.sleep(DELAY_BETWEEN_SESSIONS)
 
-    print(f"\nDone. {len(to_process)} sessions processed, {total_queued} total candidates queued for distillation.")
+    print(
+        f"\nDone. {len(to_process)} sessions processed, {total_queued} total candidates queued for distillation."
+    )
     return 0
 
 

@@ -12,20 +12,21 @@ Cost bound: default N=3 clusters per run (~$0.05-0.15 LLM cost).
 Usage:
   canonical_merge_draft.py [--limit 3] [--dry-run] [--cluster-ids 0,1,2]
 """
+
 from __future__ import annotations
 
 import argparse
 import json
 import re
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "brain_core"))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "pipeline"))
 
-from common import ROOT, parse_note, render_note  # noqa: E402
-from openclaw_dispatch import dispatch  # noqa: E402
+from cli_llm import dispatch  # migrated 2026-04-17
+from common import ROOT, parse_note, render_note
 
 REPORT_DIR = ROOT / "reports" / "canonical_compaction"
 DRAFTS_BASE = REPORT_DIR / "drafts"
@@ -83,7 +84,7 @@ def _latest_report() -> Path | None:
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _load_member(note_rel: str) -> tuple[dict, str] | None:
@@ -180,7 +181,7 @@ def _render_draft_body(synth: dict, cluster_idx: int, cluster_size: int) -> str:
 
 
 def _write_draft(cluster_idx: int, cluster: dict, synth: dict, loaded_ids: list[str]) -> Path:
-    date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    date = datetime.now(UTC).strftime("%Y-%m-%d")
     out_dir = DRAFTS_BASE / date
     out_dir.mkdir(parents=True, exist_ok=True)
     now = _utc_now()
@@ -264,50 +265,66 @@ def main() -> int:
     else:
         selected = clusters[: args.limit]
 
-    print(f"[canonical_merge_draft] report={report_path.name} selected={len(selected)} clusters", file=sys.stderr)
+    print(
+        f"[canonical_merge_draft] report={report_path.name} selected={len(selected)} clusters",
+        file=sys.stderr,
+    )
 
     processed: list[dict] = []
     for cluster_idx, cluster in enumerate(selected):
-        print(f"  [{cluster_idx}] size={cluster.get('size', 0)} repr={cluster.get('representative_title', '')[:60]}", file=sys.stderr)
+        print(
+            f"  [{cluster_idx}] size={cluster.get('size', 0)} repr={cluster.get('representative_title', '')[:60]}",
+            file=sys.stderr,
+        )
         prompt, loaded_ids = _build_prompt(cluster)
         if args.dry_run:
-            processed.append({
-                "cluster_idx": cluster_idx,
-                "size": cluster.get("size"),
-                "prompt_chars": len(prompt),
-                "loaded_ids": len(loaded_ids),
-                "status": "dry-run",
-            })
+            processed.append(
+                {
+                    "cluster_idx": cluster_idx,
+                    "size": cluster.get("size"),
+                    "prompt_chars": len(prompt),
+                    "loaded_ids": len(loaded_ids),
+                    "status": "dry-run",
+                }
+            )
             continue
 
         synth = _dispatch_sage(prompt)
         if synth is None:
-            processed.append({
-                "cluster_idx": cluster_idx,
-                "status": "dispatch_failed",
-            })
-            _log({
-                "at": _utc_now(),
-                "cluster_idx": cluster_idx,
-                "status": "dispatch_failed",
-            })
+            processed.append(
+                {
+                    "cluster_idx": cluster_idx,
+                    "status": "dispatch_failed",
+                }
+            )
+            _log(
+                {
+                    "at": _utc_now(),
+                    "cluster_idx": cluster_idx,
+                    "status": "dispatch_failed",
+                }
+            )
             continue
 
         path = _write_draft(cluster_idx, cluster, synth, loaded_ids)
-        processed.append({
-            "cluster_idx": cluster_idx,
-            "size": cluster.get("size"),
-            "path": str(path.relative_to(ROOT)),
-            "title": synth.get("title", "")[:80],
-            "superseded": len(synth.get("superseded_note_ids") or loaded_ids),
-            "status": "drafted",
-        })
-        _log({
-            "at": _utc_now(),
-            "cluster_idx": cluster_idx,
-            "path": str(path),
-            "status": "drafted",
-        })
+        processed.append(
+            {
+                "cluster_idx": cluster_idx,
+                "size": cluster.get("size"),
+                "path": str(path.relative_to(ROOT)),
+                "title": synth.get("title", "")[:80],
+                "superseded": len(synth.get("superseded_note_ids") or loaded_ids),
+                "status": "drafted",
+            }
+        )
+        _log(
+            {
+                "at": _utc_now(),
+                "cluster_idx": cluster_idx,
+                "path": str(path),
+                "status": "drafted",
+            }
+        )
 
     print(json.dumps({"status": "ok", "processed": processed}, indent=2))
     return 0

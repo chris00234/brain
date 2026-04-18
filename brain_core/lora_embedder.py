@@ -5,6 +5,7 @@ Singleton to avoid reloading the model on every call.
 
 Used by indexer.py and search.py when embed model name starts with 'lora:'.
 """
+
 from __future__ import annotations
 
 import logging
@@ -28,6 +29,7 @@ def _load_base():
         return _base_model
     try:
         from sentence_transformers import SentenceTransformer
+
         log.info("loading base embedding model: intfloat/multilingual-e5-large-instruct")
         _base_model = SentenceTransformer("intfloat/multilingual-e5-large-instruct")
         return _base_model
@@ -59,13 +61,16 @@ def _load_adapter(adapter_path: str) -> Any:
         adapter_dir = Path(adapter_path)
 
         # Path 1: isolated LoRA adapter
-        if (adapter_dir / "adapter_config.json").exists() and (adapter_dir / "adapter_model.safetensors").exists():
+        if (adapter_dir / "adapter_config.json").exists() and (
+            adapter_dir / "adapter_model.safetensors"
+        ).exists():
             try:
-                from sentence_transformers import SentenceTransformer
+                import json as _json
+
+                import torch
                 from peft import LoraConfig, set_peft_model_state_dict
                 from safetensors.torch import load_file
-                import json as _json
-                import torch
+                from sentence_transformers import SentenceTransformer
 
                 log.info("loading LoRA adapter from %s", adapter_path)
                 # Resolve base model name — brain_finetune.py writes it as a
@@ -95,6 +100,7 @@ def _load_adapter(adapter_path: str) -> Any:
         if (adapter_dir / "modules.json").exists():
             try:
                 from sentence_transformers import SentenceTransformer
+
                 log.info("loading fine-tuned SentenceTransformer from %s", adapter_path)
                 _base_model = SentenceTransformer(str(adapter_dir))
                 _active_adapter = adapter_path
@@ -118,7 +124,9 @@ def _load_adapter(adapter_path: str) -> Any:
         raise RuntimeError(f"no recognized model format at {adapter_path}")
 
 
-def get_lora_embedding(text: str, adapter_path: str, prefix: str = "passage", max_chars: int = 1000) -> list[float]:
+def get_lora_embedding(
+    text: str, adapter_path: str, prefix: str = "passage", max_chars: int = 1000
+) -> list[float]:
     """Embed text using base model + LoRA adapter.
 
     Args:
@@ -141,7 +149,9 @@ def get_lora_embedding(text: str, adapter_path: str, prefix: str = "passage", ma
         raise
 
 
-def get_lora_embeddings_batch(texts: list[str], adapter_path: str, prefix: str = "passage", max_chars: int = 1000) -> list[list[float]]:
+def get_lora_embeddings_batch(
+    texts: list[str], adapter_path: str, prefix: str = "passage", max_chars: int = 1000
+) -> list[list[float]]:
     """Batch version of get_lora_embedding. Much faster for many texts."""
     if not texts:
         return []
@@ -167,6 +177,7 @@ def unload():
 if __name__ == "__main__":
     # Smoke test
     import sys
+
     if len(sys.argv) < 2:
         print("Usage: lora_embedder.py <adapter_path>")
         sys.exit(1)

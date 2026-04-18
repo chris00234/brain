@@ -72,7 +72,8 @@ def run() -> dict:
 
     # Drift detected — notify via Jenna Telegram (best-effort)
     try:
-        from openclaw_dispatch import dispatch
+        from cli_llm import dispatch
+
         body = (
             "⚠ Canonical design standard drift detected\n\n"
             f"status: {result['status']}\n"

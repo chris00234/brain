@@ -26,10 +26,10 @@ Schedule: daily 3:55am, after memory_consolidation (3:45) which it depends on.
 
 Wall-clock budget: < 60s on ~500 atoms, ~2400 raw_events baseline.
 """
+
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 import sys
 import time
@@ -44,12 +44,22 @@ from atoms_store import (  # noqa: E402
     BRAIN_ATOMS_ENABLED,
     BRAIN_DB,
     _now,
-    link_atom_entity,
     update_atom_confidence,
 )
 
 SLEEP_WINDOW_HOURS = 48
 TOP_PAIRS_PER_SESSION = 8
+# 2026-04-16 Tier 3 #2: Complementary Learning Systems interleaved replay
+# (McClelland et al. 1995). The hippocampal replay that drives cortical
+# consolidation in biology interleaves old AND new memories — replaying
+# only new observations causes catastrophic forgetting of old traces.
+# Each sleep cycle now samples K existing high-confidence semantic atoms
+# alongside the 48h action_audit window and re-runs coactivation across
+# the combined set. Old traces maintain their neighborhood connectivity;
+# new traces get woven into existing schema rather than floating alone.
+INTERLEAVE_OLD_SAMPLES = 32
+INTERLEAVE_MIN_CONFIDENCE = 0.6
+INTERLEAVE_MIN_TIER = "semantic"  # episodic/semantic/core — skip episodic
 AMEM_K = 5
 AMEM_DIST_THRESHOLD = 0.22
 AMEM_EDGES_PER_ATOM = 3
@@ -93,6 +103,37 @@ def _finish_cycle(
         (_now(), replay_count, edges_added, consolidated, json.dumps(summary), cycle_id),
     )
     conn.commit()
+
+
+def _sample_old_high_confidence_atoms(conn: sqlite3.Connection) -> list[str]:
+    """2026-04-16 Tier 3 #2: sample N old high-confidence atoms to
+    interleave with the 48h replay window. Prevents catastrophic
+    forgetting of stable long-tail semantic knowledge.
+
+    Pulls atoms that are:
+      - tier in (semantic, core) — already consolidated, worth rehearsing
+      - confidence >= INTERLEAVE_MIN_CONFIDENCE — trusted enough to matter
+      - updated_at NOT in the last 7 days — actually OLD, not redundantly
+        picked up via the recent window
+
+    Random sample keeps the interleave broad rather than biased toward
+    one cluster. Chroma_ids returned so they merge cleanly into the
+    session-grouping pipeline as pseudo-retrievals.
+    """
+    recent_cutoff = (_now_utc() - timedelta(days=7)).isoformat(timespec="seconds")
+    try:
+        rows = conn.execute(
+            "SELECT chroma_id FROM atoms "
+            "WHERE tier IN ('semantic', 'core') "
+            "AND confidence >= ? "
+            "AND updated_at < ? "
+            "ORDER BY RANDOM() "
+            "LIMIT ?",
+            (INTERLEAVE_MIN_CONFIDENCE, recent_cutoff, INTERLEAVE_OLD_SAMPLES),
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    return [r["chroma_id"] for r in rows if r["chroma_id"]]
 
 
 def _fetch_window(conn: sqlite3.Connection) -> list[sqlite3.Row]:
@@ -147,9 +188,7 @@ def _resolve_atom_ids(conn: sqlite3.Connection, chroma_ids: list[str]) -> dict[s
     return {r["chroma_id"]: r["id"] for r in rows}
 
 
-def _upsert_pair(
-    conn: sqlite3.Connection, atom_a: str, atom_b: str
-) -> bool:
+def _upsert_pair(conn: sqlite3.Connection, atom_a: str, atom_b: str) -> bool:
     """Upsert one coactivation pair. Returns True if inserted (new edge)."""
     a, b = (atom_a, atom_b) if atom_a < atom_b else (atom_b, atom_a)
     cur = conn.execute(
@@ -163,9 +202,7 @@ def _upsert_pair(
     return cur.rowcount > 0
 
 
-def _update_coactivation(
-    conn: sqlite3.Connection, sessions: list[list[str]]
-) -> tuple[int, set[str]]:
+def _update_coactivation(conn: sqlite3.Connection, sessions: list[list[str]]) -> tuple[int, set[str]]:
     """Upsert all session pairs; returns (edges_added, set of atom ids touched)."""
     edges_added = 0
     touched: set[str] = set()
@@ -214,8 +251,7 @@ def _access_frequency(conn: sqlite3.Connection) -> Counter[str]:
 def _predictive_error_atoms(conn: sqlite3.Connection) -> set[str]:
     cutoff = (_now_utc() - timedelta(days=7)).isoformat(timespec="seconds")
     rows = conn.execute(
-        "SELECT DISTINCT atom_id FROM atom_evidence "
-        "WHERE event_type='contradict' AND created_at >= ?",
+        "SELECT DISTINCT atom_id FROM atom_evidence " "WHERE event_type='contradict' AND created_at >= ?",
         (cutoff,),
     ).fetchall()
     return {r["atom_id"] for r in rows}
@@ -235,8 +271,7 @@ def _promote_episodic_to_semantic(
     BEGIN IMMEDIATE and silently skip the ledger row.
     """
     rows = conn.execute(
-        "SELECT id, chroma_id, confidence FROM atoms "
-        "WHERE tier='episodic' AND confidence >= ?",
+        "SELECT id, chroma_id, confidence FROM atoms " "WHERE tier='episodic' AND confidence >= ?",
         (PROMOTION_CONFIDENCE_FLOOR,),
     ).fetchall()
     promoted_ids: list[str] = []
@@ -287,7 +322,7 @@ def _amem_link_neighbors(
     if not touched_atom_ids:
         return 0
     try:
-        from indexer import _get_collection_id, chroma_api, get_embedding  # noqa: E402
+        from indexer import _get_collection_id, chroma_api, get_embedding
     except ImportError:
         return 0
     col_id = _get_collection_id("semantic_memory")
@@ -327,16 +362,14 @@ def _amem_link_neighbors(
         ids = (res.get("ids") or [[]])[0]
         dists = (res.get("distances") or [[]])[0]
         new_edges_this_atom = 0
-        for nid, d in zip(ids, dists):
+        for nid, d in zip(ids, dists, strict=False):
             if new_edges_this_atom >= AMEM_EDGES_PER_ATOM:
                 break
             if d > AMEM_DIST_THRESHOLD:
                 continue
             if nid == row["chroma_id"]:
                 continue
-            neighbor_row = conn.execute(
-                "SELECT id FROM atoms WHERE chroma_id = ?", (nid,)
-            ).fetchone()
+            neighbor_row = conn.execute("SELECT id FROM atoms WHERE chroma_id = ?", (nid,)).fetchone()
             if not neighbor_row or neighbor_row["id"] == atom_id:
                 continue
             neighbor_atom_id = neighbor_row["id"]
@@ -363,9 +396,7 @@ def _amem_link_neighbors(
     return edges_added
 
 
-def _summarize_via_sage(
-    cycle_stats: dict, touched_atom_ids: set[str], conn: sqlite3.Connection
-) -> dict:
+def _summarize_via_sage(cycle_stats: dict, touched_atom_ids: set[str], conn: sqlite3.Connection) -> dict:
     """Dispatch one Sage summary call if the cycle was active enough to be
     worth summarizing. 200 tokens max; stored as JSON on sleep_cycles.summary.
     Best-effort — never fails the pipeline.
@@ -373,15 +404,19 @@ def _summarize_via_sage(
     if cycle_stats.get("replay_count", 0) < SUMMARY_TRIGGER_REPLAY_COUNT:
         return {"skipped": "below_trigger"}
     try:
-        from openclaw_dispatch import dispatch  # noqa: E402
+        from cli_llm import dispatch
     except ImportError:
         return {"skipped": "dispatch_unavailable"}
-    sample_rows = conn.execute(
-        "SELECT text FROM atoms WHERE id IN ({}) LIMIT 10".format(
-            ",".join("?" * min(10, len(touched_atom_ids)))
-        ),
-        tuple(list(touched_atom_ids)[:10]),
-    ).fetchall() if touched_atom_ids else []
+    sample_rows = (
+        conn.execute(
+            "SELECT text FROM atoms WHERE id IN ({}) LIMIT 10".format(
+                ",".join("?" * min(10, len(touched_atom_ids)))
+            ),
+            tuple(list(touched_atom_ids)[:10]),
+        ).fetchall()
+        if touched_atom_ids
+        else []
+    )
     sample = "\n".join(f"- {r['text'][:160]}" for r in sample_rows)
     prompt = (
         "You are summarizing the top 3 patterns from a brain 'sleep cycle' — "
@@ -422,7 +457,17 @@ def run() -> dict:
         cycle_id = _start_cycle(conn)
         rows = _fetch_window(conn)
         sessions = _group_sessions(rows)
+        # 2026-04-16 Tier 3 #2: interleave old high-confidence atoms into
+        # the replay set so CLS-style consolidation actually rehearses
+        # long-tail semantic knowledge, not just the last 48 hours. The
+        # interleave forms a pseudo-session: the old samples jointly
+        # co-activate with themselves AND with any overlapping new traces
+        # via the upsert step, keeping cortical neighborhoods intact.
+        old_samples = _sample_old_high_confidence_atoms(conn)
+        if old_samples:
+            sessions.append(old_samples)
         replay_count = sum(len(s) for s in sessions)
+        interleaved_count = len(old_samples)
         edges_added, touched = _update_coactivation(conn, sessions)
         freq_by_chroma = _access_frequency(conn)
         demotion_set = _predictive_error_atoms(conn)
@@ -432,6 +477,7 @@ def run() -> dict:
         summary_stats = {
             "sessions": len(sessions),
             "replay_count": replay_count,
+            "interleaved_old_samples": interleaved_count,
             "coactivation_edges_added": edges_added,
             "amem_edges_added": amem_edges,
             "promoted_episodic_to_semantic": promoted,

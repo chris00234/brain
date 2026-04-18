@@ -5,7 +5,17 @@ import json
 from pathlib import Path
 from typing import Any
 
-from common import ROOT, SCHEMA_DIR, iter_note_paths, load_json, parse_markdown_frontmatter, slugify, utc_now, validate_schema, write_markdown_frontmatter
+from common import (
+    ROOT,
+    SCHEMA_DIR,
+    iter_note_paths,
+    load_json,
+    parse_markdown_frontmatter,
+    slugify,
+    utc_now,
+    validate_schema,
+    write_markdown_frontmatter,
+)
 
 DOMAIN_KEYWORDS = {
     "infra": ["deploy", "server", "docker", "nginx", "cloudflare", "chromadb", "ollama", "infra"],
@@ -37,15 +47,15 @@ def infer_subtype(domain: str, raw_record: dict[str, Any]) -> str:
 
 
 _BOILERPLATE_PREFIXES = (
-    "openclaw ",        # "OpenClaw market session (...)"
-    "claude code ",     # "Claude Code session in ... (...)"
-    "signal:",          # "Signal: decision (score 9/10)"
-    "context ",         # "Context — User: ..."
+    "openclaw ",  # "OpenClaw market session (...)"
+    "claude code ",  # "Claude Code session in ... (...)"
+    "signal:",  # "Signal: decision (score 9/10)"
+    "context ",  # "Context — User: ..."
     "context—",
     "context-",
     "context:",
     "---",
-    "#",                # markdown headers from canonical imports
+    "#",  # markdown headers from canonical imports
 )
 
 
@@ -78,7 +88,9 @@ def existing_source_map(distilled_root: Path) -> set[str]:
     return seen
 
 
-def build_distilled(raw_record: dict[str, Any], domain: str, subtype: str, title: str) -> tuple[dict[str, Any], str]:
+def build_distilled(
+    raw_record: dict[str, Any], domain: str, subtype: str, title: str
+) -> tuple[dict[str, Any], str]:
     note_id = f"dist_{slugify(title).replace('-', '_')}"
     metadata = {
         "id": note_id,
@@ -125,6 +137,23 @@ def main() -> int:
         validate_schema(raw_schema, raw_record)
         raw_id = raw_record["id"]
         if raw_id in seen_sources:
+            skipped.append(raw_id)
+            continue
+        # 2026-04-16 fix: break synthesis staircase. daily/weekly/monthly
+        # synthesis jobs write candidate facts back into raw/inbox so that
+        # Jenna's distilled insights can become canonical. But without this
+        # guard, those already-distilled artifacts re-enter the distill→
+        # propose→promote pipeline and Jenna's next synthesis run reads
+        # them as "new events" — each layer summarizes its own compressed
+        # output, bleeding raw-signal detail. Skip them here so they flow
+        # directly to propose/promote via a different path (or a future
+        # dedicated "synthesis-candidate" lane) rather than being re-
+        # distilled from already-distilled content.
+        _src_ref = str(raw_record.get("source_ref", "") or "").lower()
+        _src_type = str(raw_record.get("source_type", "") or "").lower()
+        if _src_type == "synthesis" or _src_ref.startswith(
+            ("jenna:daily_synthesis", "jenna:weekly_synthesis", "jenna:monthly_synthesis")
+        ):
             skipped.append(raw_id)
             continue
 

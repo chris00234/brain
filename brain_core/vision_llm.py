@@ -21,6 +21,7 @@ import os
 import time
 import urllib.error
 import urllib.request
+from datetime import UTC
 from pathlib import Path
 
 log = logging.getLogger("brain.vision_llm")
@@ -49,7 +50,7 @@ def _load_api_key() -> str:
             if not line or line.startswith("#"):
                 continue
             if line.startswith("export "):
-                line = line[len("export "):]
+                line = line[len("export ") :]
             if "=" not in line:
                 continue
             k, _, v = line.partition("=")
@@ -86,8 +87,9 @@ def _count_today_calls() -> int:
     if not log_file.exists():
         return 0
     try:
-        from datetime import datetime, timezone
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        from datetime import datetime
+
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
         n = 0
         with log_file.open() as f:
             for line in f:
@@ -104,7 +106,8 @@ def _count_today_calls() -> int:
 
 def _record_call(model: str, prompt_len: int, output_len: int, duration_ms: int) -> None:
     try:
-        from datetime import datetime, timezone
+        from datetime import datetime
+
         try:
             from config import BRAIN_LOGS_DIR
         except ImportError:
@@ -112,8 +115,8 @@ def _record_call(model: str, prompt_len: int, output_len: int, duration_ms: int)
         log_file = BRAIN_LOGS_DIR / "vision_llm_calls.jsonl"
         log_file.parent.mkdir(parents=True, exist_ok=True)
         rec = {
-            "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+            "timestamp": datetime.now(UTC).isoformat(timespec="seconds"),
+            "date": datetime.now(UTC).strftime("%Y-%m-%d"),
             "model": model,
             "prompt_chars": prompt_len,
             "output_chars": output_len,
@@ -245,6 +248,7 @@ def describe_image(
 
 if __name__ == "__main__":
     import argparse
+
     parser = argparse.ArgumentParser(description="Caption an image via Gemini vision.")
     parser.add_argument("image")
     parser.add_argument("--prompt", default=None)

@@ -21,20 +21,21 @@ Guardrails:
 Usage:
   answer_canonicalize.py [--limit 3] [--dry-run] [--min-score 0.5]
 """
+
 from __future__ import annotations
 
 import argparse
 import hashlib
 import json
 import sys
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "brain_core"))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "pipeline"))
 
-import answer_candidates as ac  # noqa: E402
-from common import ROOT, tokenize, parse_note, iter_note_paths  # noqa: E402
+import answer_candidates as ac
+from common import ROOT, iter_note_paths, parse_note, tokenize
 
 INBOX_DIR = ROOT / "raw" / "inbox"
 CANONICAL_DIR = ROOT / "canonical"
@@ -51,8 +52,8 @@ def _age_days(iso: str) -> int:
     try:
         ts = datetime.fromisoformat(iso.replace("Z", "+00:00"))
         if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=timezone.utc)
-        return int((datetime.now(timezone.utc) - ts).days)
+            ts = ts.replace(tzinfo=UTC)
+        return int((datetime.now(UTC) - ts).days)
     except Exception:
         return 999
 
@@ -116,7 +117,7 @@ def _promote_to_inbox(candidate: dict, score: float) -> Path:
     """Write a schema-compliant raw/inbox/ record for canonical_pipeline to pick up."""
     INBOX_DIR.mkdir(parents=True, exist_ok=True)
     slug = _slug(candidate["query"] + candidate["answer"])
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    now = datetime.now(UTC).isoformat(timespec="seconds")
     query = candidate["query"].strip()
     answer = candidate["answer"].strip()
     reason = (candidate.get("reason") or "").strip()
@@ -133,14 +134,16 @@ def _promote_to_inbox(candidate: dict, score: float) -> Path:
     ]
     if reason:
         content_parts.extend(["", "## Promotion reason", reason])
-    content_parts.extend([
-        "",
-        "## Provenance",
-        f"- source_route: {candidate.get('source_route', 'unknown')}",
-        f"- agent: {candidate.get('agent') or 'unknown'}",
-        f"- candidate_id: {candidate['id']}",
-        f"- score: {score}",
-    ])
+    content_parts.extend(
+        [
+            "",
+            "## Provenance",
+            f"- source_route: {candidate.get('source_route', 'unknown')}",
+            f"- agent: {candidate.get('agent') or 'unknown'}",
+            f"- candidate_id: {candidate['id']}",
+            f"- score: {score}",
+        ]
+    )
     content = "\n".join(content_parts)
     content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
 
@@ -223,21 +226,25 @@ def main() -> int:
             continue
         path = _promote_to_inbox(c, score)
         ac.mark_promoted(c["id"], str(path.relative_to(ROOT)), score)
-        promoted.append({
-            "id": c["id"],
-            "source_route": c.get("source_route"),
-            "score": score,
-            "overlap": round(overlap, 3),
-            "overlap_with": overlap_id,
-            "path": str(path.relative_to(ROOT)),
-        })
-        _log({
-            "at": datetime.now(timezone.utc).isoformat(),
-            "candidate_id": c["id"],
-            "score": score,
-            "overlap": overlap,
-            "path": str(path),
-        })
+        promoted.append(
+            {
+                "id": c["id"],
+                "source_route": c.get("source_route"),
+                "score": score,
+                "overlap": round(overlap, 3),
+                "overlap_with": overlap_id,
+                "path": str(path.relative_to(ROOT)),
+            }
+        )
+        _log(
+            {
+                "at": datetime.now(UTC).isoformat(),
+                "candidate_id": c["id"],
+                "score": score,
+                "overlap": overlap,
+                "path": str(path),
+            }
+        )
 
     if not args.dry_run:
         promoted_ids = {p["id"] for p in promoted}

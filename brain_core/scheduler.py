@@ -21,12 +21,11 @@ from __future__ import annotations
 import logging
 import os
 import sqlite3
-import subprocess
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Callable
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -43,7 +42,14 @@ class ScheduledJob:
     description: str
     trigger: object  # CronTrigger or IntervalTrigger
     agent: str  # owning agent (jenna|sage|ellie|market|system)
-    misfire_grace: int = 3600  # seconds — heavy jobs use 900 (15 min)
+    # 2026-04-16 fix: default dropped 3600→300 to prevent thundering-herd
+    # after brain-server restart. Previously a 50-min downtime would
+    # re-fire ~22 jobs simultaneously (every default-grace job) when the
+    # server came back up, saturating Ollama+Neo4j. 5 min is enough slack
+    # for a graceful restart; jobs that genuinely benefit from a longer
+    # replay window (weekly Sage syntheses, monthly backups) set their
+    # own misfire_grace explicitly (900, 1800).
+    misfire_grace: int = 300
 
     def next_run_str(self, scheduler: AsyncIOScheduler) -> str:
         job = scheduler.get_job(self.name)
@@ -153,12 +159,79 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         agent="sage",
         misfire_grace=900,
     ),
+    # T2.10 auto-skill maintenance (2026-04-17): archive orphaned/stale auto-* skills
+    # Runs daily at 4:10am — after 4:00 log_rotation, before 4:45 autonomy_proposer.
+    ScheduledJob(
+        name="skill_materialize_cleanup",
+        description="T2.10: archive orphaned/stale auto-* SKILL.md files; enforce MAX_AUTO_SKILLS cap (daily 4:10am)",
+        trigger=CronTrigger(hour=4, minute=10),
+        agent="system",
+        misfire_grace=900,
+    ),
+    # T2.12 Contextual Retrieval (2026-04-17): weekly incremental re-embed of canonical
+    # chunks whose parent doc changed. Sunday 5:00am — after Sunday memory_lifecycle (2:30)
+    # and canonical_pipeline (2:00), before other Sunday jobs. ~20-30 min runtime on full
+    # pass, much less for incremental.
+    ScheduledJob(
+        name="contextual_embed_weekly",
+        description="T2.12: re-embed canonical chunks with Anthropic-style per-doc context prefix (Sun 5:00am)",
+        trigger=CronTrigger(day_of_week="sun", hour=5, minute=0),
+        agent="system",
+        misfire_grace=1800,
+    ),
+    # Long-term sustainability (2026-04-17) — keeps SQLite DBs healthy over 5+ years.
+    ScheduledJob(
+        name="db_vacuum_weekly",
+        description="Weekly VACUUM + ANALYZE on brain.db/autonomy.db/llm_usage.db (Sun 5:30am)",
+        trigger=CronTrigger(day_of_week="sun", hour=5, minute=30),
+        agent="system",
+        misfire_grace=1800,
+    ),
+    ScheduledJob(
+        name="action_audit_retention",
+        description="Prune action_audit rows older than 90d (daily 4:20am)",
+        trigger=CronTrigger(hour=4, minute=20),
+        agent="system",
+        misfire_grace=900,
+    ),
+    ScheduledJob(
+        name="llm_usage_retention",
+        description="Roll up llm_usage older than 90d into llm_usage_monthly (1st of month 4:30am)",
+        trigger=CronTrigger(day=1, hour=4, minute=30),
+        agent="system",
+        misfire_grace=1800,
+    ),
     # Maintenance
     ScheduledJob(
         name="memory_lifecycle",
         description="Age out + promote durable semantic memories (Sunday 2:30am)",
         trigger=CronTrigger(day_of_week="sun", hour=2, minute=30),
         agent="system",
+    ),
+    # 2026-04-17 — habituation prune for attention_queue (daily 3:20am, after
+    # sleep_consolidate at 3:15 captures co-activation edges).
+    ScheduledJob(
+        name="habituation_prune",
+        description="Drop attention_queue rows with shown_count ≥ 300 (daily 3:20am)",
+        trigger=CronTrigger(hour=3, minute=20),
+        agent="system",
+    ),
+    # 2026-04-17 — LLM auto-triage for candidate eval_proposals (daily 4:20am).
+    ScheduledJob(
+        name="eval_proposal_triage",
+        description="CLI codex auto-approves/rejects candidate eval_proposals (daily 4:20am)",
+        trigger=CronTrigger(hour=4, minute=20),
+        agent="system",
+        misfire_grace=900,
+    ),
+    # 2026-04-17 — LLM triage for score=2 canonical_quality items
+    # (Sun 07:00am, after canonical_quality_filter report at 06:35).
+    ScheduledJob(
+        name="canonical_quality_triage",
+        description="LLM classifies score=2 canonical_quality items as archive/keep/uncertain",
+        trigger=CronTrigger(day_of_week="sun", hour=7, minute=0),
+        agent="system",
+        misfire_grace=1800,
     ),
     # Eval — two-track gate (incident 2026-04-13)
     # stable  → 138 timeless queries, strict 5pt gate + heal dispatch (legacy alias eval_run)
@@ -399,8 +472,8 @@ JOB_SCHEDULE: list[ScheduledJob] = [
     ScheduledJob(
         name="auto_resolve_contradictions",
         description="Daily auto-resolve stale/low-confidence contradictions (6:00am) — "
-                    "v3 bumped from weekly to daily after finding 20-item pending "
-                    "backlog that should have been closed overnight",
+        "v3 bumped from weekly to daily after finding 20-item pending "
+        "backlog that should have been closed overnight",
         trigger=CronTrigger(hour=6, minute=0),
         agent="system",
         misfire_grace=900,
@@ -431,11 +504,19 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         agent="system",
         misfire_grace=900,
     ),
-    # Canonical pipeline
+    # Canonical pipeline — 3× daily (02:00 / 07:00 / 22:00 PT) post 2026-04-17.
+    # Was 1× nightly at 02:00, which caused `atoms_write_throughput_1h` SLO
+    # flapping during natural morning idle windows (input queue drained by 2am
+    # run → zero new atoms 08:00–17:00 until work-hours restriction expired).
+    # Triple-split spreads atom production across waking hours:
+    #   02:00  — nightly catchup (existing)
+    #   07:00  — morning digest (gmail/calendar overnight ingest)
+    #   22:00  — evening rollup (session/activity during the day)
+    # All three outside the 9am-6pm Ollama/ChromaDB hot-work block.
     ScheduledJob(
         name="canonical_pipeline",
-        description="Automated canonical promotion (daily 2am)",
-        trigger=CronTrigger(hour=2, minute=0),
+        description="Automated canonical promotion (3× daily: 02:00 / 07:00 / 22:00 PT)",
+        trigger=CronTrigger(hour="2,7,22", minute=0),
         agent="system",
         misfire_grace=900,
     ),
@@ -514,8 +595,8 @@ JOB_SCHEDULE: list[ScheduledJob] = [
     ),
     ScheduledJob(
         name="lint_memory",
-        description="Weekly memory lint pass (Sunday 5:30am)",
-        trigger=CronTrigger(day_of_week="sun", hour=5, minute=30),
+        description="Weekly memory lint pass (Sunday 5:35am — staggered off canonical_design_drift at 05:30)",
+        trigger=CronTrigger(day_of_week="sun", hour=5, minute=35),
         agent="system",
         misfire_grace=900,
     ),
@@ -535,8 +616,8 @@ JOB_SCHEDULE: list[ScheduledJob] = [
     ),
     ScheduledJob(
         name="answer_canonicalize",
-        description="Nightly query→canonical promoter (03:15am, before canonical_pipeline at 02:00 of the next day)",
-        trigger=CronTrigger(hour=3, minute=15),
+        description="Nightly query→canonical promoter (03:50am — staggered off neo4j_backup at 03:15 to avoid reading while backup writes)",
+        trigger=CronTrigger(hour=3, minute=50),
         agent="system",
         misfire_grace=900,
     ),
@@ -577,8 +658,8 @@ JOB_SCHEDULE: list[ScheduledJob] = [
     ),
     ScheduledJob(
         name="memory_nudge",
-        description="Weekly memory review nudge (Sunday 6:45am)",
-        trigger=CronTrigger(day_of_week="sun", hour=6, minute=45),
+        description="Weekly memory review nudge (Sunday 6:50am — staggered off canonicalize_entities_dryrun at 06:45)",
+        trigger=CronTrigger(day_of_week="sun", hour=6, minute=50),
         agent="system",
         misfire_grace=900,
     ),
@@ -665,8 +746,8 @@ JOB_SCHEDULE: list[ScheduledJob] = [
     ),
     ScheduledJob(
         name="memory_leak_detector",
-        description="Weekly memory leak detection (Sunday 5:45am)",
-        trigger=CronTrigger(day_of_week="sun", hour=5, minute=45),
+        description="Weekly memory leak detection (Sunday 5:50am — staggered off canonical_lint at 05:45)",
+        trigger=CronTrigger(day_of_week="sun", hour=5, minute=50),
         agent="system",
         misfire_grace=900,
     ),
@@ -680,8 +761,8 @@ JOB_SCHEDULE: list[ScheduledJob] = [
     # Round 9 — Tier 2 capabilities
     ScheduledJob(
         name="code_index_refresh",
-        description="Daily incremental code function indexer (3:25am, after canonical_pipeline)",
-        trigger=CronTrigger(hour=3, minute=25),
+        description="Daily incremental code function indexer (3:35am — staggered off sm2_nightly at 03:25)",
+        trigger=CronTrigger(hour=3, minute=35),
         agent="system",
         misfire_grace=1200,
     ),
@@ -705,6 +786,27 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         trigger=CronTrigger(hour=4, minute=35),
         agent="system",
         misfire_grace=600,
+    ),
+    # 2026-04-17 ECC-style skill evolution — weekly Sun 04:55, after
+    # profile_regen (04:00) + canonical_index (04:45) so atom tier state
+    # is fresh. Non-destructive: only writes SKILL.md files under
+    # ~/.claude/skills/brain-learned-*. No LLM calls.
+    ScheduledJob(
+        name="atoms_to_skills",
+        description="Promote high-confidence atoms → domain Claude Code skills (Sun 04:55)",
+        trigger=CronTrigger(day_of_week="sun", hour=4, minute=55),
+        agent="system",
+        misfire_grace=900,
+    ),
+    # 2026-04-17 CLS schema learner — spectral clustering on atom_coactivation.
+    # Runs Sun 04:40 before canonical_compaction (06:00) so its human-review
+    # queue has clustering candidates to evaluate. Non-destructive.
+    ScheduledJob(
+        name="schema_learner",
+        description="CLS spectral clustering on atom coactivation → compaction candidates (Sun 04:40)",
+        trigger=CronTrigger(day_of_week="sun", hour=4, minute=40),
+        agent="system",
+        misfire_grace=900,
     ),
     # Round 10 Wave 2 — episodic memory binding
     ScheduledJob(
@@ -730,10 +832,96 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         agent="system",
         misfire_grace=1800,
     ),
+    # 2026-04-16 Tier 2: quarterly prune_raw_orphaned — deletes entries in
+    # raw/orphaned older than 180 days. Runs on 1st of Jan/Apr/Jul/Oct at
+    # 04:25 local (well off the nightly window so it can't contend for
+    # ChromaDB or Ollama).
+    ScheduledJob(
+        name="prune_raw_orphaned",
+        description="Quarterly raw/orphaned prune (180d retention; 1st of Jan/Apr/Jul/Oct @ 04:25)",
+        trigger=CronTrigger(month="1,4,7,10", day=1, hour=4, minute=25),
+        agent="system",
+        misfire_grace=1800,
+    ),
+    # 2026-04-16 Tier 2: monthly re-examine of rejected proposals. If new
+    # high-trust corroboration arrives after a rejection, restore the
+    # proposal to the pending queue for human review. Runs 2nd of month
+    # at 04:30 (quiet hours, post-month-boundary so end-of-month syntheses
+    # have settled).
+    ScheduledJob(
+        name="re_examine_rejected",
+        description="Monthly rejected-proposal re-examination (2nd of month @ 04:30)",
+        trigger=CronTrigger(day=2, hour=4, minute=30),
+        agent="system",
+        misfire_grace=1800,
+    ),
+    # 2026-04-16 Tier 3 #4: nightly retrieval-induced inhibition (Bjork
+    # 1994). Applies small confidence decrements to atoms that consistently
+    # lose top-rank competitions on the same query cue. Runs 3:55am —
+    # between answer_canonicalize (03:50) and focus_aggregate (04:35).
+    ScheduledJob(
+        name="retrieval_inhibition",
+        description="Nightly Bjork-style inhibition of consistent retrieval losers (03:55am)",
+        trigger=CronTrigger(hour=3, minute=55),
+        agent="system",
+        misfire_grace=600,
+    ),
+    # 2026-04-16 Tier 3 #3: weekly Platt confidence calibration — fits
+    # logistic transform over eval holdout + atoms.confidence pairs.
+    # Sun 04:10 (post-eval, pre-weekly-synthesis).
+    ScheduledJob(
+        name="confidence_calibration",
+        description="Weekly Platt calibration of atoms.confidence vs eval outcomes (Sun 04:10)",
+        trigger=CronTrigger(day_of_week="sun", hour=4, minute=10),
+        agent="system",
+        misfire_grace=900,
+    ),
+    # 2026-04-17 Phase 3: weekly learned-to-rank logistic fit. Sun 04:20
+    # (between confidence_calibration 04:10 and dream_replay 08:30).
+    ScheduledJob(
+        name="ltr_train",
+        description="Weekly LogisticRegression LtR fit on recall feedback (Sun 04:20)",
+        trigger=CronTrigger(day_of_week="sun", hour=4, minute=20),
+        agent="system",
+        misfire_grace=900,
+    ),
+    # 2026-04-16 Tier 3 #7: weekly dream replay (Wagner 2004). Sage
+    # hypothesizes novel connections between distant entity pairs. Small
+    # Sage-dispatch budget (5 pairs) so it doesn't compete with weekly
+    # syntheses. Sun 08:30 (after trust_recompute 07:00, before
+    # gap_detection 09:00).
+    ScheduledJob(
+        name="dream_replay",
+        description="Weekly REM-like generative conjecture synthesis (Sun 08:30)",
+        trigger=CronTrigger(day_of_week="sun", hour=8, minute=30),
+        agent="sage",
+        misfire_grace=1800,
+    ),
+    # 2026-04-16 Tier 3 #5: weekly Friston schema-revision signal — emits
+    # raw/inbox proposals for clusters of prediction errors instead of
+    # silent per-atom punishment. Sun 08:45 (between dream_replay and
+    # gap_detection so proposals land in the same nightly pipeline).
+    ScheduledJob(
+        name="schema_revision",
+        description="Weekly free-energy schema revision (Sun 08:45)",
+        trigger=CronTrigger(day_of_week="sun", hour=8, minute=45),
+        agent="system",
+        misfire_grace=900,
+    ),
+    # 2026-04-16 Tier 3 #9: weekly RAPTOR tree build (Sarthi 2024). Runs
+    # after canonical_compaction (Sun 06:00) so it sees the freshest
+    # canonical state. Heaviest weekly Sage job — budget up to 20 min.
+    ScheduledJob(
+        name="raptor_build",
+        description="Weekly RAPTOR hierarchical summary tree (Sun 07:15)",
+        trigger=CronTrigger(day_of_week="sun", hour=7, minute=15),
+        agent="sage",
+        misfire_grace=1800,
+    ),
     ScheduledJob(
         name="stale_superseded_cleanup",
-        description="Weekly stale superseded memory cleanup (Sun 6:15am)",
-        trigger=CronTrigger(day_of_week="sun", hour=6, minute=15),
+        description="Weekly stale superseded memory cleanup (Sun 6:20am — staggered off canonical_merge_draft at 06:15)",
+        trigger=CronTrigger(day_of_week="sun", hour=6, minute=20),
         agent="system",
         misfire_grace=900,
     ),
@@ -822,7 +1010,7 @@ class BrainScheduler:
         self, job_name: str, row_id: int | None, start_ts: float, error: str | None = None
     ) -> None:
         """Called by _wait_for_job after a subprocess finishes."""
-        finished_at = datetime.now(timezone.utc).isoformat()
+        finished_at = datetime.now(UTC).isoformat()
         duration_ms = int((time.time() - start_ts) * 1000)
 
         # Update in-memory history (find the matching entry by row_id or last unfinished)
@@ -847,6 +1035,67 @@ class BrainScheduler:
             except Exception:
                 pass
 
+    def _reconcile_orphans(self) -> int:
+        """2026-04-17 reindex-silent-death fix: on server startup, reconcile
+        `job_history` rows that were left with finished_at=NULL by the prior
+        brain-server instance. Those rows are orphans — their `_wait_for_job`
+        thread died with the old process, so completion never recorded.
+
+        Two classes of orphans:
+          1. PID still alive → process survived restart (subprocess was
+             detached via start_new_session=True). Keep the row but do nothing
+             yet; the next reaper tick will catch it when the process exits.
+          2. PID gone → the subprocess also died. Mark the row as completed
+             with an 'orphaned_by_restart' error so UI / SLO stop showing it
+             as "running forever".
+
+        Returns the number of rows reconciled.
+        """
+        n_reconciled = 0
+        try:
+            conn = sqlite3.connect(str(self._db_path))
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT id, job_name, pid, started_at FROM job_history " "WHERE finished_at IS NULL"
+            ).fetchall()
+            for row in rows:
+                pid = row["pid"] or -1
+                alive = False
+                if pid > 0:
+                    try:
+                        os.kill(pid, 0)
+                        alive = True
+                    except (ProcessLookupError, PermissionError):
+                        alive = False
+                if alive:
+                    # Subprocess survived the restart — rebuild tracking so
+                    # the reaper can catch its eventual exit.
+                    try:
+                        started_at = row["started_at"]
+                        if started_at and "T" in started_at:
+                            start_ts = datetime.fromisoformat(started_at).timestamp()
+                        else:
+                            start_ts = time.time() - 60.0
+                    except Exception:
+                        start_ts = time.time() - 60.0
+                    self._running_jobs[row["job_name"]] = pid
+                    self._pending_completions[row["job_name"]] = (start_ts, row["id"])
+                    continue
+                # Dead — record completion with orphan marker
+                finished_at = datetime.now(UTC).isoformat()
+                conn.execute(
+                    "UPDATE job_history SET finished_at=?, error=COALESCE(error, ?) WHERE id=?",
+                    (finished_at, "orphaned_by_restart", row["id"]),
+                )
+                n_reconciled += 1
+            conn.commit()
+            conn.close()
+        except Exception as exc:
+            log.warning("orphan reconcile failed: %s", exc)
+        if n_reconciled:
+            log.info("reconciled %d orphaned job rows from prior brain-server instance", n_reconciled)
+        return n_reconciled
+
     def start(self, dispatcher: Callable[[str], int]) -> None:
         """Start the scheduler with a job dispatcher callback.
 
@@ -854,6 +1103,12 @@ class BrainScheduler:
         as the existing POST /jobs/{name} route handler.
         """
         self._dispatcher = dispatcher
+        # 2026-04-17: reconcile orphans left by previous brain-server instance.
+        # Must run before we start adding scheduler jobs — otherwise a freshly
+        # fired cron could collide with a "running" orphan row and the dedup
+        # in _dispatch_job (check for existing _running_jobs[name]) would fail
+        # because that in-memory state is rebuilt from SQLite orphans first.
+        self._reconcile_orphans()
         for job in JOB_SCHEDULE:
             self._scheduler.add_job(
                 self._fire,
@@ -873,6 +1128,22 @@ class BrainScheduler:
             name="Task executor tick (30s, in-process)",
             replace_existing=True,
             misfire_grace_time=60,
+            coalesce=True,
+        )
+        # 2026-04-16 fix: completion reaper. Previously _pending_completions
+        # was populated at dispatch but never drained — the missing
+        # _wait_for_job docstring-referenced method was never implemented.
+        # Result: finished_at/duration_ms stayed NULL for every scheduled
+        # run and the dict grew unbounded. This 15s-interval reaper polls
+        # each PID with kill(0); dead processes get record_completion +
+        # removed from _running_jobs and _pending_completions.
+        self._scheduler.add_job(
+            self._reap_completions,
+            trigger=IntervalTrigger(seconds=15),
+            id="completion_reaper",
+            name="Scheduler completion reaper (15s, in-process)",
+            replace_existing=True,
+            misfire_grace_time=30,
             coalesce=True,
         )
         self._scheduler.start()
@@ -930,10 +1201,64 @@ class BrainScheduler:
         except Exception as e:
             log.warning("task_executor tick failed: %s", e)
 
+    _MAX_PENDING_AGE_S = 3600  # reap entries older than 1h even if PID still alive
+
+    def _reap_completions(self) -> None:
+        """Drain _pending_completions for any subprocess that has exited.
+
+        Checks each tracked PID with kill(0). Three outcomes per entry:
+          - process still alive, age < MAX → keep pending
+          - process gone → record_completion + drop from pending + running
+          - process stuck beyond MAX age → record_completion with timeout
+            error + drop (prevents unbounded dict growth on stuck jobs)
+        """
+        if not self._pending_completions:
+            return
+        now = time.time()
+        to_drop: list[str] = []
+        for job_name, (start_ts, row_id) in list(self._pending_completions.items()):
+            pid = self._running_jobs.get(job_name)
+            if not pid or pid <= 0:
+                self.record_completion(job_name, row_id, start_ts)
+                to_drop.append(job_name)
+                continue
+            try:
+                os.kill(pid, 0)
+                alive = True
+            except (ProcessLookupError, PermissionError):
+                alive = False
+            age = now - start_ts
+            if not alive:
+                self.record_completion(job_name, row_id, start_ts)
+                to_drop.append(job_name)
+            elif age > self._MAX_PENDING_AGE_S:
+                self.record_completion(
+                    job_name,
+                    row_id,
+                    start_ts,
+                    error=f"reaper_timeout_{int(age)}s",
+                )
+                to_drop.append(job_name)
+        for name in to_drop:
+            self._pending_completions.pop(name, None)
+            self._running_jobs.pop(name, None)
+
     _ALERT_THRESHOLD = 3  # consecutive failures before alerting
 
     def _fire(self, job_name: str) -> None:
         """APScheduler callback — dispatch the job and record to history."""
+        # Skip if a prior run (scheduled or manual) is still alive. Prevents
+        # two concurrent drains racing on the same `status='pending'` rows
+        # with no SKIP LOCKED semantics → duplicate LLM calls / side effects.
+        if job_name in self._running_jobs:
+            old_pid = self._running_jobs[job_name]
+            try:
+                os.kill(old_pid, 0)
+                log.info("scheduler: skip %s — already running (pid=%d)", job_name, old_pid)
+                return
+            except (ProcessLookupError, PermissionError):
+                self._running_jobs.pop(job_name, None)  # stale, fall through
+
         start_ts = time.time()
         started = datetime.now().isoformat(timespec="seconds")
         pid = -1
@@ -979,7 +1304,7 @@ class BrainScheduler:
     def _alert_failure(self, job_name: str, last_error: str) -> None:
         """Send Telegram alert via Jenna when a job fails 3+ times consecutively."""
         try:
-            from openclaw_dispatch import dispatch
+            from cli_llm import dispatch
 
             dispatch(
                 agent="jenna",

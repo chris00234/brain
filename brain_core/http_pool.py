@@ -16,18 +16,20 @@ log = logging.getLogger("brain.http_pool")
 
 class ChromaAPIError(Exception):
     """Raised when ChromaDB/Ollama returns a 4xx error response."""
+
     def __init__(self, status: int, message: str, path: str = ""):
         self.status = status
         self.message = message
         self.path = path
         super().__init__(f"HTTP {status} from {path}: {message}")
 
+
 _thread_local = threading.local()
 _CONN_TTL = 120  # seconds — shorter than Ollama's 5-min idle unload window
 
 
 def _get_conn(host: str, port: int, timeout: int = 60) -> http.client.HTTPConnection:
-    pool = getattr(_thread_local, 'conn_pool', None)
+    pool = getattr(_thread_local, "conn_pool", None)
     if pool is None:
         _thread_local.conn_pool = {}
         pool = _thread_local.conn_pool
@@ -51,7 +53,11 @@ def http_json(method: str, url: str, payload=None, timeout: int = 60):
     """HTTP JSON request with keep-alive connection reuse and auto-reconnect."""
     parsed = urlparse(url)
     body = json.dumps(payload).encode() if payload is not None else None
-    headers = {"Content-Type": "application/json", "Connection": "keep-alive"} if body else {"Connection": "keep-alive"}
+    headers = (
+        {"Content-Type": "application/json", "Connection": "keep-alive"}
+        if body
+        else {"Connection": "keep-alive"}
+    )
     conn = _get_conn(parsed.hostname, parsed.port, timeout=timeout)
     path = parsed.path + (f"?{parsed.query}" if parsed.query else "")
     try:

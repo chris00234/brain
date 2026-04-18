@@ -30,7 +30,7 @@ from pathlib import Path
 
 # Reuse brain_core helpers (ChromaDB HTTP + Ollama embed).
 sys.path.insert(0, "/Users/chrischo/server/brain/brain_core")
-from indexer import chroma_api, get_embedding, ensure_collection, _get_collection_id  # noqa: E402
+from indexer import _get_collection_id, chroma_api, ensure_collection, get_embedding
 
 CREDENTIALS = Path("/Users/chrischo/.openclaw/credentials/ghost-admin.json")
 COLLECTION = "knowledge"
@@ -125,10 +125,7 @@ def _fetch_all_posts(url: str, key_id: str, key_secret: str) -> list[dict]:
     page = 1
     while True:
         jwt = _mint_jwt(key_id, key_secret)
-        endpoint = (
-            f"{url}/ghost/api/admin/posts/"
-            f"?limit=50&page={page}&include=tags,authors&formats=html"
-        )
+        endpoint = f"{url}/ghost/api/admin/posts/" f"?limit=50&page={page}&include=tags,authors&formats=html"
         try:
             data = _http_get(endpoint, jwt)
         except urllib.error.HTTPError as e:
@@ -192,19 +189,21 @@ def _upsert(chunks: list[dict]) -> int:
         ids.append(doc_id)
         embeddings.append(emb)
         documents.append(content)
-        metadatas.append({
-            "source": c["url"],
-            "service": SERVICE,
-            "type": "blog_post",
-            "title": c["title"],
-            "slug": c["slug"],
-            "published_at": c["published_at"],
-            "updated_at": c["updated_at"],
-            "status": c["status"],
-            "tags": ",".join(c["tags"]),
-            "agent": "market",
-            "created_at": datetime.now().isoformat(),
-        })
+        metadatas.append(
+            {
+                "source": c["url"],
+                "service": SERVICE,
+                "type": "blog_post",
+                "title": c["title"],
+                "slug": c["slug"],
+                "published_at": c["published_at"],
+                "updated_at": c["updated_at"],
+                "status": c["status"],
+                "tags": ",".join(c["tags"]),
+                "agent": "market",
+                "created_at": datetime.now().isoformat(),
+            }
+        )
 
     if not ids:
         return 0
@@ -260,17 +259,19 @@ def main() -> int:
         slug = post.get("slug") or post.get("id") or ""
         post_chunks = _chunk_post(title, post.get("html") or "")
         for idx, content in enumerate(post_chunks):
-            chunks.append({
-                "content": content,
-                "title": title,
-                "slug": slug,
-                "chunk_index": idx,
-                "url": f"{url}/{slug}" if slug else url,
-                "published_at": post.get("published_at") or "",
-                "updated_at": post.get("updated_at") or "",
-                "status": post.get("status") or "",
-                "tags": [t.get("name", "") for t in (post.get("tags") or []) if isinstance(t, dict)],
-            })
+            chunks.append(
+                {
+                    "content": content,
+                    "title": title,
+                    "slug": slug,
+                    "chunk_index": idx,
+                    "url": f"{url}/{slug}" if slug else url,
+                    "published_at": post.get("published_at") or "",
+                    "updated_at": post.get("updated_at") or "",
+                    "status": post.get("status") or "",
+                    "tags": [t.get("name", "") for t in (post.get("tags") or []) if isinstance(t, dict)],
+                }
+            )
     print(f"  Produced {len(chunks)} chunks")
 
     print("[3/3] Embedding + upserting into ChromaDB...")

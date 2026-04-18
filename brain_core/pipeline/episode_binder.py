@@ -25,18 +25,19 @@ What this does NOT do:
 Schedule: daily 3:10am, between entity_resolution (3:05) and code_index_refresh
 (3:25). No collisions.
 """
+
 from __future__ import annotations
 
 import json
 import sqlite3
 import sys
-from collections import Counter, defaultdict
-from datetime import datetime, timedelta, timezone
+from collections import Counter
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from http_pool import http_json  # noqa: E402
-from search import get_collections  # noqa: E402
+from http_pool import http_json
+from search import get_collections
 
 AUTONOMY_DB = Path("/Users/chrischo/server/brain/logs/autonomy.db")
 CHROMA_API = "http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections"
@@ -84,7 +85,7 @@ def _parse_ts(raw: str) -> datetime | None:
     try:
         dt = datetime.fromisoformat(raw.rstrip("Zz"))
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
+            dt = dt.replace(tzinfo=UTC)
         return dt
     except Exception:
         return None
@@ -92,7 +93,7 @@ def _parse_ts(raw: str) -> datetime | None:
 
 def _fetch_recent_memories() -> list[dict]:
     """Pull memories created in the last LOOKBACK_HOURS from semantic_memory + experience."""
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=LOOKBACK_HOURS)
+    cutoff = datetime.now(UTC) - timedelta(hours=LOOKBACK_HOURS)
     cols = get_collections()
     out: list[dict] = []
     for col_name in ("semantic_memory", "experience"):
@@ -115,7 +116,7 @@ def _fetch_recent_memories() -> list[dict]:
             if not ids:
                 break
             metas = resp.get("metadatas", []) or []
-            for mid, meta in zip(ids, metas):
+            for mid, meta in zip(ids, metas, strict=False):
                 meta = meta or {}
                 ts = _parse_ts(meta.get("created_at", "") or meta.get("updated_at", ""))
                 if ts is None or ts < cutoff:
@@ -138,12 +139,14 @@ def _fetch_recent_memories() -> list[dict]:
                         entities = [e.strip() for e in s.split(",") if e.strip()]
                 if not isinstance(entities, list):
                     entities = []
-                out.append({
-                    "id": mid,
-                    "created_at": ts,
-                    "collection": col_name,
-                    "entities": [e for e in entities if isinstance(e, str) and e],
-                })
+                out.append(
+                    {
+                        "id": mid,
+                        "created_at": ts,
+                        "collection": col_name,
+                        "entities": [e for e in entities if isinstance(e, str) and e],
+                    }
+                )
             if len(ids) < PAGE:
                 break
             offset += PAGE
@@ -200,7 +203,7 @@ def _persist_episodes(clusters: list[list[dict]]) -> tuple[int, int]:
     """
     if not clusters:
         return (0, 0)
-    now_iso = datetime.now(timezone.utc).isoformat()
+    now_iso = datetime.now(UTC).isoformat()
     conn = sqlite3.connect(str(AUTONOMY_DB))
     try:
         conn.execute("PRAGMA journal_mode=WAL")
@@ -289,7 +292,7 @@ def _hebbian_boost_episode_pairs(clusters: list[list[dict]]) -> int:
                 "SET r.weight = CASE WHEN r.weight + $boost > 1.0 THEN 1.0 "
                 "ELSE r.weight + $boost END, "
                 "r.last_episode_boost = $now",
-                {"a": a, "b": b, "boost": HEBBIAN_BOOST, "now": datetime.now(timezone.utc).isoformat()},
+                {"a": a, "b": b, "boost": HEBBIAN_BOOST, "now": datetime.now(UTC).isoformat()},
             )
             boosted += 1
         except Exception:
@@ -298,7 +301,7 @@ def _hebbian_boost_episode_pairs(clusters: list[list[dict]]) -> int:
 
 
 def main() -> int:
-    print(f"[episode_binder] starting at {datetime.now(timezone.utc).isoformat()}", flush=True)
+    print(f"[episode_binder] starting at {datetime.now(UTC).isoformat()}", flush=True)
     _ensure_table()
     memories = _fetch_recent_memories()
     print(f"[episode_binder] fetched {len(memories)} memories from last {LOOKBACK_HOURS}h", flush=True)
@@ -307,8 +310,11 @@ def main() -> int:
         return 0
 
     clusters = _cluster_by_window(memories)
-    print(f"[episode_binder] clustered into {len(clusters)} episodes "
-          f"(window={EPISODE_WINDOW_MINUTES}min, min_size={MIN_EPISODE_SIZE})", flush=True)
+    print(
+        f"[episode_binder] clustered into {len(clusters)} episodes "
+        f"(window={EPISODE_WINDOW_MINUTES}min, min_size={MIN_EPISODE_SIZE})",
+        flush=True,
+    )
 
     eps, members = _persist_episodes(clusters)
     print(f"[episode_binder] wrote {eps} episodes / {members} membership rows", flush=True)
@@ -317,14 +323,18 @@ def main() -> int:
     print(f"[episode_binder] hebbian boost applied to {hebbian} edges", flush=True)
 
     largest = max((len(c) for c in clusters), default=0)
-    print(json.dumps({
-        "status": "ok",
-        "memories_scanned": len(memories),
-        "episodes": eps,
-        "members": members,
-        "hebbian_boosts": hebbian,
-        "largest_episode": largest,
-    }))
+    print(
+        json.dumps(
+            {
+                "status": "ok",
+                "memories_scanned": len(memories),
+                "episodes": eps,
+                "members": members,
+                "hebbian_boosts": hebbian,
+                "largest_episode": largest,
+            }
+        )
+    )
     return 0
 
 

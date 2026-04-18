@@ -14,24 +14,23 @@ Cadence: one entity per run to bound LLM cost. Weekly via scheduler.
 Usage:
   entity_pages.py [--limit 1] [--dry-run] [--entity NAME]
 """
+
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
-import subprocess
 import sys
 import urllib.request
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "brain_core"))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "pipeline"))
 
-from neo4j_client import run_query  # noqa: E402
-from openclaw_dispatch import dispatch  # noqa: E402
-from common import ROOT  # noqa: E402
+from cli_llm import dispatch  # migrated 2026-04-17
+from common import ROOT
+from neo4j_client import run_query
 
 ENTITY_DIR = ROOT / "canonical" / "entities"
 LOGS_DIR = Path("/Users/chrischo/server/brain/logs")
@@ -162,8 +161,8 @@ def _age_days(iso: str | None) -> int | None:
     try:
         ts = datetime.fromisoformat(iso.replace("Z", "+00:00"))
         if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=timezone.utc)
-        return int((datetime.now(timezone.utc) - ts).days)
+            ts = ts.replace(tzinfo=UTC)
+        return int((datetime.now(UTC) - ts).days)
     except Exception:
         return None
 
@@ -248,7 +247,7 @@ def _render_body(entity: dict, synth: dict, related: list[dict], context_count: 
 def _write_page(slug: str, entity: dict, synth: dict, related: list[dict], context_count: int) -> Path:
     ENTITY_DIR.mkdir(parents=True, exist_ok=True)
     path = ENTITY_DIR / f"{slug}.md"
-    now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    now = datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
     note_id = f"entity_{slug}"
     title = (synth.get("title") or f"{entity['name']} — {entity.get('entity_type') or 'entity'}")[:180]
@@ -351,13 +350,17 @@ def main() -> int:
 
         related = _related(entity["name"], limit=10)
         context = _recall_context(entity["name"], n=10)
-        context_block = "\n\n".join(
-            f"[{i + 1}] ({c['source']}) {c['text']}" for i, c in enumerate(context)
-        ) or "_no context available_"
-        related_block = "\n".join(
-            f"- {r['name']} ({r.get('entity_type') or 'unknown'}) — co-occurrence {r.get('co', 0)}"
-            for r in related
-        ) or "_no related entities_"
+        context_block = (
+            "\n\n".join(f"[{i + 1}] ({c['source']}) {c['text']}" for i, c in enumerate(context))
+            or "_no context available_"
+        )
+        related_block = (
+            "\n".join(
+                f"- {r['name']} ({r.get('entity_type') or 'unknown'}) — co-occurrence {r.get('co', 0)}"
+                for r in related
+            )
+            or "_no related entities_"
+        )
 
         prompt = PROMPT.format(
             name=entity["name"],
@@ -380,19 +383,23 @@ def main() -> int:
         synth = _dispatch_sage(prompt)
         if synth is None:
             processed.append({"entity": entity["name"], "status": "dispatch_failed"})
-            _log_run({"entity": entity["name"], "status": "dispatch_failed", "at": datetime.now(timezone.utc).isoformat()})
+            _log_run(
+                {"entity": entity["name"], "status": "dispatch_failed", "at": datetime.now(UTC).isoformat()}
+            )
             continue
 
         path = _write_page(slug, entity, synth, related, len(context))
         processed.append({"entity": entity["name"], "status": "written", "path": str(path.relative_to(ROOT))})
-        _log_run({
-            "entity": entity["name"],
-            "status": "written",
-            "path": str(path.relative_to(ROOT)),
-            "context_count": len(context),
-            "related_count": len(related),
-            "at": datetime.now(timezone.utc).isoformat(),
-        })
+        _log_run(
+            {
+                "entity": entity["name"],
+                "status": "written",
+                "path": str(path.relative_to(ROOT)),
+                "context_count": len(context),
+                "related_count": len(related),
+                "at": datetime.now(UTC).isoformat(),
+            }
+        )
 
     print(json.dumps({"status": "ok", "processed": processed}))
     return 0 if processed else 1

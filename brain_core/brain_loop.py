@@ -40,13 +40,12 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re
 import sqlite3
 import sys
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -54,7 +53,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).parent))
 
 try:
-    from config import BRAIN_LOGS_DIR, AUTONOMY_DB
+    from config import AUTONOMY_DB, BRAIN_LOGS_DIR
 except ImportError:
     BRAIN_LOGS_DIR = Path("/Users/chrischo/server/brain/logs")
     AUTONOMY_DB = BRAIN_LOGS_DIR / "autonomy.db"
@@ -68,12 +67,19 @@ except ImportError:
     intent_miss_scan = None  # type: ignore[assignment]
 
 try:
-    from proactive import get_current_insights, check_decision_contradictions
+    from proactive import check_decision_contradictions, get_current_insights
 except ImportError:
     get_current_insights = None  # type: ignore[assignment]
     check_decision_contradictions = None  # type: ignore[assignment]
 
 try:
+    # 2026-04-17: revert to real openclaw_dispatch for agent work. cli_llm
+    # is correct for stateless LLM calls (HyDE, extraction, classification),
+    # but brain_loop.DISPATCH_AGENT hands a task to a specialist agent
+    # (Sage investigates contradictions, Jenna pushes Telegram summaries).
+    # CLI path is a stateless LLM call — it loses the agent's AGENTS.md
+    # persona, workspace memory, MCP tools, and Jenna→Telegram routing.
+    # Agent dispatches must go through the OpenClaw gateway.
     from openclaw_dispatch import dispatch as _openclaw_dispatch
 except ImportError:
     _openclaw_dispatch = None  # type: ignore[assignment]
@@ -108,19 +114,19 @@ ACCURACY_DROP_THRESHOLD = 0.6
 # before the SAME pair can surface again. These override the in-memory
 # rate limit which resets per subprocess invocation.
 SEEN_COOLDOWN_S: dict[str, int] = {
-    "contradiction": 24 * 3600,       # don't re-surface same contradiction for 24h
-    "accuracy_drop": 6 * 3600,        # domain-level, 6h between reports
-    "breaker_open": 1800,             # 30 min between same-breaker alerts
-    "stalled_goal": 2 * 3600,         # 2h between nudges on same goal
-    "recall_miss": 3600,              # 1h between same-session miss reports
-    "proactive_urgent": 6 * 3600,     # mirror proactive TTL
+    "contradiction": 24 * 3600,  # don't re-surface same contradiction for 24h
+    "accuracy_drop": 6 * 3600,  # domain-level, 6h between reports
+    "breaker_open": 1800,  # 30 min between same-breaker alerts
+    "stalled_goal": 2 * 3600,  # 2h between nudges on same goal
+    "recall_miss": 3600,  # 1h between same-session miss reports
+    "proactive_urgent": 6 * 3600,  # mirror proactive TTL
     "high_salience_event": 1800,
-    "claude_active": 60,              # side-channel; just throttle
-    "stale_atom": 7 * 24 * 3600,      # stale is slow-moving, 1 week cooldown
-    "llm_usage_spike": 3600,          # 1 hour — spike condition evaluates hourly anyway
-    "llm_breaker_closed": 60,         # one-shot edge, 60s debounce
-    "llm_backlog_overflow": 1800,     # 30 min
-    "llm_backlog_stale": 6 * 3600,    # 6h
+    "claude_active": 60,  # side-channel; just throttle
+    "stale_atom": 7 * 24 * 3600,  # stale is slow-moving, 1 week cooldown
+    "llm_usage_spike": 3600,  # 1 hour — spike condition evaluates hourly anyway
+    "llm_breaker_closed": 60,  # one-shot edge, 60s debounce
+    "llm_backlog_overflow": 1800,  # 30 min
+    "llm_backlog_stale": 6 * 3600,  # 6h
 }
 DEFAULT_COOLDOWN_S = 3600
 SEEN_TABLE_DDL = """
@@ -187,7 +193,7 @@ def _mark_seen(kind: str, subject: str) -> None:
         pass
 
 
-def _filter_seen(observations: list["Observation"]) -> list["Observation"]:
+def _filter_seen(observations: list[Observation]) -> list[Observation]:
     """Drop observations whose (kind, subject) is within cooldown from a
     prior fire. Mark the survivors as seen. Idempotent if sensors re-fire.
 
@@ -196,7 +202,7 @@ def _filter_seen(observations: list["Observation"]) -> list["Observation"]:
     "drop if seen" from "mark as fired" so observations dropped at the
     autonomy/rate-limit gate aren't silently lost (F4 fix).
     """
-    keep: list["Observation"] = []
+    keep: list[Observation] = []
     for o in observations:
         if _seen_recently(o.kind, o.subject):
             continue
@@ -205,7 +211,7 @@ def _filter_seen(observations: list["Observation"]) -> list["Observation"]:
     return keep
 
 
-def _filter_already_seen(observations: list["Observation"]) -> list["Observation"]:
+def _filter_already_seen(observations: list[Observation]) -> list[Observation]:
     """Drop observations whose (kind, subject) is within cooldown. Does NOT
     mark survivors as seen — caller must call _mark_observations_fired after
     the gate so retry semantics survive rejections."""
@@ -213,9 +219,9 @@ def _filter_already_seen(observations: list["Observation"]) -> list["Observation
 
 
 def _mark_observations_fired(
-    observations: list["Observation"],
-    decisions: list["Decision"],
-    approved: list["Decision"],
+    observations: list[Observation],
+    decisions: list[Decision],
+    approved: list[Decision],
 ) -> None:
     """Mark an observation seen iff it either produced no decision (reflect
     consciously chose no-op) OR its decision produced an *effective* action.
@@ -240,20 +246,17 @@ def _mark_observations_fired(
         DecisionKind.SELF_MODIFY,
     }
     effective_keys = {
-        (d.observation.kind, d.observation.subject)
-        for d in approved
-        if d.kind in effective_kinds
+        (d.observation.kind, d.observation.subject) for d in approved if d.kind in effective_kinds
     }
     decided_keys = {(d.observation.kind, d.observation.subject) for d in decisions}
     for o in observations:
         key = (o.kind, o.subject)
-        if key not in decided_keys:
-            _mark_seen(*key)
-        elif key in effective_keys:
+        if key not in decided_keys or key in effective_keys:
             _mark_seen(*key)
 
 
 # ── Types ─────────────────────────────────────────────────────────
+
 
 class DecisionKind(Enum):
     OBSERVE_ONLY = "observe"
@@ -296,12 +299,13 @@ class Decision:
 
 # ── Helpers ───────────────────────────────────────────────────────
 
+
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _parse_iso(ts: str) -> datetime | None:
@@ -310,7 +314,7 @@ def _parse_iso(ts: str) -> datetime | None:
     try:
         dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
+            dt = dt.replace(tzinfo=UTC)
         return dt
     except (ValueError, TypeError):
         return None
@@ -329,6 +333,7 @@ def _connect_brain() -> sqlite3.Connection:
 
 
 # ── Sensors ───────────────────────────────────────────────────────
+
 
 def _sense_stalled_goals() -> list[Observation]:
     """Goals with status='active' whose updated_at is older than STALLED_GOAL_HOURS.
@@ -355,18 +360,20 @@ def _sense_stalled_goals() -> list[Observation]:
         next_check = _parse_iso(row["next_check_at"] or "")
         if next_check and next_check > now:
             continue  # already scheduled for future check
-        obs.append(Observation(
-            kind="stalled_goal",
-            subject=row["id"],
-            evidence={
-                "title": row["title"],
-                "age_hours": round(age_hours, 2),
-                "owner": row["owner_agent"] or "chris",
-                "notes_len": len(row["brain_notes"] or ""),
-            },
-            salience=min(1.0, age_hours / 24),
-            ts=_now_iso(),
-        ))
+        obs.append(
+            Observation(
+                kind="stalled_goal",
+                subject=row["id"],
+                evidence={
+                    "title": row["title"],
+                    "age_hours": round(age_hours, 2),
+                    "owner": row["owner_agent"] or "chris",
+                    "notes_len": len(row["brain_notes"] or ""),
+                },
+                salience=min(1.0, age_hours / 24),
+                ts=_now_iso(),
+            )
+        )
     return obs
 
 
@@ -400,17 +407,19 @@ def _sense_recall_misses() -> list[Observation]:
             cur_text = turns[i]["query_text"] or ""
             if pattern.search(cur_text):
                 prev = turns[i - 1]
-                obs.append(Observation(
-                    kind="recall_miss",
-                    subject=sid,
-                    evidence={
-                        "prev_prompt": (prev["query_text"] or "")[:300],
-                        "correction": cur_text[:300],
-                        "prev_ts": prev["created_at"],
-                    },
-                    salience=0.8,
-                    ts=_now_iso(),
-                ))
+                obs.append(
+                    Observation(
+                        kind="recall_miss",
+                        subject=sid,
+                        evidence={
+                            "prev_prompt": (prev["query_text"] or "")[:300],
+                            "correction": cur_text[:300],
+                            "prev_ts": prev["created_at"],
+                        },
+                        salience=0.8,
+                        ts=_now_iso(),
+                    )
+                )
     return obs
 
 
@@ -425,18 +434,20 @@ def _sense_breaker_open() -> list[Observation]:
     except sqlite3.Error:
         return obs
     for row in rows:
-        obs.append(Observation(
-            kind="breaker_open",
-            subject=row["kind"],
-            evidence={
-                "state": row["state"],
-                "failures": row["failures"],
-                "reason": row["reason"] or "",
-                "opened_at": row["opened_at"],
-            },
-            salience=1.0,
-            ts=_now_iso(),
-        ))
+        obs.append(
+            Observation(
+                kind="breaker_open",
+                subject=row["kind"],
+                evidence={
+                    "state": row["state"],
+                    "failures": row["failures"],
+                    "reason": row["reason"] or "",
+                    "opened_at": row["opened_at"],
+                },
+                salience=1.0,
+                ts=_now_iso(),
+            )
+        )
     return obs
 
 
@@ -459,18 +470,20 @@ def _sense_accuracy_drops() -> list[Observation]:
             continue
         acc = correct / total
         if acc < ACCURACY_DROP_THRESHOLD:
-            obs.append(Observation(
-                kind="accuracy_drop",
-                subject=row["domain"],
-                evidence={
-                    "accuracy": round(acc, 3),
-                    "total": total,
-                    "correct": correct,
-                    "overrides": row["override_count"] or 0,
-                },
-                salience=0.7,
-                ts=_now_iso(),
-            ))
+            obs.append(
+                Observation(
+                    kind="accuracy_drop",
+                    subject=row["domain"],
+                    evidence={
+                        "accuracy": round(acc, 3),
+                        "total": total,
+                        "correct": correct,
+                        "overrides": row["override_count"] or 0,
+                    },
+                    salience=0.7,
+                    ts=_now_iso(),
+                )
+            )
     return obs
 
 
@@ -486,17 +499,19 @@ def _sense_contradictions() -> list[Observation]:
         return obs
     for ins in insights[:5]:
         try:
-            obs.append(Observation(
-                kind="contradiction",
-                subject=getattr(ins, "id", "unknown"),
-                evidence={
-                    "summary": (getattr(ins, "summary", "") or "")[:200],
-                    "detail": (getattr(ins, "detail", "") or "")[:400],
-                    "severity": getattr(ins, "severity", "info"),
-                },
-                salience=0.6,
-                ts=_now_iso(),
-            ))
+            obs.append(
+                Observation(
+                    kind="contradiction",
+                    subject=getattr(ins, "id", "unknown"),
+                    evidence={
+                        "summary": (getattr(ins, "summary", "") or "")[:200],
+                        "detail": (getattr(ins, "detail", "") or "")[:400],
+                        "severity": getattr(ins, "severity", "info"),
+                    },
+                    salience=0.6,
+                    ts=_now_iso(),
+                )
+            )
         except Exception:
             continue
     return obs
@@ -519,16 +534,18 @@ def _sense_claude_active() -> list[Observation]:
     except sqlite3.Error:
         return obs
     for row in rows:
-        obs.append(Observation(
-            kind="claude_active",
-            subject=row["session_id"] or "unknown",
-            evidence={
-                "last_turn_ts": row["last_ts"],
-                "turn_count_2m": row["turn_count"],
-            },
-            salience=0.3,
-            ts=_now_iso(),
-        ))
+        obs.append(
+            Observation(
+                kind="claude_active",
+                subject=row["session_id"] or "unknown",
+                evidence={
+                    "last_turn_ts": row["last_ts"],
+                    "turn_count_2m": row["turn_count"],
+                },
+                salience=0.3,
+                ts=_now_iso(),
+            )
+        )
     return obs
 
 
@@ -564,18 +581,20 @@ def _sense_llm_usage_spike() -> list[Observation]:
     baseline_rate = daily / 24.0 if daily > 0 else 0
     # Only fire when current rate is meaningfully above baseline
     if hourly >= 20 and baseline_rate > 0 and hourly > baseline_rate * 3:
-        obs.append(Observation(
-            kind="llm_usage_spike",
-            subject=f"last_hour_{hourly}",
-            evidence={
-                "hourly_rate": hourly,
-                "baseline_per_hour": round(baseline_rate, 1),
-                "ratio": round(hourly / baseline_rate, 2),
-                "daily_total": daily,
-            },
-            salience=min(1.0, (hourly / baseline_rate) / 10),
-            ts=_now_iso(),
-        ))
+        obs.append(
+            Observation(
+                kind="llm_usage_spike",
+                subject=f"last_hour_{hourly}",
+                evidence={
+                    "hourly_rate": hourly,
+                    "baseline_per_hour": round(baseline_rate, 1),
+                    "ratio": round(hourly / baseline_rate, 2),
+                    "daily_total": daily,
+                },
+                salience=min(1.0, (hourly / baseline_rate) / 10),
+                ts=_now_iso(),
+            )
+        )
     return obs
 
 
@@ -617,20 +636,22 @@ def _sense_stale_atoms() -> list[Observation]:
         age_days = (now - anchor).total_seconds() / 86400
         if age_days < decay_days:
             continue
-        obs.append(Observation(
-            kind="stale_atom",
-            subject=row["id"],
-            evidence={
-                "kind": kind_key,
-                "age_days": round(age_days, 1),
-                "decay_threshold_days": decay_days,
-                "reinforcement_count": row["reinforcement_count"] or 0,
-                "text_preview": (row["text"] or "")[:120],
-                "tier": row["tier"],
-            },
-            salience=min(1.0, age_days / (decay_days * 2)),
-            ts=_now_iso(),
-        ))
+        obs.append(
+            Observation(
+                kind="stale_atom",
+                subject=row["id"],
+                evidence={
+                    "kind": kind_key,
+                    "age_days": round(age_days, 1),
+                    "decay_threshold_days": decay_days,
+                    "reinforcement_count": row["reinforcement_count"] or 0,
+                    "text_preview": (row["text"] or "")[:120],
+                    "tier": row["tier"],
+                },
+                salience=min(1.0, age_days / (decay_days * 2)),
+                ts=_now_iso(),
+            )
+        )
     return obs
 
 
@@ -644,16 +665,18 @@ def _sense_proactive_pending() -> list[Observation]:
     except Exception:
         return obs
     for ins in urgent[:3]:
-        obs.append(Observation(
-            kind="proactive_urgent",
-            subject=getattr(ins, "id", "unknown"),
-            evidence={
-                "summary": (getattr(ins, "summary", "") or "")[:200],
-                "detail": (getattr(ins, "detail", "") or "")[:400],
-            },
-            salience=0.95,
-            ts=_now_iso(),
-        ))
+        obs.append(
+            Observation(
+                kind="proactive_urgent",
+                subject=getattr(ins, "id", "unknown"),
+                evidence={
+                    "summary": (getattr(ins, "summary", "") or "")[:200],
+                    "detail": (getattr(ins, "detail", "") or "")[:400],
+                },
+                salience=0.95,
+                ts=_now_iso(),
+            )
+        )
     return obs
 
 
@@ -671,6 +694,7 @@ def _sense_llm_breaker_closed() -> list[Observation]:
     obs = []
     try:
         from breakers import peek_breaker
+
         snapshot = peek_breaker("llm.dispatch")
         is_open_now = snapshot.is_open
     except Exception:
@@ -681,17 +705,20 @@ def _sense_llm_breaker_closed() -> list[Observation]:
         pending = 0
         try:
             from llm_backlog import pending_count
+
             pending = pending_count()
         except Exception:
             pass
         if pending > 0:
-            obs.append(Observation(
-                kind="llm_breaker_closed",
-                subject="llm.dispatch",
-                evidence={"pending_backlog": pending},
-                salience=0.9,
-                ts=_now_iso(),
-            ))
+            obs.append(
+                Observation(
+                    kind="llm_breaker_closed",
+                    subject="llm.dispatch",
+                    evidence={"pending_backlog": pending},
+                    salience=0.9,
+                    ts=_now_iso(),
+                )
+            )
     _last_llm_breaker_was_open = is_open_now
     return obs
 
@@ -701,27 +728,32 @@ def _sense_llm_backlog_pending() -> list[Observation]:
     oldest entry > 24h — indicates drain cron isn't keeping up."""
     obs = []
     try:
-        from llm_backlog import pending_count, oldest_pending_age_seconds
+        from llm_backlog import oldest_pending_age_seconds, pending_count
+
         pending = pending_count()
         oldest = oldest_pending_age_seconds()
     except Exception:
         return obs
     if pending > 100:
-        obs.append(Observation(
-            kind="llm_backlog_overflow",
-            subject="pending_count",
-            evidence={"pending": pending, "oldest_age_s": int(oldest)},
-            salience=0.8,
-            ts=_now_iso(),
-        ))
+        obs.append(
+            Observation(
+                kind="llm_backlog_overflow",
+                subject="pending_count",
+                evidence={"pending": pending, "oldest_age_s": int(oldest)},
+                salience=0.8,
+                ts=_now_iso(),
+            )
+        )
     elif oldest > 86400:
-        obs.append(Observation(
-            kind="llm_backlog_stale",
-            subject="oldest_entry",
-            evidence={"pending": pending, "oldest_age_s": int(oldest)},
-            salience=0.7,
-            ts=_now_iso(),
-        ))
+        obs.append(
+            Observation(
+                kind="llm_backlog_stale",
+                subject="oldest_entry",
+                evidence={"pending": pending, "oldest_age_s": int(oldest)},
+                salience=0.7,
+                ts=_now_iso(),
+            )
+        )
     return obs
 
 
@@ -742,6 +774,7 @@ SENSORS = [
 
 # ── Reflect: map observations to candidate decisions ─────────────
 
+
 def _find_active_claude_session(observations: list[Observation]) -> str | None:
     for o in observations:
         if o.kind == "claude_active":
@@ -759,109 +792,123 @@ def _reflect(observations: list[Observation]) -> list[Decision]:
             title = o.evidence.get("title", "")
             age = o.evidence.get("age_hours", 0)
             if owner == "chris" and claude_session:
-                decisions.append(Decision(
-                    observation=o,
-                    kind=DecisionKind.PUSH_TO_CLAUDE,
-                    action_payload={
-                        "session_id": claude_session,
-                        "title": f"Stalled goal: {title}",
-                        "content": (
-                            f"⚠ Goal '{title}' has been stalled for {age:.1f}h. "
-                            f"Consider next steps or mark it paused."
-                        ),
-                        "priority": "high",
-                        "source": "brain_loop.goal_monitor",
-                    },
-                    reasoning=f"Goal stalled >{STALLED_GOAL_HOURS}h, Chris-owned, Claude session active",
-                    confidence=0.8,
-                    requires_autonomy="brain_loop.push_to_claude",
-                ))
+                decisions.append(
+                    Decision(
+                        observation=o,
+                        kind=DecisionKind.PUSH_TO_CLAUDE,
+                        action_payload={
+                            "session_id": claude_session,
+                            "title": f"Stalled goal: {title}",
+                            "content": (
+                                f"⚠ Goal '{title}' has been stalled for {age:.1f}h. "
+                                f"Consider next steps or mark it paused."
+                            ),
+                            "priority": "high",
+                            "source": "brain_loop.goal_monitor",
+                        },
+                        reasoning=f"Goal stalled >{STALLED_GOAL_HOURS}h, Chris-owned, Claude session active",
+                        confidence=0.8,
+                        requires_autonomy="brain_loop.push_to_claude",
+                    )
+                )
             elif owner != "chris":
-                decisions.append(Decision(
+                decisions.append(
+                    Decision(
+                        observation=o,
+                        kind=DecisionKind.DISPATCH_AGENT,
+                        action_payload={
+                            "agent": owner,
+                            "message": (
+                                f"Your goal '{title}' has been stalled for {age:.1f}h. "
+                                f"Please advance it or report blockers in a reply."
+                            ),
+                        },
+                        reasoning=f"Goal stalled >{STALLED_GOAL_HOURS}h, agent={owner}",
+                        confidence=0.7,
+                        requires_autonomy="brain_loop.dispatch_agent_checkin",
+                    )
+                )
+            else:
+                # Chris-owned but no active session — log only
+                decisions.append(
+                    Decision(
+                        observation=o,
+                        kind=DecisionKind.OBSERVE_ONLY,
+                        reasoning="Chris-owned stalled goal but no active Claude session",
+                        confidence=0.5,
+                        requires_autonomy="brain_loop.observe",
+                    )
+                )
+
+        elif o.kind == "recall_miss":
+            decisions.append(
+                Decision(
+                    observation=o,
+                    kind=DecisionKind.PROPOSE,
+                    action_payload={
+                        "category": "intent_route_candidate",
+                        "evidence": o.evidence,
+                        "session_id": o.subject,
+                    },
+                    reasoning="Recall miss detected mid-session",
+                    confidence=0.9,
+                    requires_autonomy="brain_loop.propose_eval_candidate",
+                )
+            )
+
+        elif o.kind == "breaker_open":
+            decisions.append(
+                Decision(
+                    observation=o,
+                    kind=DecisionKind.TELEGRAM_ALERT,
+                    action_payload={
+                        "severity": "urgent",
+                        "body": (
+                            f"⚠ Breaker OPEN: {o.subject}\n"
+                            f"failures={o.evidence.get('failures', '?')}\n"
+                            f"reason: {o.evidence.get('reason', 'n/a')[:200]}"
+                        ),
+                    },
+                    reasoning="Breaker open = degraded subsystem, Chris must know",
+                    confidence=1.0,
+                    requires_autonomy="brain_loop.telegram_urgent",
+                )
+            )
+
+        elif o.kind == "accuracy_drop":
+            decisions.append(
+                Decision(
+                    observation=o,
+                    kind=DecisionKind.SELF_MODIFY,
+                    action_payload={
+                        "modification": "autonomy_demote",
+                        "domain": o.subject,
+                        "to_level": "L1",
+                        "reason": f"Accuracy {o.evidence.get('accuracy', 0):.0%} < threshold {ACCURACY_DROP_THRESHOLD:.0%}",
+                    },
+                    reasoning=f"Accuracy {o.evidence.get('accuracy', 0):.2f} over {o.evidence.get('total', 0)} tasks",
+                    confidence=0.8,
+                    requires_autonomy="brain_loop.self_modify_autonomy",
+                )
+            )
+
+        elif o.kind == "contradiction":
+            decisions.append(
+                Decision(
                     observation=o,
                     kind=DecisionKind.DISPATCH_AGENT,
                     action_payload={
-                        "agent": owner,
+                        "agent": "sage",
                         "message": (
-                            f"Your goal '{title}' has been stalled for {age:.1f}h. "
-                            f"Please advance it or report blockers in a reply."
+                            f"New contradiction detected: {o.evidence.get('summary', '')[:200]}\n"
+                            f"Please investigate and write a canonical resolution."
                         ),
                     },
-                    reasoning=f"Goal stalled >{STALLED_GOAL_HOURS}h, agent={owner}",
+                    reasoning="Sage owns contradiction resolution",
                     confidence=0.7,
-                    requires_autonomy="brain_loop.dispatch_agent_checkin",
-                ))
-            else:
-                # Chris-owned but no active session — log only
-                decisions.append(Decision(
-                    observation=o,
-                    kind=DecisionKind.OBSERVE_ONLY,
-                    reasoning="Chris-owned stalled goal but no active Claude session",
-                    confidence=0.5,
-                    requires_autonomy="brain_loop.observe",
-                ))
-
-        elif o.kind == "recall_miss":
-            decisions.append(Decision(
-                observation=o,
-                kind=DecisionKind.PROPOSE,
-                action_payload={
-                    "category": "intent_route_candidate",
-                    "evidence": o.evidence,
-                    "session_id": o.subject,
-                },
-                reasoning="Recall miss detected mid-session",
-                confidence=0.9,
-                requires_autonomy="brain_loop.propose_eval_candidate",
-            ))
-
-        elif o.kind == "breaker_open":
-            decisions.append(Decision(
-                observation=o,
-                kind=DecisionKind.TELEGRAM_ALERT,
-                action_payload={
-                    "severity": "urgent",
-                    "body": (
-                        f"⚠ Breaker OPEN: {o.subject}\n"
-                        f"failures={o.evidence.get('failures', '?')}\n"
-                        f"reason: {o.evidence.get('reason', 'n/a')[:200]}"
-                    ),
-                },
-                reasoning="Breaker open = degraded subsystem, Chris must know",
-                confidence=1.0,
-                requires_autonomy="brain_loop.telegram_urgent",
-            ))
-
-        elif o.kind == "accuracy_drop":
-            decisions.append(Decision(
-                observation=o,
-                kind=DecisionKind.SELF_MODIFY,
-                action_payload={
-                    "modification": "autonomy_demote",
-                    "domain": o.subject,
-                    "to_level": "L1",
-                    "reason": f"Accuracy {o.evidence.get('accuracy', 0):.0%} < threshold {ACCURACY_DROP_THRESHOLD:.0%}",
-                },
-                reasoning=f"Accuracy {o.evidence.get('accuracy', 0):.2f} over {o.evidence.get('total', 0)} tasks",
-                confidence=0.8,
-                requires_autonomy="brain_loop.self_modify_autonomy",
-            ))
-
-        elif o.kind == "contradiction":
-            decisions.append(Decision(
-                observation=o,
-                kind=DecisionKind.DISPATCH_AGENT,
-                action_payload={
-                    "agent": "sage",
-                    "message": (
-                        f"New contradiction detected: {o.evidence.get('summary', '')[:200]}\n"
-                        f"Please investigate and write a canonical resolution."
-                    ),
-                },
-                reasoning="Sage owns contradiction resolution",
-                confidence=0.7,
-                requires_autonomy="brain_loop.dispatch_agent_investigation",
-            ))
+                    requires_autonomy="brain_loop.dispatch_agent_investigation",
+                )
+            )
 
         elif o.kind == "llm_usage_spike":
             # LLM call rate jumped 3x+ — push to Chris immediately so he can
@@ -871,76 +918,84 @@ def _reflect(observations: list[Observation]) -> list[Decision]:
             baseline = o.evidence.get("baseline_per_hour", 0)
             ratio = o.evidence.get("ratio", 0)
             if claude_session:
-                decisions.append(Decision(
-                    observation=o,
-                    kind=DecisionKind.PUSH_TO_CLAUDE,
-                    action_payload={
-                        "session_id": claude_session,
-                        "title": "LLM usage spike detected",
-                        "content": (
-                            f"⚠ Last hour: {hourly} LLM calls. "
-                            f"Baseline: {baseline}/hr. Ratio: {ratio}x. "
-                            f"Investigate: `brain cost agent` to see which job is spamming."
-                        ),
-                        "priority": "high",
-                        "source": "brain_loop.llm_usage_spike",
-                    },
-                    reasoning=f"LLM rate {ratio}x baseline — possible runaway job",
-                    confidence=0.9,
-                    requires_autonomy="brain_loop.push_to_claude",
-                ))
+                decisions.append(
+                    Decision(
+                        observation=o,
+                        kind=DecisionKind.PUSH_TO_CLAUDE,
+                        action_payload={
+                            "session_id": claude_session,
+                            "title": "LLM usage spike detected",
+                            "content": (
+                                f"⚠ Last hour: {hourly} LLM calls. "
+                                f"Baseline: {baseline}/hr. Ratio: {ratio}x. "
+                                f"Investigate: `brain cost agent` to see which job is spamming."
+                            ),
+                            "priority": "high",
+                            "source": "brain_loop.llm_usage_spike",
+                        },
+                        reasoning=f"LLM rate {ratio}x baseline — possible runaway job",
+                        confidence=0.9,
+                        requires_autonomy="brain_loop.push_to_claude",
+                    )
+                )
             else:
-                decisions.append(Decision(
-                    observation=o,
-                    kind=DecisionKind.TELEGRAM_ALERT,
-                    action_payload={
-                        "severity": "warning",
-                        "body": (
-                            f"LLM usage spike: {hourly} calls last hour vs "
-                            f"{baseline}/hr baseline ({ratio}x). Check "
-                            f"`brain cost agent` for culprit."
-                        ),
-                    },
-                    reasoning="No active Claude session — fallback to Telegram",
-                    confidence=0.85,
-                    requires_autonomy="brain_loop.telegram_urgent",
-                ))
+                decisions.append(
+                    Decision(
+                        observation=o,
+                        kind=DecisionKind.TELEGRAM_ALERT,
+                        action_payload={
+                            "severity": "warning",
+                            "body": (
+                                f"LLM usage spike: {hourly} calls last hour vs "
+                                f"{baseline}/hr baseline ({ratio}x). Check "
+                                f"`brain cost agent` for culprit."
+                            ),
+                        },
+                        reasoning="No active Claude session — fallback to Telegram",
+                        confidence=0.85,
+                        requires_autonomy="brain_loop.telegram_urgent",
+                    )
+                )
 
         elif o.kind == "stale_atom":
-            decisions.append(Decision(
-                observation=o,
-                kind=DecisionKind.SELF_MODIFY,
-                action_payload={
-                    "modification": "atom_obsolete",
-                    "atom_id": o.subject,
-                    "reason": (
-                        f"atom kind={o.evidence.get('kind','?')} age={o.evidence.get('age_days','?')}d > "
-                        f"decay={o.evidence.get('decay_threshold_days','?')}d, "
-                        f"reinforcement={o.evidence.get('reinforcement_count','?')}"
-                    ),
-                    "preview": o.evidence.get("text_preview", ""),
-                },
-                reasoning="Stale atom past decay window with low access",
-                confidence=0.7,
-                requires_autonomy="brain_loop.self_modify_route",
-            ))
+            decisions.append(
+                Decision(
+                    observation=o,
+                    kind=DecisionKind.SELF_MODIFY,
+                    action_payload={
+                        "modification": "atom_obsolete",
+                        "atom_id": o.subject,
+                        "reason": (
+                            f"atom kind={o.evidence.get('kind','?')} age={o.evidence.get('age_days','?')}d > "
+                            f"decay={o.evidence.get('decay_threshold_days','?')}d, "
+                            f"reinforcement={o.evidence.get('reinforcement_count','?')}"
+                        ),
+                        "preview": o.evidence.get("text_preview", ""),
+                    },
+                    reasoning="Stale atom past decay window with low access",
+                    confidence=0.7,
+                    requires_autonomy="brain_loop.self_modify_route",
+                )
+            )
 
         elif o.kind == "proactive_urgent":
             if claude_session:
-                decisions.append(Decision(
-                    observation=o,
-                    kind=DecisionKind.PUSH_TO_CLAUDE,
-                    action_payload={
-                        "session_id": claude_session,
-                        "title": o.evidence.get("summary", "urgent insight")[:80],
-                        "content": o.evidence.get("detail", "")[:800],
-                        "priority": "critical",
-                        "source": "brain_loop.proactive",
-                    },
-                    reasoning="Urgent proactive insight + active Claude session",
-                    confidence=0.9,
-                    requires_autonomy="brain_loop.push_to_claude",
-                ))
+                decisions.append(
+                    Decision(
+                        observation=o,
+                        kind=DecisionKind.PUSH_TO_CLAUDE,
+                        action_payload={
+                            "session_id": claude_session,
+                            "title": o.evidence.get("summary", "urgent insight")[:80],
+                            "content": o.evidence.get("detail", "")[:800],
+                            "priority": "critical",
+                            "source": "brain_loop.proactive",
+                        },
+                        reasoning="Urgent proactive insight + active Claude session",
+                        confidence=0.9,
+                        requires_autonomy="brain_loop.push_to_claude",
+                    )
+                )
 
         elif o.kind == "claude_active":
             # Side-channel signal, not a standalone decision
@@ -951,17 +1006,19 @@ def _reflect(observations: list[Observation]) -> list[Decision]:
             # missed work catches up within 60 s rather than waiting for
             # the 30-min cron. Use SELF_MODIFY kind since we're invoking
             # a brain-owned maintenance action.
-            decisions.append(Decision(
-                observation=o,
-                kind=DecisionKind.SELF_MODIFY,
-                action_payload={
-                    "modification": "drain_llm_backlog",
-                    "pending_backlog": o.evidence.get("pending_backlog", 0),
-                },
-                reasoning="llm.dispatch breaker closed with pending backlog — immediate drain",
-                confidence=0.95,
-                requires_autonomy="brain_loop.drain_llm_backlog",
-            ))
+            decisions.append(
+                Decision(
+                    observation=o,
+                    kind=DecisionKind.SELF_MODIFY,
+                    action_payload={
+                        "modification": "drain_llm_backlog",
+                        "pending_backlog": o.evidence.get("pending_backlog", 0),
+                    },
+                    reasoning="llm.dispatch breaker closed with pending backlog — immediate drain",
+                    confidence=0.95,
+                    requires_autonomy="brain_loop.drain_llm_backlog",
+                )
+            )
 
         elif o.kind in ("llm_backlog_overflow", "llm_backlog_stale"):
             # Queue is piling up — surface to Chris. Urgent if overflow,
@@ -969,21 +1026,23 @@ def _reflect(observations: list[Observation]) -> list[Decision]:
             severity = "urgent" if o.kind == "llm_backlog_overflow" else "warn"
             pending = o.evidence.get("pending", 0)
             age_h = o.evidence.get("oldest_age_s", 0) / 3600
-            decisions.append(Decision(
-                observation=o,
-                kind=DecisionKind.TELEGRAM_ALERT,
-                action_payload={
-                    "severity": severity,
-                    "body": (
-                        f"⚠ llm_backlog {o.kind.split('_', 2)[-1]}: "
-                        f"pending={pending}, oldest={age_h:.1f}h. "
-                        f"Drain cron may be stuck or LLM still degraded."
-                    ),
-                },
-                reasoning="llm_backlog SLO breach — Chris needs to know",
-                confidence=0.85,
-                requires_autonomy="brain_loop.telegram_urgent",
-            ))
+            decisions.append(
+                Decision(
+                    observation=o,
+                    kind=DecisionKind.TELEGRAM_ALERT,
+                    action_payload={
+                        "severity": severity,
+                        "body": (
+                            f"⚠ llm_backlog {o.kind.split('_', 2)[-1]}: "
+                            f"pending={pending}, oldest={age_h:.1f}h. "
+                            f"Drain cron may be stuck or LLM still degraded."
+                        ),
+                    },
+                    reasoning="llm_backlog SLO breach — Chris needs to know",
+                    confidence=0.85,
+                    requires_autonomy="brain_loop.telegram_urgent",
+                )
+            )
 
     return decisions
 
@@ -1093,6 +1152,7 @@ def _mark_seen_with_short_cooldown(kind: str, subject: str) -> None:
 
 # ── Act: execute approved decisions ──────────────────────────────
 
+
 def _write_doorbell(session_id: str, title: str, content: str, priority: str, source: str) -> bool:
     path = DOORBELL_DIR / f".brain_doorbell.{session_id}.jsonl"
     try:
@@ -1119,6 +1179,7 @@ def _write_eval_proposal(payload: dict) -> bool:
     """
     try:
         import hashlib
+
         evidence = payload.get("evidence") or {}
 
         # Identify the payload shape
@@ -1137,17 +1198,14 @@ def _write_eval_proposal(payload: dict) -> bool:
         else:
             # Original recall_miss shape
             fp_input = (
-                f"brain_loop:{evidence.get('prev_prompt','')[:300]}:"
-                f"{evidence.get('correction','')[:300]}"
+                f"brain_loop:{evidence.get('prev_prompt','')[:300]}:" f"{evidence.get('correction','')[:300]}"
             )
             query_text = (evidence.get("prev_prompt") or "")[:1000]
 
         fp = hashlib.sha256(fp_input.encode()).hexdigest()[:16]
         pid = f"bloop_{fp}"
         with _connect_autonomy() as conn:
-            existing = conn.execute(
-                "SELECT id FROM eval_proposals WHERE id = ?", (pid,)
-            ).fetchone()
+            existing = conn.execute("SELECT id FROM eval_proposals WHERE id = ?", (pid,)).fetchone()
             if existing:
                 return True
             conn.execute(
@@ -1205,6 +1263,7 @@ def _apply_self_modification(payload: dict) -> bool:
     if modification == "drain_llm_backlog":
         try:
             from llm_backlog import drain
+
             result = drain(limit=100, abort_on_breaker=True)
             log.info(
                 "brain_loop drain_llm_backlog: drained=%d failed=%d abandoned=%d",
@@ -1325,8 +1384,7 @@ def _journal(
         "ts": _now_iso(),
         "latency_ms": int((time.time() - t0) * 1000),
         "observations": [
-            {"kind": o.kind, "subject": o.subject, "salience": o.salience}
-            for o in observations
+            {"kind": o.kind, "subject": o.subject, "salience": o.salience} for o in observations
         ],
         "decisions_total": len(decisions),
         "approved": len(approved),
@@ -1344,6 +1402,7 @@ def _journal(
 
 # ── Main loop entry point ────────────────────────────────────────
 
+
 class BrainLoop:
     """Singleton executive. One instance lives inside brain_server's event loop."""
 
@@ -1358,8 +1417,11 @@ class BrainLoop:
         Guaranteed to complete in <= TICK_BUDGET_S wall-clock even on partial
         failures. Best-effort: any sub-step that raises is logged and skipped.
         """
-        # Env kill switch — respect BRAIN_AUTOPILOT_DISABLED globally
-        if os.environ.get("BRAIN_AUTOPILOT_DISABLED") == "1":
+        # Env kill switch — respect BRAIN_AUTOPILOT_DISABLED globally.
+        # 2026-04-16 fix: accept any standard truthy value, not just "1"
+        # (see autonomy.authorize for the paired fix). Prevents silent
+        # kill-switch misconfig from `BRAIN_AUTOPILOT_DISABLED=true`.
+        if os.environ.get("BRAIN_AUTOPILOT_DISABLED", "").strip().lower() in ("1", "true", "yes", "on"):
             return {"tick": self.tick_n, "status": "disabled_env"}
 
         # Reentrancy guard — skip if previous tick is still running

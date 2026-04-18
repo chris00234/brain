@@ -229,15 +229,12 @@ def _ensure_lifecycle_row(
     conn: sqlite3.Connection, candidate_id: str, promoted_at: str | None = None
 ) -> None:
     conn.execute(
-        "INSERT OR IGNORE INTO eval_holdout_lifecycle (candidate_id, promoted_at) "
-        "VALUES (?, ?)",
+        "INSERT OR IGNORE INTO eval_holdout_lifecycle (candidate_id, promoted_at) " "VALUES (?, ?)",
         (candidate_id, promoted_at or _now_iso()),
     )
 
 
-def record_eval_result(
-    candidate_id: str, pass_bool: bool, db_path: Path | None = None
-) -> dict | None:
+def record_eval_result(candidate_id: str, pass_bool: bool, db_path: Path | None = None) -> dict | None:
     """Phase N3: record one nightly eval outcome for a pending holdout candidate.
 
     Called by cli/eval_gate.py after the stable eval run — one pass per
@@ -418,7 +415,9 @@ def auto_graduate(db_path: Path | None = None) -> dict:
     return summary
 
 
-def stuck_candidates(db_path: Path | None = None, threshold_days: int = TELEGRAM_STUCK_THRESHOLD_DAYS) -> list[dict]:
+def stuck_candidates(
+    db_path: Path | None = None, threshold_days: int = TELEGRAM_STUCK_THRESHOLD_DAYS
+) -> list[dict]:
     """Return candidates whose lifecycle row has been pending >= N days with
     no auto-graduation or rejection. Used by eval_holdout_audit to gate the
     Telegram digest (N3 removes Telegram from the routine path).

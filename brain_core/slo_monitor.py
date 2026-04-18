@@ -8,6 +8,7 @@ tests/slo_baseline.json, and alerts via Jenna on 3 consecutive violations.
 Runs as a subprocess dispatched by server.py JOB_REGISTRY. Cannot read the
 in-process metrics buffer directly, so it performs a fresh probe each cycle.
 """
+
 from __future__ import annotations
 
 import json
@@ -17,7 +18,7 @@ import sys
 import time
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 log = logging.getLogger("brain.slo_monitor")
@@ -36,12 +37,15 @@ DEFAULT_SLOS = {
     "memory_growth_weekly_pct": 20,
 }
 
-# Content quality baselines — calibrated to the expanded n=744 eval set
-# (2026-04-13). Set ~4pt below the current honest number so normal run-to-run
-# variance doesn't trip the auto-heal doom loop. Tighten as the corpus matures.
+# Content quality baselines — 2026-04-17 recalibrated after the eval path
+# swap from eval-report.json (extended track, 71.9%) to eval-report-stable.json
+# (stable track, currently 97.8% content / 89.1% source). Prior thresholds
+# (67.0 / 76.0) were stale against the new track and effectively disabled the
+# content-quality auto-heal path. Set ~4pt below stable-track numbers so
+# normal variance doesn't trip the doom loop.
 CONTENT_QUALITY_SLOS = {
-    "content_hit_pct": 67.0,  # current ~71.9 on full set
-    "source_hit_pct": 76.0,   # current ~81.2 on full set
+    "content_hit_pct": 93.0,
+    "source_hit_pct": 84.0,
 }
 
 # Fixed probe queries so measurements are comparable across cycles
@@ -71,6 +75,7 @@ PROBE_QUERIES = [
 
 def _token() -> str:
     from config import load_bearer_secret
+
     return load_bearer_secret()
 
 
@@ -156,11 +161,24 @@ def probe() -> dict:
 
 
 def check_content_quality() -> list[dict]:
-    """Read latest eval report and check content/source hit rates against SLOs."""
-    if not EVAL_REPORT_FILE.exists():
+    """Check content/source hit rates against the STABLE eval (not extended).
+
+    Previously this read eval-report.json which is the extended 743-query
+    eval set — explicitly trend-only per CLAUDE.md ("tracks literal-wording
+    queries vs consolidated abstractions — trend-only, not a regression
+    gate"). Reading the extended eval caused a 42-hour breach loop on
+    source_hit_pct (71.9 vs a threshold miscalibrated against old ~81
+    numbers). Now reads eval-report-stable.json (138-query regression gate)
+    which legitimately measures health. The stable-track content hit is
+    also covered by slos.py recall_v2_content_hit_pct, so this check is
+    left only as a redundant observability belt.
+    """
+    stable_path = EVAL_REPORT_FILE.parent / "eval-report-stable.json"
+    report_path = stable_path if stable_path.exists() else EVAL_REPORT_FILE
+    if not report_path.exists():
         return []
     try:
-        report = json.loads(EVAL_REPORT_FILE.read_text())
+        report = json.loads(report_path.read_text())
     except Exception:
         return []
 
@@ -173,19 +191,23 @@ def check_content_quality() -> list[dict]:
     source_pct = float(v2.get("hit_source_pct", 0))
 
     if content_pct > 0 and content_pct < CONTENT_QUALITY_SLOS["content_hit_pct"]:
-        violations.append({
-            "slo": "content_hit_pct",
-            "current": content_pct,
-            "baseline": CONTENT_QUALITY_SLOS["content_hit_pct"],
-            "threshold": CONTENT_QUALITY_SLOS["content_hit_pct"],
-        })
+        violations.append(
+            {
+                "slo": "content_hit_pct",
+                "current": content_pct,
+                "baseline": CONTENT_QUALITY_SLOS["content_hit_pct"],
+                "threshold": CONTENT_QUALITY_SLOS["content_hit_pct"],
+            }
+        )
     if source_pct > 0 and source_pct < CONTENT_QUALITY_SLOS["source_hit_pct"]:
-        violations.append({
-            "slo": "source_hit_pct",
-            "current": source_pct,
-            "baseline": CONTENT_QUALITY_SLOS["source_hit_pct"],
-            "threshold": CONTENT_QUALITY_SLOS["source_hit_pct"],
-        })
+        violations.append(
+            {
+                "slo": "source_hit_pct",
+                "current": source_pct,
+                "baseline": CONTENT_QUALITY_SLOS["source_hit_pct"],
+                "threshold": CONTENT_QUALITY_SLOS["source_hit_pct"],
+            }
+        )
     return violations
 
 
@@ -201,22 +223,26 @@ def check_slos() -> dict:
     recall_threshold = max(baseline["recall_p95_ms"] * 2, baseline["recall_p95_ms"])
     recall_p95 = current["recall"]["p95"]
     if current["recall"]["samples"] >= 5 and recall_p95 > recall_threshold:
-        violations.append({
-            "slo": "recall_p95_ms",
-            "current": recall_p95,
-            "baseline": baseline["recall_p95_ms"],
-            "threshold": recall_threshold,
-        })
+        violations.append(
+            {
+                "slo": "recall_p95_ms",
+                "current": recall_p95,
+                "baseline": baseline["recall_p95_ms"],
+                "threshold": recall_threshold,
+            }
+        )
 
     v2_threshold = max(baseline["recall_v2_p95_ms"] * 2, baseline["recall_v2_p95_ms"])
     v2_p95 = current["recall_v2"]["p95"]
     if current["recall_v2"]["samples"] >= 2 and v2_p95 > v2_threshold:
-        violations.append({
-            "slo": "recall_v2_p95_ms",
-            "current": v2_p95,
-            "baseline": baseline["recall_v2_p95_ms"],
-            "threshold": v2_threshold,
-        })
+        violations.append(
+            {
+                "slo": "recall_v2_p95_ms",
+                "current": v2_p95,
+                "baseline": baseline["recall_v2_p95_ms"],
+                "threshold": v2_threshold,
+            }
+        )
 
     return {
         "status": "ok" if not violations else "breached",
@@ -224,6 +250,69 @@ def check_slos() -> dict:
         "baseline": baseline,
         "violations": violations,
     }
+
+
+# Throttle jenna dispatches so hourly ticks can't spam the LLM-backed agent
+# once an SLO sits below threshold for hours. 6-hour floor means at most 4
+# dispatches per SLO per day even in the worst case. Persists in brain_config
+# so restarts don't reset the clock.
+_ALERT_DISPATCH_FLOOR_S = 6 * 3600
+_ALERT_KEY_PREFIX = "slo_monitor_alert."
+
+
+def _in_quiet_hours_now() -> bool:
+    """Read persisted quiet_hours.* keys directly — the autonomy.QUIET_HOURS
+    constant doesn't pick up POST /brain/quiet-hours overrides, so relying
+    on it silently ignores Chris's configured window."""
+    try:
+        from datetime import time as _dtime
+        from zoneinfo import ZoneInfo
+
+        import brain_config_store
+
+        # 2026-04-17 fix: match documented 22:30–07:30 PT window (see slos.py).
+        start_s = brain_config_store.get("quiet_hours.start") or "22:30"
+        end_s = brain_config_store.get("quiet_hours.end") or "07:30"
+        tz_s = brain_config_store.get("quiet_hours.tz") or "America/Los_Angeles"
+        start = _dtime.fromisoformat(start_s)
+        end = _dtime.fromisoformat(end_s)
+        t = datetime.now(ZoneInfo(tz_s)).time()
+        if start > end:
+            return t >= start or t < end
+        return start <= t < end
+    except Exception:
+        return False
+
+
+def _alert_key(alerts: list[str]) -> str:
+    # Key by the set of SLO names in the alert bundle so switching breach sets
+    # is treated as a distinct event.
+    names = sorted({a.split(" ")[1] for a in alerts if a.startswith("SLO ")})
+    return _ALERT_KEY_PREFIX + "|".join(names)
+
+
+def _should_dispatch_alert(alerts: list[str]) -> bool:
+    if _in_quiet_hours_now():
+        return False
+    try:
+        import brain_config_store
+
+        key = _alert_key(alerts)
+        last = brain_config_store.get(key)
+        if last and (time.time() - float(last)) < _ALERT_DISPATCH_FLOOR_S:
+            return False
+    except Exception:
+        pass
+    return True
+
+
+def _record_alert_dispatched(alerts: list[str]) -> None:
+    try:
+        import brain_config_store
+
+        brain_config_store.set(_alert_key(alerts), f"{time.time():.0f}", updated_by="slo_monitor")
+    except Exception:
+        pass
 
 
 def monitor_cycle() -> dict:
@@ -257,15 +346,17 @@ def monitor_cycle() -> dict:
 
     if alerts:
         try:
-            # Lazy import — only when alerting to avoid pulling openclaw on every cycle
             sys.path.insert(0, str(Path(__file__).resolve().parent))
-            from openclaw_dispatch import dispatch
-            dispatch(
-                agent="jenna",
-                message="BRAIN SLO ALERT:\n" + "\n".join(alerts),
-                thinking="off",
-                timeout=30,
-            )
+            if _should_dispatch_alert(alerts):
+                from cli_llm import dispatch
+
+                dispatch(
+                    agent="jenna",
+                    message="BRAIN SLO ALERT:\n" + "\n".join(alerts),
+                    thinking="off",
+                    timeout=30,
+                )
+                _record_alert_dispatched(alerts)
         except Exception as e:
             log.warning("alert dispatch failed: %s", e)
 
@@ -282,52 +373,67 @@ def monitor_cycle() -> dict:
         pass
 
     # Phase A3: auto-remediation via self_heal
+    # 2026-04-16 R-10: gate-blocked is NOT a failure — it's the autonomy
+    # system working as designed. Previously this raised RuntimeError,
+    # which bubbled up as a scheduler job failure and tripped the
+    # /brain/health "1 job failed" degraded status on every slo_monitor
+    # tick when quiet hours / kill-switch engaged. Now: log + skip heal.
     try:
         if not _slo_gate_allowed:
-            raise RuntimeError("slo.remediate blocked by autonomy gate")
-        from self_heal import HealingSignal, dispatch as heal_dispatch
+            # Record telemetry but do not raise — autonomy said no, we respect it.
+            print("[slo_monitor] autonomy gate denied slo.remediate; skipping heal dispatch")
+            return {"status": "gate_denied", "violations": len(violations)}
+        from self_heal import HealingSignal
+        from self_heal import dispatch as heal_dispatch
+
         # Latency breaches
         for v in violations:
             slo_name = v["slo"]
             count = state["violations"].get(slo_name, 0)
             if count >= 5:
-                heal_dispatch(HealingSignal(
-                    source="slo_monitor",
-                    signal_type="slo_latency_breach",
-                    severity="high" if count >= 8 else "medium",
-                    metric=slo_name,
-                    value=v.get("current", 0),
-                    baseline=v.get("baseline", 0),
-                    target="recall",
-                    context={"breach_count": count},
-                ))
+                heal_dispatch(
+                    HealingSignal(
+                        source="slo_monitor",
+                        signal_type="slo_latency_breach",
+                        severity="high" if count >= 8 else "medium",
+                        metric=slo_name,
+                        value=v.get("current", 0),
+                        baseline=v.get("baseline", 0),
+                        target="recall",
+                        context={"breach_count": count},
+                    )
+                )
         # Content quality breaches — trigger reindex via eval_regression healer
         for v in content_violations:
             slo_name = v["slo"]
             count = state["violations"].get(slo_name, 0)
             if count >= 2:
-                heal_dispatch(HealingSignal(
-                    source="slo_monitor",
-                    signal_type="content_quality_breach",
-                    severity="high" if count >= 4 else "medium",
-                    metric=slo_name,
-                    value=v.get("current", 0),
-                    baseline=v.get("baseline", 0),
-                    target="recall",
-                    context={"breach_count": count},
-                ))
+                heal_dispatch(
+                    HealingSignal(
+                        source="slo_monitor",
+                        signal_type="content_quality_breach",
+                        severity="high" if count >= 4 else "medium",
+                        metric=slo_name,
+                        value=v.get("current", 0),
+                        baseline=v.get("baseline", 0),
+                        target="recall",
+                        context={"breach_count": count},
+                    )
+                )
     except Exception as e:
         log.warning("self_heal dispatch failed: %s", e)
 
-    state["last_check"] = datetime.now(timezone.utc).isoformat()
+    state["last_check"] = datetime.now(UTC).isoformat()
 
     # Append to history (keep last 168 — 1 week of hourly checks)
-    state["history"].append({
-        "timestamp": state["last_check"],
-        "status": result["status"],
-        "recall_p95": result["current"]["recall"]["p95"],
-        "recall_v2_p95": result["current"]["recall_v2"]["p95"],
-    })
+    state["history"].append(
+        {
+            "timestamp": state["last_check"],
+            "status": result["status"],
+            "recall_p95": result["current"]["recall"]["p95"],
+            "recall_v2_p95": result["current"]["recall_v2"]["p95"],
+        }
+    )
     state["history"] = state["history"][-168:]
 
     save_state(state)

@@ -11,6 +11,7 @@ import json
 import logging
 import sqlite3
 import threading
+from datetime import UTC
 from pathlib import Path
 
 log = logging.getLogger("brain.embed_cache")
@@ -46,7 +47,7 @@ def cache_stats() -> dict:
 
 
 def _get_conn() -> sqlite3.Connection:
-    conn = getattr(_local, 'conn', None)
+    conn = getattr(_local, "conn", None)
     if conn is None:
         EMBED_CACHE_DB.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(EMBED_CACHE_DB), check_same_thread=False)
@@ -91,8 +92,9 @@ def cache_get(key: str) -> list[float] | None:
 def cache_put(key: str, embedding: list[float]) -> None:
     global _put_counter
     try:
-        from datetime import datetime, timezone
-        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        from datetime import datetime
+
+        now = datetime.now(UTC).isoformat(timespec="seconds")
         conn = _get_conn()
         conn.execute(
             "INSERT OR REPLACE INTO embeddings (hash, embedding, created_at) VALUES (?, ?, ?)",
@@ -126,11 +128,16 @@ def prune_old(max_age_days: int = 60, max_rows: int = 25_000) -> dict:
 
     Returns dict with counts + disk size before/after.
     """
-    from datetime import datetime, timezone, timedelta
+    from datetime import datetime, timedelta
+
     result = {
-        "legacy_deleted": 0, "aged_deleted": 0, "lru_deleted": 0,
-        "rows_before": 0, "rows_after": 0,
-        "bytes_before": 0, "bytes_after": 0,
+        "legacy_deleted": 0,
+        "aged_deleted": 0,
+        "lru_deleted": 0,
+        "rows_before": 0,
+        "rows_after": 0,
+        "bytes_before": 0,
+        "bytes_after": 0,
     }
     try:
         conn = _get_conn()
@@ -141,7 +148,7 @@ def prune_old(max_age_days: int = 60, max_rows: int = 25_000) -> dict:
             cur = conn.execute("DELETE FROM embeddings WHERE created_at IS NULL OR created_at = ''")
             result["legacy_deleted"] = cur.rowcount
 
-            cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat(timespec="seconds")
+            cutoff = (datetime.now(UTC) - timedelta(days=max_age_days)).isoformat(timespec="seconds")
             cur = conn.execute("DELETE FROM embeddings WHERE created_at < ?", (cutoff,))
             result["aged_deleted"] = cur.rowcount
 
@@ -171,9 +178,13 @@ def prune_old(max_age_days: int = 60, max_rows: int = 25_000) -> dict:
 
         log.info(
             "embed_cache.prune_old: legacy=%d aged=%d lru=%d rows=%d->%d size=%.1fMB->%.1fMB",
-            result["legacy_deleted"], result["aged_deleted"], result["lru_deleted"],
-            result["rows_before"], result["rows_after"],
-            result["bytes_before"] / 1048576, result["bytes_after"] / 1048576,
+            result["legacy_deleted"],
+            result["aged_deleted"],
+            result["lru_deleted"],
+            result["rows_before"],
+            result["rows_after"],
+            result["bytes_before"] / 1048576,
+            result["bytes_after"] / 1048576,
         )
     except Exception as e:
         log.warning("embed_cache.prune_old failed: %s", e)
@@ -185,6 +196,7 @@ if __name__ == "__main__":
     # One-shot runner so cron/scheduler can invoke without importing:
     #   python3 /Users/chrischo/server/brain/brain_core/embed_cache.py
     import argparse
+
     parser = argparse.ArgumentParser(description="Prune embed_cache.db")
     parser.add_argument("--max-age-days", type=int, default=60)
     parser.add_argument("--max-rows", type=int, default=25_000)

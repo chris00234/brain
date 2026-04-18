@@ -17,17 +17,18 @@ Inspired by Karpathy's llm-wiki gist — the lint operation detects orphan
 pages, missing cross-references, and data gaps as part of routine wiki
 maintenance. The LLM handles bookkeeping the Memex couldn't solve.
 """
+
 from __future__ import annotations
 
 import json
 import re
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "pipeline"))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "brain_core"))
-from common import ROOT, parse_note, iter_note_paths  # noqa: E402
+from common import ROOT, iter_note_paths, parse_note
 
 CANONICAL_DIR = ROOT / "canonical"
 ENTITY_DIR = CANONICAL_DIR / "entities"
@@ -45,8 +46,8 @@ def _age_days(value: str | None) -> int | None:
     try:
         ts = datetime.fromisoformat(value.replace("Z", "+00:00"))
         if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=timezone.utc)
-        return int((datetime.now(timezone.utc) - ts).days)
+            ts = ts.replace(tzinfo=UTC)
+        return int((datetime.now(UTC) - ts).days)
     except (ValueError, TypeError):
         return None
 
@@ -64,18 +65,18 @@ def _load_canonical() -> list[dict]:
             continue
         if meta.get("status") != "active":
             continue
-        notes.append({
-            "id": meta.get("id") or path.stem,
-            "title": meta.get("title") or path.stem,
-            "domain": meta.get("domain") or "",
-            "path": str(path.relative_to(ROOT)),
-            "updated_at": meta.get("updated_at"),
-            "relations_out": [
-                r.get("target") for r in meta.get("relations", []) if r.get("target")
-            ],
-            "supersedes": [s for s in meta.get("supersedes") or [] if s],
-            "age_days": _age_days(meta.get("updated_at")),
-        })
+        notes.append(
+            {
+                "id": meta.get("id") or path.stem,
+                "title": meta.get("title") or path.stem,
+                "domain": meta.get("domain") or "",
+                "path": str(path.relative_to(ROOT)),
+                "updated_at": meta.get("updated_at"),
+                "relations_out": [r.get("target") for r in meta.get("relations", []) if r.get("target")],
+                "supersedes": [s for s in meta.get("supersedes") or [] if s],
+                "age_days": _age_days(meta.get("updated_at")),
+            }
+        )
     return notes
 
 
@@ -98,15 +99,17 @@ def _find_orphans(notes: list[dict]) -> list[dict]:
             continue
         if n["relations_out"]:
             continue
-        orphans.append({
-            "id": n["id"],
-            "title": n["title"][:120],
-            "domain": n["domain"],
-            "path": n["path"],
-            "age_days": age,
-            "inbound_refs": inbound[n["id"]],
-            "outbound_refs": len(n["relations_out"]),
-        })
+        orphans.append(
+            {
+                "id": n["id"],
+                "title": n["title"][:120],
+                "domain": n["domain"],
+                "path": n["path"],
+                "age_days": age,
+                "inbound_refs": inbound[n["id"]],
+                "outbound_refs": len(n["relations_out"]),
+            }
+        )
     orphans.sort(key=lambda o: (o["domain"], -o["age_days"]))
     return orphans
 
@@ -149,12 +152,14 @@ def _find_data_gaps(hot_entities: list[dict]) -> list[dict]:
             continue
         if _entity_page_exists(name):
             continue
-        gaps.append({
-            "name": name,
-            "entity_type": e.get("entity_type") or "unknown",
-            "mentions": e.get("mentions", 0),
-            "suggested_slug": _slugify(name),
-        })
+        gaps.append(
+            {
+                "name": name,
+                "entity_type": e.get("entity_type") or "unknown",
+                "mentions": e.get("mentions", 0),
+                "suggested_slug": _slugify(name),
+            }
+        )
     gaps.sort(key=lambda g: -g["mentions"])
     return gaps
 
@@ -178,11 +183,13 @@ def _find_missing_xrefs(notes: list[dict], hot_entities: list[dict]) -> list[dic
             continue
         aliases = e.get("aliases") or []
         search_terms = [name.lower()] + [a.lower() for a in aliases if isinstance(a, str)]
-        entities_with_pages.append({
-            "name": name,
-            "target_id": f"entity_{_slugify(name)}",
-            "terms": [t for t in search_terms if len(t) >= 3],
-        })
+        entities_with_pages.append(
+            {
+                "name": name,
+                "target_id": f"entity_{_slugify(name)}",
+                "terms": [t for t in search_terms if len(t) >= 3],
+            }
+        )
     if not entities_with_pages:
         return []
 
@@ -200,25 +207,27 @@ def _find_missing_xrefs(notes: list[dict], hot_entities: list[dict]) -> list[dic
                 continue  # already linked
             if not any(term in body for term in ent["terms"]):
                 continue
-            missing.append({
-                "note_id": note_id,
-                "note_title": n["title"][:100],
-                "note_path": n["path"],
-                "entity": ent["name"],
-                "entity_page_id": ent["target_id"],
-            })
+            missing.append(
+                {
+                    "note_id": note_id,
+                    "note_title": n["title"][:100],
+                    "note_path": n["path"],
+                    "entity": ent["name"],
+                    "entity_page_id": ent["target_id"],
+                }
+            )
     missing.sort(key=lambda m: (m["entity"], m["note_id"]))
     return missing
 
 
 def _write_report(orphans: list[dict], data_gaps: list[dict], missing_xrefs: list[dict]) -> tuple[Path, Path]:
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
-    date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    date = datetime.now(UTC).strftime("%Y-%m-%d")
     json_path = REPORT_DIR / f"{date}.json"
     md_path = REPORT_DIR / f"{date}.md"
 
     payload = {
-        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
         "checks": {
             "orphan_notes": {
                 "description": f"Active canonical notes with 0 inbound refs, 0 outbound refs, age ≥ {ORPHAN_MIN_AGE_DAYS}d",
@@ -272,21 +281,27 @@ def _write_report(orphans: list[dict], data_gaps: list[dict], missing_xrefs: lis
     lines.append("")
     lines.append(f"## Data gaps — entities without canonical pages ({len(data_gaps)})")
     lines.append("")
-    lines.append(f"Neo4j entities with mention_count ≥ {DATA_GAP_MIN_MENTIONS} but no entry in `canonical/entities/`.")
+    lines.append(
+        f"Neo4j entities with mention_count ≥ {DATA_GAP_MIN_MENTIONS} but no entry in `canonical/entities/`."
+    )
     lines.append("These should be created via the weekly `entity_pages` job.")
     lines.append("")
     if not data_gaps:
         lines.append("_None — every hot entity has a canonical page._")
     else:
         for g in data_gaps[:30]:
-            lines.append(f"- **{g['name']}** — {g['entity_type']} — {g['mentions']} mentions — suggested slug `{g['suggested_slug']}`")
+            lines.append(
+                f"- **{g['name']}** — {g['entity_type']} — {g['mentions']} mentions — suggested slug `{g['suggested_slug']}`"
+            )
         if len(data_gaps) > 30:
             lines.append(f"- _… {len(data_gaps) - 30} more_")
 
     lines.append("")
     lines.append(f"## Missing cross-references ({len(missing_xrefs)})")
     lines.append("")
-    lines.append("Canonical notes that mention an entity in their body text but don't have a `relations[].target` to the entity's canonical page.")
+    lines.append(
+        "Canonical notes that mention an entity in their body text but don't have a `relations[].target` to the entity's canonical page."
+    )
     lines.append("")
     if not missing_xrefs:
         lines.append("_None — cross-references are in order._")
@@ -315,14 +330,18 @@ def main() -> int:
     data_gaps = _find_data_gaps(hot_entities) if hot_entities else []
     missing_xrefs = _find_missing_xrefs(notes, hot_entities) if hot_entities else []
     json_path, md_path = _write_report(orphans, data_gaps, missing_xrefs)
-    print(json.dumps({
-        "status": "ok",
-        "canonical_notes": len(notes),
-        "orphan_notes": len(orphans),
-        "data_gaps": len(data_gaps),
-        "missing_cross_refs": len(missing_xrefs),
-        "report": str(md_path.relative_to(ROOT)),
-    }))
+    print(
+        json.dumps(
+            {
+                "status": "ok",
+                "canonical_notes": len(notes),
+                "orphan_notes": len(orphans),
+                "data_gaps": len(data_gaps),
+                "missing_cross_refs": len(missing_xrefs),
+                "report": str(md_path.relative_to(ROOT)),
+            }
+        )
+    )
     return 0
 
 

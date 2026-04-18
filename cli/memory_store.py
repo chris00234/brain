@@ -16,8 +16,7 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "brain_core"))
-from search import get_embedding  # noqa: E402
-
+from search import get_embedding
 
 COLLECTION = "semantic_memory"
 DUPLICATE_THRESHOLD = 0.05
@@ -26,10 +25,12 @@ DUPLICATE_THRESHOLD = 0.05
 def chroma_api(method, path, data=None):
     """Call ChromaDB API on native instance (127.0.0.1:8000)."""
     import urllib.request
+
     url = f"http://127.0.0.1:8000{path}"
     body = json.dumps(data).encode() if data else None
-    req = urllib.request.Request(url, data=body, method=method,
-                                 headers={"Content-Type": "application/json"} if body else {})
+    req = urllib.request.Request(
+        url, data=body, method=method, headers={"Content-Type": "application/json"} if body else {}
+    )
     with urllib.request.urlopen(req, timeout=120) as resp:
         raw = resp.read()
     return json.loads(raw) if raw.strip() else {}
@@ -38,14 +39,15 @@ def chroma_api(method, path, data=None):
 def get_collection_id(auto_create=True):
     cols = chroma_api("GET", "/api/v2/tenants/default_tenant/databases/default_database/collections")
     for c in cols:
-        if c['name'] == COLLECTION:
-            return c['id']
+        if c["name"] == COLLECTION:
+            return c["id"]
     if auto_create:
-        result = chroma_api("POST", "/api/v2/tenants/default_tenant/databases/default_database/collections", {
-            "name": COLLECTION,
-            "metadata": {"hnsw:space": "cosine"}
-        })
-        return result.get('id')
+        result = chroma_api(
+            "POST",
+            "/api/v2/tenants/default_tenant/databases/default_database/collections",
+            {"name": COLLECTION, "metadata": {"hnsw:space": "cosine"}},
+        )
+        return result.get("id")
     return None
 
 
@@ -62,9 +64,11 @@ def cmd_store(args):
 
     embedding = get_embedding(text)
 
-    search_result = chroma_api("POST",
+    search_result = chroma_api(
+        "POST",
         f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/query",
-        {"query_embeddings": [embedding], "n_results": 1, "include": ["distances"]})
+        {"query_embeddings": [embedding], "n_results": 1, "include": ["distances"]},
+    )
     dists = search_result.get("distances", [[]])[0]
     if dists and dists[0] < DUPLICATE_THRESHOLD:
         print(f"Duplicate detected (distance: {dists[0]:.4f}). Skipping.")
@@ -73,23 +77,27 @@ def cmd_store(args):
     doc_id = f"mem:{agent}:{hashlib.md5(text.encode()).hexdigest()}"[:63]
     now = datetime.now().isoformat()
 
-    chroma_api("POST",
+    chroma_api(
+        "POST",
         f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/upsert",
         {
             "ids": [doc_id],
             "embeddings": [embedding],
             "documents": [text],
-            "metadatas": [{
-                "source": f"memory_store:{agent}",
-                "agent": agent,
-                "type": "semantic-memory",
-                "category": category,
-                "importance": str(importance),
-                "service": "",
-                "section": "",
-                "created_at": now,
-            }],
-        })
+            "metadatas": [
+                {
+                    "source": f"memory_store:{agent}",
+                    "agent": agent,
+                    "type": "semantic-memory",
+                    "category": category,
+                    "importance": str(importance),
+                    "service": "",
+                    "section": "",
+                    "created_at": now,
+                }
+            ],
+        },
+    )
     print(f"Stored: {text[:80]}... [agent={agent}, category={category}]")
 
 
@@ -111,9 +119,11 @@ def cmd_search(args):
     if args.agent:
         payload["where"] = {"agent": {"$eq": args.agent}}
 
-    result = chroma_api("POST",
+    result = chroma_api(
+        "POST",
         f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/query",
-        payload)
+        payload,
+    )
 
     docs = result.get("documents", [[]])[0]
     metas = result.get("metadatas", [[]])[0]
@@ -121,14 +131,16 @@ def cmd_search(args):
 
     results = []
     for i in range(len(docs)):
-        results.append({
-            "content": docs[i],
-            "score": round(1 - dists[i], 4),
-            "agent": metas[i].get("agent", ""),
-            "category": metas[i].get("category", ""),
-            "created_at": metas[i].get("created_at", ""),
-            "source": metas[i].get("source", ""),
-        })
+        results.append(
+            {
+                "content": docs[i],
+                "score": round(1 - dists[i], 4),
+                "agent": metas[i].get("agent", ""),
+                "category": metas[i].get("category", ""),
+                "created_at": metas[i].get("created_at", ""),
+                "source": metas[i].get("source", ""),
+            }
+        )
 
     if args.json:
         print(json.dumps(results, indent=2, ensure_ascii=False))
@@ -151,16 +163,20 @@ def cmd_forget(args):
     target = args.id_or_query
 
     if target.startswith("mem:"):
-        chroma_api("POST",
+        chroma_api(
+            "POST",
             f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/delete",
-            {"ids": [target]})
+            {"ids": [target]},
+        )
         print(f"Deleted: {target}")
         return
 
     embedding = get_embedding(target)
-    result = chroma_api("POST",
+    result = chroma_api(
+        "POST",
         f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/query",
-        {"query_embeddings": [embedding], "n_results": 1, "include": ["documents", "distances"]})
+        {"query_embeddings": [embedding], "n_results": 1, "include": ["documents", "distances"]},
+    )
 
     dists = result.get("distances", [[]])[0]
     ids = result.get("ids", [[]])[0]
@@ -170,9 +186,11 @@ def cmd_forget(args):
         print(f"No close match found for: {target}")
         return
 
-    chroma_api("POST",
+    chroma_api(
+        "POST",
         f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/delete",
-        {"ids": [ids[0]]})
+        {"ids": [ids[0]]},
+    )
     print(f"Deleted: {ids[0]} — {docs[0][:80]}...")
 
 
@@ -188,14 +206,17 @@ def cmd_stats(args):
             "include": [],
             "limit": 10000,
         }
-        result = chroma_api("POST",
+        result = chroma_api(
+            "POST",
             f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/get",
-            payload)
+            payload,
+        )
         ids = result.get("ids", [])
         print(f"Semantic memories (agent={args.agent}): {len(ids)}")
     else:
-        count_result = chroma_api("GET",
-            f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/count")
+        count_result = chroma_api(
+            "GET", f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/count"
+        )
         total = count_result if isinstance(count_result, int) else count_result.get("count", "unknown")
         print(f"Semantic memories: {total}")
 
@@ -207,7 +228,9 @@ def main():
     store_p = sub.add_parser("store", help="Store a memory")
     store_p.add_argument("text", help="Text to store")
     store_p.add_argument("--agent", help="Agent name")
-    store_p.add_argument("--category", choices=["fact", "preference", "decision", "entity", "other"], default="other")
+    store_p.add_argument(
+        "--category", choices=["fact", "preference", "decision", "entity", "other"], default="other"
+    )
     store_p.add_argument("--importance", type=float, default=0.5)
 
     search_p = sub.add_parser("search", help="Search memories")
@@ -230,5 +253,5 @@ def main():
     {"store": cmd_store, "search": cmd_search, "forget": cmd_forget, "stats": cmd_stats}[args.command](args)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

@@ -9,7 +9,6 @@ Runs on the 1st of each month at 4:30am via brain scheduler.
 """
 
 import hashlib
-import os
 import shutil
 import sqlite3
 import subprocess
@@ -17,7 +16,6 @@ import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
-
 
 BRAIN_ROOT = Path("/Users/chrischo/server/brain")
 OPENCLAW_BIN = "/Users/chrischo/.local/bin/openclaw"
@@ -32,10 +30,7 @@ from _minio import s3_client as _s3_client
 
 def _latest_backup_key(s3) -> str | None:
     resp = s3.list_objects_v2(Bucket=MINIO_BUCKET, Prefix=CHROMA_PREFIX)
-    tarballs = [
-        obj["Key"] for obj in resp.get("Contents", [])
-        if obj["Key"].endswith(".tar.gz")
-    ]
+    tarballs = [obj["Key"] for obj in resp.get("Contents", []) if obj["Key"].endswith(".tar.gz")]
     if not tarballs:
         return None
     tarballs.sort(reverse=True)
@@ -46,12 +41,19 @@ def _alert_failure(error_msg: str) -> None:
     try:
         subprocess.run(
             [
-                OPENCLAW_BIN, "agent",
-                "--agent", "jenna",
-                "--message", f"BACKUP VERIFY FAILED: {error_msg}",
-                "--thinking", "off", "--timeout", "30",
+                OPENCLAW_BIN,
+                "agent",
+                "--agent",
+                "jenna",
+                "--message",
+                f"BACKUP VERIFY FAILED: {error_msg}",
+                "--thinking",
+                "off",
+                "--timeout",
+                "30",
             ],
-            timeout=35, capture_output=True,
+            timeout=35,
+            capture_output=True,
         )
     except Exception as e:
         print(f"  WARNING: alert dispatch failed: {e}")
@@ -98,7 +100,7 @@ def verify_backup() -> int:
             s3.download_file(MINIO_BUCKET, checksum_key, str(local_checksum))
         except Exception:
             checksum_available = False
-            print(f"  WARNING: no checksum file (legacy backup)")
+            print("  WARNING: no checksum file (legacy backup)")
 
         print("[3/5] Verifying checksum...")
         if checksum_available:
@@ -122,7 +124,8 @@ def verify_backup() -> int:
         try:
             subprocess.run(
                 ["tar", "xzf", str(local_archive), "-C", str(extract_dir)],
-                check=True, timeout=180,
+                check=True,
+                timeout=180,
             )
         except subprocess.CalledProcessError as e:
             err = f"tar extraction failed: {e}"

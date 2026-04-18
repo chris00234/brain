@@ -37,7 +37,8 @@ except ImportError as e:
 # Always register at the latest version — migrations are idempotent and safe
 # to run on every startup. Without this, a brain restart after a manual migrate
 # would hit downgrade-refused on subsequent restarts (db v3 vs code v0).
-CURRENT_VERSIONS["brain_db"] = 10
+# 2026-04-16 Tier 3 #4: v11 adds retrieval_competition (Bjork inhibition).
+CURRENT_VERSIONS["brain_db"] = 11
 
 
 def _safe_int(v: object, default: int = 0) -> int:
@@ -464,14 +465,17 @@ def _add_atom_evidence() -> dict:
     try:
         conn.executescript(_N2_DDL)
         conn.commit()
-        cols = {
-            r[1] for r in conn.execute("PRAGMA table_info(atom_evidence)").fetchall()
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(atom_evidence)").fetchall()}
+        return {
+            "table_created": "atom_evidence"
+            in {
+                r[0]
+                for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='atom_evidence'"
+                ).fetchall()
+            },
+            "columns": sorted(cols),
         }
-        return {"table_created": "atom_evidence" in {
-            r[0] for r in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='atom_evidence'"
-            ).fetchall()
-        }, "columns": sorted(cols)}
     finally:
         conn.close()
 
@@ -540,9 +544,7 @@ def _add_eval_holdout_lifecycle() -> dict:
     try:
         conn.executescript(_N3_DDL)
         conn.commit()
-        cols = {
-            r[1] for r in conn.execute("PRAGMA table_info(eval_holdout_lifecycle)").fetchall()
-        }
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(eval_holdout_lifecycle)").fetchall()}
         return {"columns": sorted(cols)}
     finally:
         conn.close()
@@ -561,7 +563,8 @@ def _add_sleep_consolidation_tables() -> dict:
         conn.executescript(_N4_DDL)
         conn.commit()
         tables = {
-            r[0] for r in conn.execute(
+            r[0]
+            for r in conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' "
                 "AND name IN ('atom_coactivation', 'sleep_cycles')"
             ).fetchall()
@@ -596,11 +599,11 @@ def _add_hygiene_fields() -> dict:
     try:
         cols = {r[1] for r in conn.execute("PRAGMA table_info(atoms)").fetchall()}
         additions = [
-            ("provisional",     "INTEGER NOT NULL DEFAULT 0"),
-            ("trust_score",     "REAL NOT NULL DEFAULT 0.5"),
-            ("topic_key",       "TEXT"),
-            ("speaker_entity",  "TEXT NOT NULL DEFAULT 'chris'"),
-            ("scope",           "TEXT NOT NULL DEFAULT 'global'"),
+            ("provisional", "INTEGER NOT NULL DEFAULT 0"),
+            ("trust_score", "REAL NOT NULL DEFAULT 0.5"),
+            ("topic_key", "TEXT"),
+            ("speaker_entity", "TEXT NOT NULL DEFAULT 'chris'"),
+            ("scope", "TEXT NOT NULL DEFAULT 'global'"),
         ]
         added: list[str] = []
         for col, col_type in additions:
@@ -615,20 +618,15 @@ def _add_hygiene_fields() -> dict:
         # Indexes for retrieval filters — topic_key is the hot path for
         # topic-based supersession lookups.
         conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_atoms_provisional "
-            "ON atoms(provisional) WHERE provisional = 1"
+            "CREATE INDEX IF NOT EXISTS idx_atoms_provisional " "ON atoms(provisional) WHERE provisional = 1"
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_atoms_topic_key "
             "ON atoms(topic_key) WHERE topic_key IS NOT NULL"
         )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_atoms_speaker_scope " "ON atoms(speaker_entity, scope)")
         conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_atoms_speaker_scope "
-            "ON atoms(speaker_entity, scope)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_atoms_trust "
-            "ON atoms(trust_score) WHERE trust_score < 0.5"
+            "CREATE INDEX IF NOT EXISTS idx_atoms_trust " "ON atoms(trust_score) WHERE trust_score < 0.5"
         )
         conn.commit()
         final_cols = {r[1] for r in conn.execute("PRAGMA table_info(atoms)").fetchall()}
@@ -636,6 +634,48 @@ def _add_hygiene_fields() -> dict:
             "added": added,
             "all_columns": sorted(final_cols),
         }
+    finally:
+        conn.close()
+
+
+@migration("brain_db", 10, 11)
+def _add_retrieval_competition() -> dict:
+    """2026-04-16 Tier 3 #4: retrieval-induced inhibition table (Bjork 1994).
+
+    Logs (winner, loser, query_cue_hash) tuples emitted during recall when
+    two atoms contend for the same top-K slot. A nightly inhibition job
+    reads this table and applies small atom_evidence decrements to atoms
+    that consistently lose — preventing the rich-get-richer spiral where
+    frequently-retrieved memories dominate new retrievals regardless of
+    relevance.
+
+    - query_cue_hash: coarse cluster hash (first 12 hex of md5 over
+      normalized query) so different phrasings of the same question map
+      to the same competition bucket.
+    - pair uniqueness: one row per (winner, loser, cue), incremented on
+      repeat observation via ON CONFLICT DO UPDATE.
+    """
+    conn = _connect_brain_db()
+    try:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS retrieval_competition (
+              winner_atom_id  TEXT NOT NULL REFERENCES atoms(id) ON DELETE CASCADE,
+              loser_atom_id   TEXT NOT NULL REFERENCES atoms(id) ON DELETE CASCADE,
+              query_cue_hash  TEXT NOT NULL,
+              n_observations  INTEGER NOT NULL DEFAULT 1,
+              last_seen_at    TEXT NOT NULL,
+              PRIMARY KEY (winner_atom_id, loser_atom_id, query_cue_hash),
+              CHECK (winner_atom_id != loser_atom_id)
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_retrcomp_loser ON retrieval_competition(loser_atom_id)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_retrcomp_last_seen ON retrieval_competition(last_seen_at)"
+        )
+        conn.commit()
+        return {"status": "ok", "table": "retrieval_competition"}
     finally:
         conn.close()
 

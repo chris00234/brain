@@ -18,6 +18,7 @@ The driver consumes these one (knob, value_idx) pair at a time. Every decision
 is keep-or-revert against the current rolling baseline, so the order in `values`
 only affects which local maximum is found first, not correctness.
 """
+
 from __future__ import annotations
 
 BRAIN_ROOT = "/Users/chrischo/server/brain"

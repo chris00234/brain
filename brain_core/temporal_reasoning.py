@@ -7,11 +7,13 @@ Depends on:
 
 import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).parent))
 
-from datetime import datetime, timezone
-from temporal import parse_range, filter_by_created_at
-from indexer import chroma_api, get_embedding, _get_collection_id
+from datetime import UTC, datetime
+
+from indexer import _get_collection_id, chroma_api, get_embedding
+from temporal import filter_by_created_at, parse_range
 
 CHROMA_PREFIX = "/api/v2/tenants/default_tenant/databases/default_database/collections"
 CHAIN_HOP_LIMIT = 10
@@ -26,11 +28,15 @@ def _get_filtered(col_id: str, where: dict, limit: int = GET_LIMIT) -> list[dict
     """Fetch docs from ChromaDB with a where filter, return flat list of
     {id, content, category, created_at, valid_until}."""
     try:
-        resp = chroma_api("POST", _col_path(col_id, "get"), {
-            "where": where,
-            "limit": limit,
-            "include": ["documents", "metadatas"],
-        })
+        resp = chroma_api(
+            "POST",
+            _col_path(col_id, "get"),
+            {
+                "where": where,
+                "limit": limit,
+                "include": ["documents", "metadatas"],
+            },
+        )
     except Exception:
         return []
     ids = resp.get("ids", [])
@@ -39,13 +45,15 @@ def _get_filtered(col_id: str, where: dict, limit: int = GET_LIMIT) -> list[dict
     results = []
     for i, mid in enumerate(ids):
         meta = metas[i] if i < len(metas) else {}
-        results.append({
-            "id": mid,
-            "content": docs[i] if i < len(docs) else "",
-            "category": (meta or {}).get("category", ""),
-            "created_at": (meta or {}).get("created_at", ""),
-            "valid_until": (meta or {}).get("valid_until", ""),
-        })
+        results.append(
+            {
+                "id": mid,
+                "content": docs[i] if i < len(docs) else "",
+                "category": (meta or {}).get("category", ""),
+                "created_at": (meta or {}).get("created_at", ""),
+                "valid_until": (meta or {}).get("valid_until", ""),
+            }
+        )
     return results
 
 
@@ -58,7 +66,7 @@ def knowledge_diff(since: str, until: str = "now") -> dict:
     """
     start_dt, end_dt = parse_range(since, until if until != "now" else None)
     if end_dt is None:
-        end_dt = datetime.now(timezone.utc)
+        end_dt = datetime.now(UTC)
 
     col_id = _get_collection_id("semantic_memory")
     if not col_id:
@@ -96,12 +104,16 @@ def preference_evolution(topic: str, limit: int = 20) -> list[dict]:
 
     emb = get_embedding(topic, prefix="query")
     try:
-        resp = chroma_api("POST", _col_path(col_id, "query"), {
-            "query_embeddings": [emb],
-            "n_results": limit,
-            "where": {"category": "preference"},
-            "include": ["documents", "metadatas", "distances"],
-        })
+        resp = chroma_api(
+            "POST",
+            _col_path(col_id, "query"),
+            {
+                "query_embeddings": [emb],
+                "n_results": limit,
+                "where": {"category": "preference"},
+                "include": ["documents", "metadatas", "distances"],
+            },
+        )
     except Exception:
         return []
 
@@ -132,10 +144,14 @@ def preference_evolution(topic: str, limit: int = 20) -> list[dict]:
                 break
             # Fetch the linked record
             try:
-                r = chroma_api("POST", _col_path(col_id, "get"), {
-                    "ids": [next_id],
-                    "include": ["documents", "metadatas"],
-                })
+                r = chroma_api(
+                    "POST",
+                    _col_path(col_id, "get"),
+                    {
+                        "ids": [next_id],
+                        "include": ["documents", "metadatas"],
+                    },
+                )
             except Exception:
                 break
             r_ids = r.get("ids", [])
@@ -155,12 +171,20 @@ def preference_evolution(topic: str, limit: int = 20) -> list[dict]:
 
     for mid in list(seen):
         _walk(mid, "superseded_by")  # forward
-        _walk(mid, "supersedes")     # backward
+        _walk(mid, "supersedes")  # backward
 
     # Sort by created_at ascending
     timeline = sorted(seen.values(), key=lambda x: x.get("date") or "")
-    return [{"date": e["date"], "content": e["content"], "superseded_by": e["superseded_by"],
-             "confidence": e["confidence"], "id": e["id"]} for e in timeline]
+    return [
+        {
+            "date": e["date"],
+            "content": e["content"],
+            "superseded_by": e["superseded_by"],
+            "confidence": e["confidence"],
+            "id": e["id"],
+        }
+        for e in timeline
+    ]
 
 
 # ── 3. what_changed_summary ─────────────────────────────

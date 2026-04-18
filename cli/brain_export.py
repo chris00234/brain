@@ -8,6 +8,7 @@ Usage:
   brain_export.py --output ~/brain-export.tar.gz
   brain_export.py --output ~/brain-export/ --format dir
 """
+
 from __future__ import annotations
 
 import argparse
@@ -16,13 +17,12 @@ import shutil
 import sys
 import tarfile
 import tempfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "brain_core"))
 from http_pool import http_json
 from search import get_collections
-
 
 CHROMA_URL = "http://127.0.0.1:8000"
 CHROMA_API = f"{CHROMA_URL}/api/v2/tenants/default_tenant/databases/default_database/collections"
@@ -36,10 +36,11 @@ def export_collection(col_name: str, col_id: str, out_file: Path, batch: int = 5
     with out_file.open("w") as f:
         while True:
             try:
-                resp = http_json("POST", f"{CHROMA_API}/{col_id}/get", {
-                    "limit": batch, "offset": offset,
-                    "include": ["documents", "metadatas", "embeddings"]
-                })
+                resp = http_json(
+                    "POST",
+                    f"{CHROMA_API}/{col_id}/get",
+                    {"limit": batch, "offset": offset, "include": ["documents", "metadatas", "embeddings"]},
+                )
             except Exception as e:
                 print(f"  {col_name}: fetch failed at offset {offset}: {e}", file=sys.stderr)
                 break
@@ -51,7 +52,7 @@ def export_collection(col_name: str, col_id: str, out_file: Path, batch: int = 5
             metas = resp.get("metadatas", []) or []
             embs = resp.get("embeddings", []) or []
 
-            for i, (doc_id, doc, meta) in enumerate(zip(ids, docs, metas)):
+            for i, (doc_id, doc, meta) in enumerate(zip(ids, docs, metas, strict=False)):
                 record = {
                     "id": doc_id,
                     "content": doc,
@@ -73,16 +74,25 @@ def export_neo4j() -> dict:
     """Export Neo4j entities, lessons, and skill graph."""
     try:
         from neo4j_client import run_query
-        entities = run_query("MATCH (e:Entity) RETURN e.name AS name, e.entity_type AS type, "
-                             "e.mention_count AS mentions, properties(e) AS props LIMIT 10000")
-        lessons = run_query("MATCH (l:Lesson) RETURN l.id AS id, l.task AS task, "
-                            "l.reflection AS reflection, l.agent_id AS agent, "
-                            "l.created_at AS created_at, l.failure_count AS failure_count LIMIT 5000")
-        skills = run_query("MATCH (s:Skill) RETURN s.name AS name, s.description AS description, "
-                           "s.path AS path LIMIT 1000")
-        relations = run_query("MATCH (a)-[r:RELATES_TO]->(b) RETURN a.name AS from_name, "
-                              "b.name AS to_name, r.weight AS weight, r.co_occurrence_count AS count "
-                              "LIMIT 50000")
+
+        entities = run_query(
+            "MATCH (e:Entity) RETURN e.name AS name, e.entity_type AS type, "
+            "e.mention_count AS mentions, properties(e) AS props LIMIT 10000"
+        )
+        lessons = run_query(
+            "MATCH (l:Lesson) RETURN l.id AS id, l.task AS task, "
+            "l.reflection AS reflection, l.agent_id AS agent, "
+            "l.created_at AS created_at, l.failure_count AS failure_count LIMIT 5000"
+        )
+        skills = run_query(
+            "MATCH (s:Skill) RETURN s.name AS name, s.description AS description, "
+            "s.path AS path LIMIT 1000"
+        )
+        relations = run_query(
+            "MATCH (a)-[r:RELATES_TO]->(b) RETURN a.name AS from_name, "
+            "b.name AS to_name, r.weight AS weight, r.co_occurrence_count AS count "
+            "LIMIT 50000"
+        )
         return {
             "entities": entities,
             "lessons": lessons,
@@ -122,7 +132,7 @@ def main():
     tmpdir = Path(tempfile.mkdtemp(prefix="brain_export_"))
     try:
         manifest = {
-            "exported_at": datetime.now(timezone.utc).isoformat(),
+            "exported_at": datetime.now(UTC).isoformat(),
             "format_version": "1.0",
             "source": "brain",
             "collections": {},

@@ -21,26 +21,47 @@ and the caller falls back to no filter rather than crashing.
 """
 
 import re
-from datetime import datetime, timedelta, timezone
-from typing import Optional, Union
+from datetime import UTC, datetime, timedelta
 
 # ── Constants ────────────────────────────────────────────
 WEEKDAYS = {
-    "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
-    "friday": 4, "saturday": 5, "sunday": 6,
-    "mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6,
+    "monday": 0,
+    "tuesday": 1,
+    "wednesday": 2,
+    "thursday": 3,
+    "friday": 4,
+    "saturday": 5,
+    "sunday": 6,
+    "mon": 0,
+    "tue": 1,
+    "wed": 2,
+    "thu": 3,
+    "fri": 4,
+    "sat": 5,
+    "sun": 6,
 }
 
 UNIT_DAYS = {
-    "d": 1, "day": 1, "days": 1,
-    "w": 7, "wk": 7, "week": 7, "weeks": 7,
-    "m": 30, "mo": 30, "month": 30, "months": 30,
-    "y": 365, "yr": 365, "year": 365, "years": 365,
+    "d": 1,
+    "day": 1,
+    "days": 1,
+    "w": 7,
+    "wk": 7,
+    "week": 7,
+    "weeks": 7,
+    "m": 30,
+    "mo": 30,
+    "month": 30,
+    "months": 30,
+    "y": 365,
+    "yr": 365,
+    "year": 365,
+    "years": 365,
 }
 
 
 # ── Public API ───────────────────────────────────────────
-def parse(expression: str, now: Optional[datetime] = None) -> Optional[Union[datetime, tuple[datetime, datetime]]]:
+def parse(expression: str, now: datetime | None = None) -> datetime | tuple[datetime, datetime] | None:
     """Parse a temporal expression. Returns datetime, (start, end), or None."""
     if expression is None:
         return None
@@ -48,7 +69,7 @@ def parse(expression: str, now: Optional[datetime] = None) -> Optional[Union[dat
     if not s:
         return None
     if now is None:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
     # ISO date / datetime
     iso = _try_iso(s)
@@ -122,14 +143,15 @@ def parse(expression: str, now: Optional[datetime] = None) -> Optional[Union[dat
     return None
 
 
-def parse_range(since: Optional[str], until: Optional[str], now: Optional[datetime] = None
-                ) -> tuple[Optional[datetime], Optional[datetime]]:
+def parse_range(
+    since: str | None, until: str | None, now: datetime | None = None
+) -> tuple[datetime | None, datetime | None]:
     """Parse --since/--until pair, normalizing period expressions to (start, end)."""
     if now is None:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
-    start: Optional[datetime] = None
-    end: Optional[datetime] = None
+    start: datetime | None = None
+    end: datetime | None = None
 
     if since:
         result = parse(since, now=now)
@@ -150,7 +172,7 @@ def parse_range(since: Optional[str], until: Optional[str], now: Optional[dateti
     return start, end
 
 
-def to_chroma_where(start: Optional[datetime], end: Optional[datetime], field: str = "created_at") -> Optional[dict]:
+def to_chroma_where(start: datetime | None, end: datetime | None, field: str = "created_at") -> dict | None:
     """DEPRECATED after ChromaDB 1.4.1.
 
     ChromaDB 1.4.1 tightened validate_where to require isinstance(operand, (int, float))
@@ -166,8 +188,8 @@ def to_chroma_where(start: Optional[datetime], end: Optional[datetime], field: s
 
 def filter_by_created_at(
     rows: list,
-    start: Optional[datetime],
-    end: Optional[datetime],
+    start: datetime | None,
+    end: datetime | None,
     field: str = "created_at",
     meta_accessor=None,
 ) -> list:
@@ -221,16 +243,15 @@ def _start_of_day(dt: datetime) -> datetime:
     return dt.replace(hour=0, minute=0, second=0, microsecond=0)
 
 
-def _try_iso(s: str) -> Optional[datetime]:
+def _try_iso(s: str) -> datetime | None:
     # Strip trailing Z (UTC indicator) before parsing. `parse()` lower-cases
     # the string first, so we must match the lowercase form ("z") as well as
     # the uppercase form for any direct callers.
     s = s.rstrip("Zz")
     # Accept date or datetime — always return UTC-aware
-    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M:%S",
-                "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
         try:
-            return datetime.strptime(s, fmt).replace(tzinfo=timezone.utc)
+            return datetime.strptime(s, fmt).replace(tzinfo=UTC)
         except ValueError:
             continue
     return None
@@ -249,7 +270,6 @@ def _last_weekday(now: datetime, target_weekday: int, force_previous: bool = Fal
 
 # ── CLI smoke test ───────────────────────────────────────
 def _smoke() -> None:
-    import sys
     cases = [
         "2026-04-07",
         "2026-04-07T15:30:00",

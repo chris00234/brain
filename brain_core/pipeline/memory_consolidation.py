@@ -11,11 +11,12 @@ Rules (calibrated 2026-04-11):
 Utility: Neo4j MemoryAccess.utility_score, with access_count fallback from ChromaDB.
 Runs nightly at 3:45am.
 """
+
 from __future__ import annotations
 
-import sys
 import json
-from datetime import datetime, timezone, timedelta
+import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -33,11 +34,12 @@ def _utility_scores(memory_ids: list[str]) -> dict[str, float]:
         return {}
     try:
         from neo4j_client import run_query
+
         rows = run_query(
             "UNWIND $ids AS mid "
             "OPTIONAL MATCH (m:MemoryAccess {memory_id: mid}) "
             "RETURN mid, coalesce(m.utility_score, 0.5) AS score",
-            {"ids": memory_ids}
+            {"ids": memory_ids},
         )
         return {r["mid"]: float(r["score"]) for r in rows}
     except Exception:
@@ -51,7 +53,7 @@ def _parse_iso(ts: str) -> datetime | None:
         s = ts.rstrip("Z")
         dt = datetime.fromisoformat(s)
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
+            dt = dt.replace(tzinfo=UTC)
         return dt
     except Exception:
         return None
@@ -75,7 +77,7 @@ def consolidate() -> dict:
             resp = http_json(
                 "POST",
                 f"{CHROMA_API}/{sem_col_id}/get",
-                {"limit": PAGE, "offset": offset, "include": ["metadatas"]}
+                {"limit": PAGE, "offset": offset, "include": ["metadatas"]},
             )
         except Exception as e:
             return {"error": f"fetch failed at offset={offset}: {e}"}
@@ -91,7 +93,7 @@ def consolidate() -> dict:
     if not ids:
         return {"status": "empty", "total": 0}
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     promoted = 0
     demoted_episodic = 0
     demoted_semantic = 0
@@ -99,11 +101,11 @@ def consolidate() -> dict:
     # Fetch utility scores in batches
     utility: dict[str, float] = {}
     for i in range(0, len(ids), 500):
-        batch = ids[i:i + 500]
+        batch = ids[i : i + 500]
         utility.update(_utility_scores(batch))
 
     # Enrich utility with access_count fallback from ChromaDB metadata
-    for mid, meta in zip(ids, metas):
+    for mid, meta in zip(ids, metas, strict=False):
         meta = meta or {}
         access_count = int(meta.get("access_count") or 0)
         if mid not in utility or utility[mid] == 0.5:  # 0.5 = Neo4j fallback
@@ -113,7 +115,7 @@ def consolidate() -> dict:
     updates_batch: list[tuple[str, dict]] = []
 
     print(f"[consolidate] scanning {len(ids)} memories")
-    for mid, meta in zip(ids, metas):
+    for mid, meta in zip(ids, metas, strict=False):
         meta = meta or {}
         current_class = meta.get("memory_class") or "episodic"
         if current_class == "obsolete":
@@ -148,7 +150,9 @@ def consolidate() -> dict:
             update_meta = {"memory_class": new_class}
             if trust_score is not None:
                 update_meta["trust_score"] = str(trust_score)
-            print(f"  {mid[:30]} age={age_days}d utility={u:.2f} access={access_count} {current_class}->{new_class}")
+            print(
+                f"  {mid[:30]} age={age_days}d utility={u:.2f} access={access_count} {current_class}->{new_class}"
+            )
             updates_batch.append((mid, update_meta))
             if len(updates_batch) >= BATCH_SIZE:
                 _apply_updates(sem_col_id, updates_batch)

@@ -10,6 +10,7 @@ polluting the production `logs/audit.db` and inflating the
 `atoms_write_fail_rate_1h` SLO (540 bogus failures in one hour from my
 own CR5/CR6 dev scripts).
 """
+
 from __future__ import annotations
 
 import contextlib
@@ -18,7 +19,7 @@ import os
 import sqlite3
 import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 try:
@@ -103,7 +104,7 @@ def _conn_ctx():
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 def log_event(
@@ -128,8 +129,15 @@ def log_event(
             " review_required, reviewed_by) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
-                event_id, _now(), event_type, entity_a, entity_b,
-                match_score, conflict_type, resolution, reason,
+                event_id,
+                _now(),
+                event_type,
+                entity_a,
+                entity_b,
+                match_score,
+                conflict_type,
+                resolution,
+                reason,
                 json.dumps(source_evidence or {}),
                 1 if review_required else 0,
                 reviewed_by if not review_required else "",

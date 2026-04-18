@@ -4,13 +4,14 @@ On brain-server startup, checks registered component versions against DB state.
 Runs pending migrations. Refuses to start if current code is OLDER than DB
 (downgrade protection).
 """
+
 from __future__ import annotations
 
 import logging
 import sqlite3
-from datetime import datetime, timezone
+from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Callable
 
 log = logging.getLogger("brain.schema_versions")
 
@@ -18,16 +19,16 @@ VERSIONS_DB = Path("/Users/chrischo/server/brain/logs/schema_versions.db")
 
 # Component registry — code defines what version it expects
 CURRENT_VERSIONS = {
-    "semantic_memory": 4,     # R4 added: supersedes, valid_from, memory_class, trust_score
-    "experience": 2,          # R2 added: embed_model_version
-    "canonical": 3,           # R3 added: frontmatter spec
-    "neo4j_schema": 2,        # R4 added: Lesson, Skill nodes
-    "llm_usage": 2,           # R5 added: skipped_cb column
-    "fts_index": 2,           # R4 added: unicode61 tokenizer (from porter)
-    "agent_prefs": 1,         # R5 baseline
-    "self_heal_state": 1,     # R6 baseline
-    "contradiction_votes": 1, # R6 baseline
-    "procedures": 1,         # R11 structured procedural memory
+    "semantic_memory": 4,  # R4 added: supersedes, valid_from, memory_class, trust_score
+    "experience": 2,  # R2 added: embed_model_version
+    "canonical": 3,  # R3 added: frontmatter spec
+    "neo4j_schema": 2,  # R4 added: Lesson, Skill nodes
+    "llm_usage": 2,  # R5 added: skipped_cb column
+    "fts_index": 2,  # R4 added: unicode61 tokenizer (from porter)
+    "agent_prefs": 1,  # R5 baseline
+    "self_heal_state": 1,  # R6 baseline
+    "contradiction_votes": 1,  # R6 baseline
+    "procedures": 1,  # R11 structured procedural memory
 }
 
 
@@ -37,9 +38,11 @@ MIGRATIONS: dict[tuple[str, int, int], Callable[[], dict]] = {}
 
 def migration(component: str, from_version: int, to_version: int):
     """Decorator to register a migration function."""
+
     def decorator(fn: Callable[[], dict]):
         MIGRATIONS[(component, from_version, to_version)] = fn
         return fn
+
     return decorator
 
 
@@ -62,16 +65,15 @@ def _conn():
 def get_version(component: str) -> int:
     conn = _conn()
     try:
-        row = conn.execute(
-            "SELECT version FROM schema_versions WHERE component = ?",
-            (component,)
-        ).fetchone()
+        row = conn.execute("SELECT version FROM schema_versions WHERE component = ?", (component,)).fetchone()
         return row[0] if row else 0
     finally:
         conn.close()
 
 
-def set_version(component: str, version: int, snapshot: str | None = None, conn: sqlite3.Connection | None = None):
+def set_version(
+    component: str, version: int, snapshot: str | None = None, conn: sqlite3.Connection | None = None
+):
     """Write version. If conn is provided, caller owns the txn (no close/commit)."""
     own = conn is None
     if own:
@@ -79,7 +81,7 @@ def set_version(component: str, version: int, snapshot: str | None = None, conn:
     try:
         conn.execute(
             "INSERT OR REPLACE INTO schema_versions (component, version, applied_at, rollback_snapshot) VALUES (?, ?, ?, ?)",
-            (component, version, datetime.now(timezone.utc).isoformat(), snapshot),
+            (component, version, datetime.now(UTC).isoformat(), snapshot),
         )
         if own:
             conn.commit()
@@ -142,6 +144,7 @@ def check_and_migrate() -> dict:
     the other logging a spurious "failed: database is locked".
     """
     import fcntl
+
     _register_optional_migration_modules()
     lock_path = VERSIONS_DB.parent / "schema_versions.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -169,7 +172,9 @@ def _check_and_migrate_locked() -> dict:
         if current > target_version:
             log.error(
                 "Downgrade refused for %s: DB has v%d, code expects v%d",
-                component, current, target_version,
+                component,
+                current,
+                target_version,
             )
             status["downgrade_refused"].append(f"{component}: db={current} code={target_version}")
             continue
@@ -186,14 +191,13 @@ def _check_and_migrate_locked() -> dict:
                 break  # stop upgrade chain for this component
 
     if status["downgrade_refused"]:
-        raise RuntimeError(
-            "schema downgrade refused: " + "; ".join(status["downgrade_refused"])
-        )
+        raise RuntimeError("schema downgrade refused: " + "; ".join(status["downgrade_refused"]))
     return status
 
 
 # ── Example migration registrations ─────────────────────────
 # (Real migrations live here or in component-specific modules)
+
 
 @migration("semantic_memory", 3, 4)
 def _migrate_semantic_memory_3_to_4() -> dict:
@@ -204,6 +208,7 @@ def _migrate_semantic_memory_3_to_4() -> dict:
     """
     try:
         import sys
+
         sys.path.insert(0, str(Path(__file__).parent))
         from http_pool import http_json
         from search import get_collections
@@ -223,7 +228,7 @@ def _migrate_semantic_memory_3_to_4() -> dict:
         metas = resp.get("metadatas", []) or []
 
         needs_update = []
-        for mid, meta in zip(ids, metas):
+        for mid, meta in zip(ids, metas, strict=False):
             if not meta or "trust_score" not in meta:
                 needs_update.append(mid)
 
@@ -234,7 +239,7 @@ def _migrate_semantic_memory_3_to_4() -> dict:
         BATCH = 200
         updated = 0
         for i in range(0, len(needs_update), BATCH):
-            batch = needs_update[i:i+BATCH]
+            batch = needs_update[i : i + BATCH]
             http_json(
                 "POST",
                 f"http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col}/update",
@@ -253,5 +258,6 @@ def _migrate_semantic_memory_3_to_4() -> dict:
 
 if __name__ == "__main__":
     import json
+
     result = check_and_migrate()
     print(json.dumps(result, indent=2))

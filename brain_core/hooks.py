@@ -3,14 +3,15 @@
 Hook handlers are Python files in ~/.brain_hooks/*.py. Each file can define
 functions matching event names: on_memory_stored, on_search, etc.
 """
+
 from __future__ import annotations
 
 import importlib.util
 import json
 import logging
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable
 
 log = logging.getLogger("brain.hooks")
 
@@ -26,11 +27,16 @@ def _log_event(event: str, **kwargs):
     try:
         HOOKS_LOG.parent.mkdir(parents=True, exist_ok=True)
         with HOOKS_LOG.open("a") as f:
-            f.write(json.dumps({
-                "timestamp": datetime.now().isoformat(),
-                "event": event,
-                **{k: str(v)[:200] for k, v in kwargs.items()}
-            }) + "\n")
+            f.write(
+                json.dumps(
+                    {
+                        "timestamp": datetime.now().isoformat(),
+                        "event": event,
+                        **{k: str(v)[:200] for k, v in kwargs.items()},
+                    }
+                )
+                + "\n"
+            )
     except Exception:
         pass
 

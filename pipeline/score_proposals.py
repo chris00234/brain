@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +24,7 @@ def _parse_dt(raw: str | None) -> datetime | None:
     if not raw:
         return None
     try:
-        return datetime.fromisoformat(str(raw).replace("Z", "+00:00")).astimezone(timezone.utc)
+        return datetime.fromisoformat(str(raw).replace("Z", "+00:00")).astimezone(UTC)
     except ValueError:
         return None
 
@@ -62,7 +62,7 @@ def score_proposal(metadata: dict[str, Any], body: str) -> tuple[int, str, list[
 
     updated_at = _parse_dt(metadata.get("updated_at"))
     if updated_at:
-        age_days = (datetime.now(timezone.utc) - updated_at).days
+        age_days = (datetime.now(UTC) - updated_at).days
         if age_days <= 14:
             score += 8
             reasons.append("fresh")
@@ -95,7 +95,68 @@ def score_proposal(metadata: dict[str, Any], body: str) -> tuple[int, str, list[
         score += cf_bonus
         reasons.append("counterfactual_weak")
 
+    # 2026-04-16 Tier 3 #6: Bayesian Surprise (Itti & Baldi 2009). A
+    # proposal that merely restates canonical knowledge is low-priority;
+    # one that contradicts/extends a highly-held belief is high-priority.
+    # Operationalized via embedding-space distance to the nearest
+    # canonical note: low distance (cos sim > 0.85) → redundant → penalty,
+    # mid distance (0.55–0.85) → extends something → bonus,
+    # high distance (< 0.55) → entirely new territory → small bonus.
+    # All canonical trust tiers treated equally here; the real "surprise"
+    # signal is how much the posterior belief shifts, approximated by
+    # how different the proposal is from its nearest existing claim.
+    try:
+        surprise_delta = _bayesian_surprise(metadata, body)
+        if surprise_delta:
+            score += surprise_delta
+            if surprise_delta > 0:
+                reasons.append(f"surprise_bonus_{surprise_delta}")
+            else:
+                reasons.append(f"redundancy_penalty_{surprise_delta}")
+    except Exception:
+        pass
+
     return score, "high" if score >= 65 else ("medium" if score >= 42 else "low"), reasons
+
+
+def _bayesian_surprise(metadata: dict[str, Any], body: str) -> int:
+    """Approximate Itti & Baldi's surprise via embedding-space distance.
+
+    Searches canonical for the nearest existing claim; returns a score
+    delta in {-15, 0, +5, +10} based on cosine similarity band.
+    """
+    try:
+        import sys as _s
+
+        _s.path.insert(0, str(Path(__file__).resolve().parent.parent / "brain_core"))
+        from search_unified import search_all
+
+        title = metadata.get("title", "")
+        head = body[:500]
+        query = f"{title}\n{head}"
+        if not query.strip():
+            return 0
+        payload = search_all(
+            query,
+            limit=3,
+            sources=["canonical"],
+        )
+        results = payload.get("results", []) if isinstance(payload, dict) else []
+        if not results:
+            # No canonical to compare against → novel but unverifiable. Small bonus.
+            return 3
+        # Use the best canonical match's normalized score as inverse surprise.
+        # vector_score is the post-search normalized [0,1] cosine similarity.
+        top = results[0]
+        meta = top.get("metadata") or {}
+        sim = float(meta.get("vector_score", 0) or top.get("vector_score", 0) or 0)
+        if sim >= 0.85:
+            return -15  # near-duplicate of existing canonical → redundant
+        if sim >= 0.55:
+            return 10  # extends/refines an existing belief → high surprise
+        return 5  # entirely new territory → moderate surprise
+    except Exception:
+        return 0
 
 
 def _counterfactual_check(metadata: dict[str, Any], body: str) -> int:
@@ -105,12 +166,16 @@ def _counterfactual_check(metadata: dict[str, Any], body: str) -> int:
     """
     try:
         import sys
+
         sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "brain_core"))
         from search_unified import search_all
 
         title = metadata.get("title", "")
         results = search_all(
-            title, limit=5, sources=["rag"], collections=["experience"],
+            title,
+            limit=5,
+            sources=["rag"],
+            collections=["experience"],
         )
         result_list = results.get("results", []) if isinstance(results, dict) else []
         if len(result_list) < 2:
@@ -120,10 +185,9 @@ def _counterfactual_check(metadata: dict[str, Any], body: str) -> int:
         related = sum(1 for r in result_list if r.get("score", 0) > 40)
         if related >= 3:
             return 15  # strong signal: this knowledge relates to many past experiences
-        elif related >= 1:
-            return 5   # moderate signal
-        else:
-            return -5  # no past experiences relate — this knowledge may be speculative
+        if related >= 1:
+            return 5  # moderate signal
+        return -5  # no past experiences relate — this knowledge may be speculative
     except Exception:
         return 0
 
@@ -132,7 +196,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Score proposal queue items for review priority")
     parser.add_argument("--review-queue", type=Path, default=REVIEW_QUEUE)
     parser.add_argument("--report", type=Path, default=REVIEW_QUEUE / "proposal_score_report.json")
-    parser.add_argument("--domain", default=None, choices=["chris", "projects", "infra", "decisions", "incidents"])
+    parser.add_argument(
+        "--domain", default=None, choices=["chris", "projects", "infra", "decisions", "incidents"]
+    )
     parser.add_argument("--min-urgency", choices=["low", "medium", "high"])
     args = parser.parse_args()
 

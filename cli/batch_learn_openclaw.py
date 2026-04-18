@@ -16,6 +16,7 @@ Usage:
   batch_learn_openclaw.py --dry-run        # preview only
   batch_learn_openclaw.py --limit 10       # first 10 sessions
 """
+
 from __future__ import annotations
 
 import argparse
@@ -73,8 +74,7 @@ def _extract_user_messages(session_path: Path) -> str:
             content = msg.get("content", "")
             if isinstance(content, list):
                 text = " ".join(
-                    c.get("text", "") for c in content
-                    if isinstance(c, dict) and c.get("type") == "text"
+                    c.get("text", "") for c in content if isinstance(c, dict) and c.get("type") == "text"
                 )
             elif isinstance(content, str):
                 text = content
@@ -96,11 +96,13 @@ def _extract_user_messages(session_path: Path) -> str:
 
 
 def _post_learn(transcript: str, source: str, agent: str, token: str) -> dict:
-    body = json.dumps({
-        "transcript": transcript[:50000],
-        "source": source,
-        "agent": agent,
-    }).encode()
+    body = json.dumps(
+        {
+            "transcript": transcript[:50000],
+            "source": source,
+            "agent": agent,
+        }
+    ).encode()
     req = urllib.request.Request(
         BRAIN_URL,
         data=body,
@@ -141,9 +143,11 @@ def main() -> int:
                 sessions.append((agent, f))
 
     if args.limit > 0:
-        sessions = sessions[:args.limit]
+        sessions = sessions[: args.limit]
 
-    print(f"Found {len(sessions)} unprocessed sessions across {len(agents)} agents, {len(processed)} already done")
+    print(
+        f"Found {len(sessions)} unprocessed sessions across {len(agents)} agents, {len(processed)} already done"
+    )
 
     total_queued = 0
     for i, (agent, session) in enumerate(sessions, 1):
@@ -151,12 +155,17 @@ def main() -> int:
         key = f"{agent}:{session.name}"
 
         if len(transcript) < MIN_TRANSCRIPT_LEN:
-            print(f"  [{i}/{len(sessions)}] {agent}/{session.name}: too short ({len(transcript)} chars), skip")
+            print(
+                f"  [{i}/{len(sessions)}] {agent}/{session.name}: too short ({len(transcript)} chars), skip"
+            )
             processed.add(key)
             continue
 
-        chunks = [transcript[j:j + CHUNK_SIZE] for j in range(0, len(transcript), CHUNK_SIZE)]
-        print(f"  [{i}/{len(sessions)}] {agent}/{session.name}: {len(transcript)} chars, {len(chunks)} chunks", end="")
+        chunks = [transcript[j : j + CHUNK_SIZE] for j in range(0, len(transcript), CHUNK_SIZE)]
+        print(
+            f"  [{i}/{len(sessions)}] {agent}/{session.name}: {len(transcript)} chars, {len(chunks)} chunks",
+            end="",
+        )
 
         if args.dry_run:
             print(" (dry-run)")

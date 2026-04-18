@@ -9,18 +9,18 @@ to the compressed digest.
 
 Runs monthly (1st of month, 4:00am).
 """
+
 from __future__ import annotations
 
 import sys
-import json
-from pathlib import Path
-from datetime import datetime, timedelta, timezone
 from collections import defaultdict
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from cli_llm import dispatch_with_schema  # migrated 2026-04-17
 from http_pool import http_json
 from search import get_collections
-from openclaw_dispatch import dispatch_with_schema
 
 CHROMA_URL = "http://127.0.0.1:8000"
 CHROMA_API = f"{CHROMA_URL}/api/v2/tenants/default_tenant/databases/default_database/collections"
@@ -91,7 +91,7 @@ def main() -> int:
         print("experience collection not found")
         return 1
 
-    cutoff_date = (datetime.now(timezone.utc) - timedelta(days=CUTOFF_DAYS)).isoformat()
+    cutoff_date = (datetime.now(UTC) - timedelta(days=CUTOFF_DAYS)).isoformat()
 
     # Paginate. A single limit=10000 request would silently skip anything past
     # the 10,001st record — unacceptable for a monthly compression job that
@@ -124,7 +124,7 @@ def main() -> int:
     by_month: dict[str, list[dict]] = defaultdict(list)
     to_compress_ids: list[str] = []
 
-    for mid, doc, meta in zip(ids, docs, metas):
+    for mid, doc, meta in zip(ids, docs, metas, strict=False):
         meta = meta or {}
         created = meta.get("created_at", "")
         if not created or created >= cutoff_date:
@@ -174,12 +174,14 @@ def main() -> int:
                     "ids": [f"compressed:{month}"],
                     "embeddings": [emb],
                     "documents": [summary],
-                    "metadatas": [{
-                        "month": month,
-                        "memory_class": "compressed",
-                        "event_count": len(events),
-                        "created_at": datetime.now(timezone.utc).isoformat(),
-                    }],
+                    "metadatas": [
+                        {
+                            "month": month,
+                            "memory_class": "compressed",
+                            "event_count": len(events),
+                            "created_at": datetime.now(UTC).isoformat(),
+                        }
+                    ],
                 },
             )
             compressed_months += 1
@@ -191,7 +193,7 @@ def main() -> int:
         # Mark originals as obsolete (batched)
         event_ids = [e["id"] for e in events]
         for batch_start in range(0, len(event_ids), UPDATE_BATCH_SIZE):
-            batch = event_ids[batch_start:batch_start + UPDATE_BATCH_SIZE]
+            batch = event_ids[batch_start : batch_start + UPDATE_BATCH_SIZE]
             try:
                 http_json(
                     "POST",

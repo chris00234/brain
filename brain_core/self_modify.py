@@ -34,7 +34,7 @@ import logging
 import shutil
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -58,7 +58,7 @@ AUDIT_LOG = BRAIN_LOGS_DIR / "self_modify_audit.jsonl"
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 def _load_routes() -> dict:
@@ -77,7 +77,7 @@ def _backup_before_write() -> Path | None:
     if not INTENT_ROUTES_PATH.exists():
         return None
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     target = BACKUP_DIR / f"intent_routes_{ts}.yaml"
     try:
         shutil.copy2(INTENT_ROUTES_PATH, target)
@@ -108,6 +108,7 @@ def _audit(event: dict) -> None:
         pass
     try:
         from atoms_store import insert_action_audit
+
         insert_action_audit(
             route="brain_loop/self_modify_route",
             query_text=json.dumps(event)[:2000],
@@ -176,6 +177,7 @@ def _propose_patch(patch: dict, reason: str, actor: str) -> str | None:
     candidate instead of applying it. Returns the proposal id or None on failure."""
     try:
         import sqlite3
+
         from config import AUTONOMY_DB
     except ImportError:
         AUTONOMY_DB = BRAIN_LOGS_DIR / "autonomy.db"
@@ -225,6 +227,7 @@ def apply_intent_route_patch(
     # Authorize
     try:
         from autonomy import authorize
+
         decision = authorize("brain_loop.self_modify_route")
         level = decision.level
         allowed = decision.allowed
@@ -275,6 +278,7 @@ def apply_intent_route_patch(
     # Invalidate active_recall cache so next /recall/active sees the new routes.
     try:
         import active_recall
+
         active_recall._routes_cache = None
         active_recall._routes_cache_mtime = 0.0
     except Exception:
@@ -304,9 +308,11 @@ def preview_intent_route_patch(patch: dict) -> dict:
 
 if __name__ == "__main__":
     # Minimal smoke test: preview adding a keyword to frontend_design.
-    preview = preview_intent_route_patch({
-        "op": "add_keyword",
-        "intent": "frontend_design",
-        "keywords_en": ["glassmorphism"],
-    })
+    preview = preview_intent_route_patch(
+        {
+            "op": "add_keyword",
+            "intent": "frontend_design",
+            "keywords_en": ["glassmorphism"],
+        }
+    )
     print(json.dumps({"preview_ok": preview["ok"], "message": preview["message"]}))

@@ -15,12 +15,12 @@ import argparse
 import json
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "brain_core"))
-from safe_state import atomic_write_text  # noqa: E402
-from openclaw_dispatch import dispatch_with_schema  # noqa: E402
+from cli_llm import dispatch_with_schema  # migrated 2026-04-17
+from safe_state import atomic_write_text
 
 OPENCLAW_BIN = "/Users/chrischo/.local/bin/openclaw"
 WEEKLY_DIR = Path("/Users/chrischo/server/knowledge/canonical/chris/weekly")
@@ -87,7 +87,7 @@ def collect_month(target_month: str) -> dict:
 
 def build_prompt(month: str, data: dict) -> str:
     lines = []
-    lines.append(f"You are Sage, Chris's longitudinal synthesis agent.")
+    lines.append("You are Sage, Chris's longitudinal synthesis agent.")
     lines.append(f"Produce Chris's monthly arc for {month}.")
     lines.append("")
     lines.append("=" * 60)
@@ -140,10 +140,21 @@ def telegram_alert(month: str, out_path: Path) -> None:
     msg = f"🧠 Monthly arc ready: {month}\n\nNew canonical note: {out_path.name}\nReview when you have a moment."
     try:
         subprocess.run(
-            [OPENCLAW_BIN, "message", "send", "--channel", "telegram",
-             "--target", TELEGRAM_CHAT_ID, "--account", TELEGRAM_ACCOUNT,
-             "--message", msg],
-            capture_output=True, timeout=20,
+            [
+                OPENCLAW_BIN,
+                "message",
+                "send",
+                "--channel",
+                "telegram",
+                "--target",
+                TELEGRAM_CHAT_ID,
+                "--account",
+                TELEGRAM_ACCOUNT,
+                "--message",
+                msg,
+            ],
+            capture_output=True,
+            timeout=20,
         )
     except Exception:
         pass
@@ -152,7 +163,7 @@ def telegram_alert(month: str, out_path: Path) -> None:
 def write_arc(month: str, data: dict, parsed: dict) -> Path:
     MONTHLY_DIR.mkdir(parents=True, exist_ok=True)
     out = MONTHLY_DIR / f"{month}.md"
-    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     record = {
         "id": f"chris_monthly_arc_{month.replace('-', '_')}",
         "type": "canonical",
@@ -178,9 +189,15 @@ def write_arc(month: str, data: dict, parsed: dict) -> Path:
         "supersedes": [],
         "superseded_by": None,
     }
-    body = ["---json", json.dumps(record, indent=2), "---", "",
-            f"# {record['title']}", "",
-            "## Values evolved"]
+    body = [
+        "---json",
+        json.dumps(record, indent=2),
+        "---",
+        "",
+        f"# {record['title']}",
+        "",
+        "## Values evolved",
+    ]
     body += [f"- {x}" for x in parsed.get("values_evolved", [])]
     body += ["", "## Goals progressed"] + [f"- {x}" for x in parsed.get("goals_progressed", [])]
     body += ["", "## Goals abandoned"] + [f"- {x}" for x in parsed.get("goals_abandoned", [])]
@@ -189,7 +206,9 @@ def write_arc(month: str, data: dict, parsed: dict) -> Path:
     body += ["", f"## Energy trend: {parsed.get('energy_trend', '?')}"]
     body += ["", "## Chapter advance", parsed.get("chapter_advance", "(none)")]
     body += ["", "## Longitudinal patterns"] + [f"- {x}" for x in parsed.get("longitudinal_patterns", [])]
-    body += ["", "## Hypotheses for next month"] + [f"- {x}" for x in parsed.get("hypotheses_for_next_month", [])]
+    body += ["", "## Hypotheses for next month"] + [
+        f"- {x}" for x in parsed.get("hypotheses_for_next_month", [])
+    ]
     body += ["", "## Narrative", "", parsed.get("narrative", "(no narrative)")]
     atomic_write_text(out, "\n".join(body))
     return out
@@ -254,12 +273,22 @@ def main() -> None:
         sys.stderr.write("DISPATCH_FAIL agent=sage reason=dispatch_with_schema returned None\n")
         log_failure("dispatch_with_schema returned None")
         try:
-            subprocess.run([
-                OPENCLAW_BIN, "agent",
-                "--agent", "jenna",
-                "--message", f"SYNTHESIS FAILED: {Path(__file__).stem} — dispatch_with_schema returned None",
-                "--thinking", "off", "--timeout", "30",
-            ], timeout=35, capture_output=True)
+            subprocess.run(
+                [
+                    OPENCLAW_BIN,
+                    "agent",
+                    "--agent",
+                    "jenna",
+                    "--message",
+                    f"SYNTHESIS FAILED: {Path(__file__).stem} — dispatch_with_schema returned None",
+                    "--thinking",
+                    "off",
+                    "--timeout",
+                    "30",
+                ],
+                timeout=35,
+                capture_output=True,
+            )
         except Exception:
             pass
         sys.exit(1)
@@ -267,24 +296,44 @@ def main() -> None:
     if not isinstance(parsed.get("narrative"), str):
         sys.stderr.write("VALIDATION_FAIL: narrative is not a string\n")
         try:
-            subprocess.run([
-                OPENCLAW_BIN, "agent",
-                "--agent", "jenna",
-                "--message", f"SYNTHESIS FAILED: {Path(__file__).stem} — narrative field missing or not a string",
-                "--thinking", "off", "--timeout", "30",
-            ], timeout=35, capture_output=True)
+            subprocess.run(
+                [
+                    OPENCLAW_BIN,
+                    "agent",
+                    "--agent",
+                    "jenna",
+                    "--message",
+                    f"SYNTHESIS FAILED: {Path(__file__).stem} — narrative field missing or not a string",
+                    "--thinking",
+                    "off",
+                    "--timeout",
+                    "30",
+                ],
+                timeout=35,
+                capture_output=True,
+            )
         except Exception:
             pass
         sys.exit(1)
     if not isinstance(parsed.get("longitudinal_patterns"), list):
         sys.stderr.write("VALIDATION_FAIL: longitudinal_patterns is not a list\n")
         try:
-            subprocess.run([
-                OPENCLAW_BIN, "agent",
-                "--agent", "jenna",
-                "--message", f"SYNTHESIS FAILED: {Path(__file__).stem} — longitudinal_patterns field missing or not a list",
-                "--thinking", "off", "--timeout", "30",
-            ], timeout=35, capture_output=True)
+            subprocess.run(
+                [
+                    OPENCLAW_BIN,
+                    "agent",
+                    "--agent",
+                    "jenna",
+                    "--message",
+                    f"SYNTHESIS FAILED: {Path(__file__).stem} — longitudinal_patterns field missing or not a list",
+                    "--thinking",
+                    "off",
+                    "--timeout",
+                    "30",
+                ],
+                timeout=35,
+                capture_output=True,
+            )
         except Exception:
             pass
         sys.exit(1)

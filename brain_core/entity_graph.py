@@ -18,7 +18,7 @@ import logging
 import sqlite3
 import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -149,7 +149,7 @@ def _conn():
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 # ---------------------------------------------------------------------------
@@ -160,8 +160,9 @@ _neo4j_available: bool | None = None
 _neo4j_checked_at: float = 0.0
 _NEO4J_CHECK_TTL = 300.0  # 5 min — reduces flip-flop risk during brief hiccups
 
-import time as _time
 import threading as _threading
+import time as _time
+
 _neo4j_lock = _threading.Lock()
 
 
@@ -173,6 +174,7 @@ def _use_neo4j() -> bool:
             return _neo4j_available
         try:
             from neo4j_client import is_healthy
+
             _neo4j_available = is_healthy()
         except Exception:
             _neo4j_available = False
@@ -185,6 +187,7 @@ def _use_neo4j() -> bool:
 # ---------------------------------------------------------------------------
 # Public API — Neo4j primary, SQLite fallback
 # ---------------------------------------------------------------------------
+
 
 def extract_and_store_entities(memory_content: str, memory_id: str = "") -> int:
     """Extract entities + relations from memory content via Sage, store in graph.
@@ -204,7 +207,8 @@ def extract_and_store_entities(memory_content: str, memory_id: str = "") -> int:
         return 0
 
     try:
-        from openclaw_dispatch import dispatch
+        from cli_llm import dispatch
+
         prompt = (
             f"Extract entities and relationships from this text.\n\n"
             f"Text: {memory_content[:1000]}\n\n"
@@ -226,6 +230,7 @@ def extract_and_store_entities(memory_content: str, memory_id: str = "") -> int:
             return -1  # empty response also counts as retryable failure
 
         import re
+
         text = result.text.strip()
         text = re.sub(r"^```(?:json)?\s*", "", text)
         text = re.sub(r"\s*```$", "", text)
@@ -255,10 +260,17 @@ def extract_and_store_entities(memory_content: str, memory_id: str = "") -> int:
         try:
             from atoms_store import (
                 BRAIN_ATOMS_ENABLED as _ae,
+            )
+            from atoms_store import (
                 derive_atom_id as _dai,
+            )
+            from atoms_store import (
                 link_atom_entity as _lae,
+            )
+            from atoms_store import (
                 upsert_entity as _ue,
             )
+
             if _ae and memory_id:
                 atom_id = _dai(memory_id)
                 for ent in entities[:5]:
@@ -284,6 +296,7 @@ def extract_and_store_entities(memory_content: str, memory_id: str = "") -> int:
 
 
 from collections import OrderedDict as _OrderedDict
+
 _expand_cache: _OrderedDict[str, tuple[float, list[str]]] = _OrderedDict()
 _expand_cache_lock = _threading.Lock()
 _EXPAND_CACHE_TTL = 300.0  # 5 minutes
@@ -297,6 +310,7 @@ def resolve_entity(name: str, entity_type: str | None = None) -> str | None:
         return None
     try:
         from neo4j_client import run_query
+
         type_clause = "AND e.entity_type = $type " if entity_type else ""
         result = run_query(
             "MATCH (e:Entity) "
@@ -318,6 +332,7 @@ def add_alias(entity_name: str, alias: str) -> bool:
         return False
     try:
         from neo4j_client import run_write
+
         run_write(
             "MATCH (e:Entity {name: $name}) "
             "SET e.aliases = CASE "
@@ -366,7 +381,7 @@ def expand_with_entities(query: str, limit: int = 5) -> list[str]:
 def track_access(memory_ids: list[str]) -> None:
     """Bump access count for retrieved memories (memory lifecycle tracking)."""
     if not memory_ids:
-        return
+        return None
     now = _now()
 
     if _use_neo4j():
@@ -392,6 +407,7 @@ def get_graph_stats() -> dict:
     if _use_neo4j():
         try:
             from neo4j_client import get_stats
+
             stats = get_stats()
             stats["backend"] = "neo4j"
             return stats
@@ -406,8 +422,10 @@ def get_graph_stats() -> dict:
 # Neo4j implementations
 # ---------------------------------------------------------------------------
 
+
 def _neo4j_store_entities(entities: list, relations: list, now: str, memory_id: str) -> int:
-    from neo4j_client import run_write, run_query
+    from neo4j_client import run_query, run_write
+
     created = 0
     entity_names: dict[str, str] = {}
     # MR1 fix (2026-04-14): map raw LLM-proposed name → canonical name used
@@ -432,12 +450,14 @@ def _neo4j_store_entities(entities: list, relations: list, now: str, memory_id: 
             name = raw_name
         raw_to_canonical[raw_name] = name
         eid = f"ent_{uuid.uuid4().hex[:12]}"
-            # Classify memory class based on entity type (MemOS pattern)
+        # Classify memory class based on entity type (MemOS pattern)
         # permanent: infra facts, services, people — never decay
         # seasonal: projects, decisions — slow decay
         # ephemeral: concepts, tasks — fast decay
-        mem_class = "permanent" if etype in ("service", "person", "tool", "agent") else (
-            "seasonal" if etype in ("project", "decision") else "ephemeral"
+        mem_class = (
+            "permanent"
+            if etype in ("service", "person", "tool", "agent")
+            else ("seasonal" if etype in ("project", "decision") else "ephemeral")
         )
         result = run_query(
             "MERGE (e:Entity {name: $name}) "
@@ -510,6 +530,7 @@ def _neo4j_expand(query_lower: str, limit: int) -> list[str]:
     """Spreading activation: weighted multi-hop expansion (biological neural pathway model).
     Activation decays with distance, weighted by relationship strength."""
     from neo4j_client import run_query
+
     results = run_query(
         "MATCH (seed:Entity) WHERE toLower($q) CONTAINS toLower(seed.name) "
         "WITH seed "
@@ -584,24 +605,27 @@ def graph_search(query: str, limit: int = 5) -> list[dict]:
                 w = n.get("weight", 0)
                 lines.append(f"  - {rel} → {n['name']} (type: {n.get('type','?')}, weight: {w:.2f})")
 
-        search_results.append({
-            "content": "\n".join(lines),
-            "path": f"neo4j://entity/{name}",
-            "title": f"{name} ({etype})",
-            "source": f"neo4j://entity/{name}",
-            "source_type": "entity",
-            "collection": "graph",
-            "score": min(100.0, mentions * 2.0),  # pre-RRF only, overwritten by rrf_score
-            "trust_tier": 2,
-            "created_at": _now(),  # entities are alive now — avoids time_decay parse errors
-            "metadata": {"type": "entity", "entity_type": etype},
-        })
+        search_results.append(
+            {
+                "content": "\n".join(lines),
+                "path": f"neo4j://entity/{name}",
+                "title": f"{name} ({etype})",
+                "source": f"neo4j://entity/{name}",
+                "source_type": "entity",
+                "collection": "graph",
+                "score": min(100.0, mentions * 2.0),  # pre-RRF only, overwritten by rrf_score
+                "trust_tier": 2,
+                "created_at": _now(),  # entities are alive now — avoids time_decay parse errors
+                "metadata": {"type": "entity", "entity_type": etype},
+            }
+        )
 
     return search_results
 
 
 def _neo4j_track_access(memory_ids: list[str], now: str) -> None:
     from neo4j_client import run_write
+
     run_write(
         "UNWIND $ids AS mid "
         "MERGE (m:MemoryAccess {memory_id: mid}) "
@@ -637,6 +661,7 @@ def reinforce_memory(memory_id: str, success: bool) -> None:
     if _use_neo4j():
         try:
             from neo4j_client import run_write
+
             # v3 bugfix (2026-04-14): was MATCH-only, which silently no-op'd
             # whenever the memory_id wasn't already in MemoryAccess. The bulk
             # of reinforce_memory calls pass chroma_ids like
@@ -666,6 +691,7 @@ def reinforce_memory(memory_id: str, success: bool) -> None:
     try:
         from http_pool import http_json
         from search import get_collections
+
         cols = get_collections()
         sem_col = cols.get("semantic_memory")
         if not sem_col:
@@ -709,6 +735,7 @@ def reinforce_memory_neo4j_only(memory_id: str, success: bool) -> None:
     delta = 0.1 if success else -0.05
     try:
         from neo4j_client import run_write
+
         now_iso = _now()
         run_write(
             "MERGE (m:MemoryAccess {memory_id: $mid}) "
@@ -729,8 +756,10 @@ def reinforce_memory_neo4j_only(memory_id: str, success: bool) -> None:
 
 def _neo4j_stale_memories(days: int, limit: int) -> list[dict]:
     from neo4j_client import run_query
-    cutoff = datetime.now(timezone.utc)
+
+    cutoff = datetime.now(UTC)
     from datetime import timedelta
+
     cutoff_iso = (cutoff - timedelta(days=days)).isoformat(timespec="seconds")
     return run_query(
         "MATCH (m:MemoryAccess) WHERE m.last_accessed_at < $cutoff "
@@ -745,6 +774,7 @@ def _neo4j_stale_memories(days: int, limit: int) -> list[dict]:
 # SQLite fallback implementations
 # ---------------------------------------------------------------------------
 
+
 def _sqlite_store_entities(entities: list, relations: list, now: str, memory_id: str) -> int:
     conn = _conn()
     try:
@@ -758,10 +788,16 @@ def _sqlite_store_entities(entities: list, relations: list, now: str, memory_id:
             existing = conn.execute("SELECT id FROM entities WHERE name = ?", (name,)).fetchone()
             if existing:
                 eid = existing["id"]
-                conn.execute("UPDATE entities SET last_seen_at = ?, mention_count = mention_count + 1 WHERE id = ?", (now, eid))
+                conn.execute(
+                    "UPDATE entities SET last_seen_at = ?, mention_count = mention_count + 1 WHERE id = ?",
+                    (now, eid),
+                )
             else:
                 eid = f"ent_{uuid.uuid4().hex[:12]}"
-                conn.execute("INSERT INTO entities (id, name, entity_type, first_seen_at, last_seen_at) VALUES (?, ?, ?, ?, ?)", (eid, name, etype, now, now))
+                conn.execute(
+                    "INSERT INTO entities (id, name, entity_type, first_seen_at, last_seen_at) VALUES (?, ?, ?, ?, ?)",
+                    (eid, name, etype, now, now),
+                )
                 created += 1
             entity_ids[name] = eid
         for rel in relations[:5]:
@@ -773,8 +809,10 @@ def _sqlite_store_entities(entities: list, relations: list, now: str, memory_id:
             if not src_id or not tgt_id or src_id == tgt_id:
                 continue
             rid = f"rel_{uuid.uuid4().hex[:12]}"
-            conn.execute("INSERT OR IGNORE INTO entity_relations (id, source_entity, relationship, target_entity, confidence, created_at, source_memory_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                         (rid, src_id, relationship, tgt_id, 0.5, now, memory_id))
+            conn.execute(
+                "INSERT OR IGNORE INTO entity_relations (id, source_entity, relationship, target_entity, confidence, created_at, source_memory_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (rid, src_id, relationship, tgt_id, 0.5, now, memory_id),
+            )
         conn.commit()
         return created
     finally:
@@ -784,15 +822,23 @@ def _sqlite_store_entities(entities: list, relations: list, now: str, memory_id:
 def _sqlite_expand(query_lower: str, limit: int) -> list[str]:
     conn = _conn()
     try:
-        rows = conn.execute("SELECT id, name FROM entities WHERE ? LIKE '%' || name || '%'", (query_lower,)).fetchall()
+        rows = conn.execute(
+            "SELECT id, name FROM entities WHERE ? LIKE '%' || name || '%'", (query_lower,)
+        ).fetchall()
         matched_ids = [row["id"] for row in rows]
         if not matched_ids:
             return []
         related_names = set()
         for eid in matched_ids:
-            for r in conn.execute("SELECT e.name FROM entity_relations r JOIN entities e ON r.target_entity = e.id WHERE r.source_entity = ?", (eid,)).fetchall():
+            for r in conn.execute(
+                "SELECT e.name FROM entity_relations r JOIN entities e ON r.target_entity = e.id WHERE r.source_entity = ?",
+                (eid,),
+            ).fetchall():
                 related_names.add(r["name"])
-            for r in conn.execute("SELECT e.name FROM entity_relations r JOIN entities e ON r.source_entity = e.id WHERE r.target_entity = ?", (eid,)).fetchall():
+            for r in conn.execute(
+                "SELECT e.name FROM entity_relations r JOIN entities e ON r.source_entity = e.id WHERE r.target_entity = ?",
+                (eid,),
+            ).fetchall():
                 related_names.add(r["name"])
         related_names = {n for n in related_names if n not in query_lower}
         return list(related_names)[:limit]
@@ -836,6 +882,11 @@ def _sqlite_graph_stats() -> dict:
         relations = conn.execute("SELECT COUNT(*) FROM entity_relations").fetchone()[0]
         tracked = conn.execute("SELECT COUNT(*) FROM memory_access").fetchone()[0]
         total = conn.execute("SELECT COALESCE(SUM(access_count), 0) FROM memory_access").fetchone()[0]
-        return {"entities": entities, "relations": relations, "tracked_memories": tracked, "total_accesses": total}
+        return {
+            "entities": entities,
+            "relations": relations,
+            "tracked_memories": tracked,
+            "total_accesses": total,
+        }
     finally:
         conn.close()

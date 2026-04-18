@@ -11,14 +11,13 @@ Run:
 from __future__ import annotations
 
 import sys
-import time
 from pathlib import Path
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "brain_core"))
 
-import llm_backlog  # noqa: E402
+import llm_backlog
 
 
 @pytest.fixture(autouse=True)
@@ -37,6 +36,7 @@ def _redirect_autonomy_db(tmp_path, monkeypatch):
 
 
 # ── Enqueue + dedupe ──────────────────────────────────────
+
 
 def test_enqueue_returns_id_and_dedupes():
     rid1 = llm_backlog.enqueue("classify", {"content": "hello", "atom_id": "a1"})
@@ -58,6 +58,7 @@ def test_enqueue_different_kinds_distinct():
 
 
 # ── Drain with mock handlers ──────────────────────────────
+
 
 def test_drain_calls_registered_handler():
     calls = []
@@ -135,12 +136,14 @@ def test_drain_ignores_breaker_when_flag_disabled(monkeypatch):
 
 # ── TTL abandonment ───────────────────────────────────────
 
+
 def test_drain_abandons_past_ttl_entries(monkeypatch):
     # Craft a telegram entry backdated past the 6h TTL
     rid = llm_backlog.enqueue("telegram", {"body": "stale"})
     assert rid is not None
 
     import sqlite3
+
     old_ts = "2020-01-01T00:00:00+00:00"
     with sqlite3.connect(str(llm_backlog.AUTONOMY_DB)) as conn:
         conn.execute(
@@ -166,6 +169,7 @@ def test_drain_abandons_past_ttl_entries(monkeypatch):
 
 # ── Stats + helpers ───────────────────────────────────────
 
+
 def test_pending_count_and_oldest_age():
     llm_backlog.enqueue("classify", {"content": "a"})
     llm_backlog.enqueue("entities", {"text": "b", "chroma_id": "c1"})
@@ -190,6 +194,7 @@ def test_run_entry_point_returns_stats():
 
 
 # ── Dedup by stable content_hash ─────────────────────────
+
 
 def test_content_hash_stable_regardless_of_payload_key_order():
     # Same payload with different key order should dedupe

@@ -78,14 +78,17 @@ def quality_for(status: str) -> float:
 
 
 def redistill_via_jenna(long_text: str, *, max_words: int = SOFT_CAP_WORDS) -> str | None:
-    """Compress an atom via Jenna. Returns None on failure (caller falls back).
+    """Compress an atom via stateless LLM. Returns None on failure.
 
-    Free: uses the existing OpenClaw dispatch budget.
+    2026-04-17: migrated from openclaw_dispatch (95MB session bleed, $50+/day
+    at typical atom volume) to cli_llm.cli_dispatch (codex CLI, ChatGPT Pro
+    subscription, <10K tokens/call stateless). Function name kept for
+    minimal churn; no longer routes through Jenna.
     """
     try:
-        from openclaw_dispatch import dispatch
+        from cli_llm import cli_dispatch
     except Exception as e:
-        log.warning("redistill: openclaw_dispatch import failed: %s", e)
+        log.warning("redistill: cli_llm import failed: %s", e)
         return None
 
     prompt = (
@@ -95,16 +98,15 @@ def redistill_via_jenna(long_text: str, *, max_words: int = SOFT_CAP_WORDS) -> s
         f"{long_text}"
     )
     try:
-        result = dispatch(agent="jenna", message=prompt, thinking="off", timeout=30)
+        result = cli_dispatch(prompt, backend="codex", timeout=30)
     except Exception as e:
-        log.warning("redistill dispatch raised: %s", e)
+        log.warning("redistill cli_dispatch raised: %s", e)
         return None
 
     if not result.ok or not result.text:
         return None
     cleaned = result.text.strip().strip('"').strip("'")
     if count_words(cleaned) > HARD_CAP_WORDS:
-        # Jenna refused to compress enough — give up, return None so caller stores original
         return None
     return cleaned or None
 
