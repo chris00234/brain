@@ -75,6 +75,23 @@ MAX_DOC_CHARS_IN_PROMPT = 8000  # cap Jenna input to keep dispatch fast + cheap
 PREFIX_MAX_CHARS = 500  # safety truncation for generated prefixes
 JENNA_TIMEOUT_S = 40
 
+# Version string mixed into content_hash. Bumping this invalidates every
+# stored hash, so the next incremental run regenerates every prefix
+# across the corpus — automatic propagation of infra changes (model
+# swap, prompt edit, substrate migration) without a manual --force.
+#
+# Bump policy: increment MAJOR when the prefix semantics change
+# (different LLM, different prompt, different target substrate such as
+# ChromaDB -> Qdrant). Date tag documents WHEN the change shipped.
+#
+# History:
+# - v1-chromadb-2026-04-05 — original pipeline targeting ChromaDB store
+# - v2-qdrant-2026-04-21 — post-migration: prefix is now written to
+#   canonical's `contextual` named-vector slot via update_vectors,
+#   dense stays untouched. Bumps force regeneration of all stale
+#   ChromaDB-era prefixes (61 found during the 2026-04-21 audit).
+PREFIX_MODEL_VERSION = "v2-qdrant-2026-04-21"
+
 
 # 2026-04-18: thread-local connection pool so the batch `run()` (called on a
 # scheduler thread, processes 60+ docs each making 3 sqlite round-trips)
@@ -298,7 +315,11 @@ def _reembed_chunks_for_doc(doc_path: Path, prefix: str, dry_run: bool) -> int:
 
 
 def _hash_content(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8", errors="ignore")).hexdigest()[:16]
+    """Content hash mixed with PREFIX_MODEL_VERSION so a version bump
+    invalidates every prior audit entry and forces the next incremental
+    run to regenerate every prefix."""
+    keyed = f"{PREFIX_MODEL_VERSION}::{text}"
+    return hashlib.sha256(keyed.encode("utf-8", errors="ignore")).hexdigest()[:16]
 
 
 def run(
