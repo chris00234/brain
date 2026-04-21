@@ -143,40 +143,43 @@ def _predictive_queries(agent: str) -> list[str]:
 
     # Step 2 — Calendar lookahead (<10ms)
     try:
-        from indexer import _get_collection_id, chroma_api
+        from vector_store import get_vector_store
 
-        col_id = _get_collection_id("personal") or _get_collection_id("calendar")
-        if col_id:
-            resp = chroma_api(
-                "POST",
-                f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/get",
-                {"limit": 50, "include": ["documents", "metadatas"]},
-            )
-            docs = resp.get("documents", [])
-            metas = resp.get("metadatas", [])
-            now_utc = datetime.now(UTC)
-            cutoff = now_utc + timedelta(hours=4)
-            cal_count = 0
-            for doc, meta in zip(docs, metas, strict=False):
-                if cal_count >= 2:
-                    break
-                if not meta:
+        store = get_vector_store()
+        # "personal" is the canonical home for calendar entries; "calendar"
+        # is a legacy name kept for back-compat with old ingest paths.
+        cal_collection = "personal" if store.count("personal") > 0 else "calendar"
+        points = store.get(
+            cal_collection, limit=50, with_payload=True, with_documents=True
+        )
+        if points:
+            docs = [p.document or "" for p in points]
+            metas = [p.payload for p in points]
+        else:
+            docs, metas = [], []
+        now_utc = datetime.now(UTC)
+        cutoff = now_utc + timedelta(hours=4)
+        cal_count = 0
+        for doc, meta in zip(docs, metas, strict=False):
+            if cal_count >= 2:
+                break
+            if not meta:
+                continue
+            date_str = meta.get("date") or meta.get("start_date") or meta.get("timestamp") or ""
+            if not date_str:
+                continue
+            try:
+                event_dt = datetime.fromisoformat(date_str)
+                if event_dt.tzinfo is None:
+                    event_dt = event_dt.replace(tzinfo=UTC)
+                if not (now_utc <= event_dt <= cutoff):
                     continue
-                date_str = meta.get("date") or meta.get("start_date") or meta.get("timestamp") or ""
-                if not date_str:
-                    continue
-                try:
-                    event_dt = datetime.fromisoformat(date_str)
-                    if event_dt.tzinfo is None:
-                        event_dt = event_dt.replace(tzinfo=UTC)
-                    if not (now_utc <= event_dt <= cutoff):
-                        continue
-                except Exception:
-                    continue
-                title = meta.get("title") or meta.get("subject") or (doc[:80] if doc else "")
-                if title:
-                    queries.append(f"{title.strip()[:60]} preparation context")
-                    cal_count += 1
+            except Exception:
+                continue
+            title = meta.get("title") or meta.get("subject") or (doc[:80] if doc else "")
+            if title:
+                queries.append(f"{title.strip()[:60]} preparation context")
+                cal_count += 1
     except Exception:
         pass
 
@@ -321,30 +324,25 @@ def get_agent_memories(agent_name, limit=5):
     if cached is not None:
         return cached
     try:
-        from indexer import _get_collection_id, chroma_api
+        from vector_store import get_vector_store
 
-        col_id = _get_collection_id("semantic_memory")
-        if not col_id:
-            return ""
-        resp = chroma_api(
-            "POST",
-            f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/get",
-            {"limit": 200, "include": ["documents", "metadatas"], "where": {"agent": {"$eq": agent_name}}},
+        points = get_vector_store().get(
+            "semantic_memory",
+            filter={"agent": {"$eq": agent_name}},
+            limit=200,
+            with_payload=True,
+            with_documents=True,
         )
-        ids = resp.get("ids", [])
-        docs = resp.get("documents", [])
-        metas = resp.get("metadatas", [])
-        if not docs:
+        if not points:
             return ""
 
         entries = []
-        for i, doc in enumerate(docs):
-            meta = metas[i] if i < len(metas) else {}
+        for p in points:
             entries.append(
                 {
-                    "id": ids[i] if i < len(ids) else None,
-                    "doc": doc,
-                    "meta": meta,
+                    "id": p.id,
+                    "doc": p.document or "",
+                    "meta": p.payload or {},
                     "created_at": meta.get("created_at", ""),
                 }
             )

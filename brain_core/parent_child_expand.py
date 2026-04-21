@@ -74,35 +74,24 @@ def _fetch_parents_from_chroma(parent_ids: list[str]) -> dict[str, str]:
     if not parent_ids:
         return {}
     try:
-        from indexer import _get_collection_id, chroma_api
+        from vector_store import get_vector_store
     except Exception as _exc:
         log.warning("parent_child_expand import failed: %s", _exc)
         return {}
 
-    col_id = _get_collection_id("knowledge")
-    if not col_id:
-        log.warning("parent_child_expand: no collection id for 'knowledge'")
-        return {}
-
     out: dict[str, str] = {}
     try:
-        # ChromaDB metadata filter — $in allows batch lookup
-        resp = chroma_api(
-            "POST",
-            f"/api/v2/tenants/default_tenant/" f"databases/default_database/collections/{col_id}/get",
-            {
-                "where": {"chunk_id": {"$in": parent_ids}},
-                "include": ["documents", "metadatas"],
-                "limit": len(parent_ids) * 2,
-            },
+        points = get_vector_store().get(
+            "knowledge",
+            filter={"chunk_id": {"$in": parent_ids}},
+            limit=len(parent_ids) * 2,
+            with_payload=True,
+            with_documents=True,
         )
-        ids = resp.get("ids", []) or []
-        docs = resp.get("documents", []) or []
-        metas = resp.get("metadatas", []) or []
-        for i, _doc_id in enumerate(ids):
-            meta = metas[i] if i < len(metas) else {}
-            content = docs[i] if i < len(docs) else ""
-            chunk_id = meta.get("chunk_id") if isinstance(meta, dict) else None
+        for p in points:
+            meta = p.payload or {}
+            chunk_id = meta.get("chunk_id")
+            content = p.document or ""
             if chunk_id and content:
                 out[chunk_id] = content
     except Exception as exc:

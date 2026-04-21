@@ -197,37 +197,31 @@ def _reembed_chunks_for_doc(doc_path: Path, prefix: str, dry_run: bool) -> int:
     Returns count of chunks updated.
     """
     try:
-        from indexer import _get_collection_id, chroma_api, get_embedding
+        from indexer import get_embedding
+        from vector_store import get_vector_store
     except Exception as exc:
-        log.warning("indexer import failed: %s", exc)
+        log.warning("vector_store / indexer import failed: %s", exc)
         return 0
 
-    col_id = _get_collection_id(CANONICAL_COLLECTION)
-    if not col_id:
-        log.warning("canonical collection id missing")
-        return 0
-
-    # Chroma `where` filter supports $eq. Source stored as absolute path by the indexer.
+    store = get_vector_store()
     abs_path = str(doc_path)
     try:
-        resp = chroma_api(
-            "POST",
-            f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/get",
-            {"where": {"source": {"$eq": abs_path}}, "include": ["metadatas", "documents"]},
+        points = store.get(
+            CANONICAL_COLLECTION,
+            filter={"source": {"$eq": abs_path}},
+            with_payload=True,
+            with_documents=True,
         )
     except Exception as exc:
         log.debug("chroma get failed for %s: %s", abs_path, exc)
         return 0
 
-    ids = resp.get("ids") or []
-    docs = resp.get("documents") or []
-    metas = resp.get("metadatas") or []
-    if not ids:
+    if not points:
         return 0
 
     if dry_run:
-        log.info("[dry-run] would re-embed %d chunks for %s", len(ids), doc_path.name)
-        return len(ids)
+        log.info("[dry-run] would re-embed %d chunks for %s", len(points), doc_path.name)
+        return len(points)
 
     # Batch re-embed with wall-clock guard
     # 2026-04-17 hang fix: get_embedding retries 5x with 120s timeout each → worst-case
@@ -240,15 +234,17 @@ def _reembed_chunks_for_doc(doc_path: Path, prefix: str, dry_run: bool) -> int:
     MAX_SECONDS_PER_DOC = 90
     updated = 0
     now_iso = datetime.now(UTC).isoformat(timespec="seconds")
-    for chunk_id, doc, meta in zip(ids, docs, metas, strict=False):
+    for p in points:
         if _t.time() - t_start > MAX_SECONDS_PER_DOC:
             log.warning(
                 "wall-clock cap hit for %s at %d/%d chunks — aborting doc",
                 doc_path.name,
                 updated,
-                len(ids),
+                len(points),
             )
             break
+        doc = p.document or ""
+        meta = p.payload or {}
         if not doc:
             continue
         # 2026-04-17 prod-review: reverted to Anthropic's prefix-first order.
@@ -262,24 +258,21 @@ def _reembed_chunks_for_doc(doc_path: Path, prefix: str, dry_run: bool) -> int:
         embedding = get_embedding(enriched_text[:1000], prefix="passage", use_cache=False)
         if not embedding:
             continue
-        new_meta = dict(meta or {})
+        new_meta = dict(meta)
         new_meta["contextual_prefix"] = prefix[:PREFIX_MAX_CHARS]
         new_meta["contextualized"] = True
         new_meta["contextualized_at"] = now_iso
         try:
-            chroma_api(
-                "POST",
-                f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/upsert",
-                {
-                    "ids": [chunk_id],
-                    "embeddings": [embedding],
-                    "documents": [doc],
-                    "metadatas": [new_meta],
-                },
+            store.upsert(
+                CANONICAL_COLLECTION,
+                ids=[p.id],
+                vectors=[embedding],
+                payloads=[new_meta],
+                documents=[doc],
             )
             updated += 1
         except Exception as exc:
-            log.debug("upsert failed for %s: %s", chunk_id, exc)
+            log.debug("upsert failed for %s: %s", p.id, exc)
             continue
     return updated
 
@@ -433,7 +426,7 @@ if __name__ == "__main__":
         if not isinstance(entries, list):
             entries = [entries]
         out = apply_prefixes_batch(entries)
-        print(json.dumps(out, indent=2))
+        print(json.dumps(out, indent=2))  # noqa: T201 — CLI stdout
     elif args.cmd == "list-pending":
         _ensure_audit_table()
         done_paths = set()
@@ -459,7 +452,7 @@ if __name__ == "__main__":
             pending.append({"doc_path": str(d), "content": content[:MAX_DOC_CHARS_IN_PROMPT]})
         if args.limit:
             pending = pending[: args.limit]
-        print(json.dumps(pending, ensure_ascii=False))
+        print(json.dumps(pending, ensure_ascii=False))  # noqa: T201 — CLI stdout
     else:
         out = run(dry_run=args.dry_run, limit=args.limit, force=args.force, only_kind=args.only)
-        print(json.dumps(out, indent=2))
+        print(json.dumps(out, indent=2))  # noqa: T201 — CLI stdout
