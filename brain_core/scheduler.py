@@ -24,6 +24,7 @@ import sqlite3
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -68,6 +69,13 @@ class BrainScheduler:
         # the shared state is cheap (microseconds) and eliminates duplicate
         # dispatches that otherwise slip past the "already running" guard.
         self._state_lock = threading.RLock()
+        # 2026-04-20: task_executor tick offload. The tick's body can call
+        # task_queue.process_pending → cli_dispatch (up to 90s). Running that
+        # on the scheduler's own thread made every 30s fire during the stall
+        # drop as "max_instances reached". We now submit the work to a
+        # bounded thread pool and the APScheduler-side tick returns in <1 ms.
+        self._tick_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="brain_tick")
+        self._tick_future: Future | None = None
         self._db_path = Path(__file__).resolve().parent.parent / "logs" / "scheduler_history.db"
         self._load_history_from_db()
 
@@ -245,13 +253,12 @@ class BrainScheduler:
                 misfire_grace_time=job.misfire_grace,
                 coalesce=True,  # collapse missed runs into 1
             )
-        # In-process task executor (runs every 30s, not as subprocess).
-        # max_instances=2 tolerates one stalled tick (e.g. cli_dispatch chain
-        # up to 90s with 30s-per-backend fallback) without skipping the next
-        # scheduled fire. A real fix — offload escalation to a background
-        # thread so the tick itself is fast — is tracked as follow-up; see
-        # server.err.log 2026-04-20 17:31-17:34 for the incident that surfaced
-        # the "maximum number of running instances reached (1)" pattern.
+        # In-process task executor (runs every 30s). _tick_executor itself is
+        # fire-and-forget: it hands work to self._tick_pool and returns in
+        # <1 ms, so a stalled escalation inside task_queue.process_pending
+        # can no longer pile up "max_instances reached" skips on the
+        # scheduler. See server.err.log 2026-04-20 17:31-17:34 for the
+        # original stall pattern.
         self._scheduler.add_job(
             self._tick_executor,
             trigger=IntervalTrigger(seconds=30),
@@ -260,7 +267,6 @@ class BrainScheduler:
             replace_existing=True,
             misfire_grace_time=60,
             coalesce=True,
-            max_instances=2,
         )
         # 2026-04-16 fix: completion reaper. Previously _pending_completions
         # was populated at dispatch but never drained — the missing
@@ -286,6 +292,7 @@ class BrainScheduler:
     def shutdown(self) -> None:
         if self._scheduler.running:
             self._scheduler.shutdown(wait=True)
+        self._tick_pool.shutdown(wait=False, cancel_futures=True)
 
     def schedule_inprocess(
         self,
@@ -312,7 +319,22 @@ class BrainScheduler:
         )
 
     def _tick_executor(self) -> None:
-        """In-process task executor tick. Runs every 30s.
+        """Scheduler-side tick. Always returns in <1 ms.
+
+        Submits the actual work to self._tick_pool so a stalled escalation
+        (cli_dispatch chain can hit 90s) can never block the scheduler. If
+        the previous submission is still in flight, we skip this fire with
+        a debug log rather than queuing — we'd rather drop a tick than let
+        escalations pile up behind a stuck LLM call.
+        """
+        prev = self._tick_future
+        if prev is not None and not prev.done():
+            log.debug("task_executor: previous tick still running, skipping this fire")
+            return
+        self._tick_future = self._tick_pool.submit(self._tick_work)
+
+    def _tick_work(self) -> None:
+        """In-process task executor tick body. Runs on self._tick_pool.
 
         Two phases:
         1. process_pending — auto-approve tasks above confidence threshold
