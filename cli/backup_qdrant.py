@@ -45,8 +45,6 @@ LOG_DIR = Path("/Users/chrischo/server/brain/logs")
 MINIO_ALIAS = "local"
 MINIO_BUCKET = "rag-backups"
 
-COLLECTIONS = ["canonical", "semantic_memory", "experience", "knowledge", "code", "personal", "obsidian"]
-
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _minio import s3_client as _s3_client  # noqa: E402
 
@@ -157,6 +155,22 @@ def _snapshot_collection(name: str, dest: Path) -> bool:
     return True
 
 
+def _discover_collections() -> list[str]:
+    """Ask Qdrant for the live collection list so the backup covers every
+    collection currently stored, not a stale hardcoded set. Falls back to
+    the previous static list only if Qdrant can't be reached."""
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(f"{QDRANT_URL}/collections", timeout=10) as resp:  # noqa: S310
+            body = json.loads(resp.read())
+        names = [c.get("name") for c in body.get("result", {}).get("collections", []) if c.get("name")]
+        return sorted(names)
+    except Exception as e:
+        print(f"  WARN: collection discovery failed ({e}); falling back to static list")
+        return ["canonical", "semantic_memory", "experience", "knowledge", "code", "personal", "obsidian"]
+
+
 def backup(retain_days: int) -> bool:
     now = datetime.now()
     date_str = now.strftime("%Y-%m-%d")
@@ -172,9 +186,10 @@ def backup(retain_days: int) -> bool:
         shutil.rmtree(backup_path)
     backup_path.mkdir(parents=True)
 
-    print(f"[1/4] Snapshotting {len(COLLECTIONS)} collections...")
+    collections = _discover_collections()
+    print(f"[1/4] Snapshotting {len(collections)} collections: {collections}")
     succeeded = 0
-    for name in COLLECTIONS:
+    for name in collections:
         if _snapshot_collection(name, backup_path):
             succeeded += 1
             size = (backup_path / f"{name}.snapshot").stat().st_size / (1024 * 1024)
@@ -220,7 +235,7 @@ def backup(retain_days: int) -> bool:
     log_file = LOG_DIR / f"backup-{date_str}.log"
     log_file.write_text(
         f"Qdrant backup completed: {now.isoformat()}\n"
-        f"Size: {size_mb:.1f} MB\nCollections: {succeeded}/{len(COLLECTIONS)}\n"
+        f"Size: {size_mb:.1f} MB\nCollections: {succeeded}/{len(collections)}\n"
     )
     print(f"\nBackup complete. Log: {log_file}")
     return True

@@ -189,7 +189,11 @@ def rebuild_collection(client: QdrantClient, collection: str, *, dry_run: bool) 
                 vectors["sparse"] = SparseVector(indices=indices, values=values)
             points.append(PointStruct(id=row["id"], vector=vectors, payload=row["payload"]))
         try:
-            client.upsert(collection_name=collection, points=points, wait=False)
+            # wait=True: this script deletes the old collection before
+            # re-upserting, so any un-ack'd write lost to a crash or OOM
+            # is permanently gone. Per-batch sync is the right tradeoff
+            # for a one-shot migration.
+            client.upsert(collection_name=collection, points=points, wait=True)
             stats["upserted"] += len(points)
         except Exception as e:
             print(f"    upsert batch at {start} failed: {e}")

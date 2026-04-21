@@ -230,6 +230,8 @@ class QdrantStore:
         self._client = QdrantClient(url=self._url, timeout=30)
         self._id_cache: OrderedDict[str, str] = OrderedDict()
         self._id_cache_lock = threading.Lock()
+        self._sparse_cache: dict[str, bool] = {}
+        self._sparse_cache_lock = threading.Lock()
 
     # ── helpers ──────────────────────────────────────────────────
 
@@ -311,12 +313,12 @@ class QdrantStore:
 
     def _has_sparse(self, collection: str) -> bool:
         """Cheap, cached check: does this collection have a `sparse` named slot?"""
-        cache = getattr(self, "_sparse_cache", None)
-        if cache is None:
-            cache = {}
-            self._sparse_cache = cache
-        if collection in cache:
-            return cache[collection]
+        with self._sparse_cache_lock:
+            hit = self._sparse_cache.get(collection)
+            if hit is not None:
+                return hit
+        # Perform the Qdrant RPC outside the lock to avoid serializing
+        # unrelated collection probes under concurrent hybrid_search fan-out.
         try:
             info = self._client.get_collection(collection_name=collection)
             sparse_config = getattr(getattr(info, "config", None), "params", None)
@@ -324,7 +326,8 @@ class QdrantStore:
             has = "sparse" in sparse_vectors
         except Exception:
             has = False
-        cache[collection] = has
+        with self._sparse_cache_lock:
+            self._sparse_cache[collection] = has
         return has
 
     def _hit_payload(self, payload: dict | None) -> tuple[dict, str, str | None]:
@@ -456,7 +459,10 @@ class QdrantStore:
 
                         point_vectors["sparse"] = SparseVector(indices=indices, values=values)
             points.append(PointStruct(id=self._qid(sid), vector=point_vectors, payload=merged))
-        self._client.upsert(collection_name=real, points=points, wait=False)
+        # wait=True: hot-path brain_store writes must be durable before the
+        # POST /memory handler returns. A Qdrant restart within the ack
+        # window would otherwise silently drop the write.
+        self._client.upsert(collection_name=real, points=points, wait=True)
 
     def query(
         self,
@@ -642,10 +648,13 @@ class QdrantStore:
             return
         real, _ = _resolve_alias(collection, None)
         try:
+            # wait=True so an upsert-then-delete sequence can't end up with
+            # the delete persisting while the preceding write is still
+            # un-ack'd (and therefore lost on a Qdrant restart).
             self._client.delete(
                 collection_name=real,
                 points_selector=PointIdsList(points=[self._qid(sid) for sid in ids]),
-                wait=False,
+                wait=True,
             )
         except Exception as exc:
             log.warning("qdrant delete(%s) failed: %s", collection, exc)
@@ -664,7 +673,7 @@ class QdrantStore:
                 collection_name=real,
                 payload=patch,
                 points=[self._qid(sid) for sid in ids],
-                wait=False,
+                wait=True,
             )
         except Exception as exc:
             log.warning("qdrant set_payload(%s) failed: %s", collection, exc)
