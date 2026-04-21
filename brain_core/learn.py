@@ -33,11 +33,9 @@ from cli_llm import dispatch as _dispatch  # noqa: E402  # migrated 2026-04-17
 from indexer import (  # noqa: E402
     EMBED_MODEL,
     EMBED_MODEL_VERSION,
-    _get_collection_id,
-    chroma_api,
-    ensure_collection,
     get_embedding,
 )
+from vector_store import get_vector_store  # noqa: E402
 
 try:
     from config import OPENCLAW_BIN
@@ -115,19 +113,13 @@ def _count_corroborating_trust(content: str) -> float:
     if not emb:
         return TRUST_BASELINE
 
+    store = get_vector_store()
     matched = 0
     for col_name in CORROBORATION_COLLECTIONS:
         try:
-            col_id = _get_collection_id(col_name)
-            if not col_id:
-                continue
-            resp = chroma_api(
-                "POST",
-                f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/query",
-                {"query_embeddings": [emb], "n_results": 1, "include": ["distances"]},
-            )
-            dists = (resp.get("distances") or [[]])[0] if isinstance(resp, dict) else []
-            if dists and dists[0] is not None and float(dists[0]) <= 0.25:
+            hits = store.query(col_name, vector=emb, k=1, with_payload=False)
+            # Previous: cosine distance <= 0.25 → similarity >= 0.75
+            if hits and hits[0].score >= 0.75:
                 matched += 1
         except Exception:
             continue
@@ -476,10 +468,8 @@ def embed_and_store(memories: list[dict[str, Any]], source: str, agent: str) -> 
     if not memories:
         return []
 
-    ensure_collection(SEMANTIC_COLLECTION)
-    col_id = _get_collection_id(SEMANTIC_COLLECTION)
-    if not col_id:
-        return []
+    store = get_vector_store()
+    store.create_collection(SEMANTIC_COLLECTION)
 
     stored: list[dict[str, Any]] = []
     ids: list[str] = []
@@ -539,12 +529,13 @@ def embed_and_store(memories: list[dict[str, Any]], source: str, agent: str) -> 
 
         # Dedup layer 1: exact content hash match
         try:
-            existing = chroma_api(
-                "POST",
-                f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/get",
-                {"ids": [mem_id], "include": []},
+            existing_points = store.get(
+                SEMANTIC_COLLECTION,
+                ids=[mem_id],
+                with_payload=False,
+                with_documents=False,
             )
-            if existing.get("ids") and mem_id in existing["ids"]:
+            if existing_points:
                 continue
         except Exception:
             pass
@@ -579,11 +570,7 @@ def embed_and_store(memories: list[dict[str, Any]], source: str, agent: str) -> 
             # Explicit invalidation phrase with a target - delete the target,
             # skip storing the invalidation statement as its own memory.
             try:
-                chroma_api(
-                    "POST",
-                    f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/delete",
-                    {"ids": [supersede_target]},
-                )
+                store.delete(SEMANTIC_COLLECTION, ids=[supersede_target])
                 try:
                     from audit_log import log_event
 
@@ -608,17 +595,12 @@ def embed_and_store(memories: list[dict[str, Any]], source: str, agent: str) -> 
             meta["supersedes"] = supersede_target
             # Mark old memory as superseded
             try:
-                chroma_api(
-                    "POST",
-                    f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/update",
-                    {
-                        "ids": [supersede_target],
-                        "metadatas": [
-                            {
-                                "superseded_by": mem_id,
-                                "valid_until": now_iso,
-                            }
-                        ],
+                store.update_payload(
+                    SEMANTIC_COLLECTION,
+                    ids=[supersede_target],
+                    patch={
+                        "superseded_by": mem_id,
+                        "valid_until": now_iso,
                     },
                 )
                 try:
@@ -695,12 +677,14 @@ def embed_and_store(memories: list[dict[str, Any]], source: str, agent: str) -> 
     if not ids:
         return []
 
-    # Phase 2: Upsert (ChromaDB handles its own concurrency)
+    # Phase 2: Upsert (the vector backend handles its own concurrency)
     try:
-        chroma_api(
-            "POST",
-            f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/upsert",
-            {"ids": ids, "embeddings": embeddings, "documents": documents, "metadatas": metadatas},
+        store.upsert(
+            SEMANTIC_COLLECTION,
+            ids=ids,
+            vectors=embeddings,
+            documents=documents,
+            payloads=metadatas,
         )
     except Exception as e:
         print(f"WARNING learn upsert failed: {e}")
@@ -779,39 +763,35 @@ def check_contradictions_for_memory(
     contradictions: list[dict[str, Any]] = []
     if not embedding:
         return contradictions
-    if sem_col_id is None:
-        sem_col_id = _get_collection_id(SEMANTIC_COLLECTION)
-    if not sem_col_id:
-        return contradictions
-    ensure_collection(CONTRADICTIONS_COLLECTION)
+    del sem_col_id  # legacy parameter — retained for API compat, unused now
+    store = get_vector_store()
+    store.create_collection(CONTRADICTIONS_COLLECTION)
 
     try:
-        res = chroma_api(
-            "POST",
-            f"/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col_id}/query",
-            {
-                "query_embeddings": [embedding],
-                "n_results": 8,
-                "include": ["documents", "metadatas", "distances"],
-            },
+        hits = store.query(
+            SEMANTIC_COLLECTION,
+            vector=embedding,
+            k=8,
+            with_payload=True,
         )
     except Exception:
         return contradictions
 
-    ids_lists = res.get("ids") or []
-    if not ids_lists or not ids_lists[0]:
+    if not hits:
         return contradictions
-    ids = ids_lists[0]
-    docs = (res.get("documents") or [[]])[0]
-    dists = (res.get("distances") or [[]])[0]
-    metas_list = (res.get("metadatas") or [[]])[0]
 
     new_tokens = _tokenize(content)
 
-    for other_id, other_doc, other_dist, other_meta in zip(ids, docs, dists, metas_list, strict=False):
+    for h in hits:
+        other_id = h.id
+        other_doc = h.document or ""
+        # Preserve distance-based variables. ChromaStore gives similarity;
+        # re-derive distance so downstream comparisons keep their semantics.
+        other_dist = max(0.0, 1.0 - h.score)
+        other_meta = h.payload or {}
         if other_id == mem_id:
             continue
-        other_category = (other_meta or {}).get("category", "")
+        other_category = other_meta.get("category", "")
         if other_category and other_category != category:
             continue
         if other_dist > (1 - SIMILARITY_THRESHOLD):
@@ -899,11 +879,7 @@ def check_contradictions_for_memory(
                 contradictions.append(contradiction)
                 continue
             try:
-                chroma_api(
-                    "POST",
-                    f"/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col_id}/delete",
-                    {"ids": [other_id]},
-                )
+                store.delete(SEMANTIC_COLLECTION, ids=[other_id])
                 try:
                     from audit_log import log_event
 
@@ -934,11 +910,7 @@ def check_contradictions_for_memory(
                 contradictions.append(contradiction)
                 continue
             try:
-                chroma_api(
-                    "POST",
-                    f"/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col_id}/delete",
-                    {"ids": [other_id]},
-                )
+                store.delete(SEMANTIC_COLLECTION, ids=[other_id])
                 try:
                     from audit_log import log_event
 
@@ -972,9 +944,6 @@ def check_contradictions(stored: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """
     if not stored:
         return []
-    sem_col_id = _get_collection_id(SEMANTIC_COLLECTION)
-    if not sem_col_id:
-        return []
     contradictions: list[dict[str, Any]] = []
     for mem in stored:
         try:
@@ -986,7 +955,6 @@ def check_contradictions(stored: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 category=meta.get("category", ""),
                 confidence=float(meta.get("confidence", 0.5) or 0.5),
                 created_at=meta.get("created_at", ""),
-                sem_col_id=sem_col_id,
             )
             contradictions.extend(found)
         except Exception:
@@ -995,32 +963,26 @@ def check_contradictions(stored: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _store_contradiction(contradiction: dict[str, Any]) -> None:
-    col_id = _get_collection_id(CONTRADICTIONS_COLLECTION)
-    if not col_id:
-        return
     summary = f"NEW: {contradiction['new_content']}\n" f"OLD: {contradiction['old_content']}"
     embedding = get_embedding(summary[:EMBED_TRUNCATE])
     if not embedding:
         return
-    chroma_api(
-        "POST",
-        f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/upsert",
-        {
-            "ids": [contradiction["id"]],
-            "embeddings": [embedding],
-            "documents": [summary],
-            "metadatas": [
-                {
-                    "new_id": contradiction["new_id"],
-                    "old_id": contradiction["old_id"],
-                    "category": contradiction["category"],
-                    "distance": str(contradiction["distance"]),
-                    "token_overlap": str(contradiction["token_overlap"]),
-                    "created_at": contradiction["created_at"],
-                    "review_state": "pending",
-                }
-            ],
-        },
+    get_vector_store().upsert(
+        CONTRADICTIONS_COLLECTION,
+        ids=[contradiction["id"]],
+        vectors=[embedding],
+        documents=[summary],
+        payloads=[
+            {
+                "new_id": contradiction["new_id"],
+                "old_id": contradiction["old_id"],
+                "category": contradiction["category"],
+                "distance": str(contradiction["distance"]),
+                "token_overlap": str(contradiction["token_overlap"]),
+                "created_at": contradiction["created_at"],
+                "review_state": "pending",
+            }
+        ],
     )
 
 

@@ -10,7 +10,7 @@ import logging
 import re
 from typing import Literal
 
-from http_pool import http_json
+from vector_store import get_vector_store
 
 log = logging.getLogger("brain.memory_operations")
 
@@ -54,9 +54,9 @@ def classify_operation(
     new_content: str,
     new_embedding: list[float],
     new_confidence: float,
-    sem_col_id: str,
+    sem_col_id: str = "semantic_memory",  # legacy name kept for call-site compat
     category: str = "",
-    chroma_url: str = "http://127.0.0.1:8000",
+    chroma_url: str = "",  # unused; retained for signature compat
 ) -> tuple[Operation, str | None, dict]:
     """Classify a new memory against existing ones.
 
@@ -64,39 +64,46 @@ def classify_operation(
         (operation, superseded_id_if_update, diagnostics)
 
     Diagnostics dict contains: top_distance, top_overlap, top_confidence, reason
+
+    The ``sem_col_id`` / ``chroma_url`` parameters are retained for
+    backwards compatibility with existing callers (learn.py). Under the
+    VectorStore abstraction we address by collection name directly, so
+    these are ignored — the collection is always "semantic_memory".
     """
+    del chroma_url  # unused under VectorStore
     is_pref = category == "preference"
 
     if not new_embedding:
         return ("ADD", None, {"reason": "no embedding available"})
 
-    # Query top similar memories (more candidates for preferences)
-    query_payload: dict = {
-        "query_embeddings": [new_embedding],
-        "n_results": 5 if is_pref else 3,
-        "include": ["documents", "metadatas", "distances"],
-    }
-    if is_pref:
-        query_payload["where"] = {"category": "preference"}
+    # Target collection name: any non-UUID string is treated as a name;
+    # legacy UUID values from old callers fall back to the canonical name.
+    collection = sem_col_id if sem_col_id and "-" not in sem_col_id else "semantic_memory"
+    where_filter = {"category": "preference"} if is_pref else None
+    k = 5 if is_pref else 3
 
     try:
-        resp = http_json(
-            "POST",
-            f"{chroma_url}/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col_id}/query",
-            payload=query_payload,
-            timeout=15,
+        hits = get_vector_store().query(
+            collection,
+            vector=new_embedding,
+            k=k,
+            filter=where_filter,
+            with_payload=True,
         )
     except Exception as e:
         log.debug("classify: query failed (%s) — defaulting to ADD", e)
         return ("ADD", None, {"reason": f"query failed: {e}"})
 
-    distances = (resp.get("distances") or [[]])[0]
-    ids = (resp.get("ids") or [[]])[0]
-    docs = (resp.get("documents") or [[]])[0]
-    metas = (resp.get("metadatas") or [[]])[0]
-
-    if not ids:
+    if not hits:
         return ("ADD", None, {"reason": "no similar memories"})
+
+    # Preserve the distance-based variables the rank loop expects.
+    # ChromaStore hands back score = 1 - cosine_distance, so we invert
+    # back to distance here instead of rewriting the rank logic.
+    distances = [max(0.0, 1.0 - h.score) for h in hits]
+    ids = [h.id for h in hits]
+    docs = [h.document or "" for h in hits]
+    metas = [h.payload or {} for h in hits]
 
     # Walk candidates in rank order, skipping memories that are already superseded
     # (they're chain heads that shouldn't compete with new memories).
