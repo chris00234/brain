@@ -322,12 +322,15 @@ def _amem_link_neighbors(
     if not touched_atom_ids:
         return 0
     try:
-        from indexer import _get_collection_id, chroma_api, get_embedding
+        from indexer import get_embedding
+        from vector_store import get_vector_store
     except ImportError:
         return 0
-    col_id = _get_collection_id("semantic_memory")
-    if not col_id:
-        return 0
+
+    store = get_vector_store()
+    # Matching similarity floor: a cosine-distance cap of AMEM_DIST_THRESHOLD
+    # maps to similarity >= 1 - AMEM_DIST_THRESHOLD.
+    sim_floor = 1.0 - AMEM_DIST_THRESHOLD
 
     edges_added = 0
     # Only link atoms with known text and chroma_id
@@ -348,28 +351,23 @@ def _amem_link_neighbors(
         if not emb:
             continue
         try:
-            res = chroma_api(
-                "POST",
-                f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/query",
-                {
-                    "query_embeddings": [emb],
-                    "n_results": AMEM_K + 1,
-                    "include": ["distances"],
-                },
+            hits = store.query(
+                "semantic_memory",
+                vector=emb,
+                k=AMEM_K + 1,
+                with_payload=False,
             )
         except Exception:
             continue
-        ids = (res.get("ids") or [[]])[0]
-        dists = (res.get("distances") or [[]])[0]
         new_edges_this_atom = 0
-        for nid, d in zip(ids, dists, strict=False):
+        for h in hits:
             if new_edges_this_atom >= AMEM_EDGES_PER_ATOM:
                 break
-            if d > AMEM_DIST_THRESHOLD:
+            if h.score < sim_floor:
                 continue
-            if nid == row["chroma_id"]:
+            if h.id == row["chroma_id"]:
                 continue
-            neighbor_row = conn.execute("SELECT id FROM atoms WHERE chroma_id = ?", (nid,)).fetchone()
+            neighbor_row = conn.execute("SELECT id FROM atoms WHERE chroma_id = ?", (h.id,)).fetchone()
             if not neighbor_row or neighbor_row["id"] == atom_id:
                 continue
             neighbor_atom_id = neighbor_row["id"]
@@ -386,7 +384,7 @@ def _amem_link_neighbors(
                     "INSERT OR IGNORE INTO provenance "
                     "(parent_kind, parent_id, child_kind, child_id, relation, confidence, created_at) "
                     "VALUES ('atom', ?, 'atom', ?, 'related', ?, ?)",
-                    (atom_id, neighbor_atom_id, round(1.0 - float(d), 4), _now()),
+                    (atom_id, neighbor_atom_id, round(h.score, 4), _now()),
                 )
                 edges_added += 1
                 new_edges_this_atom += 1
