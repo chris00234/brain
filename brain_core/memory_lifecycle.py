@@ -246,62 +246,42 @@ def main():
 
 
 def dedup_semantic_memory() -> int:
-    """Remove content-duplicate entries from the semantic_memory ChromaDB collection."""
-    import urllib.request
+    """Remove content-duplicate entries from the semantic_memory collection."""
+    from vector_store import get_vector_store
 
-    CHROMA = "http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections"
+    store = get_vector_store()
 
-    # Find collection ID
-    with urllib.request.urlopen(CHROMA, timeout=10) as resp:
-        cols = json.loads(resp.read())
-    col_id = None
-    for c in cols:
-        if c.get("name") == "semantic_memory":
-            col_id = c["id"]
-            break
-    if not col_id:
+    points = store.get(
+        "semantic_memory",
+        limit=10000,
+        with_payload=False,
+        with_documents=True,
+    )
+    if not points:
         return 0
 
-    # Get all docs
-    req = urllib.request.Request(
-        f"{CHROMA}/{col_id}/get",
-        data=json.dumps({"limit": 10000, "include": ["documents"]}).encode(),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=30) as _resp:
-        data = json.loads(_resp.read())
-    ids = data.get("ids", [])
-    docs = data.get("documents", [])
-
-    # Find content duplicates - keep the first occurrence
-    seen = {}
-    dupe_ids = []
-    for i, doc in enumerate(docs):
+    # Find content duplicates — keep the first occurrence.
+    seen: dict[str, int] = {}
+    dupe_ids: list[str] = []
+    for i, p in enumerate(points):
+        doc = p.document
         if doc is None:
             continue
         h = hashlib.md5(doc.encode()).hexdigest()
         if h in seen:
-            dupe_ids.append(ids[i])
+            dupe_ids.append(p.id)
         else:
             seen[h] = i
 
     if not dupe_ids:
-        print(f"  semantic_memory: {len(ids)} entries, no duplicates")
+        print(f"  semantic_memory: {len(points)} entries, no duplicates")
         return 0
 
-    # Delete duplicates in batches
+    # Delete duplicates in batches.
     BATCH = 20
     for s in range(0, len(dupe_ids), BATCH):
         e = min(s + BATCH, len(dupe_ids))
-        req = urllib.request.Request(
-            f"{CHROMA}/{col_id}/delete",
-            data=json.dumps({"ids": dupe_ids[s:e]}).encode(),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=15):
-            pass
+        store.delete("semantic_memory", dupe_ids[s:e])
     print(f"  semantic_memory: removed {len(dupe_ids)} content duplicates")
     return len(dupe_ids)
 
@@ -314,45 +294,30 @@ def dedup_semantic_near_duplicates() -> dict:
     deletes the shorter/older one. Logs decisions to audit trail.
     """
     import re
-    import urllib.request
 
-    CHROMA = "http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections"
+    from vector_store import get_vector_store
 
-    # Find collection ID
+    store = get_vector_store()
+
+    # Get docs with embeddings — capped at 300 to keep O(n^2) pairwise
+    # comparison tractable without numpy. 300 entries ≈ 45k comparisons
+    # in pure Python ≈ 10s. Order by created_at DESC is implicit in
+    # store.get insertion order for recent writes.
     try:
-        with urllib.request.urlopen(CHROMA, timeout=10) as resp:
-            cols = json.loads(resp.read())
+        points = store.get(
+            "semantic_memory",
+            limit=300,
+            with_payload=True,
+            with_documents=True,
+            with_vectors=True,
+        )
     except Exception as e:
         return {"status": "error", "reason": str(e)}
 
-    col_id = None
-    for c in cols:
-        if c.get("name") == "semantic_memory":
-            col_id = c["id"]
-            break
-    if not col_id:
-        return {"status": "skip", "reason": "collection not found"}
-
-    # Get docs with embeddings - capped at 300 to keep O(n^2) pairwise comparison tractable
-    # without numpy (not in requirements.txt). 300 entries = ~45k comparisons in pure Python ≈ 10s.
-    # Previous cap of 2000 -> ~2M comparisons -> multi-hour runtime. Order by created_at DESC
-    # to prioritize deduping recent entries.
-    req = urllib.request.Request(
-        f"{CHROMA}/{col_id}/get",
-        data=json.dumps({"limit": 300, "include": ["documents", "embeddings", "metadatas"]}).encode(),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=60) as _resp:
-            data = json.loads(_resp.read())
-    except Exception as e:
-        return {"status": "error", "reason": str(e)}
-
-    ids = data.get("ids", [])
-    docs = data.get("documents", [])
-    embs = data.get("embeddings", [])
-    metas = data.get("metadatas", [])
+    ids = [p.id for p in points]
+    docs = [p.document or "" for p in points]
+    embs = [p.vector or [] for p in points]
+    metas = [p.payload or {} for p in points]
 
     if len(ids) < 2:
         return {"status": "ok", "checked": len(ids), "removed": 0}
@@ -421,14 +386,7 @@ def dedup_semantic_near_duplicates() -> dict:
     BATCH = 20
     for s in range(0, len(delete_list), BATCH):
         e = min(s + BATCH, len(delete_list))
-        req = urllib.request.Request(
-            f"{CHROMA}/{col_id}/delete",
-            data=json.dumps({"ids": delete_list[s:e]}).encode(),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=15):
-            pass
+        store.delete("semantic_memory", delete_list[s:e])
 
     print(f"  semantic_memory near-dedup: removed {len(delete_list)} near-duplicates from {len(ids)} entries")
 
@@ -494,33 +452,29 @@ def auto_resolve_stale_contradictions():
     """
     from datetime import datetime, timedelta
 
-    from http_pool import http_json
-    from search import get_collections
+    from vector_store import get_vector_store
 
-    cols = get_collections()
-    contra_col = cols.get("semantic_contradictions")
-    sem_col = cols.get("semantic_memory")
-    if not contra_col or not sem_col:
-        return {"resolved": 0, "error": "collections unavailable"}
+    store = get_vector_store()
 
     # Fetch pending contradictions
     try:
-        resp = http_json(
-            "POST",
-            f"http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections/{contra_col}/get",
-            {"where": {"review_state": "pending"}, "limit": 500, "include": ["metadatas"]},
+        pending = store.get(
+            "semantic_contradictions",
+            filter={"review_state": "pending"},
+            limit=500,
+            with_payload=True,
+            with_documents=False,
         )
     except Exception as e:
         return {"resolved": 0, "error": str(e)}
 
-    ids = resp.get("ids", [])
-    metas = resp.get("metadatas", [])
     resolved_count = 0
     kept_count = 0
     cutoff_date = datetime.now(UTC) - timedelta(days=14)
 
-    for contra_id, meta in zip(ids, metas or [{}] * len(ids), strict=False):
-        meta = meta or {}
+    for p in pending:
+        meta = p.payload or {}
+        contra_id = p.id
         old_id = meta.get("old_id")
         new_id = meta.get("new_id")
         created_at = meta.get("created_at", "")
@@ -530,17 +484,17 @@ def auto_resolve_stale_contradictions():
 
         # Fetch both memories
         try:
-            mem_resp = http_json(
-                "POST",
-                f"http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col}/get",
-                {"ids": [old_id, new_id], "include": ["metadatas"]},
+            both = store.get(
+                "semantic_memory",
+                ids=[old_id, new_id],
+                with_payload=True,
+                with_documents=False,
             )
         except Exception:
             continue
 
-        returned_ids = mem_resp.get("ids", [])
-        returned_metas = mem_resp.get("metadatas", []) or []
-        id_to_meta = {i: m for i, m in zip(returned_ids, returned_metas, strict=False) if m}
+        returned_ids = [m.id for m in both]
+        id_to_meta = {m.id: (m.payload or {}) for m in both}
 
         action = None
 
@@ -603,24 +557,12 @@ def auto_resolve_stale_contradictions():
         # Apply resolution
         try:
             if action == "keep_new" and old_id in returned_ids:
-                http_json(
-                    "POST",
-                    f"http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col}/delete",
-                    {"ids": [old_id]},
-                )
+                store.delete("semantic_memory", [old_id])
             elif action == "keep_old" and new_id in returned_ids:
-                http_json(
-                    "POST",
-                    f"http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col}/delete",
-                    {"ids": [new_id]},
-                )
+                store.delete("semantic_memory", [new_id])
             # "dismiss" and the keep_* branches both clear the contradiction
             # record after (optionally) deleting one side.
-            http_json(
-                "POST",
-                f"http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections/{contra_col}/delete",
-                {"ids": [contra_id]},
-            )
+            store.delete("semantic_contradictions", [contra_id])
             # Clean up any orphan votes for this contradiction so the
             # contradiction_votes table doesn't grow unbounded and so future
             # votes can't match a deleted contradiction_id.
@@ -654,48 +596,44 @@ def cleanup_supersession_chains() -> dict:
     3. If the target is missing, clears superseded_by (resurrects the memory)
     4. If the target itself is superseded, follows the chain to the live head
     """
-    from http_pool import http_json
-    from search import get_collections
+    from vector_store import get_vector_store
 
-    cols = get_collections()
-    sem_col = cols.get("semantic_memory")
-    if not sem_col:
-        return {"checked": 0, "orphaned": 0, "fixed": 0, "error": "semantic_memory missing"}
+    store = get_vector_store()
 
-    # Fetch all entries in pages - need IDs + metadatas to find superseded_by refs
+    # Fetch all entries in pages — IDs + payloads to find superseded_by refs
     PAGE = 500
     offset = 0
     all_ids: set[str] = set()
-    superseded: list[tuple[str, dict]] = []  # (id, metadata) for entries with superseded_by
+    superseded: list[tuple[str, dict]] = []
 
     while True:
         try:
-            resp = http_json(
-                "POST",
-                f"http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col}/get",
-                {"limit": PAGE, "offset": offset, "include": ["metadatas"]},
+            points = store.get(
+                "semantic_memory",
+                limit=PAGE,
+                offset=offset,
+                with_payload=True,
+                with_documents=False,
             )
         except Exception as e:
             return {"checked": 0, "orphaned": 0, "fixed": 0, "error": f"fetch failed: {e}"}
 
-        ids = resp.get("ids", []) or []
-        if not ids:
+        if not points:
             break
-        metas = resp.get("metadatas", []) or []
 
-        for mid, meta in zip(ids, metas, strict=False):
-            all_ids.add(mid)
-            meta = meta or {}
+        for p in points:
+            all_ids.add(p.id)
+            meta = p.payload or {}
             target = (meta.get("superseded_by") or "").strip()
             if target:
-                superseded.append((mid, dict(meta)))
+                superseded.append((p.id, dict(meta)))
 
-        if len(ids) < PAGE:
+        if len(points) < PAGE:
             break
         offset += PAGE
 
     # Build lookup for O(1) chain walking
-    superseded_map: dict[str, dict] = {mid: meta for mid, meta in superseded}
+    superseded_map: dict[str, dict] = dict(superseded)
 
     # Find orphans: superseded_by points to a non-existent ID
     orphaned_ids: list[str] = []
@@ -723,18 +661,22 @@ def cleanup_supersession_chains() -> dict:
             orphaned_ids.append(mid)
             orphaned_metas.append(meta)
 
-    # Batch update orphans
+    # Batch update orphans. Under the VectorStore abstraction each
+    # orphan gets an individual patch (superseded_by / valid_until
+    # cleared) so we issue one update_payload per id. Total orphan
+    # count is small on normal runs; batch=50 is kept to preserve
+    # error-logging semantics.
     fixed = 0
     BATCH = 50
     for i in range(0, len(orphaned_ids), BATCH):
         batch_ids = orphaned_ids[i : i + BATCH]
-        batch_metas = orphaned_metas[i : i + BATCH]
         try:
-            http_json(
-                "POST",
-                f"http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col}/update",
-                {"ids": batch_ids, "metadatas": batch_metas},
-            )
+            for mid in batch_ids:
+                store.update_payload(
+                    "semantic_memory",
+                    ids=[mid],
+                    patch={"superseded_by": "", "valid_until": ""},
+                )
             fixed += len(batch_ids)
         except Exception as e:
             return {
@@ -754,8 +696,7 @@ def recompute_trust_scores() -> dict:
     score for each entry, and updates the metadata in place. Memories that
     gain or lose corroborating sources naturally drift in trust over time.
     """
-    from http_pool import http_json
-    from search import get_collections
+    from vector_store import get_vector_store
 
     sys.path.insert(0, str(Path(__file__).parent))
     try:
@@ -763,10 +704,7 @@ def recompute_trust_scores() -> dict:
     except Exception as e:
         return {"status": "error", "reason": f"learn import failed: {e}"}
 
-    cols = get_collections()
-    sem_col = cols.get("semantic_memory")
-    if not sem_col:
-        return {"status": "error", "reason": "semantic_memory missing"}
+    store = get_vector_store()
 
     PAGE = 500
     offset = 0
@@ -776,53 +714,44 @@ def recompute_trust_scores() -> dict:
     drift_down = 0
     while True:
         try:
-            resp = http_json(
-                "POST",
-                f"http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col}/get",
-                {"limit": PAGE, "offset": offset, "include": ["documents", "metadatas"]},
+            points = store.get(
+                "semantic_memory",
+                limit=PAGE,
+                offset=offset,
+                with_payload=True,
+                with_documents=True,
             )
         except Exception as e:
             return {"status": "error", "reason": f"fetch failed at offset={offset}: {e}"}
-        ids = resp.get("ids", []) or []
-        if not ids:
+        if not points:
             break
-        docs = resp.get("documents", []) or []
-        metas = resp.get("metadatas", []) or []
 
-        update_ids: list[str] = []
-        update_metas: list[dict] = []
-        for mid, content, meta in zip(ids, docs, metas, strict=False):
+        for p in points:
             total += 1
-            meta = meta or {}
+            meta = p.payload or {}
             try:
                 old = float(meta.get("trust_score", "0.5"))
             except Exception:
                 old = 0.5
-            new = _count_corroborating_trust(content or "")
+            new = _count_corroborating_trust(p.document or "")
             if abs(new - old) < 0.05:
                 continue
             if new > old:
                 drift_up += 1
             else:
                 drift_down += 1
-            new_meta = dict(meta)
-            new_meta["trust_score"] = str(new)
-            update_ids.append(mid)
-            update_metas.append(new_meta)
-
-        if update_ids:
             try:
-                http_json(
-                    "POST",
-                    f"http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col}/update",
-                    {"ids": update_ids, "metadatas": update_metas},
+                store.update_payload(
+                    "semantic_memory",
+                    ids=[p.id],
+                    patch={"trust_score": str(new)},
                 )
-                updated += len(update_ids)
+                updated += 1
             except Exception as e:
-                # Continue - partial updates are fine for a weekly job
-                print(f"  trust_recompute update failed at offset={offset}: {e}")
+                # Continue — partial updates are fine for a weekly job.
+                print(f"  trust_recompute update failed for {p.id}: {e}")
 
-        if len(ids) < PAGE:
+        if len(points) < PAGE:
             break
         offset += PAGE
 
@@ -848,37 +777,30 @@ def reinforce_on_access(memory_ids: list[str], boost: float = 0.02) -> dict:
     """
     if not memory_ids:
         return {"reinforced": 0}
-    from http_pool import http_json
-    from search import get_collections
+    from vector_store import get_vector_store
 
-    cols = get_collections()
-    sem_col = cols.get("semantic_memory")
-    if not sem_col:
-        return {"reinforced": 0, "reason": "semantic_memory missing"}
+    store = get_vector_store()
 
     # Fetch current metadata for the affected ids
     try:
-        resp = http_json(
-            "POST",
-            f"http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col}/get",
-            {"ids": memory_ids[:20], "include": ["metadatas"]},
+        points = store.get(
+            "semantic_memory",
+            ids=memory_ids[:20],
+            with_payload=True,
+            with_documents=False,
         )
     except Exception as e:
         return {"reinforced": 0, "reason": f"fetch failed: {e}"}
-
-    ids = resp.get("ids", []) or []
-    metas = resp.get("metadatas", []) or []
-    if not ids:
+    if not points:
         return {"reinforced": 0}
 
     # Z-suffix matches the convention used by entity_graph._now() and
-    # learn._now_iso() - keeps lexicographic comparison consistent across
+    # learn._now_iso() — keeps lexicographic comparison consistent across
     # all writers (the prune job sorts by these timestamps).
     now_iso = datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
-    update_ids: list[str] = []
-    update_metas: list[dict] = []
-    for mid, meta in zip(ids, metas, strict=False):
-        meta = dict(meta or {})
+    reinforced = 0
+    for p in points:
+        meta = dict(p.payload or {})
         try:
             count = int(meta.get("access_count", 0))
         except (ValueError, TypeError):
@@ -887,7 +809,6 @@ def reinforce_on_access(memory_ids: list[str], boost: float = 0.02) -> dict:
             trust = float(meta.get("trust_score", 0.5))
         except (ValueError, TypeError):
             trust = 0.5
-        meta["access_count"] = count + 1
 
         # Decayed access_score: weights recent access more heavily.
         # Existing score decays at 5% per day, then +1 for current access.
@@ -905,23 +826,24 @@ def reinforce_on_access(memory_ids: list[str], boost: float = 0.02) -> dict:
                 existing_score = existing_score * decay_factor
             except (ValueError, TypeError):
                 pass
-        meta["access_score"] = str(round(existing_score + 1.0, 2))
 
-        meta["last_accessed_at"] = now_iso
-        meta["trust_score"] = str(min(1.0, trust + boost))
-        update_ids.append(mid)
-        update_metas.append(meta)
+        patch = {
+            "access_count": count + 1,
+            "access_score": str(round(existing_score + 1.0, 2)),
+            "last_accessed_at": now_iso,
+            "trust_score": str(min(1.0, trust + boost)),
+        }
+        try:
+            store.update_payload("semantic_memory", ids=[p.id], patch=patch)
+            reinforced += 1
+        except Exception as e:
+            # Partial reinforcement is fine — this runs as a fire-and-forget
+            # BackgroundTask from /recall.
+            print(f"  reinforce_on_access update failed for {p.id}: {e}")
 
-    if not update_ids:
+    if reinforced == 0:
         return {"reinforced": 0}
-    try:
-        http_json(
-            "POST",
-            f"http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col}/update",
-            {"ids": update_ids, "metadatas": update_metas},
-        )
-    except Exception as e:
-        return {"reinforced": 0, "reason": f"update failed: {e}"}
+    update_ids = [p.id for p in points]
 
     # v3 Layer B - bump Neo4j MemoryAccess.utility_score so the graph's
     # MemRL ranking actually reflects usage. Uses _neo4j_only path to avoid
@@ -1017,8 +939,7 @@ def prune_atrophied_memories(
     Safety floor: never deletes more than 100 memories per run, never deletes
     if the candidate set is more than 5% of the collection.
     """
-    from http_pool import http_json
-    from search import get_collections
+    from vector_store import get_vector_store
 
     sys.path.insert(0, str(Path(__file__).parent))
     try:
@@ -1028,10 +949,7 @@ def prune_atrophied_memories(
         def log_event(*args, **kwargs):
             return ""
 
-    cols = get_collections()
-    sem_col = cols.get("semantic_memory")
-    if not sem_col:
-        return {"status": "error", "reason": "semantic_memory missing"}
+    store = get_vector_store()
 
     cutoff = datetime.now(UTC) - timedelta(days=max_age_days)
     # Normalize to Z-suffix so lexicographic comparison works against memories
@@ -1072,22 +990,23 @@ def prune_atrophied_memories(
     total_scanned = 0
     while True:
         try:
-            resp = http_json(
-                "POST",
-                f"http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col}/get",
-                {"limit": PAGE, "offset": offset, "include": ["documents", "metadatas"]},
+            points = store.get(
+                "semantic_memory",
+                limit=PAGE,
+                offset=offset,
+                with_payload=True,
+                with_documents=True,
             )
         except Exception as e:
             return {"status": "error", "reason": f"fetch failed: {e}"}
-        ids = resp.get("ids", []) or []
-        if not ids:
+        if not points:
             break
-        docs = resp.get("documents", []) or []
-        metas = resp.get("metadatas", []) or []
 
-        for mid, doc, meta in zip(ids, docs, metas, strict=False):
+        for p in points:
             total_scanned += 1
-            meta = meta or {}
+            mid = p.id
+            doc = p.document or ""
+            meta = p.payload or {}
             tier = (meta.get("memory_class") or "").lower()
             if tier != "obsolete":
                 continue
@@ -1128,7 +1047,7 @@ def prune_atrophied_memories(
                 }
             )
 
-        if len(ids) < PAGE:
+        if len(points) < PAGE:
             break
         offset += PAGE
 
@@ -1202,22 +1121,19 @@ def prune_atrophied_memories(
                                 emb = get_embedding(gist_text, prefix="passage")
                                 if emb:
                                     new_id = f"gist_{old_id[:24]}"
-                                    http_json(
-                                        "POST",
-                                        f"http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col}/upsert",
-                                        {
-                                            "ids": [new_id],
-                                            "embeddings": [emb],
-                                            "documents": [gist_text],
-                                            "metadatas": [
-                                                {
-                                                    "memory_class": "gist",
-                                                    "derived_from": old_id,
-                                                    "created_at": datetime.now(UTC).isoformat(),
-                                                    "trust_score": "0.4",
-                                                }
-                                            ],
-                                        },
+                                    store.upsert(
+                                        "semantic_memory",
+                                        ids=[new_id],
+                                        vectors=[emb],
+                                        documents=[gist_text],
+                                        payloads=[
+                                            {
+                                                "memory_class": "gist",
+                                                "derived_from": old_id,
+                                                "created_at": datetime.now(UTC).isoformat(),
+                                                "trust_score": "0.4",
+                                            }
+                                        ],
                                     )
                                     gist_count += 1
                             except Exception:
@@ -1233,11 +1149,7 @@ def prune_atrophied_memories(
     for i in range(0, len(candidate_ids), BATCH):
         batch = candidate_ids[i : i + BATCH]
         try:
-            http_json(
-                "POST",
-                f"http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col}/delete",
-                {"ids": batch},
-            )
+            store.delete("semantic_memory", batch)
             deleted += len(batch)
             for mid in batch:
                 try:
@@ -1278,8 +1190,7 @@ def cleanup_stale_superseded() -> dict:
 
     Safety: max 100 deletions per run, max 5% of collection.
     """
-    from http_pool import http_json
-    from search import get_collections
+    from vector_store import get_vector_store
 
     sys.path.insert(0, str(Path(__file__).parent))
     try:
@@ -1289,10 +1200,7 @@ def cleanup_stale_superseded() -> dict:
         def log_event(*args, **kwargs):
             return ""
 
-    cols = get_collections()
-    sem_col = cols.get("semantic_memory")
-    if not sem_col:
-        return {"cleaned": 0, "checked": 0, "error": "semantic_memory missing"}
+    store = get_vector_store()
 
     cutoff = datetime.now(UTC) - timedelta(days=30)
     cutoff_iso = cutoff.isoformat().replace("+00:00", "Z")
@@ -1306,28 +1214,28 @@ def cleanup_stale_superseded() -> dict:
 
     while True:
         try:
-            resp = http_json(
-                "POST",
-                f"http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col}/get",
-                {"limit": PAGE, "offset": offset, "include": ["metadatas"]},
+            points = store.get(
+                "semantic_memory",
+                limit=PAGE,
+                offset=offset,
+                with_payload=True,
+                with_documents=False,
             )
         except Exception as e:
             return {"cleaned": 0, "checked": 0, "error": f"fetch failed: {e}"}
 
-        ids = resp.get("ids", []) or []
-        if not ids:
+        if not points:
             break
-        metas = resp.get("metadatas", []) or []
 
-        for mid, meta in zip(ids, metas, strict=False):
+        for p in points:
             total_scanned += 1
-            all_ids.add(mid)
-            meta = meta or {}
+            all_ids.add(p.id)
+            meta = p.payload or {}
             target = (meta.get("superseded_by") or "").strip()
             if target:
-                superseded.append((mid, dict(meta)))
+                superseded.append((p.id, dict(meta)))
 
-        if len(ids) < PAGE:
+        if len(points) < PAGE:
             break
         offset += PAGE
 
@@ -1376,11 +1284,7 @@ def cleanup_stale_superseded() -> dict:
     for i in range(0, len(candidates), BATCH):
         batch = candidates[i : i + BATCH]
         try:
-            http_json(
-                "POST",
-                f"http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col}/delete",
-                {"ids": batch},
-            )
+            store.delete("semantic_memory", batch)
             deleted += len(batch)
             for mid in batch:
                 try:
@@ -1403,15 +1307,11 @@ def memory_health_report() -> dict:
 
     Aggregates: tier distribution, category breakdown, stuck memories,
     average age/access per tier, superseded count. Writes JSON to
-    logs/memory_health.json. No ChromaDB writes, no LLM calls.
+    logs/memory_health.json. No vector writes, no LLM calls.
     """
-    from http_pool import http_json
-    from search import get_collections
+    from vector_store import get_vector_store
 
-    cols = get_collections()
-    sem_col = cols.get("semantic_memory")
-    if not sem_col:
-        return {"status": "error", "reason": "semantic_memory collection not found"}
+    store = get_vector_store()
 
     # Fetch all entries in pages
     PAGE = 500
@@ -1419,19 +1319,19 @@ def memory_health_report() -> dict:
     all_metas: list[dict] = []
     while True:
         try:
-            resp = http_json(
-                "POST",
-                f"http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col}/get",
-                {"limit": PAGE, "offset": offset, "include": ["metadatas"]},
+            points = store.get(
+                "semantic_memory",
+                limit=PAGE,
+                offset=offset,
+                with_payload=True,
+                with_documents=False,
             )
         except Exception as e:
             return {"status": "error", "reason": f"fetch failed at offset={offset}: {e}"}
-        ids = resp.get("ids", []) or []
-        if not ids:
+        if not points:
             break
-        metas = resp.get("metadatas", []) or [{}] * len(ids)
-        all_metas.extend(m or {} for m in metas)
-        if len(ids) < PAGE:
+        all_metas.extend((p.payload or {}) for p in points)
+        if len(points) < PAGE:
             break
         offset += PAGE
 
