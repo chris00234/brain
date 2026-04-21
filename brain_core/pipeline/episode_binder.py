@@ -36,14 +36,12 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from http_pool import http_json
-from search import get_collections
+from vector_store import get_vector_store
 
 try:
     from config import AUTONOMY_DB
 except ImportError:
     AUTONOMY_DB = Path("/Users/chrischo/server/brain/logs/autonomy.db")
-CHROMA_API = "http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections"
 
 EPISODE_WINDOW_MINUTES = 30
 LOOKBACK_HOURS = 24
@@ -97,30 +95,28 @@ def _parse_ts(raw: str) -> datetime | None:
 def _fetch_recent_memories() -> list[dict]:
     """Pull memories created in the last LOOKBACK_HOURS from semantic_memory + experience."""
     cutoff = datetime.now(UTC) - timedelta(hours=LOOKBACK_HOURS)
-    cols = get_collections()
+    store = get_vector_store()
     out: list[dict] = []
     for col_name in ("semantic_memory", "experience"):
-        col_id = cols.get(col_name)
-        if not col_id:
-            continue
         offset = 0
         PAGE = 500
         while True:
             try:
-                resp = http_json(
-                    "POST",
-                    f"{CHROMA_API}/{col_id}/get",
-                    {"limit": PAGE, "offset": offset, "include": ["metadatas"]},
+                points = store.get(
+                    col_name,
+                    limit=PAGE,
+                    offset=offset,
+                    with_payload=True,
+                    with_documents=False,
                 )
             except Exception as e:
                 print(f"  warning: {col_name} fetch failed at offset={offset}: {e}", file=sys.stderr)
                 break
-            ids = resp.get("ids", []) or []
-            if not ids:
+            if not points:
                 break
-            metas = resp.get("metadatas", []) or []
-            for mid, meta in zip(ids, metas, strict=False):
-                meta = meta or {}
+            for p in points:
+                mid = p.id
+                meta = p.payload or {}
                 ts = _parse_ts(meta.get("created_at", "") or meta.get("updated_at", ""))
                 if ts is None or ts < cutoff:
                     continue
@@ -150,7 +146,7 @@ def _fetch_recent_memories() -> list[dict]:
                         "entities": [e for e in entities if isinstance(e, str) and e],
                     }
                 )
-            if len(ids) < PAGE:
+            if len(points) < PAGE:
                 break
             offset += PAGE
     return out

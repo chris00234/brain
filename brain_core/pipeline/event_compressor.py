@@ -19,11 +19,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from cli_llm import dispatch_with_schema  # migrated 2026-04-17
-from http_pool import http_json
-from search import get_collections
-
-CHROMA_URL = "http://127.0.0.1:8000"
-CHROMA_API = f"{CHROMA_URL}/api/v2/tenants/default_tenant/databases/default_database/collections"
+from vector_store import get_vector_store
 
 MIN_EVENTS_PER_MONTH = 5
 MAX_EVENTS_PER_PROMPT = 100
@@ -41,23 +37,12 @@ Events:
 Return strict JSON matching the schema."""
 
 
-def _get_or_create_compressed_collection() -> str | None:
-    """Look up experience_compressed collection, creating it if missing."""
-    cols = get_collections()
-    comp_col = cols.get("experience_compressed")
-    if comp_col:
-        return comp_col
-    try:
-        resp = http_json(
-            "POST",
-            CHROMA_API,
-            {"name": "experience_compressed", "metadata": {"source": "event_compressor"}},
-        )
-        if isinstance(resp, dict):
-            return resp.get("id")
-    except Exception as e:
-        print(f"  failed to create experience_compressed: {e}")
-    return None
+def _get_or_create_compressed_collection() -> str:
+    """Ensure experience_compressed exists, return its name."""
+    get_vector_store().create_collection(
+        "experience_compressed", {"source": "event_compressor"}
+    )
+    return "experience_compressed"
 
 
 def compress_month(month: str, events: list[dict]) -> str | None:
@@ -85,17 +70,11 @@ def compress_month(month: str, events: list[dict]) -> str | None:
 
 
 def main() -> int:
-    cols = get_collections()
-    exp_col = cols.get("experience")
-    if not exp_col:
-        print("experience collection not found")
-        return 1
-
+    store = get_vector_store()
     cutoff_date = (datetime.now(UTC) - timedelta(days=CUTOFF_DAYS)).isoformat()
 
-    # Paginate. A single limit=10000 request would silently skip anything past
-    # the 10,001st record — unacceptable for a monthly compression job that
-    # needs to see every old event exactly once.
+    # Paginate so every old event is seen exactly once (a single large
+    # limit would silently cap past its limit).
     ids: list[str] = []
     docs: list[str] = []
     metas: list[dict] = []
@@ -103,21 +82,22 @@ def main() -> int:
     offset = 0
     while True:
         try:
-            resp = http_json(
-                "POST",
-                f"{CHROMA_API}/{exp_col}/get",
-                {"limit": PAGE, "offset": offset, "include": ["documents", "metadatas"]},
+            points = store.get(
+                "experience",
+                limit=PAGE,
+                offset=offset,
+                with_payload=True,
+                with_documents=True,
             )
         except Exception as e:
             print(f"fetch from experience failed at offset={offset}: {e}")
             return 1
-        page_ids = resp.get("ids", []) or []
-        if not page_ids:
+        if not points:
             break
-        ids.extend(page_ids)
-        docs.extend(resp.get("documents", []) or [])
-        metas.extend(resp.get("metadatas", []) or [])
-        if len(page_ids) < PAGE:
+        ids.extend(p.id for p in points)
+        docs.extend((p.document or "") for p in points)
+        metas.extend((p.payload or {}) for p in points)
+        if len(points) < PAGE:
             break
         offset += PAGE
 
@@ -142,9 +122,6 @@ def main() -> int:
     print(f"Found {len(to_compress_ids)} events across {len(by_month)} months to compress")
 
     comp_col = _get_or_create_compressed_collection()
-    if not comp_col:
-        print("experience_compressed collection unavailable — aborting")
-        return 1
 
     # Lazy import to avoid pulling indexer on module load
     from indexer import get_embedding
@@ -167,22 +144,19 @@ def main() -> int:
             continue
 
         try:
-            http_json(
-                "POST",
-                f"{CHROMA_API}/{comp_col}/upsert",
-                {
-                    "ids": [f"compressed:{month}"],
-                    "embeddings": [emb],
-                    "documents": [summary],
-                    "metadatas": [
-                        {
-                            "month": month,
-                            "memory_class": "compressed",
-                            "event_count": len(events),
-                            "created_at": datetime.now(UTC).isoformat(),
-                        }
-                    ],
-                },
+            store.upsert(
+                comp_col,
+                ids=[f"compressed:{month}"],
+                vectors=[emb],
+                documents=[summary],
+                payloads=[
+                    {
+                        "month": month,
+                        "memory_class": "compressed",
+                        "event_count": len(events),
+                        "created_at": datetime.now(UTC).isoformat(),
+                    }
+                ],
             )
             compressed_months += 1
             print(f"  {month}: compressed {len(events)} events")
@@ -190,24 +164,16 @@ def main() -> int:
             print(f"  {month}: upsert failed: {e}")
             continue
 
-        # Mark originals as obsolete (batched)
-        event_ids = [e["id"] for e in events]
-        for batch_start in range(0, len(event_ids), UPDATE_BATCH_SIZE):
-            batch = event_ids[batch_start : batch_start + UPDATE_BATCH_SIZE]
+        # Mark originals as obsolete
+        patch = {
+            "memory_class": "obsolete",
+            "compressed_into": f"compressed:{month}",
+        }
+        for e in events:
             try:
-                http_json(
-                    "POST",
-                    f"{CHROMA_API}/{exp_col}/update",
-                    {
-                        "ids": batch,
-                        "metadatas": [
-                            {"memory_class": "obsolete", "compressed_into": f"compressed:{month}"}
-                            for _ in batch
-                        ],
-                    },
-                )
-            except Exception as e:
-                print(f"  {month}: update batch failed: {e}")
+                store.update_payload("experience", ids=[e["id"]], patch=patch)
+            except Exception as exc:
+                print(f"  {month}: update failed for {e['id']}: {exc}")
 
     print(f"\nCompressed {compressed_months} months, skipped {skipped_months} (too few events)")
     return 0

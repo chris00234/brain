@@ -151,36 +151,50 @@ def _log_tuning(entry: dict) -> None:
 
 
 def get_collections() -> dict:
-    """Get {name: id} mapping."""
+    """Get {name: name} mapping (name doubles as identifier under VectorStore)."""
     try:
-        resp = http_json("GET", CHROMA_API)
-        if isinstance(resp, list):
-            return {c["name"]: c["id"] for c in resp if c.get("name") and c.get("id")}
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from vector_store import get_vector_store
+
+        return {n: n for n in get_vector_store().list_collections()}
     except Exception:
         pass
     return {}
 
 
-def update_collection_hnsw(col_id: str, ef_search: int) -> bool:
+def update_collection_hnsw(col_name: str, ef_search: int) -> bool:
     """Persist a new ef_search hint on the collection metadata.
 
-    Note: this does NOT update the live HNSW index — ChromaDB reads
-    hnsw:search_ef at collection init time. The update is recorded so
-    that the NEXT collection load picks it up (e.g. after a server
-    restart or cache eviction). Callers should treat this as an
-    advisory write, not a live retuning.
+    ChromaDB-specific: this PUTs against ChromaDB v2 `new_metadata` shape.
+    Under Qdrant the equivalent is an `update_collection` gRPC call with
+    a full `hnsw_config`; it's expressed in Phase A5 (QdrantStore) when
+    the HNSW tuner gets a backend-aware rewrite. This hybrid path keeps
+    the current ChromaDB installation tunable until then.
     """
     try:
+        # Resolve name → current ChromaDB UUID for the direct PUT call.
+        # We leave the ChromaDB path as-is; VectorStore has no
+        # update_collection_metadata primitive yet.
+        import urllib.request
+
+        CHROMA_API = (
+            "http://127.0.0.1:8000/api/v2/tenants/default_tenant/"
+            "databases/default_database/collections"
+        )
+        with urllib.request.urlopen(CHROMA_API, timeout=10) as resp:
+            cols = json.loads(resp.read())
+        col_id = next((c["id"] for c in cols if c.get("name") == col_name), None)
+        if not col_id:
+            print(f"  {col_name}: not found for HNSW tune")
+            return False
         http_json(
             "PUT",
             f"{CHROMA_API}/{col_id}",
-            payload={
-                "new_metadata": {"hnsw:search_ef": ef_search},
-            },
+            payload={"new_metadata": {"hnsw:search_ef": ef_search}},
         )
         return True
     except Exception as e:
-        print(f"  failed to update {col_id}: {e}")
+        print(f"  failed to update {col_name}: {e}")
         return False
 
 

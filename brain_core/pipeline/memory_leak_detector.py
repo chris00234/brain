@@ -11,30 +11,19 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from http_pool import http_json
-from search import get_collections
+from vector_store import get_vector_store
 
 HISTORY_FILE = Path("/Users/chrischo/server/brain/logs/collection_size_history.jsonl")
 GROWTH_THRESHOLD_PCT = 20.0
 
-CHROMA_URL = "http://127.0.0.1:8000"
-CHROMA_API = f"{CHROMA_URL}/api/v2/tenants/default_tenant/databases/default_database/collections"
-
 
 def get_counts() -> dict[str, int]:
-    """Get current doc counts per collection."""
-    cols = get_collections()
+    """Get current doc counts per collection via the vector store."""
+    store = get_vector_store()
     counts: dict[str, int] = {}
-    for name, col_id in cols.items():
+    for name in store.list_collections():
         try:
-            count_resp = http_json("GET", f"{CHROMA_API}/{col_id}/count")
-            # ChromaDB v2 /count returns a bare integer as JSON
-            if isinstance(count_resp, int):
-                counts[name] = count_resp
-            elif isinstance(count_resp, dict):
-                counts[name] = int(count_resp.get("count", 0))
-            else:
-                counts[name] = 0
+            counts[name] = store.count(name)
         except Exception as e:
             print(f"  {name}: count failed: {e}")
             counts[name] = -1

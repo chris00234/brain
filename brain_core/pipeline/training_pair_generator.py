@@ -14,14 +14,10 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from http_pool import http_json
-from search import get_collections
+from vector_store import get_vector_store
 
 FEEDBACK_LOG = Path("/Users/chrischo/server/brain/logs/search-feedback.jsonl")
 TRAINING_DIR = Path("/Users/chrischo/server/brain/logs/training")
-
-CHROMA_URL = "http://127.0.0.1:8000"
-CHROMA_API = f"{CHROMA_URL}/api/v2/tenants/default_tenant/databases/default_database/collections"
 
 MIN_POSITIVE_PAIRS = 100  # minimum to be worth training
 HARD_NEGATIVES_PER_POSITIVE = 3
@@ -59,26 +55,26 @@ def read_feedback_events(since_days: int = 30) -> list[dict]:
 def fetch_memory_content(result_id: str, source: str) -> str | None:
     """Fetch the actual document content for a given result_id."""
     try:
-        cols = get_collections()
+        store = get_vector_store()
+        names = set(store.list_collections())
         col_name: str | None = None
         if ":" in result_id:
             prefix, _ = result_id.split(":", 1)
-            if prefix in cols:
+            if prefix in names:
                 col_name = prefix
         if not col_name and source:
-            col_name = source if source in cols else None
+            col_name = source if source in names else None
         if not col_name:
             return None
 
-        col_id = cols[col_name]
-        resp = http_json(
-            "POST",
-            f"{CHROMA_API}/{col_id}/get",
-            {"ids": [result_id], "include": ["documents"]},
+        points = store.get(
+            col_name,
+            ids=[result_id],
+            with_payload=False,
+            with_documents=True,
         )
-        docs = resp.get("documents", []) or []
-        if docs and docs[0]:
-            return docs[0][:1000]
+        if points and points[0].document:
+            return points[0].document[:1000]
     except Exception:
         pass
     return None
@@ -91,17 +87,19 @@ def sample_hard_negatives(query: str, positive_content: str, count: int = 3) -> 
     that share NO significant tokens with the query.
     """
     try:
-        cols = get_collections()
-        col_id = cols.get("knowledge") or cols.get("semantic_memory")
-        if not col_id:
+        store = get_vector_store()
+        names = set(store.list_collections())
+        collection = "knowledge" if "knowledge" in names else ("semantic_memory" if "semantic_memory" in names else None)
+        if not collection:
             return []
 
-        resp = http_json(
-            "POST",
-            f"{CHROMA_API}/{col_id}/get",
-            {"limit": 100, "include": ["documents"]},
+        points = store.get(
+            collection,
+            limit=100,
+            with_payload=False,
+            with_documents=True,
         )
-        docs = resp.get("documents", []) or []
+        docs = [p.document or "" for p in points]
         if not docs:
             return []
 

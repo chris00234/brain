@@ -9,43 +9,35 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from http_pool import http_json
 from indexer import EMBED_MODEL_VERSION, get_embeddings_batch
-
-CHROMA_URL = "http://127.0.0.1:8000"
-CHROMA_API = f"{CHROMA_URL}/api/v2/tenants/default_tenant/databases/default_database/collections"
+from vector_store import get_vector_store
 
 
-def get_collection_id(name: str) -> str | None:
-    cols = http_json("GET", CHROMA_API)
-    if isinstance(cols, list):
-        for c in cols:
-            if c.get("name") == name:
-                return c.get("id")
-    return None
+def collection_exists(name: str) -> bool:
+    return name in get_vector_store().list_collections()
 
 
-def create_collection(name: str) -> str | None:
-    resp = http_json("POST", CHROMA_API, payload={"name": name, "metadata": {"source": "reembed_migrator"}})
-    return resp.get("id") if isinstance(resp, dict) else None
+def create_collection(name: str) -> str:
+    get_vector_store().create_collection(name, {"source": "reembed_migrator"})
+    return name
 
 
-def fetch_all_docs(col_id: str, batch: int = 500):
+def fetch_all_docs(collection: str, batch: int = 500):
     offset = 0
+    store = get_vector_store()
     while True:
-        resp = http_json(
-            "POST",
-            f"{CHROMA_API}/{col_id}/get",
-            {"limit": batch, "offset": offset, "include": ["documents", "metadatas"]},
+        points = store.get(
+            collection,
+            limit=batch,
+            offset=offset,
+            with_payload=True,
+            with_documents=True,
         )
-        ids = resp.get("ids", [])
-        if not ids:
+        if not points:
             break
-        docs = resp.get("documents", []) or []
-        metas = resp.get("metadatas", []) or []
-        for i, d, m in zip(ids, docs, metas, strict=False):
-            yield i, d, m
-        if len(ids) < batch:
+        for p in points:
+            yield p.id, (p.document or ""), (p.payload or {})
+        if len(points) < batch:
             break
         offset += batch
 
@@ -60,7 +52,7 @@ def _embed_batch(docs: list, model: str = "") -> list:
     return get_embeddings_batch(docs, prefix="passage")
 
 
-def _flush_batch(shadow_id: str, ids: list, docs: list, metas: list, model: str = "") -> int:
+def _flush_batch(shadow_name: str, ids: list, docs: list, metas: list, model: str = "") -> int:
     """Embed + upsert a batch, filtering out empty embeddings. Returns count written."""
     if not ids:
         return 0
@@ -73,15 +65,12 @@ def _flush_batch(shadow_id: str, ids: list, docs: list, metas: list, model: str 
         print(f"  WARNING: {len(ids) - len(valid)} docs in batch failed embedding, skipped")
     v_ids, v_docs, v_metas, v_embs = zip(*valid, strict=False)
     try:
-        http_json(
-            "POST",
-            f"{CHROMA_API}/{shadow_id}/upsert",
-            {
-                "ids": list(v_ids),
-                "embeddings": list(v_embs),
-                "documents": list(v_docs),
-                "metadatas": list(v_metas),
-            },
+        get_vector_store().upsert(
+            shadow_name,
+            ids=list(v_ids),
+            vectors=list(v_embs),
+            documents=list(v_docs),
+            payloads=list(v_metas),
         )
         return len(valid)
     except Exception as e:
@@ -112,14 +101,12 @@ def main():
     )
     args = parser.parse_args()
 
-    source_id = get_collection_id(args.collection)
-    if not source_id:
+    if not collection_exists(args.collection):
         print(f"ERROR: collection {args.collection} not found")
         return 2
 
     shadow_name = _derive_shadow_name(args.collection, args.model)
-    existing_shadow = get_collection_id(shadow_name)
-    if existing_shadow:
+    if collection_exists(shadow_name):
         print(f"ERROR: shadow collection {shadow_name} already exists — delete it first")
         return 2
 
@@ -134,29 +121,26 @@ def main():
         return 0
 
     # Create shadow
-    shadow_id = create_collection(shadow_name)
-    if not shadow_id:
-        print("ERROR: failed to create shadow collection")
-        return 2
+    create_collection(shadow_name)
 
     def _delete_shadow():
         """Attempt to remove a partial shadow on failure. Best-effort.
 
-        ChromaDB v2 native mode DELETE uses the collection NAME, not the UUID
-        (verified against 0.5.x native server — DELETE by UUID returns 404).
+        VectorStore doesn't expose collection-level delete in the protocol;
+        we rely on the backend-specific CLI for shadow teardown in the
+        rollback path. Note this in the log so operators know where to look.
         """
-        try:
-            http_json("DELETE", f"{CHROMA_API}/{shadow_name}")
-            print(f"  rolled back: deleted partial shadow {shadow_name}")
-        except Exception as e:
-            print(f"  WARNING: could not delete partial shadow {shadow_name}: {e}")
+        print(
+            f"  rollback: manual shadow cleanup needed — run `qdrant-cli drop {shadow_name}` "
+            f"(or ChromaDB equivalent) before retrying."
+        )
 
     # Migrate in batches of 100
     total = 0
     model_version_tag = args.model if args.model.startswith("lora:") else EMBED_MODEL_VERSION
     batch_docs, batch_metas, batch_ids = [], [], []
     try:
-        for doc_id, content, meta in fetch_all_docs(source_id):
+        for doc_id, content, meta in fetch_all_docs(args.collection):
             batch_ids.append(doc_id)
             batch_docs.append(content or "")
             meta = dict(meta or {})
@@ -165,13 +149,13 @@ def main():
             batch_metas.append(meta)
 
             if len(batch_ids) >= 100:
-                total += _flush_batch(shadow_id, batch_ids, batch_docs, batch_metas, model=args.model)
+                total += _flush_batch(shadow_name, batch_ids, batch_docs, batch_metas, model=args.model)
                 print(f"  migrated {total} docs...")
                 batch_docs, batch_metas, batch_ids = [], [], []
 
         # Final batch
         if batch_ids:
-            total += _flush_batch(shadow_id, batch_ids, batch_docs, batch_metas, model=args.model)
+            total += _flush_batch(shadow_name, batch_ids, batch_docs, batch_metas, model=args.model)
     except KeyboardInterrupt:
         print("\nINTERRUPTED — rolling back partial shadow")
         _delete_shadow()
