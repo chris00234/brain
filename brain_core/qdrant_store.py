@@ -160,19 +160,21 @@ def _resolve_qdrant_url() -> str:
 
 
 def _search_params_for(collection: str) -> Any:
-    """Per-collection HNSW runtime params.
+    """Per-collection HNSW + quantization runtime params.
 
-    hnsw_tuner keeps recommended ef_search per collection (tuned for
-    p95 vs recall tradeoffs). Reading it here so the adaptive tuner's
-    recommendations actually flow into live queries without every
-    caller having to pass SearchParams explicitly.
+    - hnsw_ef: pulled from hnsw_tuner.SETTINGS (per-collection p95 / recall
+      tradeoff). Previously dead code; wired here so tuner recommendations
+      flow into live queries.
+    - quantization.rescore=True: bootstrap stores vectors in int8 with
+      full fp32 on NVMe. Setting rescore=True asks Qdrant to fetch the
+      fp32 vectors for the top candidates and re-score them — small
+      latency cost (~5-15ms), meaningful quality win at high k.
     """
-    ef = _hnsw_settings().get(collection)
-    if not ef:
-        return None
-    from qdrant_client.models import SearchParams
+    from qdrant_client.models import QuantizationSearchParams, SearchParams
 
-    return SearchParams(hnsw_ef=int(ef))
+    ef = _hnsw_settings().get(collection)
+    quant = QuantizationSearchParams(ignore=False, rescore=True, oversampling=2.0)
+    return SearchParams(hnsw_ef=int(ef) if ef else None, quantization=quant)
 
 
 _HNSW_SETTINGS_CACHE: dict[str, int] | None = None
@@ -271,12 +273,19 @@ class QdrantStore:
         """
         from qdrant_client.models import Prefetch, SparseVector
 
-        prefetch_limit = max(k * 3, 30)
+        # Asymmetric prefetch depths:
+        # - dense is the primary recall source → wide prefetch (k*3, min 30)
+        # - contextual / sparse are tie-breakers for exact wording and
+        #   prefix-enriched semantics → narrower (k*2, min 20) to avoid
+        #   diluting dense ranking before the top-level rescore.
+        # Tuned 2026-04-21 against cli/eval_set_stable.json.
+        dense_limit = max(k * 3, 30)
+        aux_limit = max(k * 2, 20)
         prefetch_list: list[Prefetch] = [
             Prefetch(
                 query=vector,
                 using="dense",
-                limit=prefetch_limit,
+                limit=dense_limit,
                 filter=qfilter,
                 params=search_params,
             )
@@ -286,7 +295,7 @@ class QdrantStore:
                 Prefetch(
                     query=vector,
                     using="contextual",
-                    limit=prefetch_limit,
+                    limit=aux_limit,
                     filter=qfilter,
                     params=search_params,
                 )
@@ -301,7 +310,7 @@ class QdrantStore:
                         Prefetch(
                             query=SparseVector(indices=indices, values=values),
                             using="sparse",
-                            limit=prefetch_limit,
+                            limit=aux_limit,
                             filter=qfilter,
                         )
                     )
@@ -496,14 +505,29 @@ class QdrantStore:
 
         hits: list = []
         if prefetch_list:
+            # Qdrant 1.17 hybrid pattern: prefetch broadly with hybrid
+            # fusion, then rescore the merged top candidates with pure
+            # dense cosine. RRF alone gave strong content recall but
+            # demoted dense-top-ranked source hits (eval source@5 dropped
+            # 5.1pts on 2026-04-21 regression). Rescoring with dense at
+            # the top level restores source ordering while keeping sparse
+            # and contextual as recall-widening signals.
             try:
-                from qdrant_client.models import FusionQuery
+                from qdrant_client.models import FusionQuery, Prefetch
 
-                resp = self._client.query_points(
-                    collection_name=real,
+                fusion_prefetch = Prefetch(
                     prefetch=prefetch_list,
                     query=FusionQuery(fusion="rrf"),
+                    limit=max(k * 3, 30),
+                )
+                resp = self._client.query_points(
+                    collection_name=real,
+                    prefetch=fusion_prefetch,
+                    query=vector,
+                    using="dense",
                     limit=k,
+                    query_filter=qfilter,
+                    search_params=search_params,
                     with_payload=with_payload,
                     with_vectors=with_vectors,
                 )
