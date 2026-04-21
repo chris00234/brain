@@ -287,7 +287,13 @@ def _canonical_blocks_from_matches(
 
 
 _SEMANTIC_POOL_MAX_WORKERS = 4
-_SEMANTIC_PER_QUERY_TIMEOUT_S = 0.8
+_SEMANTIC_OVERALL_TIMEOUT_S = 1.2  # hard cap for the whole fanout
+# Shared module-level pool so a slow worker thread does not block the caller
+# on a context manager's shutdown(wait=True). Abandoned futures keep running
+# on the pool and their results get discarded on completion.
+from concurrent.futures import ThreadPoolExecutor as _ActiveRecallPool  # noqa: E402
+
+_semantic_pool = _ActiveRecallPool(max_workers=_SEMANTIC_POOL_MAX_WORKERS, thread_name_prefix="active_recall")
 
 
 def _semantic_blocks(
@@ -299,19 +305,18 @@ def _semantic_blocks(
     """Fan out the prompt + matched intents' always_push_queries through
     search_unified.search_all. Returns up to `limit` dedup'd blocks.
 
-    2026-04-20 perf: parallelized across queries with ThreadPoolExecutor.
-    Previously ran 4 queries serially at ~500-800ms each → 2-3s p99 that
-    pushed /recall/active past the 5s MCP window. Now all queries race in
-    parallel with a per-query soft timeout; slow queries drop out rather
-    than blocking the response.
+    2026-04-20 perf: parallelized across queries with a module-level
+    ThreadPoolExecutor. Serial fanout used to hit 2-3s p99. Parallel fanout
+    lets one slow query drop out instead of gating the response, and uses a
+    shared pool so the function itself never blocks on pool shutdown.
     """
     try:
         import search_unified
     except ImportError:
         return []
 
-    from concurrent.futures import ThreadPoolExecutor, as_completed
     from concurrent.futures import TimeoutError as _FutTimeout
+    from concurrent.futures import as_completed
 
     queries = [prompt]
     for m in matches:
@@ -335,17 +340,31 @@ def _semantic_blocks(
         return []
 
     all_results: list[dict] = []
-    with ThreadPoolExecutor(
-        max_workers=_SEMANTIC_POOL_MAX_WORKERS, thread_name_prefix="active_recall"
-    ) as pool:
-        futures = {pool.submit(_one, q): q for q in queries}
-        for fut in as_completed(futures, timeout=_SEMANTIC_PER_QUERY_TIMEOUT_S * len(queries)):
+    futures = {_semantic_pool.submit(_one, q): q for q in queries}
+    try:
+        for fut in as_completed(futures, timeout=_SEMANTIC_OVERALL_TIMEOUT_S):
             try:
-                all_results.extend(fut.result(timeout=0))
-            except _FutTimeout:
-                log.debug("active_recall semantic query timed out: %r", futures[fut][:40])
+                all_results.extend(fut.result())
             except Exception as e:
                 log.debug("active_recall semantic query errored for %r: %s", futures[fut][:40], e)
+    except _FutTimeout:
+        # Some queries did not finish within the overall budget. Collect
+        # whatever HAS completed, abandon the rest — they stay on the pool
+        # but their result is ignored. Under normal load the pool drains
+        # in 1-2s and workers are available on the next tick.
+        done = sum(1 for f in futures if f.done())
+        log.info(
+            "active_recall fanout exceeded %.1fs budget (%d/%d queries done)",
+            _SEMANTIC_OVERALL_TIMEOUT_S,
+            done,
+            len(futures),
+        )
+        import contextlib
+
+        for f in futures:
+            if f.done():
+                with contextlib.suppress(Exception):
+                    all_results.extend(f.result())
 
     # Dedup by path or id within this call
     blocks: list[InjectionBlock] = []
