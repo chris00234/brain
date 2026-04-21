@@ -245,7 +245,13 @@ class BrainScheduler:
                 misfire_grace_time=job.misfire_grace,
                 coalesce=True,  # collapse missed runs into 1
             )
-        # In-process task executor (runs every 30s, not as subprocess)
+        # In-process task executor (runs every 30s, not as subprocess).
+        # max_instances=2 tolerates one stalled tick (e.g. cli_dispatch chain
+        # up to 90s with 30s-per-backend fallback) without skipping the next
+        # scheduled fire. A real fix — offload escalation to a background
+        # thread so the tick itself is fast — is tracked as follow-up; see
+        # server.err.log 2026-04-20 17:31-17:34 for the incident that surfaced
+        # the "maximum number of running instances reached (1)" pattern.
         self._scheduler.add_job(
             self._tick_executor,
             trigger=IntervalTrigger(seconds=30),
@@ -254,6 +260,7 @@ class BrainScheduler:
             replace_existing=True,
             misfire_grace_time=60,
             coalesce=True,
+            max_instances=2,
         )
         # 2026-04-16 fix: completion reaper. Previously _pending_completions
         # was populated at dispatch but never drained — the missing
