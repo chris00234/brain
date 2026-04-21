@@ -208,6 +208,31 @@ def build_tree() -> dict:
     current_level = leaves  # each item: {"id", "embedding", "text", "level"}
     summaries_made = 0
 
+    # Idempotency cache — on restart after disconnect, avoid re-LLMing
+    # clusters whose node_id already exists in canonical AND was written
+    # TODAY. Older summaries (e.g. from pre-Qdrant-migration runs) must
+    # be regenerated because their text may reference stale facts
+    # ("ChromaDB as the vector store", etc). Only matching-date node_ids
+    # get skipped; stale-date ids fall through to fresh LLM generation.
+    today_stamp = datetime.now(UTC).strftime("%Y%m%d")
+    existing_raptor_ids: set[str] = set()
+    try:
+        from vector_store import get_vector_store
+
+        pts = get_vector_store().get(
+            "canonical_raptor",
+            limit=10000,
+            with_payload=True,  # need payload to recover `_original_id` string node_id
+            with_documents=False,
+        )
+        # Only cache node_ids with today's date suffix; older dates are
+        # stale and must be refreshed this run.
+        existing_raptor_ids = {p.id for p in pts if isinstance(p.id, str) and p.id.endswith(today_stamp)}
+    except Exception as exc:
+        import logging
+
+        logging.getLogger("brain.raptor").debug("raptor idempotency cache load failed: %s", exc)
+
     for level in range(1, MAX_LEVELS + 1):
         if len(current_level) <= MAX_ROOT_NODES:
             break
@@ -221,12 +246,46 @@ def build_tree() -> dict:
                 continue
             cluster_texts = [current_level[i]["text"] for i in cluster_idxs]
             cluster_child_ids = [current_level[i]["id"] for i in cluster_idxs]
+            node_id = f"raptor:L{level}:{ci:03d}:{datetime.now(UTC).strftime('%Y%m%d')}"
+            # Skip Sage LLM call + upsert when a summary for this exact
+            # cluster slot already landed today. Re-embedding still needs
+            # to happen so the level-2 clustering sees summary semantics,
+            # but we reuse the prior-run text by fetching it.
+            if node_id in existing_raptor_ids:
+                try:
+                    existing_pts = get_vector_store().get(
+                        "canonical_raptor",
+                        ids=[node_id],
+                        with_documents=True,
+                        with_vectors=False,
+                    )
+                    if existing_pts and existing_pts[0].document:
+                        try:
+                            from indexer import get_embedding
+
+                            emb = get_embedding(existing_pts[0].document, use_cache=True, prefix="passage")
+                        except Exception:
+                            emb = []
+                        next_level.append(
+                            {
+                                "id": node_id,
+                                "embedding": emb or [],
+                                "text": existing_pts[0].document,
+                                "level": level,
+                            }
+                        )
+                        continue
+                except Exception as exc:
+                    import logging
+
+                    logging.getLogger("brain.raptor").debug(
+                        "raptor idempotency skip failed for %s: %s", node_id, exc
+                    )
             summary = _summarize_cluster_via_sage(cluster_texts, level)
             if not summary:
                 # Fall back to passing the most central child through
                 next_level.append(current_level[cluster_idxs[0]])
                 continue
-            node_id = f"raptor:L{level}:{ci:03d}:{datetime.now(UTC).strftime('%Y%m%d')}"
             _upsert_summary(col_id, node_id, summary, level, cluster_child_ids)
             summaries_made += 1
             made_this_level += 1
