@@ -7056,7 +7056,7 @@ def code_find(
         if not col_id:
             return {"results": [], "error": "code collection not found — run /jobs/code_index_refresh first"}
         emb = get_embedding(q, prefix="query")
-        data = vector_search(col_id, emb, n=n)
+        data = vector_search(col_id, emb, n=n, query_text=q)
         ids = (data.get("ids") or [[]])[0]
         docs = (data.get("documents") or [[]])[0]
         metas = (data.get("metadatas") or [[]])[0]

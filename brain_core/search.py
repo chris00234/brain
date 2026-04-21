@@ -328,14 +328,16 @@ def hybrid_search(query, collections, limit=5, use_keyword=True, where=None, ded
     embeddings = [get_embedding(q) for q in queries]
     col_map = get_collections()
 
-    # Build the list of (col_name, col_id, embedding) tasks up front.
-    tasks: list[tuple[str, str, list[float]]] = []
+    # Build the list of (col_name, col_id, embedding, variant_text) tasks.
+    # variant_text is threaded to the vector backend so Qdrant can fold
+    # BM25 sparse into its hybrid fusion alongside dense.
+    tasks: list[tuple[str, str, list[float], str]] = []
     for col_name in collections:
         col_id = col_map.get(col_name)
         if not col_id:
             continue
-        for emb in embeddings:
-            tasks.append((col_name, col_id, emb))
+        for variant_text, emb in zip(queries, embeddings, strict=True):
+            tasks.append((col_name, col_id, emb, variant_text))
 
     # Formerly max(80, limit*10). Default /recall/v2 passes limit=20 → candidate_n=200
     # per (collection, variant) call — 14 calls × 200 = 2800 raw results just to
@@ -346,9 +348,9 @@ def hybrid_search(query, collections, limit=5, use_keyword=True, where=None, ded
     candidate_n = max(25, limit * 3)
 
     def _query_one(task):
-        col_name, col_id, emb = task
+        col_name, col_id, emb, variant_text = task
         try:
-            data = vector_search(col_id, emb, n=candidate_n, where=where)
+            data = vector_search(col_id, emb, n=candidate_n, where=where, query_text=variant_text)
         except Exception as e:
             log.warning("vector_search failed for collection=%s: %s", col_name, e)
             return col_name, {}

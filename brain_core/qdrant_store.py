@@ -396,15 +396,32 @@ class QdrantStore:
                     continue  # Skip operator dicts; caller must set these explicitly
                 alias_patch[k] = v
 
+        has_sparse = self._has_sparse(real)
+        sparse_encode = None
+        if has_sparse and documents is not None:
+            try:
+                from sparse_tokenizer import encode as _se
+
+                sparse_encode = _se
+            except Exception:
+                sparse_encode = None
+
         points: list[PointStruct] = []
         for i, (sid, vec, payload) in enumerate(zip(ids, vectors, payloads, strict=True)):
             merged = dict(payload or {})
             merged.update(alias_patch)
             # Reserved keys so get()/query() can return original string id and document.
             merged["_original_id"] = sid
+            point_vectors: dict[str, Any] = {"dense": vec}
             if documents is not None:
                 merged["_document"] = documents[i]
-            points.append(PointStruct(id=self._qid(sid), vector={"dense": vec}, payload=merged))
+                if sparse_encode is not None:
+                    indices, values = sparse_encode(documents[i] or "")
+                    if indices:
+                        from qdrant_client.models import SparseVector
+
+                        point_vectors["sparse"] = SparseVector(indices=indices, values=values)
+            points.append(PointStruct(id=self._qid(sid), vector=point_vectors, payload=merged))
         self._client.upsert(collection_name=real, points=points, wait=False)
 
     def query(

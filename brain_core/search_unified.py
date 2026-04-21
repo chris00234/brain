@@ -1225,7 +1225,7 @@ def search_all(
                 emb = get_embedding(query, use_cache=True, prefix="query")
             except Exception:
                 return []
-            data = vector_search(col_id, emb, n=min(limit, 5))
+            data = vector_search(col_id, emb, n=min(limit, 5), query_text=query)
             if not data:
                 return []
             ids = (data.get("ids") or [[]])[0]
