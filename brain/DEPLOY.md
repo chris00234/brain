@@ -1,6 +1,6 @@
 # Brain — Deployment
 
-**Status (2026-04-21)**: Chris runs the brain natively on his M4 Max Mac Studio via launchd. Qdrant runs as a Docker container (OrbStack). The deployment artifacts in this document (`Dockerfile`, `docker-compose.yml`) are a portable fallback — they prove the brain CAN be containerized, run on a fresh Linux box, and recovered from cold-start in under 5 minutes.
+**Status (2026-04-21)**: Chris runs the brain + all storage backends natively on his M4 Max Mac Studio via launchd. Qdrant is built from source (v1.17.0 via cargo) and supervised by `ai.openclaw.qdrant-native`. The deployment artifacts in this document (`Dockerfile`, `docker-compose.yml`) are a portable fallback for Linux — they prove the brain can be containerized, run on a fresh Linux box, and recovered from cold-start in under 5 minutes.
 
 ## Deployment modes
 
@@ -11,6 +11,7 @@ Chris's box runs nine launchd services:
 | Service | Plist | Purpose |
 |---|---|---|
 | `ai.openclaw.brain-server` | `~/Library/LaunchAgents/` | Brain FastAPI on :8791 (KeepAlive supervisor) |
+| `ai.openclaw.qdrant-native` | same | Qdrant v1.17 on :6333 / :6334 (source-built binary at `~/.local/bin/qdrant`) |
 | `ai.openclaw.ollama-native` | same | Ollama on :11434, Apple Silicon GPU/NE |
 | `ai.openclaw.neo4j-native` | same | Neo4j Bolt :7687 / HTTP :7474, 512MB heap |
 | `ai.openclaw.qdrant-backup` | same | Independent failure domain backup loop (Qdrant snapshots + knowledge tree) |
@@ -72,7 +73,8 @@ python3.14 -m venv .venv
 .venv/bin/pip install -e .
 
 # Install the three storage backends manually
-# - Qdrant:    docker run -d -p 6333:6333 -v $PWD/qdrant-data:/qdrant/storage qdrant/qdrant:v1.14.0
+# - Qdrant:    cargo install --git https://github.com/qdrant/qdrant --tag v1.17.0 --locked qdrant
+#              OR on Linux: docker run -d -p 6333:6333 -v $PWD/qdrant-data:/qdrant/storage qdrant/qdrant:v1.17.0
 # - Ollama:    curl -fsSL https://ollama.com/install.sh | sh
 # - Neo4j:     apt install neo4j  (or download tarball)
 

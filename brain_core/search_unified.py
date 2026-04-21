@@ -1235,7 +1235,7 @@ def search_all(
             out: list[dict] = []
             for i in range(len(docs)):
                 vector_sim = max(0.0, min(1.0, 1 - (dists[i] if i < len(dists) else 1.0)))
-                level = int((metas[i] or {}).get("level", 1) or 1)
+                level = int((metas[i] or {}).get("raptor_level", 1) or 1)
                 title = f"RAPTOR summary L{level}"
                 out.append(
                     {

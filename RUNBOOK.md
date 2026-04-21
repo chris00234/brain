@@ -180,14 +180,14 @@ sqlite3 /Users/chrischo/server/brain/logs/scheduler_history.db "SELECT * FROM jo
 ### First-line check
 ```bash
 curl -sf http://127.0.0.1:6333/readyz
-docker ps --filter name=qdrant
-docker logs --tail 50 qdrant 2>&1
+launchctl list | grep qdrant-native
+tail -50 ~/server/brain/logs/qdrant-native.err.log
 ```
 
 ### Fix
-1. Restart Qdrant container:
+1. Restart native Qdrant:
    ```bash
-   docker compose -f ~/server/brain/docker-compose.yml restart qdrant
+   launchctl kickstart -k gui/$(id -u)/ai.openclaw.qdrant-native
    ```
 2. Wait 5s, re-check `/readyz`.
 3. If persistent failure, check disk space on `~/server/brain/qdrant-data/`.
@@ -428,7 +428,7 @@ BRAIN_ATOMS_ENABLED=true .venv/bin/python cli/canonicalize_entities.py --thresho
 ## Reference
 
 - Brain entry: `~/server/brain/server.py` (FastAPI on :8791)
-- Services: qdrant (docker, 6333), ollama (native, 11434), neo4j (native, 7687)
+- Services: qdrant (native, 6333), ollama (native, 11434), neo4j (native, 7687)
 - Schema migrations: `~/server/brain/brain_core/schema_versions.py`
 - Autonomy gate: `~/server/brain/brain_core/autonomy.py`
 - Persistent breakers: `~/server/brain/brain_core/breakers.py`

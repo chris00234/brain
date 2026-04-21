@@ -166,20 +166,40 @@ def _search_params_for(collection: str) -> Any:
     recommendations actually flow into live queries without every
     caller having to pass SearchParams explicitly.
     """
-    try:
-        import sys
-        from pathlib import Path
-
-        sys.path.insert(0, str(Path(__file__).resolve().parent / "pipeline"))
-        from hnsw_tuner import SETTINGS  # type: ignore[import]
-    except Exception:
-        return None
-    ef = SETTINGS.get(collection)
+    ef = _hnsw_settings().get(collection)
     if not ef:
         return None
     from qdrant_client.models import SearchParams
 
     return SearchParams(hnsw_ef=int(ef))
+
+
+_HNSW_SETTINGS_CACHE: dict[str, int] | None = None
+
+
+def _hnsw_settings() -> dict[str, int]:
+    """Lazy-load + cache hnsw_tuner.SETTINGS once per process.
+
+    Previously re-imported on every query and leaked `sys.path` entries
+    without bound on long-running processes. The import failure path
+    returns an empty dict so callers silently skip ef_search override.
+    """
+    global _HNSW_SETTINGS_CACHE
+    if _HNSW_SETTINGS_CACHE is not None:
+        return _HNSW_SETTINGS_CACHE
+    import sys
+    from pathlib import Path
+
+    pipeline_dir = str(Path(__file__).resolve().parent / "pipeline")
+    if pipeline_dir not in sys.path:
+        sys.path.append(pipeline_dir)
+    try:
+        from hnsw_tuner import SETTINGS  # type: ignore[import-not-found]
+
+        _HNSW_SETTINGS_CACHE = dict(SETTINGS)
+    except Exception:
+        _HNSW_SETTINGS_CACHE = {}
+    return _HNSW_SETTINGS_CACHE
 
 
 class QdrantStore:

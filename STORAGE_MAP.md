@@ -59,7 +59,7 @@ Authoritative list of every on-disk store brain owns. Anything not listed here i
 
 | Service | Endpoint | Role |
 |---|---|---|
-| Qdrant | `http://127.0.0.1:6333` (Docker) | Vector store. 7 collections: `canonical`, `semantic_memory`, `experience`, `knowledge`, `code`, `personal`, `obsidian`. Legacy names (`semantic_contradictions`, `canonical_raptor`, `experience_compressed`, `context`, `patterns`) are aliased to their target collection via payload discriminators. int8 scalar quantization, HNSW m=16 / ef_construct=128, named `dense`/`contextual`/`raptor` vectors on canonical. |
+| Qdrant | `http://127.0.0.1:6333` (native, v1.17 source-build) | Vector store. 7 collections: `canonical`, `semantic_memory`, `experience`, `knowledge`, `code`, `personal`, `obsidian`. Legacy names (`semantic_contradictions`, `canonical_raptor`, `experience_compressed`, `context`, `patterns`) are aliased to their target collection via payload discriminators. int8 scalar quantization, HNSW m=16 / ef_construct=128, named `dense`/`contextual`/`raptor` vectors on canonical + `sparse` (BM25) on every collection. |
 | Ollama | `http://127.0.0.1:11434` (native) | Embedder only. Model: `blaifa/multilingual-e5-large-instruct` (1024-dim). No LLM inference. |
 | Neo4j | `bolt://127.0.0.1:7687` (native) | Entity graph + 2-hop expansion + `MemoryAccess` utility scoring (Zep/Graphiti pattern). No auth (localhost). |
 

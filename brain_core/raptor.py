@@ -169,7 +169,7 @@ def _upsert_summary(col_id: str, node_id: str, text: str, level: int, children: 
         payloads=[
             {
                 "type": "raptor-summary",
-                "level": level,
+                "raptor_level": level,
                 "children_count": len(children),
                 "children": json.dumps(children[:30]),
                 "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
