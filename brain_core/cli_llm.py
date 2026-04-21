@@ -35,6 +35,7 @@ accounting for the new llm_daily_spend_usd SLO.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import re
@@ -166,10 +167,8 @@ def _parse_codex(stdout: str, stderr: str) -> tuple[str, int]:
     tokens = 0
     m = _CODEX_TOKEN_RE.search(stderr or "") or _CODEX_TOKEN_RE.search(stdout)
     if m:
-        try:
+        with contextlib.suppress(ValueError):
             tokens = int(m.group(1).replace(",", ""))
-        except ValueError:
-            pass
     return text, tokens
 
 
@@ -258,11 +257,11 @@ def _try_backend(backend: str, model: str, prompt: str, timeout: int) -> CliResu
 def cli_dispatch(
     prompt: str,
     *,
-    timeout: int = 60,
+    timeout: int = 30,
     backend: str | None = None,
     backlog_kind: str | None = None,
     backlog_payload: dict | None = None,
-    **_ignored,
+    **_ignored: Any,
 ) -> CliResult:
     """Dispatch a stateless LLM call with full fallback chain.
 
@@ -295,7 +294,7 @@ def cli_dispatch(
     result: CliResult | None = None
     tried: list[tuple[str, str]] = []
 
-    for backend, model, desc in chain:
+    for backend, model, _desc in chain:
         r = _try_backend(backend, model, prompt, timeout)
         tried.append((backend, model))
         r.tried = tried
@@ -346,7 +345,7 @@ def cli_dispatch_with_schema(
     prompt: str,
     schema_description: str,
     *,
-    timeout: int = 60,
+    timeout: int = 30,
     max_parse_retries: int = 2,
     backlog_kind: str | None = None,
     backlog_payload: dict | None = None,
@@ -361,7 +360,7 @@ def cli_dispatch_with_schema(
         f"{schema_description}\n\nNo prose. No markdown fences. Just the JSON object."
     )
     error_suffix = ""
-    for attempt in range(max_parse_retries + 1):
+    for _attempt in range(max_parse_retries + 1):
         full_message = prompt + schema_instruction + error_suffix
         result = cli_dispatch(
             full_message,
@@ -390,7 +389,7 @@ def dispatch_compat(
     message: str,
     *,
     thinking: str = "low",
-    timeout: int = 60,
+    timeout: int = 30,
     backlog_kind: str | None = None,
     backlog_payload: dict | None = None,
     **_: Any,
@@ -431,12 +430,12 @@ if __name__ == "__main__":
 
     test_prompt = sys.argv[1] if len(sys.argv) > 1 else "Answer in one word: capital of Japan"
     r = cli_dispatch(test_prompt)
-    print(
+    print(  # noqa: T201 — CLI debug entry point
         f"backend={r.backend} model={r.model} ok={r.ok} tokens={r.tokens} "
         f"dur_ms={r.duration_ms} attempts={r.attempts} tried={r.tried}"
     )
-    print(f"text: {r.text[:300]}")
+    print(f"text: {r.text[:300]}")  # noqa: T201
     if r.backlogged:
-        print("(backlogged for later catch-up)")
+        print("(backlogged for later catch-up)")  # noqa: T201
     if not r.ok:
-        print(f"error: {r.error[:300]}")
+        print(f"error: {r.error[:300]}")  # noqa: T201
