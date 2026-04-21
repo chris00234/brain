@@ -190,18 +190,49 @@ def _hnsw_settings() -> dict[str, int]:
     global _HNSW_SETTINGS_CACHE
     if _HNSW_SETTINGS_CACHE is not None:
         return _HNSW_SETTINGS_CACHE
+    import json
     import sys
     from pathlib import Path
 
     pipeline_dir = str(Path(__file__).resolve().parent / "pipeline")
     if pipeline_dir not in sys.path:
         sys.path.append(pipeline_dir)
+
+    merged: dict[str, int] = {}
     try:
         from hnsw_tuner import SETTINGS  # type: ignore[import-not-found]
 
-        _HNSW_SETTINGS_CACHE = dict(SETTINGS)
-    except Exception:
-        _HNSW_SETTINGS_CACHE = {}
+        merged.update(SETTINGS)
+    except Exception as exc:
+        log.debug("hnsw_tuner SETTINGS import failed: %s", exc)
+
+    # Close the adaptive feedback loop: hnsw_tuner.adaptive_tune appends
+    # recommendation rows to logs/hnsw_tuning.jsonl but nothing ever read
+    # them back. Merge the latest recommendation per collection on top of
+    # the static defaults so live queries pick up the tuner's decisions.
+    try:
+        tuning_log = Path("/Users/chrischo/server/brain/logs/hnsw_tuning.jsonl")
+        if tuning_log.exists():
+            latest: dict[str, int] = {}
+            with tuning_log.open() as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or not line.startswith("{"):
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except Exception as exc:
+                        log.debug("hnsw_tuning.jsonl parse error: %s", exc)
+                        continue
+                    col = rec.get("collection")
+                    rec_ef = rec.get("recommended_ef") or rec.get("new_ef")
+                    if col and isinstance(rec_ef, int) and rec_ef > 0:
+                        latest[col] = rec_ef  # last write wins (file is append-only)
+            merged.update(latest)
+    except Exception as exc:
+        log.debug("hnsw_tuning.jsonl read failed: %s", exc)
+
+    _HNSW_SETTINGS_CACHE = merged
     return _HNSW_SETTINGS_CACHE
 
 

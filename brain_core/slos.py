@@ -213,6 +213,22 @@ SLOS: dict[str, SLO] = {
         metric_unit="MB",
         consecutive_breaches_required=1,
     ),
+    # 2026-04-21: qdrant-backup silent-failure watcher. The nightly
+    # ai.openclaw.qdrant-backup launchd plist runs at 03:00 local time and
+    # uploads to MinIO. If it silently fails (S3 creds rot, Qdrant snapshot
+    # API flakes, or the Python CLI itself crashes pre-upload), there is
+    # no natural alarm — the next cron fire just produces a fresh attempt
+    # and the gap goes unobserved. This floor breaches when the most
+    # recent local qdrant-backup-*.tar.gz is older than 36h, catching a
+    # full failed cycle before a second day compounds the risk.
+    "qdrant_backup_age_hours": SLO(
+        name="qdrant_backup_age_hours",
+        description="Age in hours of the most recent qdrant-backup-*.tar.gz. Breaches >36h (one full missed nightly backup window).",
+        target=36.0,
+        severity="warning",
+        metric_unit="hours",
+        consecutive_breaches_required=1,
+    ),
 }
 
 
@@ -550,6 +566,30 @@ def _measure_dispatch_failure_rate_1h() -> float:
         return 0.0
 
 
+def _measure_qdrant_backup_age_hours() -> float:
+    """Age of the newest ~/server/brain/qdrant-backups/qdrant-backup-*.tar.gz.
+
+    Returns hours since last successful backup tarball landed on disk. The
+    nightly plist runs at 03:00 — a 36h threshold catches a single missed
+    cycle without pagering on 3:01am before today's backup completes.
+    Returns 999.0 when no backups exist (guaranteed breach) so a fresh
+    install surfaces the gap immediately instead of silently succeeding.
+    """
+    try:
+        backup_dir = Path("/Users/chrischo/server/brain/qdrant-backups")
+        if not backup_dir.exists():
+            return 999.0
+        tarballs = list(backup_dir.glob("qdrant-backup-*.tar.gz"))
+        if not tarballs:
+            return 999.0
+        newest = max(tarballs, key=lambda p: p.stat().st_mtime)
+        age_s = time.time() - newest.stat().st_mtime
+        return round(age_s / 3600.0, 2)
+    except Exception as exc:
+        log.debug("qdrant_backup_age measurement failed: %s", exc)
+        return 999.0
+
+
 def _measure_logs_dir_total_mb() -> float:
     """Sum size of all files under brain logs/ directory."""
     try:
@@ -607,6 +647,7 @@ _MEASUREMENTS: dict[str, Callable[[], float]] = {
     "dispatch_failure_rate_1h": _measure_dispatch_failure_rate_1h,
     "agent_session_max_mb": _measure_agent_session_max_mb,
     "logs_dir_total_mb": _measure_logs_dir_total_mb,
+    "qdrant_backup_age_hours": _measure_qdrant_backup_age_hours,
 }
 
 
