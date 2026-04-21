@@ -20,6 +20,18 @@ import hashlib
 import re
 import unicodedata
 
+# Bump to invalidate every stored sparse vector. Callers that index or
+# upsert points can stamp this into payload so reindex jobs can detect
+# version drift. Tokenization scheme changes (new stopwords, stemming,
+# different hashing) require a bump.
+#
+# History:
+# - v1-unicode61-md5-2026-04-21 — initial BM25 sparse rollout: unicode word
+#   split, NFD normalization + combining-mark strip, lowercase, minimal
+#   English stopword set, MD5-hashed uint32 token indices, raw TF values
+#   (Qdrant Modifier.IDF does the BM25 math server-side).
+SPARSE_TOKENIZER_VERSION = "v1-unicode61-md5-2026-04-21"
+
 _WORD_RE = re.compile(r"\w+", re.UNICODE)
 
 # Minimal English stopword list — purely an optimization so very common

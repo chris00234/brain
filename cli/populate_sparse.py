@@ -27,14 +27,22 @@ sys.path.insert(0, str(BRAIN_ROOT / "brain_core"))
 
 from qdrant_client import QdrantClient  # noqa: E402
 from qdrant_client.models import PointVectors, SparseVector  # noqa: E402
-from sparse_tokenizer import encode as sparse_encode  # noqa: E402
+from sparse_tokenizer import SPARSE_TOKENIZER_VERSION, encode  # noqa: E402
+
+sparse_encode = encode
 
 PAGE = 500
 BATCH = 200
 
 
 def populate(client: QdrantClient, collection: str, *, dry_run: bool) -> dict:
-    stats = {"collection": collection, "scanned": 0, "updated": 0, "skipped_empty_doc": 0}
+    stats = {
+        "collection": collection,
+        "scanned": 0,
+        "updated": 0,
+        "skipped_empty_doc": 0,
+        "skipped_current_version": 0,
+    }
     print(f"\n=== {collection} ===")
     next_offset = None
     while True:
@@ -49,11 +57,17 @@ def populate(client: QdrantClient, collection: str, *, dry_run: bool) -> dict:
             break
 
         updates: list[PointVectors] = []
+        version_patches: list[tuple[str, dict]] = []
         for p in pts:
             stats["scanned"] += 1
-            doc = (p.payload or {}).get("_document") or ""
+            payload = p.payload or {}
+            doc = payload.get("_document") or ""
             if not doc.strip():
                 stats["skipped_empty_doc"] += 1
+                continue
+            # Smart skip: row already at current tokenizer version → leave it.
+            if payload.get("sparse_tokenizer_version") == SPARSE_TOKENIZER_VERSION:
+                stats["skipped_current_version"] += 1
                 continue
             indices, values = sparse_encode(doc)
             if not indices:
@@ -62,22 +76,33 @@ def populate(client: QdrantClient, collection: str, *, dry_run: bool) -> dict:
             updates.append(
                 PointVectors(id=p.id, vector={"sparse": SparseVector(indices=indices, values=values)})
             )
+            version_patches.append((p.id, {"sparse_tokenizer_version": SPARSE_TOKENIZER_VERSION}))
 
         # Flush in batches of BATCH to keep request size bounded.
         for start in range(0, len(updates), BATCH):
             chunk = updates[start : start + BATCH]
+            patches_chunk = version_patches[start : start + BATCH]
             if dry_run:
                 stats["updated"] += len(chunk)
             else:
                 try:
                     client.update_vectors(collection_name=collection, points=chunk, wait=False)
+                    # Stamp version so future runs can smart-skip these rows.
+                    for pid, patch in patches_chunk:
+                        client.set_payload(
+                            collection_name=collection,
+                            payload=patch,
+                            points=[pid],
+                            wait=False,
+                        )
                     stats["updated"] += len(chunk)
                 except Exception as e:
                     print(f"  update_vectors batch failed: {e}")
 
         print(
             f"  scanned={stats['scanned']} updated={stats['updated']} "
-            f"skipped={stats['skipped_empty_doc']}"
+            f"skipped_empty={stats['skipped_empty_doc']} "
+            f"skipped_current_version={stats['skipped_current_version']}"
         )
 
         if len(pts) < PAGE or not next_offset:

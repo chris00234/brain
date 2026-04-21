@@ -122,22 +122,36 @@ def _ensure_audit_table() -> None:
             prefix_chars     INTEGER NOT NULL,
             generated_at     TEXT NOT NULL,
             model            TEXT NOT NULL DEFAULT 'jenna',
+            prefix_version   TEXT NOT NULL DEFAULT 'v1-chromadb-2026-04-05',
             PRIMARY KEY (doc_path, content_hash)
         );
         CREATE INDEX IF NOT EXISTS idx_ctx_embed_audit_path ON contextual_embed_audit(doc_path);
         """
     )
+    # Idempotent: add prefix_version column to pre-existing schema.
+    import contextlib
+
+    with contextlib.suppress(sqlite3.OperationalError):
+        conn.execute(
+            "ALTER TABLE contextual_embed_audit ADD COLUMN prefix_version TEXT "
+            "NOT NULL DEFAULT 'v1-chromadb-2026-04-05'"
+        )
     conn.commit()
 
 
-def _last_seen_hash(doc_path: str) -> str | None:
+def _last_seen(doc_path: str) -> tuple[str, str] | None:
+    """Return (content_hash, prefix_version) of the last audit row for
+    this doc, or None if never seen. Smart-skip caller compares BOTH
+    against the current doc hash + PREFIX_MODEL_VERSION so a version
+    bump forces regeneration of stale prefixes without redoing docs
+    whose prefix is already current."""
     conn = _audit_conn()
     row = conn.execute(
-        "SELECT content_hash FROM contextual_embed_audit "
+        "SELECT content_hash, prefix_version FROM contextual_embed_audit "
         "WHERE doc_path = ? ORDER BY generated_at DESC LIMIT 1",
         (doc_path,),
     ).fetchone()
-    return row[0] if row else None
+    return (row[0], row[1]) if row else None
 
 
 def _record_audit(
@@ -149,8 +163,9 @@ def _record_audit(
     conn = _audit_conn()
     conn.execute(
         """INSERT OR REPLACE INTO contextual_embed_audit
-           (doc_path, content_hash, chunk_count, context_prefix, prefix_chars, generated_at, model)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+           (doc_path, content_hash, chunk_count, context_prefix, prefix_chars,
+            generated_at, model, prefix_version)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             doc_path,
             content_hash,
@@ -159,6 +174,7 @@ def _record_audit(
             len(prefix),
             datetime.now(UTC).isoformat(timespec="seconds"),
             "jenna",
+            PREFIX_MODEL_VERSION,
         ),
     )
     conn.commit()
@@ -315,11 +331,12 @@ def _reembed_chunks_for_doc(doc_path: Path, prefix: str, dry_run: bool) -> int:
 
 
 def _hash_content(text: str) -> str:
-    """Content hash mixed with PREFIX_MODEL_VERSION so a version bump
-    invalidates every prior audit entry and forces the next incremental
-    run to regenerate every prefix."""
-    keyed = f"{PREFIX_MODEL_VERSION}::{text}"
-    return hashlib.sha256(keyed.encode("utf-8", errors="ignore")).hexdigest()[:16]
+    """Plain SHA256 of the doc text. Version-based invalidation is a
+    separate column in the audit table — mixing the version into the
+    content hash would force a full-corpus regen on every bump even for
+    docs whose prefix is already valid. Smart incremental skipping
+    compares content_hash AND prefix_version independently."""
+    return hashlib.sha256(text.encode("utf-8", errors="ignore")).hexdigest()[:16]
 
 
 def run(
@@ -374,8 +391,11 @@ def run(
             continue
         content_hash = _hash_content(content)
         if not force:
-            prev = _last_seen_hash(str(doc_path))
-            if prev == content_hash:
+            prev = _last_seen(str(doc_path))
+            # Skip only when BOTH content_hash and prefix_version match.
+            # content_hash mismatch → doc content changed, need regen.
+            # version mismatch → infra/model change, need regen even if content same.
+            if prev is not None and prev == (content_hash, PREFIX_MODEL_VERSION):
                 summary["skipped_unchanged"] += 1
                 continue
 

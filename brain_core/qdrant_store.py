@@ -475,11 +475,14 @@ class QdrantStore:
 
         has_sparse = self._has_sparse(real)
         sparse_encode = None
+        sparse_tokenizer_version: str | None = None
         if has_sparse and documents is not None:
             try:
+                from sparse_tokenizer import SPARSE_TOKENIZER_VERSION
                 from sparse_tokenizer import encode as _se
 
                 sparse_encode = _se
+                sparse_tokenizer_version = SPARSE_TOKENIZER_VERSION
             except Exception:
                 sparse_encode = None
 
@@ -498,6 +501,10 @@ class QdrantStore:
                         from qdrant_client.models import SparseVector
 
                         point_vectors["sparse"] = SparseVector(indices=indices, values=values)
+                        # Stamp the tokenizer version on the point so a
+                        # reindex job can detect sparse-schema drift and
+                        # regen just the stale rows, not the whole corpus.
+                        merged["sparse_tokenizer_version"] = sparse_tokenizer_version
             points.append(PointStruct(id=self._qid(sid), vector=point_vectors, payload=merged))
         # wait=True: hot-path brain_store writes must be durable before the
         # POST /memory handler returns. A Qdrant restart within the ack
