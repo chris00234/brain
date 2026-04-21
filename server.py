@@ -4006,7 +4006,8 @@ def create_memory(request: Request, req: MemoryCreateRequest) -> MemoryEntry:
         "agent": req.agent,
         "source": req.source,
         "category": req.category,
-        "confidence": str(round(req.confidence, 3)),
+        # Phase A4: typed float so Qdrant payload range filters work.
+        "confidence": round(float(req.confidence), 3),
         "reason": req.reason,
         "created_at": now_iso,
         "type": "manual",
@@ -4020,8 +4021,8 @@ def create_memory(request: Request, req: MemoryCreateRequest) -> MemoryEntry:
         "valid_until": "",
         # Phase 1D: memory class tier (new memories start episodic)
         "memory_class": "episodic",
-        # Phase 1E: trust score
-        "trust_score": "0.5",
+        # Phase 1E: trust score (typed float per Phase A4)
+        "trust_score": 0.5,
     }
 
     # Phase 1B: on UPDATE, mark old memory as superseded
@@ -4280,7 +4281,8 @@ def create_memory_batch(request: Request, req: MemoryBatchRequest) -> dict:
             "agent": mem_req.agent,
             "source": mem_req.source,
             "category": mem_req.category,
-            "confidence": str(round(mem_req.confidence, 3)),
+            # Phase A4: typed floats so Qdrant payload range filters work.
+            "confidence": round(float(mem_req.confidence), 3),
             "reason": mem_req.reason,
             "created_at": now_iso,
             "type": "manual",
@@ -4290,7 +4292,7 @@ def create_memory_batch(request: Request, req: MemoryBatchRequest) -> dict:
             "valid_from": now_iso,
             "valid_until": "",
             "memory_class": "episodic",
-            "trust_score": "0.5",
+            "trust_score": 0.5,
         }
 
         if operation == "UPDATE" and supersede_target:
@@ -4447,7 +4449,8 @@ def patch_memory(mem_id: Annotated[str, PathParam()], req: MemoryPatchRequest) -
         new_meta["category"] = req.category
         patch["category"] = req.category
     if req.confidence is not None:
-        new_meta["confidence"] = str(round(req.confidence, 3))
+        # Phase A4: typed float, not stringified.
+        new_meta["confidence"] = round(float(req.confidence), 3)
         patch["confidence"] = new_meta["confidence"]
     new_meta["updated_at"] = patch["updated_at"]
 

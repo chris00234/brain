@@ -719,7 +719,7 @@ def reinforce_memory(memory_id: str, success: bool) -> None:
         store.update_payload(
             "semantic_memory",
             ids=[memory_id],
-            patch={"trust_score": str(round(new_ts, 3))},
+            patch={"trust_score": round(float(new_ts), 3)},
         )
     except Exception:
         pass

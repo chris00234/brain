@@ -744,7 +744,7 @@ def recompute_trust_scores() -> dict:
                 store.update_payload(
                     "semantic_memory",
                     ids=[p.id],
-                    patch={"trust_score": str(new)},
+                    patch={"trust_score": float(new)},
                 )
                 updated += 1
             except Exception as e:
@@ -827,11 +827,12 @@ def reinforce_on_access(memory_ids: list[str], boost: float = 0.02) -> dict:
             except (ValueError, TypeError):
                 pass
 
+        # Phase A4: typed numerics for Qdrant payload range filters.
         patch = {
             "access_count": count + 1,
-            "access_score": str(round(existing_score + 1.0, 2)),
+            "access_score": round(existing_score + 1.0, 2),
             "last_accessed_at": now_iso,
-            "trust_score": str(min(1.0, trust + boost)),
+            "trust_score": round(min(1.0, trust + boost), 3),
         }
         try:
             store.update_payload("semantic_memory", ids=[p.id], patch=patch)
@@ -1131,7 +1132,7 @@ def prune_atrophied_memories(
                                                 "memory_class": "gist",
                                                 "derived_from": old_id,
                                                 "created_at": datetime.now(UTC).isoformat(),
-                                                "trust_score": "0.4",
+                                                "trust_score": 0.4,  # Phase A4: typed float
                                             }
                                         ],
                                     )

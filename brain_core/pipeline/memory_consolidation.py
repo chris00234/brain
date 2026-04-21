@@ -142,7 +142,8 @@ def consolidate() -> dict:
         if new_class:
             update_meta = {"memory_class": new_class}
             if trust_score is not None:
-                update_meta["trust_score"] = str(trust_score)
+                # Phase A4: typed float per payload-normalization migration.
+                update_meta["trust_score"] = round(float(trust_score), 3)
             print(
                 f"  {mid[:30]} age={age_days}d utility={u:.2f} access={access_count} {current_class}->{new_class}"
             )

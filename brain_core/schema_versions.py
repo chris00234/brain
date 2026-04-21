@@ -229,15 +229,16 @@ def _migrate_semantic_memory_3_to_4() -> dict:
         if not needs_update:
             return {"updated": 0}
 
-        # Per-id update_payload (patch semantics via read-merge-write in ChromaStore).
-        # Round 11 note kept: use string format to match all other writers —
-        # type-consistent values across rows so any future $lt/$gt filter works.
+        # Phase A4: typed float (was string) so Qdrant payload range filters
+        # work after cutover. All other writers were updated in the same
+        # Phase A4 commit; type-consistency invariant now lives at float,
+        # not str.
         updated = 0
         for mid in needs_update:
             store.update_payload(
                 "semantic_memory",
                 ids=[mid],
-                patch={"trust_score": "0.5"},
+                patch={"trust_score": 0.5},
             )
             updated += 1
 

@@ -506,7 +506,9 @@ def embed_and_store(memories: list[dict[str, Any]], source: str, agent: str) -> 
             "agent": agent,
             "source": source,
             "category": category,
-            "confidence": str(round(confidence, 3)),
+            # Phase A4 migration: typed floats (was str(round(..., 3))) so
+            # Qdrant payload indexes can range-filter after cutover.
+            "confidence": round(float(confidence), 3),
             "reason": (mem.get("reason") or "")[:300],
             "context_tags": (mem.get("context_tags") or "")[:200],
             "override_conditions": (mem.get("override_conditions") or "")[:300],
@@ -524,7 +526,8 @@ def embed_and_store(memories: list[dict[str, Any]], source: str, agent: str) -> 
             "memory_class": "episodic",
             # Phase 1E (Round 9 B3): trust_score derived from cross-source
             # corroboration count. 0.4 baseline + 0.1 per matching source.
-            "trust_score": str(_count_corroborating_trust(mem.get("content", ""))),
+            # Typed float per Phase A4.
+            "trust_score": float(_count_corroborating_trust(mem.get("content", ""))),
         }
 
         # Dedup layer 1: exact content hash match
