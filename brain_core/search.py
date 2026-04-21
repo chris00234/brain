@@ -146,40 +146,53 @@ _collections_lock = threading.Lock()
 
 
 def get_collections():
+    """Return a {name: identifier} mapping. Under the VectorStore abstraction
+    the "identifier" is just the collection name itself — callers only use
+    the value as an opaque handle they pass back to :func:`vector_search`,
+    so returning a name→name map keeps every existing call site compiling."""
     global _collections_cache, _collections_cache_ts
     now = time.time()
     with _collections_lock:
         if _collections_cache and (now - _collections_cache_ts) < _collections_ttl:
             return dict(_collections_cache)
     # Fetch outside lock (HTTP call is slow, don't hold the lock during I/O)
-    cols = _http_json(
-        "GET",
-        f"{CHROMA_URL}/api/v2/tenants/default_tenant/databases/default_database/collections",
-    )
+    from vector_store import get_vector_store
+
+    try:
+        names = get_vector_store().list_collections()
+    except Exception:
+        names = []
     with _collections_lock:
-        # Double-check: another thread may have populated the cache while we fetched
         if _collections_cache and (time.time() - _collections_cache_ts) < _collections_ttl:
             return dict(_collections_cache)
-        if isinstance(cols, list):
-            _collections_cache = {c["name"]: c["id"] for c in cols if c.get("name") and c.get("id")}
-            _collections_cache_ts = time.time()
+        _collections_cache = {n: n for n in names}
+        _collections_cache_ts = time.time()
         return dict(_collections_cache)
 
 
 def vector_search(col_id, embedding, n=10, where=None):
-    payload_dict = {
-        "query_embeddings": [embedding],
-        "n_results": n,
-        "include": ["documents", "metadatas", "distances"],
-    }
-    if where:
-        payload_dict["where"] = where
-    return _http_json(
-        "POST",
-        f"{CHROMA_URL}/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/query",
-        payload=payload_dict,
-        timeout=30,
+    """KNN search returning the legacy ChromaDB response shape so the many
+    call sites that unpack ``resp["ids"][0]`` / ``resp["distances"][0]``
+    don't need to change. ``col_id`` is a collection NAME under the new
+    VectorStore abstraction (see :func:`get_collections`)."""
+    from vector_store import get_vector_store
+
+    hits = get_vector_store().query(
+        col_id,
+        vector=embedding,
+        k=n,
+        filter=where,
+        with_payload=True,
     )
+    # Callers expect similarity → distance (1 - distance convention). The
+    # ChromaStore flipped to similarity at the adapter boundary; reconstruct
+    # the cosine distance so downstream scoring math stays identical.
+    return {
+        "ids": [[h.id for h in hits]],
+        "distances": [[max(0.0, 1.0 - h.score) for h in hits]],
+        "documents": [[h.document or "" for h in hits]],
+        "metadatas": [[h.payload or {} for h in hits]],
+    }
 
 
 def keyword_score(query, document):
