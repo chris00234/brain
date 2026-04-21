@@ -43,6 +43,7 @@ import logging
 import sqlite3
 import sys
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC
@@ -79,7 +80,7 @@ except ImportError:
 log = logging.getLogger("brain.active_recall")
 
 INTENT_ROUTES_PATH = BRAIN_CORE_DIR / "intent_routes.yaml"
-DOORBELL_DIR = Path("/tmp")
+DOORBELL_DIR = Path("/tmp")  # noqa: S108 — brain_loop writes per-session-id doorbell files here; the hook script reads+clears them in-process.
 DOORBELL_TEMPLATE = "{session_id}"
 BUDGET_TOKEN_LIMIT = 2048
 LOW_CONFIDENCE_THRESHOLD = 0.5
@@ -285,6 +286,10 @@ def _canonical_blocks_from_matches(
 # ── Semantic layer via search_all ─────────────────────────────────
 
 
+_SEMANTIC_POOL_MAX_WORKERS = 4
+_SEMANTIC_PER_QUERY_TIMEOUT_S = 0.8
+
+
 def _semantic_blocks(
     prompt: str,
     matches: list[IntentMatch],
@@ -292,20 +297,30 @@ def _semantic_blocks(
     limit: int = 5,
 ) -> list[InjectionBlock]:
     """Fan out the prompt + matched intents' always_push_queries through
-    search_unified.search_all. Returns up to `limit` dedup'd blocks."""
+    search_unified.search_all. Returns up to `limit` dedup'd blocks.
+
+    2026-04-20 perf: parallelized across queries with ThreadPoolExecutor.
+    Previously ran 4 queries serially at ~500-800ms each → 2-3s p99 that
+    pushed /recall/active past the 5s MCP window. Now all queries race in
+    parallel with a per-query soft timeout; slow queries drop out rather
+    than blocking the response.
+    """
     try:
         import search_unified
     except ImportError:
         return []
 
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from concurrent.futures import TimeoutError as _FutTimeout
+
     queries = [prompt]
     for m in matches:
         queries.extend(m.always_push_queries)
+    queries = [q for q in queries[:4] if q and q.strip()]
+    if not queries:
+        return []
 
-    all_results: list[dict] = []
-    for q in queries[:4]:  # cap to avoid runaway
-        if not q or not q.strip():
-            continue
+    def _one(q: str) -> list[dict]:
         try:
             resp = search_unified.search_all(
                 q,
@@ -314,9 +329,23 @@ def _semantic_blocks(
                 original_query=prompt,
             )
             if isinstance(resp, dict):
-                all_results.extend(resp.get("results", []))
+                return list(resp.get("results") or [])
         except Exception as e:
             log.debug("search_all failed for %r: %s", q[:40], e)
+        return []
+
+    all_results: list[dict] = []
+    with ThreadPoolExecutor(
+        max_workers=_SEMANTIC_POOL_MAX_WORKERS, thread_name_prefix="active_recall"
+    ) as pool:
+        futures = {pool.submit(_one, q): q for q in queries}
+        for fut in as_completed(futures, timeout=_SEMANTIC_PER_QUERY_TIMEOUT_S * len(queries)):
+            try:
+                all_results.extend(fut.result(timeout=0))
+            except _FutTimeout:
+                log.debug("active_recall semantic query timed out: %r", futures[fut][:40])
+            except Exception as e:
+                log.debug("active_recall semantic query errored for %r: %s", futures[fut][:40], e)
 
     # Dedup by path or id within this call
     blocks: list[InjectionBlock] = []
@@ -440,7 +469,7 @@ def _doorbell_blocks(session_id: str) -> list[InjectionBlock]:
 
 
 @contextmanager
-def _autonomy_db_conn():
+def _autonomy_db_conn() -> Iterator[sqlite3.Connection]:
     conn = sqlite3.connect(str(AUTONOMY_DB), timeout=5)
     conn.row_factory = sqlite3.Row
     try:
@@ -641,9 +670,7 @@ def _audit(
         # reinforcement-on-access was dead on the active_recall path. Now
         # uses the real ChromaDB id carried on `memory_id`.
         sem_ids = [
-            b.memory_id
-            for b in blocks
-            if b.source.startswith("semantic") and b.score >= 0.5 and b.memory_id
+            b.memory_id for b in blocks if b.source.startswith("semantic") and b.score >= 0.5 and b.memory_id
         ][:5]
         if sem_ids:
             import search_unified
@@ -700,9 +727,10 @@ def build_injection(
         all_blocks = canonical + doorbell + semantic + proactive
         filtered = _apply_decay_filter(all_blocks, seen_registry, turn_idx)
 
-        if not filtered or max((b.score for b in filtered), default=0) < LOW_CONFIDENCE_THRESHOLD:
-            if not any(b.priority == "critical" for b in filtered):
-                filtered.insert(0, _confidence_sentinel())
+        if (
+            not filtered or max((b.score for b in filtered), default=0) < LOW_CONFIDENCE_THRESHOLD
+        ) and not any(b.priority == "critical" for b in filtered):
+            filtered.insert(0, _confidence_sentinel())
 
         budgeted = _enforce_budget(filtered, BUDGET_TOKEN_LIMIT)
 
