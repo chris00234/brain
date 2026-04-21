@@ -300,7 +300,7 @@ def _submit_bg_extract(text: str, chroma_id: str) -> bool:
             log.debug("silenced exception in atoms_store.py: %s", _exc)
         return False
 
-    def _run():
+    def _run() -> None:
         try:
             from entity_graph import extract_and_store_entities
 
@@ -932,24 +932,19 @@ def cluster_size_for(
 
     try:
         sys.path.insert(0, str(Path(__file__).resolve().parent))
-        from indexer import _get_collection_id, chroma_api
+        from vector_store import get_vector_store
 
-        col_id = _get_collection_id("semantic_memory")
-        if not col_id:
-            _CLUSTER_SIZE_CACHE[chroma_id] = (1, now_ts)
-            return 1
-        res = chroma_api(
-            "POST",
-            f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/query",
-            {
-                "query_embeddings": [embedding],
-                "n_results": 10,
-                "include": ["distances"],
-            },
+        hits = get_vector_store().query(
+            "semantic_memory",
+            vector=embedding,
+            k=10,
+            with_payload=False,
         )
-        dists = (res.get("distances") or [[]])[0]
-        limit_dist = 1.0 - threshold  # cosine distance threshold
-        size = sum(1 for d in dists if d <= limit_dist)
+        # VectorHit.score is normalized similarity (higher=better). The
+        # caller's `threshold` is expressed as a cosine-distance cap;
+        # `similarity >= 1 - distance_cap` is the matching predicate.
+        sim_floor = 1.0 - threshold
+        size = sum(1 for h in hits if h.score >= sim_floor)
         size = max(1, size)
         _CLUSTER_SIZE_CACHE[chroma_id] = (size, now_ts)
         return size

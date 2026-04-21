@@ -509,49 +509,34 @@ def incremental_stale_cleanup() -> dict:
     whose source files no longer exist on disk. Does not require re-embedding.
     """
     try:
-        from indexer import _get_collection_id, chroma_api
+        from vector_store import get_vector_store
     except ImportError:
-        return {"status": "error", "reason": "indexer not importable"}
+        return {"status": "error", "reason": "vector_store not importable"}
 
+    store = get_vector_store()
     collections = ["knowledge", "experience", "canonical"]
     total_cleaned = 0
 
     for col_name in collections:
-        col_id = _get_collection_id(col_name)
-        if not col_id:
-            continue
         try:
-            count = chroma_api(
-                "GET", f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/count"
-            )
-            count = int(count) if isinstance(count, (int, str)) else 0
+            count = store.count(col_name)
             if count == 0:
                 continue
-            resp = chroma_api(
-                "POST",
-                f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/get",
-                {
-                    "limit": count,
-                    "include": ["metadatas"],
-                },
+            points = store.get(
+                col_name,
+                limit=count,
+                with_payload=True,
+                with_documents=False,
             )
-            ids = resp.get("ids", [])
-            metas = resp.get("metadatas", [])
             stale = []
-            for doc_id, meta in zip(ids, metas, strict=False):
-                source = (meta or {}).get("source", "")
+            for p in points:
+                source = (p.payload or {}).get("source", "")
                 if source and source.startswith("/") and not Path(source).exists():
-                    stale.append(doc_id)
+                    stale.append(p.id)
             if stale:
                 BATCH = 20
                 for s in range(0, len(stale), BATCH):
-                    chroma_api(
-                        "POST",
-                        f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/delete",
-                        {
-                            "ids": stale[s : s + BATCH],
-                        },
-                    )
+                    store.delete(col_name, stale[s : s + BATCH])
                 print(f"[stale_cleanup] {col_name}: removed {len(stale)} orphaned docs")
                 total_cleaned += len(stale)
         except Exception as e:
