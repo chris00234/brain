@@ -583,7 +583,7 @@ def auto_resolve_stale_contradictions():
         except Exception:
             continue
 
-    return {"resolved": resolved_count, "kept_for_review": kept_count, "total": len(ids)}
+    return {"resolved": resolved_count, "kept_for_review": kept_count, "total": len(pending)}
 
 
 def cleanup_supersession_chains() -> dict:
