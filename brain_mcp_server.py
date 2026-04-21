@@ -416,17 +416,29 @@ def handle_tools_call(params):
         result = _brain_request("GET", path, actor=actor)
 
     elif name == "brain_store":
-        result = _brain_request(
-            "POST",
-            "/memory",
-            {
-                "content": args["content"],
-                "category": args.get("category", "fact"),
-                "agent": actor,
-                "source": "mcp",
-            },
-            actor=actor,
-        )
+        # 2026-04-20 MCP timeout cap: POST /memory runs ingest_classifier (LLM
+        # call with 1h cache, ~500ms hot / up to 3s cold) + embed (~60ms) +
+        # ChromaDB/SQLite writes. Usually <1s but LLM-cold-path can spike past
+        # 5s under load. 4s cap returns structured hint instead of -32001.
+        try:
+            result = _brain_request(
+                "POST",
+                "/memory",
+                {
+                    "content": args["content"],
+                    "category": args.get("category", "fact"),
+                    "agent": actor,
+                    "source": "mcp",
+                },
+                actor=actor,
+                timeout_s=4,
+            )
+        except Exception as exc:
+            result = {
+                "status": "timeout",
+                "hint": "brain_store may hit ingest_classifier LLM (1-3s cold). Retry, or POST /memory via HTTP directly when the 5s MCP window is insufficient.",
+                "error": str(exc)[:200],
+            }
 
     elif name == "brain_decide":
         # 2026-04-17 fix: OpenClaw's MCP transport has a 5s operation timeout;
@@ -472,15 +484,26 @@ def handle_tools_call(params):
             }
 
     elif name == "brain_ingest":
-        result = _brain_request(
-            "POST",
-            "/brain/ingest",
-            {
-                "content": args["content"],
-                "source": args.get("source", "mcp_ingest"),
-            },
-            actor=actor,
-        )
+        # 2026-04-20 MCP timeout cap: ingest runs LLM classify + embed + store
+        # (1-5s typical), blows past the 5s MCP window on spikes. 4s cap returns
+        # a structured hint instead of -32001.
+        try:
+            result = _brain_request(
+                "POST",
+                "/brain/ingest",
+                {
+                    "content": args["content"],
+                    "source": args.get("source", "mcp_ingest"),
+                },
+                actor=actor,
+                timeout_s=4,
+            )
+        except Exception as exc:
+            result = {
+                "status": "timeout",
+                "hint": "brain_ingest is LLM-backed (1-5s). Retry, or POST /brain/ingest via HTTP directly when the 5s MCP window is insufficient.",
+                "error": str(exc)[:200],
+            }
 
     elif name == "brain_focus":
         result = _brain_request(
@@ -562,30 +585,51 @@ def handle_tools_call(params):
         result = _brain_request("GET", f"/brain/wm/{sid}/{agt}", actor=actor)
 
     elif name == "brain_ingest_image":
-        result = _brain_request(
-            "POST",
-            "/brain/ingest/image",
-            {
-                "path": args.get("path"),
-                "base64_data": args.get("base64_data"),
-                "mime_type": args.get("mime_type", "image/png"),
-                "prompt": args.get("prompt"),
-                "agent": actor,
-            },
-            actor=actor,
-        )
+        # 2026-04-20 MCP timeout cap: vision LLM (Gemini) call is 2-10s,
+        # always exceeds 5s MCP window. 4s cap returns structured hint.
+        try:
+            result = _brain_request(
+                "POST",
+                "/brain/ingest/image",
+                {
+                    "path": args.get("path"),
+                    "base64_data": args.get("base64_data"),
+                    "mime_type": args.get("mime_type", "image/png"),
+                    "prompt": args.get("prompt"),
+                    "agent": actor,
+                },
+                actor=actor,
+                timeout_s=4,
+            )
+        except Exception as exc:
+            result = {
+                "status": "timeout",
+                "hint": "brain_ingest_image is vision-LLM-backed (Gemini, 2-10s). Use POST /brain/ingest/image via HTTP directly for the full run.",
+                "error": str(exc)[:200],
+            }
 
     elif name == "brain_search_web":
-        result = _brain_request(
-            "POST",
-            "/web/search",
-            {
-                "query": args["query"],
-                "limit": args.get("limit", 10),
-                "agent": actor,
-            },
-            actor=actor,
-        )
+        # 2026-04-20 MCP timeout cap: searxng round-trip + ranking is 2-10s,
+        # regularly exceeds 5s MCP window (gateway.err: 2026-04-20T13:19 Ellie
+        # -32001). 4s cap returns structured hint instead of protocol error.
+        try:
+            result = _brain_request(
+                "POST",
+                "/web/search",
+                {
+                    "query": args["query"],
+                    "limit": args.get("limit", 10),
+                    "agent": actor,
+                },
+                actor=actor,
+                timeout_s=4,
+            )
+        except Exception as exc:
+            result = {
+                "status": "timeout",
+                "hint": "brain_search_web is network-backed (searxng, 2-10s). Retry, or POST /web/search via HTTP directly when the 5s MCP window is insufficient.",
+                "error": str(exc)[:200],
+            }
 
     # 2026-04-16 Tier 3 #8: cognitive verb handlers
     elif name == "brain_forget":
@@ -600,7 +644,16 @@ def handle_tools_call(params):
             )
 
     elif name == "brain_consolidate":
-        result = _brain_request("POST", "/brain/consolidate", {}, actor=actor)
+        # 2026-04-20 MCP timeout cap: full consolidation pass is 10s+, always
+        # exceeds 5s MCP window. 4s cap returns structured hint.
+        try:
+            result = _brain_request("POST", "/brain/consolidate", {}, actor=actor, timeout_s=4)
+        except Exception as exc:
+            result = {
+                "status": "timeout",
+                "hint": "brain_consolidate runs a full consolidation pass (10s+). POST /brain/consolidate via HTTP directly for the full run.",
+                "error": str(exc)[:200],
+            }
 
     elif name == "brain_doubt":
         limit = int(args.get("limit", 20))
