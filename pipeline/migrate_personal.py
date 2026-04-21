@@ -15,24 +15,22 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "brain_core"))
-from indexer import _get_collection_id, chroma_api, ensure_collection
+from vector_store import get_vector_store
 
 SOURCE_COLLECTIONS = ["notes", "messages", "calendar", "tasks"]
 TARGET = "personal"
 
 
 def migrate(apply: bool = False):
+    store = get_vector_store()
+
     # Count source docs
     total = 0
     for col in SOURCE_COLLECTIONS:
-        col_id = _get_collection_id(col)
-        if not col_id:
-            print(f"  {col}: not found")
+        count = store.count(col)
+        if count == 0:
+            print(f"  {col}: not found or empty")
             continue
-        count = chroma_api(
-            "GET", f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/count"
-        )
-        count = int(count) if isinstance(count, (int, str)) else 0
         print(f"  {col}: {count} docs")
         total += count
 
@@ -42,65 +40,51 @@ def migrate(apply: bool = False):
         print("\nRun with --apply to execute migration")
         return
 
-    # Ensure target collection exists
-    target_id = ensure_collection(TARGET)
-    print(f"Target collection '{TARGET}': {target_id}")
+    store.create_collection(TARGET)
+    print(f"Target collection '{TARGET}': ensured")
 
     migrated = 0
     for col in SOURCE_COLLECTIONS:
-        col_id = _get_collection_id(col)
-        if not col_id:
-            continue
-
-        # Get all docs with embeddings and metadata
-        count = chroma_api(
-            "GET", f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/count"
-        )
-        count = int(count) if isinstance(count, (int, str)) else 0
+        count = store.count(col)
         if count == 0:
             continue
 
-        resp = chroma_api(
-            "POST",
-            f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/get",
-            {
-                "limit": max(count, 100),
-                "include": ["documents", "metadatas", "embeddings"],
-            },
+        points = store.get(
+            col,
+            limit=max(count, 100),
+            with_payload=True,
+            with_documents=True,
+            with_vectors=True,
         )
-
-        ids = resp.get("ids", [])
-        docs = resp.get("documents", [])
-        metas = resp.get("metadatas", [])
-        embs = resp.get("embeddings", [])
-
-        if not ids:
+        if not points:
             continue
 
-        # Re-prefix IDs to avoid collisions
-        new_ids = [f"personal:{_id.split(':', 1)[-1]}" if ":" in _id else f"personal:{_id}" for _id in ids]
-
-        # Add source_type to metadata for filtering
+        # Re-prefix IDs to avoid collisions in the target collection.
+        new_ids = [
+            f"personal:{p.id.split(':', 1)[-1]}" if ":" in p.id else f"personal:{p.id}"
+            for p in points
+        ]
+        docs = [p.document or "" for p in points]
+        metas = [dict(p.payload) for p in points]
+        embs = [p.vector or [] for p in points]
+        # Tag source for filtering
         for m in metas:
-            m["source_collection"] = col  # original collection name
+            m["source_collection"] = col
 
         # Upsert in batches
         BATCH = 20
         for start in range(0, len(new_ids), BATCH):
             end = min(start + BATCH, len(new_ids))
-            chroma_api(
-                "POST",
-                f"/api/v2/tenants/default_tenant/databases/default_database/collections/{target_id}/upsert",
-                {
-                    "ids": new_ids[start:end],
-                    "documents": docs[start:end],
-                    "metadatas": metas[start:end],
-                    "embeddings": embs[start:end],
-                },
+            store.upsert(
+                TARGET,
+                ids=new_ids[start:end],
+                vectors=embs[start:end],
+                documents=docs[start:end],
+                payloads=metas[start:end],
             )
             migrated += end - start
 
-        print(f"  {col}: migrated {len(ids)} docs")
+        print(f"  {col}: migrated {len(points)} docs")
 
     print(f"\nTotal migrated: {migrated} docs into '{TARGET}'")
     print(f"\nOld collections ({', '.join(SOURCE_COLLECTIONS)}) are still intact.")

@@ -33,12 +33,10 @@ from pathlib import Path
 sys.path.insert(0, "/Users/chrischo/server/brain/brain_core")
 from indexer import (
     EMBED_MODEL,
-    _get_collection_id,
-    chroma_api,
-    ensure_collection,
     filter_secrets,
     get_embedding,
 )
+from vector_store import get_vector_store
 
 # ── Config ──────────────────────────────────────────────
 STATE_FILE = Path("/Users/chrischo/server/brain/logs/personal-ingest-state.json")
@@ -155,10 +153,8 @@ def add_personal_documents(collection_name, docs, skip_stale_cleanup=True):
     if not docs:
         return set()
 
-    col_id = _get_collection_id(collection_name)
-    if not col_id:
-        print(f"    ERROR: Collection '{collection_name}' not found")
-        return set()
+    store = get_vector_store()
+    store.create_collection(collection_name)
 
     ids = []
     embeddings = []
@@ -248,15 +244,12 @@ def add_personal_documents(collection_name, docs, skip_stale_cleanup=True):
     BATCH = 20
     for start in range(0, len(ids), BATCH):
         end = min(start + BATCH, len(ids))
-        chroma_api(
-            "POST",
-            f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/upsert",
-            {
-                "ids": ids[start:end],
-                "embeddings": embeddings[start:end],
-                "documents": documents[start:end],
-                "metadatas": metadatas[start:end],
-            },
+        store.upsert(
+            collection_name,
+            ids=ids[start:end],
+            vectors=embeddings[start:end],
+            documents=documents[start:end],
+            payloads=metadatas[start:end],
         )
         print(f"    Batch {start//BATCH + 1}: upserted {end - start} chunks       ")
 
@@ -271,17 +264,16 @@ def _run_personal_stale_cleanup(collection_name: str, upserted_ids: set) -> int:
 
     Returns the number of docs deleted.
     """
-    col_id = _get_collection_id(collection_name)
-    if not col_id:
-        return 0
+    store = get_vector_store()
     BATCH = 20
     try:
-        resp = chroma_api(
-            "POST",
-            f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/get",
-            {"limit": 1_000_000, "include": []},
+        points = store.get(
+            collection_name,
+            limit=1_000_000,
+            with_payload=False,
+            with_documents=False,
         )
-        existing_ids = set(resp.get("ids", []))
+        existing_ids = {p.id for p in points}
         stale_ids = list(existing_ids - upserted_ids)
         if not stale_ids:
             print(f"  Stale cleanup: 0 docs to prune from '{collection_name}'")
@@ -296,11 +288,7 @@ def _run_personal_stale_cleanup(collection_name: str, upserted_ids: set) -> int:
             return 0
         for s in range(0, len(stale_ids), BATCH):
             e = min(s + BATCH, len(stale_ids))
-            chroma_api(
-                "POST",
-                f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/delete",
-                {"ids": stale_ids[s:e]},
-            )
+            store.delete(collection_name, stale_ids[s:e])
         print(f"  Stale cleanup: deleted {len(stale_ids)} stale docs from '{collection_name}'")
         return len(stale_ids)
     except Exception as ex:
@@ -962,7 +950,7 @@ def main():
     print("=" * 60)
 
     print("\n[setup] Ensuring collections...")
-    ensure_collection("personal")
+    get_vector_store().create_collection("personal")
 
     state = load_state()
     state["last_run"] = datetime.now(UTC).isoformat()
