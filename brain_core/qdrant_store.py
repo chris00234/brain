@@ -46,6 +46,37 @@ log = logging.getLogger("brain.qdrant_store")
 _ID_NAMESPACE = uuid.UUID("2f4c3d10-9e4a-4c3f-9a8a-2e0a1b2c3d4e")
 
 
+# Legacy collection aliases — the 13→7 topology collapse folded several
+# ChromaDB collections under one Qdrant target. Callers that still reference
+# the old names (many of them — brain_core/proactive.py, learn.py,
+# memory_lifecycle.py, server.py all have bare strings like
+# "semantic_contradictions") get transparently redirected: the real
+# collection is the target, with an extra filter predicate AND-merged onto
+# whatever the caller supplied. Keeps the Qdrant cutover zero-caller-churn.
+_COLLECTION_ALIASES: dict[str, tuple[str, dict]] = {
+    "semantic_contradictions": ("semantic_memory", {"kind": "contradiction"}),
+    "canonical_raptor": ("canonical", {"raptor_level": {"$gt": 0}}),
+    "experience_compressed": ("experience", {"compressed": True}),
+    "context": ("knowledge", {"origin": "context"}),
+    "patterns": ("knowledge", {"origin": "patterns"}),
+}
+
+
+def _resolve_alias(collection: str, where: Any) -> tuple[str, Any]:
+    """Translate a legacy collection name to (real_collection, merged_filter).
+    If the name isn't aliased, return unchanged."""
+    if collection not in _COLLECTION_ALIASES:
+        return collection, where
+    real, extra = _COLLECTION_ALIASES[collection]
+    if not where:
+        merged = dict(extra)
+    elif "$and" in where:
+        merged = {"$and": [*where["$and"], extra]}
+    else:
+        merged = {"$and": [where, extra]}
+    return real, merged
+
+
 def _string_to_uuid(string_id: str) -> str:
     """Map an arbitrary string id to a stable UUIDv5."""
     return str(uuid.uuid5(_ID_NAMESPACE, string_id))
@@ -197,12 +228,15 @@ class QdrantStore:
         del metadata  # Qdrant has no collection-level metadata dict; schema
         # lives in the named-vector config. Bootstrap script handles full
         # schema; this path keeps existing code compiling.
+        # Legacy alias: caller asking for "semantic_contradictions" doesn't
+        # need a new collection — it's folded into semantic_memory already.
+        real, _ = _resolve_alias(name, None)
         try:
             existing = {c.name for c in (self._client.get_collections().collections or [])}
-            if name in existing:
+            if real in existing:
                 return
             self._client.create_collection(
-                collection_name=name,
+                collection_name=real,
                 vectors_config=VectorParams(
                     size=self.DEFAULT_VECTOR_SIZE,
                     distance=Distance.COSINE,
@@ -212,8 +246,16 @@ class QdrantStore:
             log.warning("qdrant create_collection(%s) failed: %s", name, exc)
 
     def count(self, collection: str) -> int:
+        real, alias_filter = _resolve_alias(collection, None)
         try:
-            resp = self._client.count(collection_name=collection, exact=True)
+            if alias_filter:
+                resp = self._client.count(
+                    collection_name=real,
+                    count_filter=_translate_filter(alias_filter),
+                    exact=True,
+                )
+            else:
+                resp = self._client.count(collection_name=real, exact=True)
             return int(resp.count or 0)
         except Exception:
             return 0
@@ -235,17 +277,31 @@ class QdrantStore:
         if documents is not None and len(documents) != len(ids):
             raise ValueError(f"upsert length mismatch: ids={len(ids)} documents={len(documents)}")
 
+        # Legacy alias: inject the discriminator payload so the caller doesn't
+        # have to know about the 13→7 collapse. e.g. an upsert to the legacy
+        # "semantic_contradictions" name lands in semantic_memory with
+        # kind=contradiction stamped on the payload.
+        real, alias_filter = _resolve_alias(collection, None)
+        alias_patch: dict[str, Any] = {}
+        if alias_filter:
+            # alias_filter is a dict like {"kind": "contradiction"} or
+            # {"raptor_level": {"$gt": 0}}. The upsert path wants literal
+            # values to stamp; extract bare equality terms only.
+            for k, v in alias_filter.items():
+                if isinstance(v, dict):
+                    continue  # Skip operator dicts; caller must set these explicitly
+                alias_patch[k] = v
+
         points: list[PointStruct] = []
         for i, (sid, vec, payload) in enumerate(zip(ids, vectors, payloads, strict=True)):
             merged = dict(payload or {})
+            merged.update(alias_patch)
             # Reserved keys so get()/query() can return original string id and document.
             merged["_original_id"] = sid
             if documents is not None:
                 merged["_document"] = documents[i]
-            # Bootstrap creates collections with a named `dense` vector; upsert
-            # must send the vector as {name: vec} to match that schema.
             points.append(PointStruct(id=self._qid(sid), vector={"dense": vec}, payload=merged))
-        self._client.upsert(collection_name=collection, points=points, wait=False)
+        self._client.upsert(collection_name=real, points=points, wait=False)
 
     def query(
         self,
@@ -260,13 +316,14 @@ class QdrantStore:
         # qdrant-client 1.17+ uses `query_points` instead of deprecated
         # `search`. We always query against the primary `dense` named
         # vector — bootstrap guarantees every collection has one.
+        real, merged_filter = _resolve_alias(collection, filter)
         try:
             resp = self._client.query_points(
-                collection_name=collection,
+                collection_name=real,
                 query=vector,
                 using="dense",
                 limit=k,
-                query_filter=_translate_filter(filter),
+                query_filter=_translate_filter(merged_filter),
                 with_payload=with_payload,
                 with_vectors=with_vectors,
             )
@@ -306,10 +363,11 @@ class QdrantStore:
         with_vectors: bool = False,
         with_documents: bool = True,
     ) -> list[VectorPoint]:
+        real, merged_filter = _resolve_alias(collection, filter)
         if ids is not None:
             try:
                 records = self._client.retrieve(
-                    collection_name=collection,
+                    collection_name=real,
                     ids=[self._qid(sid) for sid in ids],
                     with_payload=with_payload or with_documents,
                     with_vectors=with_vectors,
@@ -325,8 +383,8 @@ class QdrantStore:
         # Filter + paginate path uses scroll.
         try:
             points, _next = self._client.scroll(
-                collection_name=collection,
-                scroll_filter=_translate_filter(filter),
+                collection_name=real,
+                scroll_filter=_translate_filter(merged_filter),
                 limit=limit or 500,
                 offset=offset or None,
                 with_payload=with_payload or with_documents,
@@ -357,9 +415,10 @@ class QdrantStore:
 
         if not ids:
             return
+        real, _ = _resolve_alias(collection, None)
         try:
             self._client.delete(
-                collection_name=collection,
+                collection_name=real,
                 points_selector=PointIdsList(points=[self._qid(sid) for sid in ids]),
                 wait=False,
             )
@@ -374,9 +433,10 @@ class QdrantStore:
     ) -> None:
         if not ids or not patch:
             return
+        real, _ = _resolve_alias(collection, None)
         try:
             self._client.set_payload(
-                collection_name=collection,
+                collection_name=real,
                 payload=patch,
                 points=[self._qid(sid) for sid in ids],
                 wait=False,

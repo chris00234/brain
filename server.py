@@ -7319,13 +7319,16 @@ def brain_health() -> dict:
     services: dict[str, str] = {}
 
     # Probe the vector backend via VectorStore heartbeat (backend-agnostic).
-    # Reports under "chromadb" key for compat with existing Glance dashboard
-    # and /brain/status consumers; will become store.name once Phase C lands.
+    # Key name follows store.name so rollback from qdrant→chroma is transparent
+    # to dashboards; Glance will surface whichever backend is live.
     try:
-        services["chromadb"] = "up" if get_vector_store().heartbeat() else "down"
+        store = get_vector_store()
+        vector_key = store.name
+        services[vector_key] = "up" if store.heartbeat() else "down"
     except Exception:
-        services["chromadb"] = "down"
-    if services["chromadb"] == "down":
+        vector_key = "vector_store"
+        services[vector_key] = "down"
+    if services.get(vector_key) == "down":
         alerts.append("Vector store unreachable")
 
     # Probe Ollama
@@ -7382,7 +7385,7 @@ def brain_health() -> dict:
         alerts.append(f"{len(scheduler_failures)} job(s) failed recently")
 
     # Determine status
-    if services.get("chromadb") == "down" or services.get("ollama") == "down":
+    if services.get(vector_key) == "down" or services.get("ollama") == "down":
         status = "unhealthy"
     elif alerts:
         status = "degraded"
