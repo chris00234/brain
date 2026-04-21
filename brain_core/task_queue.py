@@ -927,34 +927,30 @@ class TaskQueue:
             resp = dispatch_fn(agent="sage", message=prompt, thinking="low", timeout=30)
             if resp.ok and resp.text and len(resp.text.strip()) > 20:
                 heuristic = resp.text.strip()[:300]
-                from indexer import _get_collection_id, chroma_api, get_embedding
+                from indexer import get_embedding
+                from vector_store import get_vector_store
 
-                col_id = _get_collection_id("semantic_memory")
-                if col_id:
-                    import hashlib
+                import hashlib
 
-                    h_id = f"heuristic:{hashlib.md5(heuristic.encode()).hexdigest()[:16]}"
-                    emb = get_embedding(heuristic[:1000], prefix="passage")
-                    if emb:
-                        chroma_api(
-                            "POST",
-                            f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/upsert",
+                h_id = f"heuristic:{hashlib.md5(heuristic.encode()).hexdigest()[:16]}"
+                emb = get_embedding(heuristic[:1000], prefix="passage")
+                if emb:
+                    get_vector_store().upsert(
+                        "semantic_memory",
+                        ids=[h_id],
+                        vectors=[emb],
+                        documents=[heuristic],
+                        payloads=[
                             {
-                                "ids": [h_id],
-                                "embeddings": [emb],
-                                "documents": [heuristic],
-                                "metadatas": [
-                                    {
-                                        "category": "heuristic",
-                                        "agent": agent,
-                                        "source": "erl_extraction",
-                                        "type": "self_learning",
-                                        "created_at": self._now(),
-                                    }
-                                ],
-                            },
-                        )
-                        log.info("extracted heuristic for task %s: %s", task["id"], heuristic[:80])
+                                "category": "heuristic",
+                                "agent": agent,
+                                "source": "erl_extraction",
+                                "type": "self_learning",
+                                "created_at": self._now(),
+                            }
+                        ],
+                    )
+                    log.info("extracted heuristic for task %s: %s", task["id"], heuristic[:80])
         except Exception as e:
             log.warning("heuristic extraction failed for %s: %s", task.get("id"), e)
 
@@ -963,30 +959,24 @@ class TaskQueue:
         Returns (context_text, retrieved_ids) for utility reinforcement."""
         retrieved_ids: list[str] = []
         try:
-            from indexer import _get_collection_id, chroma_api, get_embedding
+            from indexer import get_embedding
+            from vector_store import get_vector_store
 
-            col_id = _get_collection_id("semantic_memory")
-            if not col_id:
-                return "", []
             query_emb = get_embedding(task_description[:500], prefix="query")
             if not query_emb:
                 return "", []
-            resp = chroma_api(
-                "POST",
-                f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/query",
-                {
-                    "query_embeddings": [query_emb],
-                    "n_results": limit,
-                    "include": ["documents", "metadatas", "distances"],
-                    "where": {"category": {"$eq": "heuristic"}},
-                },
+            hits = get_vector_store().query(
+                "semantic_memory",
+                vector=query_emb,
+                k=limit,
+                filter={"category": {"$eq": "heuristic"}},
+                with_payload=True,
             )
-            docs = (resp.get("documents") or [[]])[0]
-            ids = (resp.get("ids") or [[]])[0]
-            retrieved_ids = [i for i in ids if i]
+            retrieved_ids = [h.id for h in hits if h.id]
+            docs = [h.document for h in hits if h.document]
             if not docs:
                 return "", retrieved_ids
-            return "\n".join(f"- {d}" for d in docs if d), retrieved_ids
+            return "\n".join(f"- {d}" for d in docs), retrieved_ids
         except Exception:
             return "", []
 
@@ -1215,33 +1205,29 @@ class TaskQueue:
             if data.get("preconditions"):
                 procedure_text += f"\nPreconditions: {data['preconditions']}"
 
-            from indexer import _get_collection_id, chroma_api, get_embedding
+            from indexer import get_embedding
+            from vector_store import get_vector_store
 
-            col_id = _get_collection_id("patterns")
-            if col_id:
-                import hashlib
+            import hashlib
 
-                p_id = f"proc:{hashlib.md5(procedure_text[:200].encode()).hexdigest()[:16]}"
-                emb = get_embedding(procedure_text[:1000], prefix="passage")
-                if emb:
-                    chroma_api(
-                        "POST",
-                        f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/upsert",
+            p_id = f"proc:{hashlib.md5(procedure_text[:200].encode()).hexdigest()[:16]}"
+            emb = get_embedding(procedure_text[:1000], prefix="passage")
+            if emb:
+                get_vector_store().upsert(
+                    "patterns",
+                    ids=[p_id],
+                    vectors=[emb],
+                    documents=[procedure_text],
+                    payloads=[
                         {
-                            "ids": [p_id],
-                            "embeddings": [emb],
-                            "documents": [procedure_text],
-                            "metadatas": [
-                                {
-                                    "type": "procedure",
-                                    "agent": agent,
-                                    "source": "voyager_extraction",
-                                    "created_at": self._now(),
-                                }
-                            ],
-                        },
-                    )
-                    log.info("extracted procedure for task %s (%d steps)", task["id"], len(steps))
+                            "type": "procedure",
+                            "agent": agent,
+                            "source": "voyager_extraction",
+                            "created_at": self._now(),
+                        }
+                    ],
+                )
+                log.info("extracted procedure for task %s (%d steps)", task["id"], len(steps))
             # Structured storage for typed retrieval and dedup
             try:
                 self._store_procedure(
