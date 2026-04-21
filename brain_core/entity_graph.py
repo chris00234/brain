@@ -696,33 +696,30 @@ def reinforce_memory(memory_id: str, success: bool) -> None:
         except Exception:
             pass
 
-    # Also update ChromaDB trust_score metadata (fetch current, compute delta, write back)
+    # Also update the vector store trust_score payload
+    # (fetch current, compute delta, write back via update_payload).
     try:
-        from http_pool import http_json
-        from search import get_collections
+        from vector_store import get_vector_store
 
-        cols = get_collections()
-        sem_col = cols.get("semantic_memory")
-        if not sem_col:
-            return
-        resp = http_json(
-            "POST",
-            f"http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col}/get",
-            {"ids": [memory_id], "include": ["metadatas"]},
+        store = get_vector_store()
+        points = store.get(
+            "semantic_memory",
+            ids=[memory_id],
+            with_payload=True,
+            with_documents=False,
         )
-        metas = resp.get("metadatas", []) or []
-        if not metas:
+        if not points:
             return
         try:
-            current = float((metas[0] or {}).get("trust_score", "0.5"))
+            current = float((points[0].payload or {}).get("trust_score", "0.5"))
         except (ValueError, TypeError):
             current = 0.5
         ts_delta = 0.02 if success else -0.05
         new_ts = max(0.0, min(1.0, current + ts_delta))
-        http_json(
-            "POST",
-            f"http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col}/update",
-            {"ids": [memory_id], "metadatas": [{"trust_score": str(round(new_ts, 3))}]},
+        store.update_payload(
+            "semantic_memory",
+            ids=[memory_id],
+            patch={"trust_score": str(round(new_ts, 3))},
         )
     except Exception:
         pass

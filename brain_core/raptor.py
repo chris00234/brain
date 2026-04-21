@@ -39,8 +39,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 
-# Conservative thresholds to avoid sprawl: maintain ~10–30 level-1
-# summaries, ~3–8 level-2, ~1–2 level-3 for typical canonical size.
+# Conservative thresholds to avoid sprawl: maintain ~10-30 level-1
+# summaries, ~3-8 level-2, ~1-2 level-3 for typical canonical size.
 MAX_LEVELS = 3
 CLUSTER_SIM_THRESHOLD = 0.75
 MIN_CLUSTER_SIZE = 2
@@ -118,78 +118,63 @@ def _summarize_cluster_via_sage(texts: list[str], level: int) -> str | None:
 
 
 def _load_active_canonical() -> list[dict]:
-    """Pull active canonical notes + embeddings from Chroma."""
+    """Pull active canonical notes + embeddings via the vector store."""
     try:
-        from http_pool import http_json
-        from search import get_collections
+        from vector_store import get_vector_store
 
-        cols = get_collections()
-        col_id = cols.get("canonical")
-        if not col_id:
-            return []
-        resp = http_json(
-            "POST",
-            f"http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/get",
-            {
-                "where": {"status": "active"},
-                "limit": 2000,
-                "include": ["embeddings", "metadatas", "documents"],
-            },
+        points = get_vector_store().get(
+            "canonical",
+            filter={"status": "active"},
+            limit=2000,
+            with_payload=True,
+            with_documents=True,
+            with_vectors=True,
         )
     except Exception:
         return []
-    ids = resp.get("ids") or []
-    embs = resp.get("embeddings") or []
-    docs = resp.get("documents") or []
-    metas = resp.get("metadatas") or []
     out = []
-    for i, cid in enumerate(ids):
+    for p in points:
         out.append(
             {
-                "id": cid,
-                "embedding": embs[i] if i < len(embs) else [],
-                "text": (docs[i] or "")[:3000] if i < len(docs) else "",
-                "metadata": metas[i] if i < len(metas) else {},
+                "id": p.id,
+                "embedding": p.vector or [],
+                "text": (p.document or "")[:3000],
+                "metadata": p.payload or {},
                 "level": 0,
             }
         )
     return out
 
 
-def _ensure_raptor_collection() -> str | None:
-    """Create the canonical_raptor collection if missing; return its id."""
-    try:
-        from indexer import ensure_collection
+def _ensure_raptor_collection() -> str:
+    """Create the canonical_raptor collection if missing; return its name."""
+    from vector_store import get_vector_store
 
-        return ensure_collection(COLLECTION_NAME)
-    except Exception:
-        return None
+    get_vector_store().create_collection(COLLECTION_NAME)
+    return COLLECTION_NAME
 
 
 def _upsert_summary(col_id: str, node_id: str, text: str, level: int, children: list[str]) -> None:
-    from http_pool import http_json
     from indexer import get_embedding
+    from vector_store import get_vector_store
 
     emb = get_embedding(text, use_cache=True, prefix="passage")
     if not emb:
         return
-    http_json(
-        "POST",
-        f"http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/upsert",
-        {
-            "ids": [node_id],
-            "embeddings": [emb],
-            "documents": [text],
-            "metadatas": [
-                {
-                    "type": "raptor-summary",
-                    "level": level,
-                    "children_count": len(children),
-                    "children": json.dumps(children[:30]),
-                    "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
-                }
-            ],
-        },
+    get_vector_store().upsert(
+        col_id,
+        ids=[node_id],
+        vectors=[emb],
+        documents=[text],
+        payloads=[
+            {
+                "type": "raptor-summary",
+                "level": level,
+                "children_count": len(children),
+                "children": json.dumps(children[:30]),
+                "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
+            }
+        ],
     )
 
 
@@ -266,4 +251,4 @@ def build_tree() -> dict:
 
 
 if __name__ == "__main__":
-    print(json.dumps(build_tree(), indent=2, ensure_ascii=False))
+    print(json.dumps(build_tree(), indent=2, ensure_ascii=False))  # noqa: T201 — CLI stdout
