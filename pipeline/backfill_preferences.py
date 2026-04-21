@@ -69,34 +69,28 @@ def _infer_domain(text: str) -> str:
 
 def collect_preferences() -> list[dict]:
     """Query semantic_memory for preference entries."""
-    from indexer import _get_collection_id, chroma_api
+    from vector_store import get_vector_store
 
-    col_id = _get_collection_id("semantic_memory")
-    if not col_id:
-        print("semantic_memory collection not found")
+    points = get_vector_store().get(
+        "semantic_memory",
+        filter={"category": "preference"},
+        limit=200,
+        with_payload=True,
+        with_documents=True,
+    )
+    if not points:
+        print("semantic_memory collection empty or missing")
         return []
 
-    resp = chroma_api(
-        "POST",
-        f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/get",
-        {
-            "limit": 200,
-            "include": ["documents", "metadatas"],
-            "where": {"category": "preference"},
-        },
-    )
-
-    docs = resp.get("documents", [])
-    metas = resp.get("metadatas", [])
-    ids = resp.get("ids", [])
-
     prefs = []
-    for doc, meta, pid in zip(docs, metas, ids, strict=False):
+    for p in points:
+        doc = p.document or ""
+        meta = p.payload or {}
         if not doc or len(doc.strip()) < 10:
             continue
         prefs.append(
             {
-                "id": pid,
+                "id": p.id,
                 "content": doc.strip()[:200],
                 "agent": meta.get("agent", ""),
                 "confidence": float(meta.get("confidence", "0.5")),

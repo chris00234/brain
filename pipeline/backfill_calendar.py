@@ -23,30 +23,27 @@ def _now_iso() -> str:
 
 
 def collect_events() -> list[dict]:
-    """Query calendar collection from ChromaDB."""
-    from indexer import _get_collection_id, chroma_api
+    """Query calendar collection from the vector store."""
+    from vector_store import get_vector_store
 
-    # Try personal (post-migration), fall back to calendar (pre-migration)
-    col_id = _get_collection_id("personal") or _get_collection_id("calendar")
-    if not col_id:
-        print("neither personal nor calendar collection found")
+    store = get_vector_store()
+    # Try personal (post-migration), fall back to calendar (pre-migration).
+    collection = "personal" if store.count("personal") > 0 else "calendar"
+    points = store.get(
+        collection,
+        filter={"type": "event"},
+        limit=200,
+        with_payload=True,
+        with_documents=True,
+    )
+    if not points:
+        print(f"no events found in {collection}")
         return []
 
-    resp = chroma_api(
-        "POST",
-        f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/get",
-        {
-            "limit": 200,
-            "include": ["documents", "metadatas"],
-            "where": {"type": "event"},
-        },
-    )
-
-    docs = resp.get("documents", [])
-    metas = resp.get("metadatas", [])
-
     events = []
-    for doc, meta in zip(docs, metas, strict=False):
+    for p in points:
+        doc = p.document or ""
+        meta = p.payload or {}
         if not doc or len(doc.strip()) < 10:
             continue
         title = meta.get("title", "")
