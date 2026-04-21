@@ -23,7 +23,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from cli_llm import dispatch as _dispatch  # migrated 2026-04-17
-from indexer import _get_collection_id, chroma_api
+from vector_store import get_vector_store
 from search_unified import search_all
 
 try:
@@ -136,20 +136,11 @@ def check_schedule_gaps() -> list[ProactiveInsight]:
     """Search calendar for events in next 48h, flag those with no prep materials."""
     insights = []
     try:
-        col_id = _get_collection_id("personal")
-        if not col_id:
+        points = get_vector_store().get("personal", limit=100, with_payload=True, with_documents=True)
+        if not points:
             return []
-
-        # Get recent calendar entries — use a broad get with limit
-        resp = chroma_api(
-            "POST",
-            f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/get",
-            {"limit": 100, "include": ["documents", "metadatas"]},
-        )
-        docs = resp.get("documents", [])
-        metas = resp.get("metadatas", [])
-        if not docs:
-            return []
+        docs = [p.document or "" for p in points]
+        metas = [p.payload for p in points]
 
         now = datetime.now(UTC)
         cutoff = now + timedelta(hours=48)
@@ -217,22 +208,15 @@ def check_decision_contradictions() -> list[ProactiveInsight]:
     """Read semantic_contradictions for unresolved items, check recent memories for new ones."""
     insights = []
     try:
-        col_id = _get_collection_id("semantic_contradictions")
-        if not col_id:
-            return []
-
-        # Get pending contradictions
-        resp = chroma_api(
-            "POST",
-            f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/get",
-            {
-                "limit": 50,
-                "include": ["documents", "metadatas"],
-                "where": {"review_state": {"$eq": "pending"}},
-            },
+        points = get_vector_store().get(
+            "semantic_contradictions",
+            filter={"review_state": {"$eq": "pending"}},
+            limit=50,
+            with_payload=True,
+            with_documents=True,
         )
-        docs = resp.get("documents", [])
-        metas = resp.get("metadatas", [])
+        docs = [p.document or "" for p in points]
+        metas = [p.payload for p in points]
 
         for doc, meta in zip(docs, metas, strict=False):
             if not doc:
@@ -259,24 +243,15 @@ def check_decision_contradictions() -> list[ProactiveInsight]:
 
     # Also check recent semantic_memory for potential new contradictions
     try:
-        mem_col_id = _get_collection_id("semantic_memory")
-        if not mem_col_id:
-            return insights
-
         cutoff_iso = (datetime.now(UTC) - timedelta(hours=24)).isoformat(timespec="seconds")
         # ChromaDB 1.4.1 rejects string operands in $gte/$lt — fetch unfiltered
         # and post-filter by created_at in Python. We cap at 500 to avoid
         # scanning unbounded collections.
-        resp = chroma_api(
-            "POST",
-            f"/api/v2/tenants/default_tenant/databases/default_database/collections/{mem_col_id}/get",
-            {
-                "limit": 500,
-                "include": ["documents", "metadatas"],
-            },
+        points = get_vector_store().get(
+            "semantic_memory", limit=500, with_payload=True, with_documents=True
         )
-        all_docs = resp.get("documents", [])
-        all_metas = resp.get("metadatas", [])
+        all_docs = [p.document or "" for p in points]
+        all_metas = [p.payload for p in points]
 
         # Flag any that have contradiction_score in metadata AND are recent
         for doc, meta in zip(all_docs, all_metas, strict=False):
