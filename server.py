@@ -3868,26 +3868,19 @@ def export_memory() -> list[dict]:
     """Export all semantic_memory entries as a JSON array for backup/migration."""
     collection = _memory_collection_id()
     store = get_vector_store()
-    page_size = 2000
-    all_results: list[dict] = []
-    offset = 0
+    # Single call — QdrantStore.get walks Qdrant's native cursor internally
+    # to honor the requested limit. No need for offset-based pagination
+    # here (that path used to loop infinitely before the cursor-based fix).
     try:
-        while True:
-            points = store.get(
-                collection,
-                limit=page_size,
-                offset=offset,
-                with_payload=True,
-                with_documents=True,
-            )
-            for p in points:
-                all_results.append({"id": p.id, "content": p.document or "", "metadata": p.payload or {}})
-            if len(points) < page_size:
-                break
-            offset += page_size
+        points = store.get(
+            collection,
+            limit=1_000_000,
+            with_payload=True,
+            with_documents=True,
+        )
     except Exception as e:
         raise HTTPException(status_code=502, detail=_safe_http_detail("vector get", e))
-    return all_results
+    return [{"id": p.id, "content": p.document or "", "metadata": p.payload or {}} for p in points]
 
 
 @app.get(

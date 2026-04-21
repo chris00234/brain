@@ -300,6 +300,21 @@ def _hebbian_boost_episode_pairs(clusters: list[list[dict]]) -> int:
 
 
 def main() -> int:
+    # Hard wall-clock cap so a hung Qdrant scroll or Neo4j write can't
+    # grow this process to multi-GB RSS while launchd's misfire_grace
+    # is ignored. Triggered once during the 2026-04-21 Qdrant
+    # rebuild: binder scheduled at 03:18 PDT while the sparse reindex
+    # was mid-delete/recreate of collections, left running 3h46min
+    # holding ~7GB RSS before manual kill.
+    import signal
+
+    def _timeout(signum, frame):  # noqa: ARG001 - signal signature
+        print("[episode_binder] FATAL: exceeded 300s wall-clock, aborting", flush=True)
+        sys.exit(124)
+
+    signal.signal(signal.SIGALRM, _timeout)
+    signal.alarm(300)
+
     print(f"[episode_binder] starting at {datetime.now(UTC).isoformat()}", flush=True)
     _ensure_table()
     memories = _fetch_recent_memories()

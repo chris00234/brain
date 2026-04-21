@@ -557,22 +557,56 @@ class QdrantStore:
                 for r in records
             ]
 
-        # Filter + paginate path uses scroll.
-        try:
-            points, _next = self._client.scroll(
-                collection_name=real,
-                scroll_filter=_translate_filter(merged_filter),
-                limit=limit or 500,
-                offset=offset or None,
-                with_payload=with_payload or with_documents,
-                with_vectors=with_vectors,
-            )
-        except Exception as exc:
-            log.warning("qdrant scroll(%s) failed: %s", collection, exc)
+        # Filter + paginate path uses Qdrant's cursor-based scroll.
+        #
+        # Qdrant's `offset` on scroll is a POINT ID (UUID/int/str), NOT a
+        # numeric row offset. The earlier implementation passed `offset=500,
+        # 1000, ...` which Qdrant tried to interpret as a point id, matched
+        # nothing, and kept returning the first page — turning callers'
+        # "paginate forward" loops into infinite loops that blew RAM to
+        # several GB (surfaced via pipeline/episode_binder.py hanging at
+        # ~7GB RSS during the 2026-04-21 Qdrant sparse rebuild).
+        #
+        # Correct translation: walk Qdrant's opaque `next_offset` cursor
+        # from the start, skip the first `offset` rows, then return the
+        # next `limit`. O(offset) per call — fine for small offsets; callers
+        # doing full iteration should use offset=0 + limit=large.
+        target_skip = max(0, int(offset or 0))
+        target_take = int(limit or 500)
+        page_size = min(target_take + target_skip, 500)
+        if page_size <= 0:
             return []
-        return [
-            self._record_to_point(r, with_documents=with_documents, with_vectors=with_vectors) for r in points
-        ]
+        collected: list[VectorPoint] = []
+        cursor: Any = None
+        skipped = 0
+        MAX_PAGES = 2000  # safety bound: 2000 * 500 = 1M rows max walked per call
+        for _ in range(MAX_PAGES):
+            try:
+                points, cursor = self._client.scroll(
+                    collection_name=real,
+                    scroll_filter=_translate_filter(merged_filter),
+                    limit=page_size,
+                    offset=cursor,
+                    with_payload=with_payload or with_documents,
+                    with_vectors=with_vectors,
+                )
+            except Exception as exc:
+                log.warning("qdrant scroll(%s) failed: %s", collection, exc)
+                return collected
+            if not points:
+                break
+            for r in points:
+                if skipped < target_skip:
+                    skipped += 1
+                    continue
+                collected.append(
+                    self._record_to_point(r, with_documents=with_documents, with_vectors=with_vectors)
+                )
+                if len(collected) >= target_take:
+                    return collected
+            if cursor is None:
+                break
+        return collected
 
     def _record_to_point(self, record: Any, *, with_documents: bool, with_vectors: bool) -> VectorPoint:
         user_payload, original_id, document = self._hit_payload(record.payload)
