@@ -532,11 +532,11 @@ def get_vector_store() -> VectorStore:
         if target == "chroma":
             store: VectorStore = ChromaStore()
         elif target == "qdrant":
-            raise NotImplementedError(
-                "VECTOR_BACKEND=qdrant: QdrantStore lands in Phase A5 of the "
-                "migration plan (~/.claude/plans/toasty-snacking-shamir.md). "
-                "Use VECTOR_BACKEND=chroma until then."
-            )
+            # Phase A5 implementation — wired here so VECTOR_BACKEND=qdrant
+            # Just Works once a Qdrant instance is reachable at QDRANT_URL.
+            from qdrant_store import QdrantStore
+
+            store = QdrantStore()
         elif target == "dual":
             raise NotImplementedError(
                 "VECTOR_BACKEND=dual: DualWriteStore lands in Phase B2 of the "
