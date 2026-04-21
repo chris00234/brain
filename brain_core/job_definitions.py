@@ -561,13 +561,6 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         misfire_grace=900,
     ),
     ScheduledJob(
-        name="fts_rebuild",
-        description="Nightly SQLite FTS5 keyword index rebuild (4:15am)",
-        trigger=CronTrigger(hour=4, minute=15),
-        agent="system",
-        misfire_grace=900,
-    ),
-    ScheduledJob(
         name="memory_consolidation",
         description="Nightly memory tier promotion/demotion (3:45am, Phase 1D)",
         trigger=CronTrigger(hour=3, minute=45),

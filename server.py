@@ -473,7 +473,6 @@ JOB_REGISTRY: dict[str, list[str]] = {
         "--graduate",
     ],
     "llm_usage_purge": [_py, f"{_bd}/brain_core/pipeline/llm_usage_purge.py"],
-    "fts_rebuild": [_py, f"{_bd}/brain_core/fts_index.py"],
     "event_compressor": [_py, f"{_bd}/brain_core/pipeline/event_compressor.py"],
     "slo_monitor": [_py, f"{_bd}/brain_core/slo_monitor.py"],
     "hnsw_adaptive": [_py, f"{_bd}/brain_core/pipeline/hnsw_tuner.py", "--adaptive"],

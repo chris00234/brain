@@ -1146,24 +1146,19 @@ def search_all(
     def _search_fts():
         t0 = time.time()
         res: list[dict] = []
-        # 2026-04-17 T2.9: query both FTS indexes — Chroma-synced (fts_index, nightly rebuild)
-        # AND live raw_events FTS (triggered on brain.db writes). The live index catches
-        # literal-wording queries for env vars, model names, error messages that appear
-        # verbatim in raw event streams but are excluded from the semantic fan-out.
-        try:
-            from fts_index import search_fts
-
-            res = search_fts(query, limit=limit) or []
-        except Exception:
-            res = []
+        # BM25 for vector-store documents now comes from Qdrant's native
+        # sparse vectors (fused into the dense query via FusionQuery in
+        # QdrantStore._build_prefetch). The SQLite fts_index that used to
+        # shadow-sync from Qdrant was retired 2026-04-21 — redundant.
+        # `raw_events_fts` stays: it indexes brain.db's raw_events table
+        # (separate data, live triggers), giving literal-wording recall on
+        # env vars, model names, error messages that never land in Qdrant.
         try:
             from raw_events_fts import search as _raw_fts_search
 
-            raw_hits = _raw_fts_search(query, limit=max(3, limit // 2)) or []
-            if raw_hits:
-                res = list(res) + list(raw_hits)
+            res = _raw_fts_search(query, limit=limit) or []
         except Exception:
-            pass
+            res = []
         source_timing["fts_ms"] = int((time.time() - t0) * 1000)
         return res
 

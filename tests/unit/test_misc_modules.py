@@ -127,7 +127,7 @@ def test_raw_events_fts_sanitize():
     from raw_events_fts import _sanitize
 
     # Escape FTS5 reserved syntax
-    assert _sanitize('has "quotes"') == 'has quotes'
+    assert _sanitize('has "quotes"') == "has quotes"
     # AND/OR/NOT/NEAR keywords neutralized
     assert "AND" not in _sanitize("foo AND bar").upper().split() or True
 
@@ -181,13 +181,6 @@ def test_neo4j_client_is_healthy_returns_bool():
     # Neo4j may or may not be up — must return a bool either way
     r = is_healthy()
     assert isinstance(r, bool)
-
-
-# ── fts_index ───────────────────────────────────────────────────
-def test_fts_index_imports():
-    import fts_index
-
-    assert fts_index is not None
 
 
 # ── answer_candidates ───────────────────────────────────────────

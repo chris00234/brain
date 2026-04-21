@@ -89,7 +89,6 @@
 | `event_compressor` | `cron(day=1, hour=4, minute=20)` | 1800s | Monthly event compression for old experience events (1st of month, 4:20am) |
 | `feedback_aggregate` | `cron(day_of_week=sun, hour=6, minute=30)` | 900s | Weekly search feedback aggregation (Sun 6:30am) |
 | `focus_aggregate` | `cron(hour=4, minute=35)` | 600s | Daily energy/focus data layer aggregation (4:35am) |
-| `fts_rebuild` | `cron(hour=4, minute=15)` | 900s | Nightly SQLite FTS5 keyword index rebuild (4:15am) |
 | `gap_detection` | `cron(day_of_week=sun, hour=9, minute=0)` | 900s | Weekly knowledge gap detection from recall failures (Sunday 9:00am) |
 | `graph_backfill_co_mention` | `cron(day_of_week=sun, hour=3, minute=40)` | 900s | Weekly co-occurrence RELATES_TO backfill from shared MemoryAccess (Sunday 3:40am) |
 | `graph_consolidation` | `cron(hour=2, minute=50)` | 900s | Nightly graph sleep: decay, prune, promote, cluster (2:50am) |
@@ -187,7 +186,6 @@
 | `event_compressor` | `cron(day=1, hour=4, minute=20)` | system | 1800s |
 | `feedback_aggregate` | `cron(day_of_week=sun, hour=6, minute=30)` | system | 900s |
 | `focus_aggregate` | `cron(hour=4, minute=35)` | system | 600s |
-| `fts_rebuild` | `cron(hour=4, minute=15)` | system | 900s |
 | `gap_detection` | `cron(day_of_week=sun, hour=9, minute=0)` | system | 900s |
 | `ghost_blog_ingest` | `cron(hour=5, minute=0)` | market | 300s |
 | `git_activity_ingest` | `cron(hour=1, minute=45)` | ellie | 300s |
