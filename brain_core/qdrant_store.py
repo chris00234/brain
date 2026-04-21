@@ -242,7 +242,9 @@ class QdrantStore:
             merged["_original_id"] = sid
             if documents is not None:
                 merged["_document"] = documents[i]
-            points.append(PointStruct(id=self._qid(sid), vector=vec, payload=merged))
+            # Bootstrap creates collections with a named `dense` vector; upsert
+            # must send the vector as {name: vec} to match that schema.
+            points.append(PointStruct(id=self._qid(sid), vector={"dense": vec}, payload=merged))
         self._client.upsert(collection_name=collection, points=points, wait=False)
 
     def query(
@@ -255,15 +257,20 @@ class QdrantStore:
         with_payload: bool = True,
         with_vectors: bool = False,
     ) -> list[VectorHit]:
+        # qdrant-client 1.17+ uses `query_points` instead of deprecated
+        # `search`. We always query against the primary `dense` named
+        # vector — bootstrap guarantees every collection has one.
         try:
-            hits = self._client.search(
+            resp = self._client.query_points(
                 collection_name=collection,
-                query_vector=vector,
+                query=vector,
+                using="dense",
                 limit=k,
                 query_filter=_translate_filter(filter),
                 with_payload=with_payload,
                 with_vectors=with_vectors,
             )
+            hits = resp.points
         except Exception as exc:
             log.warning("qdrant query(%s) failed: %s", collection, exc)
             return []
@@ -271,13 +278,18 @@ class QdrantStore:
         results: list[VectorHit] = []
         for h in hits:
             user_payload, original_id, document = self._hit_payload(h.payload if with_payload else None)
+            # Named-vector collections return vector as {name: [...]}; pull
+            # the `dense` slot.
+            vec: list[float] | None = None
+            if with_vectors and h.vector is not None:
+                vec = list(h.vector.get("dense") or []) if isinstance(h.vector, dict) else list(h.vector)
             results.append(
                 VectorHit(
                     id=original_id or str(h.id),
                     score=float(h.score),
                     payload=user_payload,
                     document=document,
-                    vector=list(h.vector) if (with_vectors and h.vector is not None) else None,
+                    vector=vec,
                 )
             )
         return results
@@ -329,13 +341,15 @@ class QdrantStore:
 
     def _record_to_point(self, record: Any, *, with_documents: bool, with_vectors: bool) -> VectorPoint:
         user_payload, original_id, document = self._hit_payload(record.payload)
+        raw_vec = getattr(record, "vector", None)
+        vec: list[float] | None = None
+        if with_vectors and raw_vec is not None:
+            vec = list(raw_vec.get("dense") or []) if isinstance(raw_vec, dict) else list(raw_vec)
         return VectorPoint(
             id=original_id or str(record.id),
             payload=user_payload,
             document=document if with_documents else None,
-            vector=list(record.vector)
-            if (with_vectors and getattr(record, "vector", None) is not None)
-            else None,
+            vector=vec,
         )
 
     def delete(self, collection: str, ids: list[str]) -> None:
