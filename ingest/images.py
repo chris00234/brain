@@ -47,12 +47,8 @@ from pathlib import Path
 
 sys.path.insert(0, "/Users/chrischo/server/brain/brain_core")
 
-from indexer import (
-    _get_collection_id,
-    chroma_api,
-    ensure_collection,
-    get_embedding,
-)
+from indexer import get_embedding
+from vector_store import get_vector_store
 
 log = logging.getLogger("brain.ingest.images")
 
@@ -287,43 +283,36 @@ def ingest_image(
             "ocr_ms": int((time.time() - t0) * 1000),
         }
 
-    # Index caption in ChromaDB
+    # Index caption in the vector store
     try:
-        col_id = _get_collection_id(KNOWLEDGE_COLLECTION)
-        if not col_id:
-            ensure_collection(KNOWLEDGE_COLLECTION)
-            col_id = _get_collection_id(KNOWLEDGE_COLLECTION)
-        if not col_id:
-            raise RuntimeError(f"could not resolve collection id for {KNOWLEDGE_COLLECTION}")
+        store = get_vector_store()
+        store.create_collection(KNOWLEDGE_COLLECTION)
 
         emb = get_embedding(caption[:EMBED_TRUNCATE])
         if not emb:
             raise RuntimeError("embedding failed")
 
         doc_id = f"image:{image_hash}"
-        chroma_api(
-            "POST",
-            f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/upsert",
-            {
-                "ids": [doc_id],
-                "embeddings": [emb],
-                "documents": [caption],
-                "metadatas": [
-                    {
-                        "source": f"image/{image_path.name}",
-                        "source_type": "image",
-                        "image_hash": image_hash,
-                        "caption_method": method,
-                        "image_path": str(image_path),
-                        "ocr_chars": ocr_chars,
-                        "created_at": _now_iso(),
-                        "embed_model": "multilingual-e5-large-instruct",
-                    }
-                ],
-            },
+        store.upsert(
+            KNOWLEDGE_COLLECTION,
+            ids=[doc_id],
+            vectors=[emb],
+            documents=[caption],
+            payloads=[
+                {
+                    "source": f"image/{image_path.name}",
+                    "source_type": "image",
+                    "image_hash": image_hash,
+                    "caption_method": method,
+                    "image_path": str(image_path),
+                    "ocr_chars": ocr_chars,
+                    "created_at": _now_iso(),
+                    "embed_model": "multilingual-e5-large-instruct",
+                }
+            ],
         )
     except Exception as e:
-        log.warning("chroma upsert failed for %s: %s", image_path.name, e)
+        log.warning("image upsert failed for %s: %s", image_path.name, e)
         _log_failure(str(image_path), f"upsert: {e}")
         return {"path": str(image_path), "status": "upsert_failed", "error": str(e)[:200]}
 

@@ -41,12 +41,10 @@ from pathlib import Path
 sys.path.insert(0, "/Users/chrischo/server/brain/brain_core")
 
 from indexer import (
-    _get_collection_id,
-    chroma_api,
     chunk_text,
-    ensure_collection,
     get_embedding,
 )
+from vector_store import get_vector_store
 
 # M8.2: optional semantic chunking. Module-level kill switch via
 # BRAIN_SEMANTIC_CHUNKING env var. Falls back to indexer.chunk_text otherwise.
@@ -207,12 +205,8 @@ def _upsert_chunks(chunks: list[dict], pdf_hash: str) -> int:
     if not chunks:
         return 0
 
-    col_id = _get_collection_id(KNOWLEDGE_COLLECTION)
-    if not col_id:
-        ensure_collection(KNOWLEDGE_COLLECTION)
-        col_id = _get_collection_id(KNOWLEDGE_COLLECTION)
-    if not col_id:
-        raise RuntimeError(f"could not get collection id for {KNOWLEDGE_COLLECTION}")
+    store = get_vector_store()
+    store.create_collection(KNOWLEDGE_COLLECTION)
 
     ids: list[str] = []
     embeddings: list[list[float]] = []
@@ -241,15 +235,12 @@ def _upsert_chunks(chunks: list[dict], pdf_hash: str) -> int:
     if not ids:
         return 0
 
-    chroma_api(
-        "POST",
-        f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/upsert",
-        {
-            "ids": ids,
-            "embeddings": embeddings,
-            "documents": documents,
-            "metadatas": metadatas,
-        },
+    store.upsert(
+        KNOWLEDGE_COLLECTION,
+        ids=ids,
+        vectors=embeddings,
+        documents=documents,
+        payloads=metadatas,
     )
     return len(ids)
 
