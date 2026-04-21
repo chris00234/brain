@@ -25,6 +25,7 @@ source atoms so the narrative self remains introspectable.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import sys
 from datetime import UTC, datetime
@@ -92,7 +93,42 @@ def compile_self_model() -> str:
     reinforced = _top_reinforced_atoms(TOP_ACCESSED_N)
     now = datetime.now(UTC).isoformat(timespec="seconds")
 
+    # Canonical JSON frontmatter so rebuild_canonical_index + canonical
+    # ChromaDB ingest pick this up as a first-class atom (without this the
+    # file sits on disk but never becomes retrievable).
+    meta = {
+        "id": "chris_self_model",
+        "type": "canonical",
+        "domain": "chris",
+        "subtype": "self_model",
+        "title": "Chris Cho - unified self-model (DMN anchor)",
+        "status": "active",
+        "visibility": "private",
+        "confidence": 0.95,
+        "updated_at": now,
+        "last_reviewed_at": now,
+        "owner": "chris",
+        "scope": "global",
+        "valid_from": now,
+        "valid_to": None,
+        "sources": [
+            "canonical/chris/_identity.md",
+            "canonical/chris/_state.md",
+            "brain.db::atom_valence (top positive)",
+            "brain.db::atoms (top reinforcement_count)",
+        ],
+        "provenance_summary": (
+            "Nightly DMN-like compile: identity + state + top-valence atoms + "
+            "top-reinforced canonical atoms. Regenerated from signals, not "
+            "hand-edited. Raichle 2001 / Northoff 2006."
+        ),
+    }
+
     lines: list[str] = []
+    lines.append("---json")
+    lines.append(json.dumps(meta, indent=2, ensure_ascii=False))
+    lines.append("---")
+    lines.append("")
     lines.append(f"# Chris - unified self-model (regenerated {now})")
     lines.append("")
     lines.append(
