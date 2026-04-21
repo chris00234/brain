@@ -1,5 +1,5 @@
 #!/opt/homebrew/bin/python3
-"""Memory file lifecycle — archive old agent memory files, extract insights first.
+"""Memory file lifecycle - archive old agent memory files, extract insights first.
 
 Phase 4d: before archiving a memory file, dispatch it to Liz via openclaw agent
 for canonical-worthy fact extraction. Each extracted fact becomes a schema-compliant
@@ -87,7 +87,7 @@ def extract_via_liz(memory_file: Path) -> int:
 
     Each extracted fact becomes a schema-compliant raw record in raw/inbox/.
     Returns the number of facts written. Returns 0 on any failure (caller should
-    proceed with archival regardless — extraction is best-effort).
+    proceed with archival regardless - extraction is best-effort).
     """
     try:
         content = memory_file.read_text()[:8000]  # cap to avoid huge prompts
@@ -189,7 +189,7 @@ def main():
     archive_cutoff = now - timedelta(days=args.archive_age)
     delete_cutoff = now - timedelta(days=args.delete_age)
 
-    print(f"Memory Lifecycle — {now.strftime('%Y-%m-%d %H:%M')}")
+    print(f"Memory Lifecycle - {now.strftime('%Y-%m-%d %H:%M')}")
     print(f"Archive: files older than {args.archive_age} days ({archive_cutoff.strftime('%Y-%m-%d')})")
     print(f"Delete: archived files older than {args.delete_age} days ({delete_cutoff.strftime('%Y-%m-%d')})")
     if args.dry_run:
@@ -274,7 +274,7 @@ def dedup_semantic_memory() -> int:
     ids = data.get("ids", [])
     docs = data.get("documents", [])
 
-    # Find content duplicates — keep the first occurrence
+    # Find content duplicates - keep the first occurrence
     seen = {}
     dupe_ids = []
     for i, doc in enumerate(docs):
@@ -333,9 +333,9 @@ def dedup_semantic_near_duplicates() -> dict:
     if not col_id:
         return {"status": "skip", "reason": "collection not found"}
 
-    # Get docs with embeddings — capped at 300 to keep O(n^2) pairwise comparison tractable
+    # Get docs with embeddings - capped at 300 to keep O(n^2) pairwise comparison tractable
     # without numpy (not in requirements.txt). 300 entries = ~45k comparisons in pure Python ≈ 10s.
-    # Previous cap of 2000 → ~2M comparisons → multi-hour runtime. Order by created_at DESC
+    # Previous cap of 2000 -> ~2M comparisons -> multi-hour runtime. Order by created_at DESC
     # to prioritize deduping recent entries.
     req = urllib.request.Request(
         f"{CHROMA}/{col_id}/get",
@@ -388,7 +388,7 @@ def dedup_semantic_near_duplicates() -> dict:
             if ids[j] in to_delete or not docs[j] or not embs[j]:
                 continue
 
-            # Quick length check — skip if very different lengths
+            # Quick length check - skip if very different lengths
             len_ratio = min(len(docs[i]), len(docs[j])) / max(len(docs[i]), len(docs[j]), 1)
             if len_ratio < 0.3:
                 continue
@@ -402,7 +402,7 @@ def dedup_semantic_near_duplicates() -> dict:
             if jac < 0.5:
                 continue
 
-            # Near-duplicate found — keep the longer/newer one
+            # Near-duplicate found - keep the longer/newer one
             time_i = (metas[i] or {}).get("created_at", "")
             time_j = (metas[j] or {}).get("created_at", "")
 
@@ -451,7 +451,7 @@ def dedup_semantic_near_duplicates() -> dict:
 
 
 def _get_vote_consensus(contra_id: str) -> str | None:
-    """Read contradiction_votes; return consensus action if ≥3 votes and ≥2 agree.
+    """Read contradiction_votes; return consensus action if >=3 votes and >=2 agree.
 
     Returns one of keep_new / keep_old / merge / dismiss, or None if no consensus.
     """
@@ -487,10 +487,10 @@ def auto_resolve_stale_contradictions():
     """Auto-resolve contradictions where one side is clearly superior.
 
     Rules (checked in order):
-    0. Agent vote consensus: ≥3 votes with ≥2 agreeing → majority action
-    1. If confidence gap > 0.2 — keep the higher-confidence entry
-    2. If contradiction is > 14 days old and unreviewed — keep the newer entry
-    3. If one side is already deleted — dismiss the contradiction
+    0. Agent vote consensus: >=3 votes with >=2 agreeing -> majority action
+    1. If confidence gap > 0.2 - keep the higher-confidence entry
+    2. If contradiction is > 14 days old and unreviewed - keep the newer entry
+    3. If one side is already deleted - dismiss the contradiction
     """
     from datetime import datetime, timedelta
 
@@ -566,21 +566,34 @@ def auto_resolve_stale_contradictions():
             elif old_conf - new_conf > 0.2:
                 action = "keep_old"
             else:
-                # Case 3: Age-based — contradictions older than 14 days, keep newer
+                # Case 2b: Near-duplicate rephrasing - distance<0.05 + token
+                # overlap>=0.70. Matches the ingest-time gate in learn.py so
+                # any near-duplicate that slipped past (e.g. added before the
+                # gate shipped) still gets cleaned up.
                 try:
-                    contra_dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
-                    if contra_dt.tzinfo is None:
-                        contra_dt = contra_dt.replace(tzinfo=UTC)
-                    if contra_dt < cutoff_date:
-                        action = "keep_new"
-                except Exception:
-                    pass
+                    dist_val = float(meta.get("distance", 1.0))
+                    overlap_val = float(meta.get("token_overlap", 0.0))
+                except (ValueError, TypeError):
+                    dist_val = 1.0
+                    overlap_val = 0.0
+                if dist_val < 0.05 and overlap_val >= 0.70:
+                    action = "keep_new"
+                else:
+                    # Case 3: Age-based - contradictions older than 14 days, keep newer
+                    try:
+                        contra_dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                        if contra_dt.tzinfo is None:
+                            contra_dt = contra_dt.replace(tzinfo=UTC)
+                        if contra_dt < cutoff_date:
+                            action = "keep_new"
+                    except Exception:
+                        pass
 
         if action is None:
             kept_count += 1
             continue
 
-        # "merge" has no deterministic implementation here — the votes express
+        # "merge" has no deterministic implementation here - the votes express
         # an intent that needs human curation. Leave the contradiction pending
         # for manual review rather than silently dropping both sides.
         if action == "merge":
@@ -649,7 +662,7 @@ def cleanup_supersession_chains() -> dict:
     if not sem_col:
         return {"checked": 0, "orphaned": 0, "fixed": 0, "error": "semantic_memory missing"}
 
-    # Fetch all entries in pages — need IDs + metadatas to find superseded_by refs
+    # Fetch all entries in pages - need IDs + metadatas to find superseded_by refs
     PAGE = 500
     offset = 0
     all_ids: set[str] = set()
@@ -693,10 +706,10 @@ def cleanup_supersession_chains() -> dict:
         visited: set[str] = {mid}
         current = target
         while current in all_ids:
-            # Target exists — check if it's also superseded
+            # Target exists - check if it's also superseded
             target_meta = superseded_map.get(current)
             if target_meta is None:
-                break  # current is live (not superseded) — chain is healthy
+                break  # current is live (not superseded) - chain is healthy
             next_target = (target_meta.get("superseded_by") or "").strip()
             if not next_target or next_target in visited:
                 break  # chain ends here or is circular
@@ -704,7 +717,7 @@ def cleanup_supersession_chains() -> dict:
             current = next_target
 
         if current not in all_ids:
-            # Chain head is dead — resurrect this memory
+            # Chain head is dead - resurrect this memory
             meta.pop("superseded_by", None)
             meta.pop("valid_until", None)
             orphaned_ids.append(mid)
@@ -806,7 +819,7 @@ def recompute_trust_scores() -> dict:
                 )
                 updated += len(update_ids)
             except Exception as e:
-                # Continue — partial updates are fine for a weekly job
+                # Continue - partial updates are fine for a weekly job
                 print(f"  trust_recompute update failed at offset={offset}: {e}")
 
         if len(ids) < PAGE:
@@ -827,7 +840,7 @@ def reinforce_on_access(memory_ids: list[str], boost: float = 0.02) -> dict:
 
     Called as a fire-and-forget BackgroundTask from /recall when semantic_memory
     entries appear in the top-N results. Implements MemoryBank's reinforcement
-    on access — memories you actually use ratchet up trust over time, becoming
+    on access - memories you actually use ratchet up trust over time, becoming
     more salient for future queries.
 
     Best-effort: any failure logs and returns the partial count rather than
@@ -859,7 +872,7 @@ def reinforce_on_access(memory_ids: list[str], boost: float = 0.02) -> dict:
         return {"reinforced": 0}
 
     # Z-suffix matches the convention used by entity_graph._now() and
-    # learn._now_iso() — keeps lexicographic comparison consistent across
+    # learn._now_iso() - keeps lexicographic comparison consistent across
     # all writers (the prune job sorts by these timestamps).
     now_iso = datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
     update_ids: list[str] = []
@@ -910,7 +923,7 @@ def reinforce_on_access(memory_ids: list[str], boost: float = 0.02) -> dict:
     except Exception as e:
         return {"reinforced": 0, "reason": f"update failed: {e}"}
 
-    # v3 Layer B — bump Neo4j MemoryAccess.utility_score so the graph's
+    # v3 Layer B - bump Neo4j MemoryAccess.utility_score so the graph's
     # MemRL ranking actually reflects usage. Uses _neo4j_only path to avoid
     # the double-boost bug where reinforce_memory's full path re-reads and
     # re-writes Chroma trust_score we just updated above (would add +0.04
@@ -931,6 +944,52 @@ def reinforce_on_access(memory_ids: list[str], boost: float = 0.02) -> dict:
     return {"reinforced": len(update_ids)}
 
 
+def reinforce_all_collections(results: list[dict], limit: int = 10) -> dict:
+    """Super-human reconsolidation: reinforce EVERY atom-backed retrieval hit,
+    not just semantic_memory. Matches biological reconsolidation - every
+    retrieval rewrites the trace. UP-only: bumps reinforcement_count and
+    last_reviewed_at via atoms_store.reinforce. Never decrements, never
+    deletes. Fire-and-forget from /recall BackgroundTask.
+    """
+    if not results:
+        return {"reinforced": 0}
+    sem_ids: list[str] = []
+    atom_chroma_ids: list[str] = []
+    for r in results[:limit]:
+        if not isinstance(r, dict):
+            continue
+        col = (r.get("collection") or "").lower()
+        rid = r.get("id") or (r.get("metadata") or {}).get("id")
+        if not rid:
+            continue
+        if col == "semantic_memory" or "semantic" in col:
+            sem_ids.append(rid)
+        else:
+            atom_chroma_ids.append(rid)
+    out = {"reinforced": 0, "semantic": 0, "atoms": 0}
+    if sem_ids:
+        try:
+            r1 = reinforce_on_access(sem_ids)
+            out["semantic"] = int(r1.get("reinforced", 0))
+        except Exception as _exc:
+            log.debug("sem reinforce skipped: %s", _exc)
+    if atom_chroma_ids:
+        try:
+            sys.path.insert(0, str(Path(__file__).parent))
+            from atoms_store import reinforce as _atom_reinforce
+
+            for cid in atom_chroma_ids:
+                try:
+                    _atom_reinforce(cid, success=True)
+                    out["atoms"] += 1
+                except Exception:
+                    continue
+        except ImportError:
+            pass
+    out["reinforced"] = out["semantic"] + out["atoms"]
+    return out
+
+
 def prune_atrophied_memories(
     dry_run: bool = True, max_age_days: int = 120, compress_with_gist: bool = False
 ) -> dict:
@@ -944,13 +1003,13 @@ def prune_atrophied_memories(
       - trust_score < 0.5
       - not referenced from any canonical/distilled note (provenance check)
 
-    Default is dry_run=True — logs what WOULD be pruned without deleting.
+    Default is dry_run=True - logs what WOULD be pruned without deleting.
     Set dry_run=False after reviewing the candidates.
 
     Compression: if compress_with_gist=True AND there are candidates, dispatch
     a single Jenna call (batched) to extract one-line gists per memory before
     deletion. The gists are stored as new tier="gist" memories with
-    derived_from=[old_id], so the information isn't lost — only the verbose
+    derived_from=[old_id], so the information isn't lost - only the verbose
     original is removed.
 
     Every deletion is logged to audit_log for recovery if needed.
@@ -982,7 +1041,7 @@ def prune_atrophied_memories(
     # than the cutoff and bypassing the age filter.
     cutoff_iso = cutoff.isoformat().replace("+00:00", "Z")
 
-    # Round 11 fix: real provenance check — preload the set of memory IDs
+    # Round 11 fix: real provenance check - preload the set of memory IDs
     # mentioned in any canonical/distilled note. The previous implementation
     # checked metadata fields that no writer ever populates, making the
     # provenance gate a no-op.
@@ -1006,7 +1065,7 @@ def prune_atrophied_memories(
     except Exception:
         pass
 
-    # Fetch all of semantic_memory in pages — we need every entry to evaluate
+    # Fetch all of semantic_memory in pages - we need every entry to evaluate
     PAGE = 500
     offset = 0
     candidates: list[dict] = []
@@ -1074,7 +1133,7 @@ def prune_atrophied_memories(
         offset += PAGE
 
     n_candidates = len(candidates)
-    # Take the SMALLER of the two limits — never delete >100/run AND never
+    # Take the SMALLER of the two limits - never delete >100/run AND never
     # delete >5% of the collection. Was using max() which inverted the intent.
     safety_cap = min(100, max(1, int(total_scanned * 0.05)))
     if n_candidates > safety_cap:
@@ -1083,7 +1142,7 @@ def prune_atrophied_memories(
             "scanned": total_scanned,
             "candidates": n_candidates,
             "safety_cap": safety_cap,
-            "reason": f"candidate set ({n_candidates}) exceeds 5% / 100 floor — refusing to prune",
+            "reason": f"candidate set ({n_candidates}) exceeds 5% / 100 floor - refusing to prune",
         }
 
     if dry_run or n_candidates == 0:
@@ -1099,7 +1158,7 @@ def prune_atrophied_memories(
             "actually_deleted": 0,
         }
 
-    # Real deletion path — only reached when dry_run=False
+    # Real deletion path - only reached when dry_run=False
     candidate_ids = [c["id"] for c in candidates]
 
     # Optional gist compression before delete
@@ -1111,7 +1170,7 @@ def prune_atrophied_memories(
             BATCH = 50
             # 2026-04-17 token-spike fix: cap per-item content at 400 chars.
             # Previously unbounded concat of 50 memories could hit 760K tokens/call
-            # (observed 3-day OpenAI spike). 400 chars × 50 = 20KB prompt ≈ 5K tokens,
+            # (observed 3-day OpenAI spike). 400 chars x 50 = 20KB prompt ≈ 5K tokens,
             # still enough context for a 1-line gist of each memory.
             for i in range(0, len(candidates), BATCH):
                 batch = candidates[i : i + BATCH]
@@ -1168,7 +1227,7 @@ def prune_atrophied_memories(
         except Exception as e:
             print(f"  gist compression failed: {e}")
 
-    # Delete in batches of 50 — record audit log for each
+    # Delete in batches of 50 - record audit log for each
     deleted = 0
     BATCH = 50
     for i in range(0, len(candidate_ids), BATCH):
@@ -1276,7 +1335,7 @@ def cleanup_stale_superseded() -> dict:
     candidates: list[str] = []
     for mid, meta in superseded:
         target = meta["superseded_by"].strip()
-        # Target must exist (chain is valid — not an orphan)
+        # Target must exist (chain is valid - not an orphan)
         if target not in all_ids:
             continue
         # valid_until must be set and older than 30 days
@@ -1305,7 +1364,7 @@ def cleanup_stale_superseded() -> dict:
             "checked": checked,
             "candidates": len(candidates),
             "safety_cap": safety_cap,
-            "reason": f"candidate set ({len(candidates)}) exceeds safety cap — refusing",
+            "reason": f"candidate set ({len(candidates)}) exceeds safety cap - refusing",
         }
 
     if not candidates:

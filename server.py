@@ -159,6 +159,10 @@ JOB_REGISTRY: dict[str, list[str]] = {
     "monthly_synthesis": [_py, f"{_bd}/synthesis/monthly.py"],
     "brain_reflect": [_py, f"{_bd}/synthesis/reflect.py"],
     "profile_regen": [_py, f"{_bd}/synthesis/profile_regen.py"],
+    # 2026-04-20 DMN-like unified self-model atom. Nightly compile of identity +
+    # state + top-valence + top-reinforced into canonical/chris/_self_model.md.
+    # Next canonical_pipeline run turns it into the default retrieval anchor.
+    "self_model_regen": [_py, f"{_bd}/synthesis/self_model_regen.py"],
     # 2026-04-17 ECC-style skill evolution: convert high-confidence atoms
     # (tier=core/semantic, kind=preference/decision/correction) into
     # domain-scoped Claude Code skills at ~/.claude/skills/brain-learned-*
@@ -1319,6 +1323,7 @@ app.add_middleware(SlowAPIMiddleware)
 @app.exception_handler(Exception)
 async def _generic_exception_handler(request, exc):  # type: ignore[no-untyped-def]
     import uuid
+
     from fastapi.responses import JSONResponse
 
     err_id = uuid.uuid4().hex[:12]
@@ -1333,6 +1338,7 @@ async def _generic_exception_handler(request, exc):  # type: ignore[no-untyped-d
             "err_id": err_id,
         },
     )
+
 
 _cors_origins = os.getenv("BRAIN_CORS_ORIGINS", "").strip()
 app.add_middleware(
@@ -1541,23 +1547,11 @@ def recall(
             # the response comes from. Fire-and-forget so cache lookups stay fast.
             try:
                 cached_results = cached.get("results", []) if isinstance(cached, dict) else []
-                cached_sem_ids = []
-                for r in cached_results:
-                    if not isinstance(r, dict):
-                        continue
-                    col = r.get("collection") or ""
-                    if col != "semantic_memory" and "semantic" not in col:
-                        continue
-                    rid = r.get("id") or (r.get("metadata") or {}).get("id")
-                    if rid:
-                        cached_sem_ids.append(rid)
-                    if len(cached_sem_ids) >= 5:
-                        break
-                if cached_sem_ids:
-                    from brain_core.memory_lifecycle import reinforce_on_access
+                if cached_results:
+                    from brain_core.memory_lifecycle import reinforce_all_collections
                     from brain_core.search_unified import _search_bg_pool
 
-                    _search_bg_pool.submit(reinforce_on_access, cached_sem_ids)
+                    _search_bg_pool.submit(reinforce_all_collections, cached_results)
             except Exception:
                 pass
             return cached
@@ -1601,23 +1595,11 @@ def recall(
     # (canonical results) so we check both paths.
     try:
         results_list = payload.get("results", []) if isinstance(payload, dict) else []
-        sem_ids = []
-        for r in results_list:
-            if not isinstance(r, dict):
-                continue
-            col = r.get("collection") or ""
-            if col != "semantic_memory" and "semantic" not in col:
-                continue
-            rid = r.get("id") or (r.get("metadata") or {}).get("id")
-            if rid:
-                sem_ids.append(rid)
-            if len(sem_ids) >= 5:
-                break
-        if sem_ids:
-            from brain_core.memory_lifecycle import reinforce_on_access
+        if results_list:
+            from brain_core.memory_lifecycle import reinforce_all_collections
             from brain_core.search_unified import _search_bg_pool
 
-            _search_bg_pool.submit(reinforce_on_access, sem_ids)
+            _search_bg_pool.submit(reinforce_all_collections, results_list)
     except Exception:
         pass
     return payload
@@ -3608,7 +3590,9 @@ def list_jobs() -> dict:
 @app.get("/jobs/{job}/history", tags=["jobs"], dependencies=[Depends(verify_bearer)])
 def job_history(
     job: Annotated[str, PathParam()],
-    full: Annotated[bool, Query(description="Read from scheduler_history.db instead of in-memory ring")] = False,
+    full: Annotated[
+        bool, Query(description="Read from scheduler_history.db instead of in-memory ring")
+    ] = False,
     limit: Annotated[int, Query(ge=1, le=1000)] = 200,
 ) -> dict:
     if job not in JOB_REGISTRY:
@@ -3620,6 +3604,7 @@ def job_history(
     # ring buffer only kept ~20 entries per job.
     import sqlite3 as _sqlite3_hist
     from pathlib import Path as _Path
+
     history_db = _Path("/Users/chrischo/server/brain/logs/scheduler_history.db")
     if not history_db.exists():
         return {"job": job, "source": "sqlite", "history": []}
@@ -5505,6 +5490,40 @@ def vote_on_contradiction(contra_id: Annotated[str, PathParam()], req: Contradic
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)[:200])
+
+
+@app.get(
+    "/brain/contradictions",
+    response_model=ContradictionListResponse,
+    tags=["memory"],
+    dependencies=[Depends(verify_bearer)],
+)
+def list_contradictions_brain_alias(limit: int = 50) -> ContradictionListResponse:
+    """Alias of GET /memory/contradictions for consistent /brain/* namespacing."""
+    return list_contradictions(limit=limit)
+
+
+@app.post("/brain/contradictions/{contra_id}/resolve", tags=["memory"], dependencies=[Depends(verify_bearer)])
+def resolve_contradiction_brain_alias(
+    contra_id: Annotated[str, PathParam()],
+    req: ContradictionResolveRequest,
+) -> dict:
+    """Alias of POST /memory/contradictions/{id}/resolve."""
+    return resolve_contradiction(contra_id=contra_id, req=req)
+
+
+@app.post("/brain/contradictions/{contra_id}/vote", tags=["memory"], dependencies=[Depends(verify_bearer)])
+def vote_on_contradiction_brain_alias(
+    contra_id: Annotated[str, PathParam()], req: ContradictionVoteRequest
+) -> dict:
+    """Alias of POST /memory/contradictions/{id}/vote."""
+    return vote_on_contradiction(contra_id=contra_id, req=req)
+
+
+@app.get("/brain/contradictions/{contra_id}/votes", tags=["memory"], dependencies=[Depends(verify_bearer)])
+def get_contradiction_votes_brain_alias(contra_id: Annotated[str, PathParam()]) -> dict:
+    """Alias of GET /memory/contradictions/{id}/votes."""
+    return get_contradiction_votes(contra_id=contra_id)
 
 
 @app.get("/memory/contradictions/{contra_id}/votes", tags=["memory"], dependencies=[Depends(verify_bearer)])

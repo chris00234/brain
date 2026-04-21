@@ -1,12 +1,12 @@
-"""brain_core/learn.py — automatic self-learning extraction.
+"""brain_core/learn.py - automatic self-learning extraction.
 
 Pipeline (per session transcript):
-  1. extract_candidates  — regex-based passage scoring
-  2. distill_via_jenna   — single OpenClaw dispatch (Jenna, low thinking) returns JSON
-  3. embed_and_store     — Ollama embed + write to semantic_memory collection
-  4. check_contradictions — vector + heuristic contradiction detection
+  1. extract_candidates  - regex-based passage scoring
+  2. distill_via_jenna   - single OpenClaw dispatch (Jenna, low thinking) returns JSON
+  3. embed_and_store     - Ollama embed + write to semantic_memory collection
+  4. check_contradictions - vector + heuristic contradiction detection
 
-The only LLM call is step 2 (via the OpenClaw gateway → OpenAI subscription).
+The only LLM call is step 2 (via the OpenClaw gateway -> OpenAI subscription).
 Ollama is used only for embeddings. No new LLM hosting, no extra spend.
 
 Called by: brain_server.py POST /learn (BackgroundTask)
@@ -51,8 +51,15 @@ SIMILARITY_THRESHOLD = 0.90  # cosine similarity above this = potential contradi
 # ("lives in Irvine" vs "lives in San Francisco"). Low-overlap pairs are
 # almost always complementary, not contradictory.
 MIN_CONTRADICTION_OVERLAP = 0.55
+# Near-duplicate rephrasings of the same fact are not contradictions - the 2026-04
+# audit found 333 of them accumulate over 2 days from same-session rephrasings.
+# Below this distance (cosine) the embeddings are essentially identical; the
+# high-overlap gate keeps us from silently dropping semantically different texts
+# that happen to share vocabulary.
+NEAR_DUPLICATE_DISTANCE = 0.05
+NEAR_DUPLICATE_MIN_OVERLAP = 0.70
 # Exclude "wants / would like / prefers / should" statements about broad topics
-# from contradiction detection — these are additive preferences, not flips.
+# from contradiction detection - these are additive preferences, not flips.
 PREFERENCE_STOPWORDS = frozenset(
     {
         "chris",
@@ -194,7 +201,7 @@ def _extract_session_summary(transcript: str) -> str | None:
 
     Strategy: find the last substantive user message (>20 chars, not a
     one-word reaction). Falls back to first 200 chars of transcript.
-    No LLM call — pure regex/heuristic.
+    No LLM call - pure regex/heuristic.
     """
     if not transcript or len(transcript) < 30:
         return None
@@ -291,8 +298,8 @@ Rules:
 - Each workflow (AWM, Agent Workflow Memory): {{"task_type": "<2-4 word snake_case classifier, e.g. deploy_docker_service>", "title": "<human-readable summary>", "steps": ["step 1", "step 2", ...], "preconditions": "<what must be true before running, or empty>", "tools": ["tool1", ...]}}
 - Maximum {max_n} memories. Fewer is better. Skip ephemeral chat.
 - Only extract memories that would still be true next month.
-- Each content field must be self-contained — no pronouns referring to outside context.
-- Skip anything you already know from Chris's profile (functional components, conventional commits, npm, Tailwind, shadcn, etc.) — only NEW signals.
+- Each content field must be self-contained - no pronouns referring to outside context.
+- Skip anything you already know from Chris's profile (functional components, conventional commits, npm, Tailwind, shadcn, etc.) - only NEW signals.
 - For corrections: look for moments where Chris told the agent/brain it was wrong, gave a correction, or overrode a recommendation. Only include real factual corrections, not style preferences.
 - For workflows: ONLY extract when the transcript shows a SUCCESSFUL multi-step procedure (3+ distinct actions, task completed). Skip if session was Q&A, brainstorming, or debugging. Workflow = reusable recipe. Maximum 2 per session; usually 0.
 {correction_hint}
@@ -325,7 +332,7 @@ def distill_via_jenna(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     """Dispatch to OpenClaw Jenna for structured memory + correction + workflow extraction.
 
-    Returns (memories, corrections, workflows). Failures return ([], [], []) silently —
+    Returns (memories, corrections, workflows). Failures return ([], [], []) silently -
     the caller logs and proceeds without breaking the session.
     """
     if not candidates and len(transcript) < 200:
@@ -333,13 +340,13 @@ def distill_via_jenna(
 
     passages_str = (
         "\n".join(f"- [{c['triggers']}] {c['block'][:300]}" for c in candidates[:10])
-        or "(none scored — extract from full transcript)"
+        or "(none scored - extract from full transcript)"
     )
 
     correction_hint = ""
     if _has_correction_signals(transcript):
         correction_hint = (
-            "- NOTE: This session contains corrections — pay special attention "
+            "- NOTE: This session contains corrections - pay special attention "
             "to extracting what was wrong and what the right answer is.\n"
         )
 
@@ -425,7 +432,7 @@ def _store_workflows(
 ) -> int:
     """Materialize extracted workflows as procedures via task_queue._store_procedure.
 
-    Leverages the existing Jaccard-0.7 dedup in _store_procedure — already-seen
+    Leverages the existing Jaccard-0.7 dedup in _store_procedure - already-seen
     workflows increment success_count instead of creating duplicates. New
     procedures inherit source="awm_session" so they're distinguishable from
     task-derived procedures (source="extraction").
@@ -498,7 +505,7 @@ def embed_and_store(memories: list[dict[str, Any]], source: str, agent: str) -> 
         mem_id = f"{SEMANTIC_COLLECTION}:{_digest(content)}"
         try:
             embedding = get_embedding(content[:EMBED_TRUNCATE], prefix="passage")
-            # Use passage embedding for dedup — negligible accuracy difference for same-content similarity
+            # Use passage embedding for dedup - negligible accuracy difference for same-content similarity
         except Exception:
             continue
         if not embedding:
@@ -517,13 +524,13 @@ def embed_and_store(memories: list[dict[str, Any]], source: str, agent: str) -> 
             "type": "self_learning",
             "embed_model": EMBED_MODEL,
             "embed_model_version": EMBED_MODEL_VERSION,
-            # Phase 1B: supersession chains — empty string = not superseded
+            # Phase 1B: supersession chains - empty string = not superseded
             "supersedes": "",
             "superseded_by": "",
             # Phase 1C: temporal validity window
             "valid_from": now_iso,
             "valid_until": "",
-            # Phase 1D: memory class tier (episodic → semantic → obsolete)
+            # Phase 1D: memory class tier (episodic -> semantic -> obsolete)
             "memory_class": "episodic",
             # Phase 1E (Round 9 B3): trust_score derived from cross-source
             # corroboration count. 0.4 baseline + 0.1 per matching source.
@@ -563,13 +570,13 @@ def embed_and_store(memories: list[dict[str, Any]], source: str, agent: str) -> 
             else:
                 operation = op
         except Exception as e:
-            log.debug("classify_operation failed: %s — defaulting to ADD", e)
+            log.debug("classify_operation failed: %s - defaulting to ADD", e)
 
         if operation == "NOOP":
             continue
 
         if operation == "DELETE" and supersede_target:
-            # Explicit invalidation phrase with a target — delete the target,
+            # Explicit invalidation phrase with a target - delete the target,
             # skip storing the invalidation statement as its own memory.
             try:
                 chroma_api(
@@ -592,7 +599,7 @@ def embed_and_store(memories: list[dict[str, Any]], source: str, agent: str) -> 
             except Exception as e:
                 log.warning("DELETE: failed to remove %s: %s", supersede_target, e)
             continue
-        # DELETE without target → fall through to ADD (user said "forget X" but no match found)
+        # DELETE without target -> fall through to ADD (user said "forget X" but no match found)
         if operation == "DELETE":
             operation = "ADD"
 
@@ -622,7 +629,7 @@ def embed_and_store(memories: list[dict[str, Any]], source: str, agent: str) -> 
                         entity_a=supersede_target,
                         entity_b=mem_id,
                         resolution="update_chain",
-                        reason="Phase 1A classified as UPDATE — refinement of prior fact",
+                        reason="Phase 1A classified as UPDATE - refinement of prior fact",
                     )
                 except Exception:
                     pass
@@ -716,7 +723,7 @@ def embed_and_store(memories: list[dict[str, Any]], source: str, agent: str) -> 
     # HR3 fix (2026-04-14): use shared ingest_mirror helper so /learn
     # gets the full v3 Brain Hygiene pipeline (classifier, topic
     # supersession, llm_backlog catch-up). Previously /learn called
-    # upsert_atom directly with no hygiene fields — topic_key was NULL
+    # upsert_atom directly with no hygiene fields - topic_key was NULL
     # so supersession never fired, speaker defaulted to 'chris' so
     # agent-extracted content leaked into the trusted filter.
     try:
@@ -743,9 +750,9 @@ def embed_and_store(memories: list[dict[str, Any]], source: str, agent: str) -> 
     # HR2 fix (2026-04-14): removed redundant daemon-thread entity
     # extraction loop. upsert_atom already triggers _submit_bg_extract
     # (F3 bounded pool) which handles entity extraction correctly with
-    # overflow → llm_backlog catch-up. The old daemon thread here was
+    # overflow -> llm_backlog catch-up. The old daemon thread here was
     # double-writing (2x LLM cost, 2x Neo4j load) AND bypassed the
-    # F3 bounded pool safety — arbitrary thread fan-out on bulk /learn.
+    # F3 bounded pool safety - arbitrary thread fan-out on bulk /learn.
     return stored
 
 
@@ -761,12 +768,12 @@ def check_contradictions_for_memory(
 ) -> list[dict[str, Any]]:
     """Phase N1: per-memory contradiction check, usable from the hot path.
 
-    Same heuristic as check_contradictions (same-category + cosine ≥ 0.90 +
-    jaccard ≥ 0.55 + stopword-aware symmetric diff) but operates on a single
+    Same heuristic as check_contradictions (same-category + cosine >= 0.90 +
+    jaccard >= 0.55 + stopword-aware symmetric diff) but operates on a single
     memory's embedding so POST /memory and POST /memory/batch can wire it
     directly after the Chroma upsert. Auto-resolves clear cases (newer +
     >= 0.2 higher confidence) and logs predictive_error action_audit rows
-    (Friston predictive coding — disagreement against stored beliefs is the
+    (Friston predictive coding - disagreement against stored beliefs is the
     learning signal).
     """
     contradictions: list[dict[str, Any]] = []
@@ -830,7 +837,7 @@ def check_contradictions_for_memory(
             "review_state": "pending",
         }
 
-        # Phase N1: fire the predictive_error audit row — disagreement against
+        # Phase N1: fire the predictive_error audit row - disagreement against
         # an existing atom IS the Friston learning signal. Best-effort.
         try:
             from atoms_store import insert_action_audit as _iaa
@@ -847,7 +854,7 @@ def check_contradictions_for_memory(
         # Phase N2: shift the LOSER atom's confidence down via the evidence
         # ledger. Contradict = logit -1.0, scaled by cluster size so one
         # contradictory observation among k near-duplicate atoms only counts
-        # as 1/k (Kuhn). Best-effort — update_atom_confidence is disabled
+        # as 1/k (Kuhn). Best-effort - update_atom_confidence is disabled
         # until brain_db migrates to @7.
         try:
             from atoms_store import (
@@ -876,6 +883,45 @@ def check_contradictions_for_memory(
         old_conf = float((other_meta or {}).get("confidence", 0.5))
         new_time = created_at or ""
         old_time = (other_meta or {}).get("created_at", "")
+
+        is_near_duplicate = (
+            float(other_dist) < NEAR_DUPLICATE_DISTANCE and overlap >= NEAR_DUPLICATE_MIN_OVERLAP
+        )
+
+        if is_near_duplicate:
+            contradiction["review_state"] = "auto_resolved"
+            contradiction["resolution"] = "keep_new_near_duplicate"
+            try:
+                _store_contradiction(contradiction)
+            except Exception:
+                contradiction["review_state"] = "pending"
+                contradiction.pop("resolution", None)
+                contradictions.append(contradiction)
+                continue
+            try:
+                chroma_api(
+                    "POST",
+                    f"/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col_id}/delete",
+                    {"ids": [other_id]},
+                )
+                try:
+                    from audit_log import log_event
+
+                    log_event(
+                        "resolve",
+                        entity_a=other_id,
+                        entity_b=mem_id,
+                        match_score=round(float(other_dist), 4),
+                        conflict_type="contradiction",
+                        resolution="auto_keep_new_near_duplicate",
+                        reason=f"Auto: near-duplicate (d={other_dist:.4f}, overlap={overlap:.2f})",
+                    )
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            contradictions.append(contradiction)
+            continue
 
         if new_conf - old_conf > 0.2 and new_time and old_time and new_time > old_time:
             contradiction["review_state"] = "auto_resolved"
@@ -1033,6 +1079,21 @@ def _record_corrections(
             stored = embed_and_store([mem], source=source, agent=agent)
             if stored:
                 recorded += 1
+                # Amygdala-style affective tagging: correction = strong negative
+                # valence. Drives retrieval ranking + surface contradictions.
+                try:
+                    from brain_core import valence as _val
+
+                    atom_id = stored[0].get("id")
+                    if atom_id:
+                        _val.record_valence(
+                            atom_id=atom_id,
+                            delta=-0.6,
+                            reason=f"session correction: {wrong[:150]}",
+                            source=f"learn:{source}",
+                        )
+                except Exception as ve:
+                    log.debug("valence tag for correction skipped: %s", ve)
         except Exception as e:
             log.warning("failed to store correction memory: %s", e)
 
@@ -1043,7 +1104,7 @@ def _record_corrections(
 
 # ── Public entry point ──────────────────────────────────────────────────
 def process_session(transcript: str, source: str = "session", agent: str = "claude") -> dict[str, Any]:
-    """Full pipeline: extract → distill → embed → contradict.
+    """Full pipeline: extract -> distill -> embed -> contradict.
 
     Returns a summary dict the API can echo back. All errors are caught and
     surfaced in the result so a bad transcript never breaks the caller.
@@ -1099,6 +1160,58 @@ def process_session(transcript: str, source: str = "session", agent: str = "clau
         summary["entries"] = [
             {"id": s["id"], "content": s["content"], "category": s["metadata"]["category"]} for s in stored
         ]
+        # Amygdala + surprise-weighted ingest (Friston). Two additive tags:
+        #   a) Praise markers in transcript -> +0.3 on ALL stored (bulk session)
+        #   b) Novel ADDs with confidence >= 0.7 -> +0.15 (surprise salience)
+        # Both are UP-only - super-human brain never down-tags from these
+        # paths. Corrections (elsewhere) are the only negative write-path.
+        try:
+            if stored:
+                from brain_core import valence as _val
+
+                t = transcript.lower()
+                praise = any(
+                    m in t
+                    for m in (
+                        "완벽",
+                        "exactly right",
+                        "perfect",
+                        "정확해",
+                        "맞아",
+                        "좋아",
+                        "good job",
+                        "that's it",
+                        "잘했",
+                        "nailed it",
+                        "great work",
+                    )
+                )
+                for s in stored:
+                    aid = s.get("id")
+                    if not aid:
+                        continue
+                    meta = s.get("metadata") or {}
+                    op = meta.get("operation", "ADD")
+                    try:
+                        conf = float(meta.get("confidence", 0.5))
+                    except (TypeError, ValueError):
+                        conf = 0.5
+                    if praise:
+                        _val.record_valence(
+                            atom_id=aid,
+                            delta=0.3,
+                            reason="session praise markers detected",
+                            source=f"learn:{source}",
+                        )
+                    if op == "ADD" and conf >= 0.7:
+                        _val.record_valence(
+                            atom_id=aid,
+                            delta=0.15,
+                            reason=f"novel high-confidence ingest (op={op}, c={conf:.2f})",
+                            source=f"learn:surprise:{source}",
+                        )
+        except Exception as ve:
+            log.debug("valence write-path skipped: %s", ve)
     except Exception as e:
         summary["errors"].append(f"store: {e}")
         return summary

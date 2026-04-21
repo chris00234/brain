@@ -1,9 +1,9 @@
-"""brain_core/dream_replay.py — REM-like generative recombination (Wagner 2004).
+"""brain_core/dream_replay.py - REM-like generative recombination (Wagner 2004).
 
 Biological sleep includes REM phases where memories recombine in novel
-configurations that never occurred in waking life — the mechanism behind
+configurations that never occurred in waking life - the mechanism behind
 creative insight and analogical reasoning. Wagner et al. (2004) showed
-sleep after learning improves insight on new problems by ~3×.
+sleep after learning improves insight on new problems by ~3x.
 
 This module runs a weekly `dream_replay` job:
   1. Sample pairs of distant-domain entities from Neo4j that have NO
@@ -41,8 +41,10 @@ log = logging.getLogger("brain.dream_replay")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-# Keep the sampling conservative so we don't burn Sage budget on noise.
-MAX_PAIRS_PER_RUN = 5
+# 2026-04-20 nightly schedule: bumped 5 -> 15 pairs/night so weekly aggregate
+# rises ~20x (35 vs old 5). Budget: 15 Sage dispatches x ~45s = under 15min
+# of Sage-API wall-time, still well within nightly window.
+MAX_PAIRS_PER_RUN = 15
 MIN_HYPOTHESIS_CHARS = 100
 CONJECTURE_CONFIDENCE = 0.3
 
@@ -52,7 +54,7 @@ def _sample_distant_pairs(limit: int) -> list[tuple[dict, dict]]:
 
     Uses Neo4j when available, else returns empty list (feature is a no-op
     on systems without the graph). Pairs are biased toward entities with
-    at least 2 mentions each — we want real entities, not noise.
+    at least 2 mentions each - we want real entities, not noise.
     """
     try:
         from entity_graph import _use_neo4j
@@ -144,10 +146,10 @@ def _store_conjecture(pair: tuple[dict, dict], hypothesis: str) -> str | None:
 
         a, b = pair
         seed = f"{a['name']}::{b['name']}::{hypothesis[:100]}"
-        chroma_id = f"dream:{_h.md5(seed.encode('utf-8')).hexdigest()[:16]}"
+        chroma_id = f"dream:{_h.md5(seed.encode('utf-8'), usedforsecurity=False).hexdigest()[:16]}"
         now_iso = datetime.now(UTC).isoformat(timespec="seconds")
-        atom_id = upsert_atom(
-            text=f"Dream conjecture ({a['name']} × {b['name']}):\n{hypothesis}",
+        return upsert_atom(
+            text=f"Dream conjecture ({a['name']} x {b['name']}):\n{hypothesis}",
             chroma_id=chroma_id,
             kind="conjecture",
             confidence=CONJECTURE_CONFIDENCE,
@@ -166,7 +168,6 @@ def _store_conjecture(pair: tuple[dict, dict], hypothesis: str) -> str | None:
                 }
             ),
         )
-        return atom_id
     except Exception:
         return None
 
@@ -199,4 +200,4 @@ def run() -> dict:
 
 
 if __name__ == "__main__":
-    print(json.dumps(run(), indent=2, ensure_ascii=False))
+    print(json.dumps(run(), indent=2, ensure_ascii=False))  # noqa: T201
