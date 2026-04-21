@@ -1,5 +1,5 @@
 #!/opt/homebrew/bin/python3
-"""Semantic memory store — persistent ChromaDB replacement for Qdrant in-memory.
+"""Semantic memory store — persistent vector-backed memory from the CLI.
 
 Usage:
   memory_store.py store <text> [--agent <name>] [--category fact|preference|decision|entity|other] [--importance 0-1]
@@ -17,45 +17,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "brain_core"))
 from search import get_embedding
+from vector_store import get_vector_store
 
 COLLECTION = "semantic_memory"
-DUPLICATE_THRESHOLD = 0.05
-
-
-def chroma_api(method, path, data=None):
-    """Call ChromaDB API on native instance (127.0.0.1:8000)."""
-    import urllib.request
-
-    url = f"http://127.0.0.1:8000{path}"
-    body = json.dumps(data).encode() if data else None
-    req = urllib.request.Request(
-        url, data=body, method=method, headers={"Content-Type": "application/json"} if body else {}
-    )
-    with urllib.request.urlopen(req, timeout=120) as resp:
-        raw = resp.read()
-    return json.loads(raw) if raw.strip() else {}
-
-
-def get_collection_id(auto_create=True):
-    cols = chroma_api("GET", "/api/v2/tenants/default_tenant/databases/default_database/collections")
-    for c in cols:
-        if c["name"] == COLLECTION:
-            return c["id"]
-    if auto_create:
-        result = chroma_api(
-            "POST",
-            "/api/v2/tenants/default_tenant/databases/default_database/collections",
-            {"name": COLLECTION, "metadata": {"hnsw:space": "cosine"}},
-        )
-        return result.get("id")
-    return None
+DUPLICATE_THRESHOLD = 0.05  # cosine distance; equivalent similarity floor = 1 - 0.05
 
 
 def cmd_store(args):
-    col_id = get_collection_id()
-    if not col_id:
-        print(f"Failed to access or create collection '{COLLECTION}'. Check ChromaDB connectivity.")
-        sys.exit(1)
+    store = get_vector_store()
+    store.create_collection(COLLECTION)
 
     text = args.text
     agent = args.agent or "unknown"
@@ -64,165 +34,119 @@ def cmd_store(args):
 
     embedding = get_embedding(text)
 
-    search_result = chroma_api(
-        "POST",
-        f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/query",
-        {"query_embeddings": [embedding], "n_results": 1, "include": ["distances"]},
+    hits = store.query(
+        COLLECTION, vector=embedding, k=1, with_payload=False, with_vectors=False
     )
-    dists = search_result.get("distances", [[]])[0]
-    if dists and dists[0] < DUPLICATE_THRESHOLD:
-        print(f"Duplicate detected (distance: {dists[0]:.4f}). Skipping.")
+    # similarity floor: a hit closer than DUPLICATE_THRESHOLD in cosine-distance
+    # equals a similarity score above (1 - DUPLICATE_THRESHOLD).
+    sim_floor = 1.0 - DUPLICATE_THRESHOLD
+    if hits and hits[0].score > sim_floor:
+        print(f"Duplicate detected (similarity: {hits[0].score:.4f}). Skipping.")
         return
 
     doc_id = f"mem:{agent}:{hashlib.md5(text.encode()).hexdigest()}"[:63]
     now = datetime.now().isoformat()
 
-    chroma_api(
-        "POST",
-        f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/upsert",
-        {
-            "ids": [doc_id],
-            "embeddings": [embedding],
-            "documents": [text],
-            "metadatas": [
-                {
-                    "source": f"memory_store:{agent}",
-                    "agent": agent,
-                    "type": "semantic-memory",
-                    "category": category,
-                    "importance": str(importance),
-                    "service": "",
-                    "section": "",
-                    "created_at": now,
-                }
-            ],
-        },
+    store.upsert(
+        COLLECTION,
+        ids=[doc_id],
+        vectors=[embedding],
+        documents=[text],
+        payloads=[
+            {
+                "source": f"memory_store:{agent}",
+                "agent": agent,
+                "type": "semantic-memory",
+                "category": category,
+                "importance": str(importance),
+                "service": "",
+                "section": "",
+                "created_at": now,
+            }
+        ],
     )
     print(f"Stored: {text[:80]}... [agent={agent}, category={category}]")
 
 
 def cmd_search(args):
-    col_id = get_collection_id()
-    if not col_id:
-        print(f"Collection '{COLLECTION}' not found.")
-        sys.exit(1)
-
+    store = get_vector_store()
     embedding = get_embedding(args.query, prefix="query")
     n = args.limit or 5
 
-    payload = {
-        "query_embeddings": [embedding],
-        "n_results": n,
-        "include": ["documents", "metadatas", "distances"],
-    }
-
-    if args.agent:
-        payload["where"] = {"agent": {"$eq": args.agent}}
-
-    result = chroma_api(
-        "POST",
-        f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/query",
-        payload,
+    where = {"agent": {"$eq": args.agent}} if args.agent else None
+    hits = store.query(
+        COLLECTION, vector=embedding, k=n, filter=where, with_payload=True
     )
 
-    docs = result.get("documents", [[]])[0]
-    metas = result.get("metadatas", [[]])[0]
-    dists = result.get("distances", [[]])[0]
-
     results = []
-    for i in range(len(docs)):
+    for h in hits:
+        meta = h.payload or {}
         results.append(
             {
-                "content": docs[i],
-                "score": round(1 - dists[i], 4),
-                "agent": metas[i].get("agent", ""),
-                "category": metas[i].get("category", ""),
-                "created_at": metas[i].get("created_at", ""),
-                "source": metas[i].get("source", ""),
+                "content": h.document or "",
+                "score": round(h.score, 4),
+                "agent": meta.get("agent", ""),
+                "category": meta.get("category", ""),
+                "created_at": meta.get("created_at", ""),
+                "source": meta.get("source", ""),
             }
         )
 
     if args.json:
-        print(json.dumps(results, indent=2, ensure_ascii=False))
+        print(json.dumps(results, indent=2, ensure_ascii=False))  # noqa: T201 — CLI stdout
     else:
         if not results:
-            print("No memories found.")
+            print("No memories found.")  # noqa: T201 — CLI stdout
             return
         for i, r in enumerate(results):
-            print(f"#{i+1} (score: {r['score']:.3f}) [{r['category']}] {r['agent']}")
-            print(f"  {r['content'][:200]}")
-            print()
+            print(f"#{i+1} (score: {r['score']:.3f}) [{r['category']}] {r['agent']}")  # noqa: T201
+            print(f"  {r['content'][:200]}")  # noqa: T201
+            print()  # noqa: T201
 
 
 def cmd_forget(args):
-    col_id = get_collection_id()
-    if not col_id:
-        print(f"Collection '{COLLECTION}' not found.")
-        sys.exit(1)
-
+    store = get_vector_store()
     target = args.id_or_query
 
     if target.startswith("mem:"):
-        chroma_api(
-            "POST",
-            f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/delete",
-            {"ids": [target]},
-        )
+        store.delete(COLLECTION, ids=[target])
         print(f"Deleted: {target}")
         return
 
     embedding = get_embedding(target)
-    result = chroma_api(
-        "POST",
-        f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/query",
-        {"query_embeddings": [embedding], "n_results": 1, "include": ["documents", "distances"]},
+    hits = store.query(
+        COLLECTION, vector=embedding, k=1, with_payload=True, with_vectors=False
     )
-
-    dists = result.get("distances", [[]])[0]
-    ids = result.get("ids", [[]])[0]
-    docs = result.get("documents", [[]])[0]
-
-    if not ids or dists[0] > 0.3:
+    # Same 0.3 cosine-distance cutoff as before: similarity >= 0.7
+    if not hits or hits[0].score < 0.7:
         print(f"No close match found for: {target}")
         return
 
-    chroma_api(
-        "POST",
-        f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/delete",
-        {"ids": [ids[0]]},
-    )
-    print(f"Deleted: {ids[0]} — {docs[0][:80]}...")
+    hit = hits[0]
+    store.delete(COLLECTION, ids=[hit.id])
+    doc_preview = (hit.document or "")[:80]
+    print(f"Deleted: {hit.id} — {doc_preview}...")
 
 
 def cmd_stats(args):
-    col_id = get_collection_id()
-    if not col_id:
-        print(f"Collection '{COLLECTION}' not found.")
-        sys.exit(1)
+    store = get_vector_store()
 
     if args.agent:
-        payload = {
-            "where": {"agent": {"$eq": args.agent}},
-            "include": [],
-            "limit": 10000,
-        }
-        result = chroma_api(
-            "POST",
-            f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/get",
-            payload,
+        points = store.get(
+            COLLECTION,
+            filter={"agent": {"$eq": args.agent}},
+            limit=10000,
+            with_payload=False,
+            with_documents=False,
         )
-        ids = result.get("ids", [])
-        print(f"Semantic memories (agent={args.agent}): {len(ids)}")
+        print(f"Semantic memories (agent={args.agent}): {len(points)}")
     else:
-        count_result = chroma_api(
-            "GET", f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/count"
-        )
-        total = count_result if isinstance(count_result, int) else count_result.get("count", "unknown")
+        total = store.count(COLLECTION)
         print(f"Semantic memories: {total}")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Semantic Memory Store (ChromaDB)")
+    parser = argparse.ArgumentParser(description="Semantic Memory Store (VectorStore-backed)")
     sub = parser.add_subparsers(dest="command")
 
     store_p = sub.add_parser("store", help="Store a memory")

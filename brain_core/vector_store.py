@@ -185,7 +185,15 @@ class ChromaStore:
         # path) at module load, so we only touch it when ChromaStore is
         # actually instantiated. Existing call sites of ``chroma_api`` are
         # unaffected.
-        from brain_core.indexer import chroma_api as _chroma_api
+        #
+        # Import shape depends on how the caller wired sys.path. Server and
+        # in-package callers set brain root on the path ("brain_core.indexer");
+        # CLI scripts typically insert brain_core/ itself ("indexer"). Try
+        # both so this module is drop-in for every existing entry point.
+        try:
+            from indexer import chroma_api as _chroma_api
+        except ModuleNotFoundError:
+            from brain_core.indexer import chroma_api as _chroma_api
 
         self._chroma_api = _chroma_api
         if base_url is not None:
