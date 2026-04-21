@@ -49,10 +49,13 @@ from qdrant_client import QdrantClient  # noqa: E402
 from qdrant_client.models import (  # noqa: E402
     Distance,
     HnswConfigDiff,
+    Modifier,
     PayloadSchemaType,
     ScalarQuantization,
     ScalarQuantizationConfig,
     ScalarType,
+    SparseIndexParams,
+    SparseVectorParams,
     VectorParams,
 )
 
@@ -67,6 +70,15 @@ QUANTIZATION = ScalarQuantization(
 )
 
 HNSW = HnswConfigDiff(m=16, ef_construct=128, full_scan_threshold=10000, on_disk=False)
+
+# Sparse vectors for BM25 hybrid search. IDF modifier tells Qdrant to compute
+# BM25 ranking server-side from raw term frequencies sent by the client.
+SPARSE_CONFIG: dict[str, SparseVectorParams] = {
+    "sparse": SparseVectorParams(
+        index=SparseIndexParams(on_disk=False),
+        modifier=Modifier.IDF,
+    ),
+}
 
 
 def _vector_params(size: int = VECTOR_SIZE) -> VectorParams:
@@ -217,6 +229,7 @@ def bootstrap(*, dry_run: bool = False, url: str = "http://127.0.0.1:6333") -> i
             client.create_collection(
                 collection_name=name,
                 vectors_config=vectors,
+                sparse_vectors_config=SPARSE_CONFIG,
                 quantization_config=QUANTIZATION,
                 hnsw_config=HNSW,
             )

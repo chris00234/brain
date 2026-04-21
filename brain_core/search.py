@@ -168,11 +168,13 @@ def get_collections():
         return dict(_collections_cache)
 
 
-def vector_search(col_id, embedding, n=10, where=None):
+def vector_search(col_id, embedding, n=10, where=None, query_text=None):
     """KNN search returning the legacy ChromaDB response shape so the many
     call sites that unpack ``resp["ids"][0]`` / ``resp["distances"][0]``
     don't need to change. ``col_id`` is a collection NAME under the new
-    VectorStore abstraction (see :func:`get_collections`)."""
+    VectorStore abstraction (see :func:`get_collections`). When
+    ``query_text`` is supplied, the Qdrant backend folds a BM25 sparse
+    prefetch into the hybrid fusion."""
     from vector_store import get_vector_store
 
     hits = get_vector_store().query(
@@ -181,6 +183,7 @@ def vector_search(col_id, embedding, n=10, where=None):
         k=n,
         filter=where,
         with_payload=True,
+        query_text=query_text,
     )
     # Callers expect similarity → distance (1 - distance convention). The
     # ChromaStore flipped to similarity at the adapter boundary; reconstruct

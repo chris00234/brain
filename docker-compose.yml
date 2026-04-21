@@ -13,23 +13,14 @@
 # Bearer secret + brain DBs are mounted from the host so state survives
 # container restarts.
 
-services:
-  qdrant:
-    image: qdrant/qdrant:v1.17.0
-    container_name: qdrant
-    restart: unless-stopped
-    ports:
-      - "127.0.0.1:6333:6333"
-      - "127.0.0.1:6334:6334"
-    volumes:
-      - ./qdrant-data:/qdrant/storage
-    mem_limit: 4g
-    healthcheck:
-      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/6333'"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
+# Qdrant is no longer run via Docker. It's a native macOS binary built
+# from source (v1.17.0), launched via ai.openclaw.qdrant-native launchd
+# plist. Kept out of docker-compose to match the ChromaDB-era decision:
+# OrbStack virtiofs adds write amplification that a vector store's
+# mmap+WAL pattern doesn't like. This file is the portable Linux fallback
+# — on Linux, reintroduce a qdrant service block here before bringing up.
 
+services:
   ollama:
     image: ollama/ollama:latest
     container_name: brain-ollama
@@ -80,7 +71,11 @@ services:
       BRAIN_ATOMS_ENABLED: "true"
       BRAIN_ATOMS_READ: "true"
       VECTOR_BACKEND: qdrant
-      QDRANT_URL: http://qdrant:6333
+      # On native (Chris's Mac) Qdrant runs on the host via the
+      # ai.openclaw.qdrant-native plist; on Linux/portable deploys,
+      # reintroduce a qdrant service block above and point this at
+      # http://qdrant:6333.
+      QDRANT_URL: http://host.docker.internal:6333
       OLLAMA_HOST: ollama
       NEO4J_URI: bolt://neo4j:7687
     volumes:
@@ -88,8 +83,6 @@ services:
       - ./brain.db:/app/brain.db
       - ${HOME}/.openclaw/credentials:/credentials:ro
     depends_on:
-      qdrant:
-        condition: service_healthy
       ollama:
         condition: service_started
       neo4j:

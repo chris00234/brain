@@ -1,0 +1,29 @@
+# qdrant-config.yaml — native Qdrant 1.17 config for Chris's brain.
+#
+# Runs as ai.openclaw.qdrant-native launchd service (see
+# ~/Library/LaunchAgents/ai.openclaw.qdrant-native.plist), binding to
+# localhost only. Data dir is the same path the docker container used,
+# so the move is a drop-in replacement.
+
+log_level: INFO
+
+storage:
+  storage_path: /Users/chrischo/server/brain/qdrant-data
+  snapshots_path: /Users/chrischo/server/brain/qdrant-snapshots
+  # performance knobs kept close to Qdrant defaults. Scalar int8
+  # quantization + payload indexes are configured per-collection via
+  # cli/qdrant_bootstrap.py, not here.
+  performance:
+    max_search_threads: 0  # 0 = num_cpus
+    max_optimization_threads: 1
+
+service:
+  host: 127.0.0.1
+  http_port: 6333
+  grpc_port: 6334
+  # No API key — local-only bind.
+  enable_cors: true
+  enable_tls: false
+
+cluster:
+  enabled: false

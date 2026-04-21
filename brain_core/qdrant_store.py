@@ -213,6 +213,86 @@ class QdrantStore:
         self._id_cache[string_id] = qid
         return qid
 
+    def _build_prefetch(
+        self,
+        *,
+        real: str,
+        vector: list[float],
+        query_text: str | None,
+        k: int,
+        qfilter: Any,
+        search_params: Any,
+    ) -> list:
+        """Build the per-named-vector Prefetch list for hybrid fusion.
+
+        - Every collection gets a dense prefetch.
+        - Canonical additionally gets a contextual prefetch.
+        - If query_text is supplied AND the collection actually has a
+          populated sparse slot, also adds a sparse prefetch.
+
+        Returns an empty list if no hybrid prefetch makes sense (single
+        dense path handled by caller).
+        """
+        from qdrant_client.models import Prefetch, SparseVector
+
+        prefetch_limit = max(k * 3, 30)
+        prefetch_list: list[Prefetch] = [
+            Prefetch(
+                query=vector,
+                using="dense",
+                limit=prefetch_limit,
+                filter=qfilter,
+                params=search_params,
+            )
+        ]
+        if real == "canonical":
+            prefetch_list.append(
+                Prefetch(
+                    query=vector,
+                    using="contextual",
+                    limit=prefetch_limit,
+                    filter=qfilter,
+                    params=search_params,
+                )
+            )
+        if query_text and self._has_sparse(real):
+            try:
+                from sparse_tokenizer import encode as sparse_encode
+
+                indices, values = sparse_encode(query_text)
+                if indices:
+                    prefetch_list.append(
+                        Prefetch(
+                            query=SparseVector(indices=indices, values=values),
+                            using="sparse",
+                            limit=prefetch_limit,
+                            filter=qfilter,
+                        )
+                    )
+            except Exception as exc:
+                log.debug("qdrant sparse encode failed for %s: %s", real, exc)
+
+        # Hybrid only makes sense with 2+ prefetches; 1 prefetch = plain dense.
+        return prefetch_list if len(prefetch_list) >= 2 else []
+
+    def _has_sparse(self, collection: str) -> bool:
+        """Cheap, cached check: does this collection have a `sparse` named slot?"""
+        cache = getattr(self, "_sparse_cache", None)
+        if cache is None:
+            cache = {}
+            self._sparse_cache = cache
+        if collection in cache:
+            return cache[collection]
+        try:
+            info = self._client.get_collection(collection_name=collection)
+            sparse_config = getattr(getattr(info, "config", None), "params", None)
+            sparse_vectors = getattr(sparse_config, "sparse_vectors", None) or {}
+            has = "sparse" in sparse_vectors
+        except Exception:
+            has = False
+        cache[collection] = has
+        return has
+
     def _hit_payload(self, payload: dict | None) -> tuple[dict, str, str | None]:
         """Split a Qdrant payload into (user_payload, original_id, document).
 
@@ -336,39 +416,35 @@ class QdrantStore:
         filter: Filter = None,
         with_payload: bool = True,
         with_vectors: bool = False,
+        query_text: str | None = None,
     ) -> list[VectorHit]:
-        # qdrant-client 1.17+ uses `query_points` instead of deprecated
-        # `search`. Bootstrap guarantees every collection has a primary
-        # `dense` named vector; `canonical` additionally has `contextual`
-        # populated on contextualized rows, so we issue a multi-vector
-        # prefetch + RRF fusion for it. Non-canonical collections stay on
-        # single-vector dense search.
+        # qdrant-client 1.17+ uses `query_points`. Hybrid search combines
+        # the primary `dense` vector with the collection's extra named
+        # vectors: `contextual` for canonical (prefix-enriched dense) and
+        # `sparse` for all 7 (BM25 via Qdrant IDF modifier). `query_text`
+        # is required to compute the sparse vector; if absent, sparse is
+        # skipped and hybrid collapses to dense (+ contextual for canonical).
         real, merged_filter = _resolve_alias(collection, filter)
         search_params = _search_params_for(real)
         qfilter = _translate_filter(merged_filter)
 
-        if real == "canonical":
+        prefetch_list = self._build_prefetch(
+            real=real,
+            vector=vector,
+            query_text=query_text,
+            k=k,
+            qfilter=qfilter,
+            search_params=search_params,
+        )
+
+        hits: list = []
+        if prefetch_list:
             try:
-                from qdrant_client.models import FusionQuery, Prefetch
+                from qdrant_client.models import FusionQuery
 
                 resp = self._client.query_points(
                     collection_name=real,
-                    prefetch=[
-                        Prefetch(
-                            query=vector,
-                            using="dense",
-                            limit=max(k * 3, 30),
-                            filter=qfilter,
-                            params=search_params,
-                        ),
-                        Prefetch(
-                            query=vector,
-                            using="contextual",
-                            limit=max(k * 3, 30),
-                            filter=qfilter,
-                            params=search_params,
-                        ),
-                    ],
+                    prefetch=prefetch_list,
                     query=FusionQuery(fusion="rrf"),
                     limit=k,
                     with_payload=with_payload,
@@ -378,8 +454,6 @@ class QdrantStore:
             except Exception as exc:
                 log.warning("qdrant hybrid-query(%s) failed, falling back to dense: %s", collection, exc)
                 hits = []
-        else:
-            hits = []
 
         if not hits:
             try:
