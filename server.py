@@ -78,15 +78,6 @@ from config import (  # noqa: E402
     WEEKLY_DIR,
 )
 from indexer import (
-    _get_collection_id as _get_col_id,  # legacy; kept for Pattern-A transitional callers
-)
-from indexer import (  # noqa: E402
-    chroma_api as _chroma_api,  # legacy; kept for Pattern-A transitional callers
-)
-from indexer import (
-    ensure_collection as _ensure_collection,  # legacy; kept for Pattern-A transitional callers
-)
-from indexer import (
     get_embedding as _get_embedding,
 )
 from vector_store import get_vector_store  # noqa: E402
@@ -2946,31 +2937,27 @@ def ingest_image_route(request: Request, req: ImageIngestRequest) -> dict:
 
     # Index into knowledge collection (consistent with batch ingest path)
     try:
-        col_id = _get_col_id("knowledge")
-        if not col_id:
-            raise HTTPException(status_code=503, detail="knowledge collection unavailable")
+        store = get_vector_store()
+        store.create_collection("knowledge")
         embedding = _get_embedding(doc_text[:4000])
         if not embedding:
             raise HTTPException(status_code=502, detail="embedding failed")
-        _chroma_api(
-            "POST",
-            f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/upsert",
-            {
-                "ids": [doc_id],
-                "documents": [doc_text],
-                "embeddings": [embedding],
-                "metadatas": [
-                    {
-                        "type": "image_caption",
-                        "image_hash": image_hash,
-                        "path": image_path_str or "",
-                        "mime_type": req.mime_type,
-                        "agent": req.agent,
-                        "captioned_by": "gemini-2.5-flash",
-                        "captioned_at": datetime.now(UTC).isoformat(timespec="seconds"),
-                    }
-                ],
-            },
+        store.upsert(
+            "knowledge",
+            ids=[doc_id],
+            vectors=[embedding],
+            documents=[doc_text],
+            payloads=[
+                {
+                    "type": "image_caption",
+                    "image_hash": image_hash,
+                    "path": image_path_str or "",
+                    "mime_type": req.mime_type,
+                    "agent": req.agent,
+                    "captioned_by": "gemini-2.5-flash",
+                    "captioned_at": datetime.now(UTC).isoformat(timespec="seconds"),
+                }
+            ],
         )
     except HTTPException:
         raise
@@ -4145,18 +4132,17 @@ def create_memory(request: Request, req: MemoryCreateRequest) -> MemoryEntry:
     if os.environ.get("BRAIN_CORROBORATE_ON_WRITE", "1") != "0":
         try:
             contradict_old_ids = {c["old_id"] for c in (contradictions or [])}
-            res = _chroma_api(
-                "POST",
-                f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/query",
-                {
-                    "query_embeddings": [embedding],
-                    "n_results": 5,
-                    "include": ["metadatas", "distances"],
-                },
+            hits = get_vector_store().query(
+                collection,
+                vector=embedding,
+                k=5,
+                with_payload=True,
             )
-            sibling_ids = (res.get("ids") or [[]])[0]
-            sibling_dists = (res.get("distances") or [[]])[0]
-            sibling_metas = (res.get("metadatas") or [[]])[0]
+            sibling_ids = [h.id for h in hits]
+            # Preserve the distance-based variables downstream code expects.
+            # ChromaStore returns similarity; re-derive cosine distance here.
+            sibling_dists = [max(0.0, 1.0 - h.score) for h in hits]
+            sibling_metas = [h.payload or {} for h in hits]
             from brain_core.atoms_store import (
                 cluster_size_for as _cluster_size,
             )
@@ -4245,10 +4231,7 @@ def create_memory_batch(request: Request, req: MemoryBatchRequest) -> dict:
     Each memory still gets individual classification (ADD/UPDATE/NOOP/DELETE)
     but the final ChromaDB upsert is a single batched call.
     """
-    col_id = _memory_collection_id()
-    if not col_id:
-        raise HTTPException(status_code=503, detail="semantic_memory collection unavailable")
-
+    col_id = _memory_collection_id()  # collection name under VectorStore
     from memory_operations import classify_operation, should_delete_by_content
 
     ids_to_upsert = []
@@ -4320,43 +4303,40 @@ def create_memory_batch(request: Request, req: MemoryBatchRequest) -> dict:
         operations.append(operation)
         results.append({"id": mem_id, "operation": operation})
 
-    # Apply supersede updates (batched)
+    store = get_vector_store()
+
+    # Apply supersede updates (batched).
+    # Each row patches only the two supersede fields, per-id — update_payload
+    # takes a single patch dict so we issue one call per id. The total batch
+    # is usually small (<5), and read-merge-write inside ChromaStore preserves
+    # the rest of the old row's metadata.
     if supersede_updates:
         try:
-            _chroma_api(
-                "POST",
-                f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/update",
-                {
-                    "ids": [u[0] for u in supersede_updates],
-                    "metadatas": [{"superseded_by": u[1], "valid_until": u[2]} for u in supersede_updates],
-                },
-            )
+            for old_id, new_id, ts in supersede_updates:
+                store.update_payload(
+                    col_id,
+                    ids=[old_id],
+                    patch={"superseded_by": new_id, "valid_until": ts},
+                )
         except Exception as e:
             print(f"WARNING batch supersede failed: {e}")
 
     # Apply deletes (batched)
     if deletes_to_apply:
         try:
-            _chroma_api(
-                "POST",
-                f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/delete",
-                {"ids": deletes_to_apply},
-            )
+            store.delete(col_id, ids=deletes_to_apply)
         except Exception as e:
             print(f"WARNING batch delete failed: {e}")
 
     # Apply upserts (batched)
     if ids_to_upsert:
         try:
-            _chroma_api(
-                "POST",
-                f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/upsert",
-                {
-                    "ids": ids_to_upsert,
-                    "embeddings": embeddings_to_upsert,
-                    "documents": docs_to_upsert,
-                    "metadatas": metas_to_upsert,
-                },
+            store.upsert(
+                col_id,
+                ids=ids_to_upsert,
+                vectors=embeddings_to_upsert,
+                documents=docs_to_upsert,
+                payloads=metas_to_upsert,
             )
             for _ in ids_to_upsert:
                 _metrics_buf.record_memory_write()
@@ -4455,37 +4435,42 @@ def create_memory_batch(request: Request, req: MemoryBatchRequest) -> dict:
     "/memory/{mem_id}", response_model=MemoryEntry, tags=["memory"], dependencies=[Depends(verify_bearer)]
 )
 def patch_memory(mem_id: Annotated[str, PathParam()], req: MemoryPatchRequest) -> MemoryEntry:
-    col_id = _memory_collection_id()
-    if not col_id:
-        raise HTTPException(status_code=503, detail="semantic_memory collection unavailable")
+    collection = _memory_collection_id()
+    store = get_vector_store()
 
     # Read existing
     existing = get_memory(mem_id)
     new_content = req.content if req.content is not None else existing.content
     new_meta = dict(existing.metadata)
+    patch: dict[str, Any] = {"updated_at": learn._now_iso()}
     if req.category is not None:
         new_meta["category"] = req.category
+        patch["category"] = req.category
     if req.confidence is not None:
         new_meta["confidence"] = str(round(req.confidence, 3))
-    new_meta["updated_at"] = learn._now_iso()
-
-    embedding = _get_embedding(new_content[: learn.EMBED_TRUNCATE]) if req.content is not None else None
-    upsert_body: dict[str, Any] = {
-        "ids": [mem_id],
-        "documents": [new_content],
-        "metadatas": [new_meta],
-    }
-    if embedding:
-        upsert_body["embeddings"] = [embedding]
+        patch["confidence"] = new_meta["confidence"]
+    new_meta["updated_at"] = patch["updated_at"]
 
     try:
-        _chroma_api(
-            "POST",
-            f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/upsert",
-            upsert_body,
-        )
+        if req.content is not None:
+            # Content changed → re-embed and overwrite the whole point.
+            embedding = _get_embedding(new_content[: learn.EMBED_TRUNCATE])
+            if not embedding:
+                raise HTTPException(status_code=502, detail="embedding failed")
+            store.upsert(
+                collection,
+                ids=[mem_id],
+                vectors=[embedding],
+                documents=[new_content],
+                payloads=[new_meta],
+            )
+        else:
+            # Metadata-only patch — keep the existing vector untouched.
+            store.update_payload(collection, ids=[mem_id], patch=patch)
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=502, detail=_safe_http_detail("chroma upsert", e))
+        raise HTTPException(status_code=502, detail=_safe_http_detail("vector upsert", e))
     return MemoryEntry(id=mem_id, content=new_content, metadata=new_meta)
 
 
@@ -4538,31 +4523,25 @@ def brain_doubt(limit: int = Query(default=20, ge=1, le=100)) -> dict:
 
     # Pending contradictions
     try:
-        from search import get_collections as _gc
-
-        _cols = _gc()
-        _contra_col = _cols.get("semantic_contradictions")
-        if _contra_col:
-            _resp = _chroma_api(
-                "POST",
-                f"/api/v2/tenants/default_tenant/databases/default_database/collections/{_contra_col}/get",
-                {"limit": limit, "include": ["metadatas", "documents"]},
+        points = get_vector_store().get(
+            "semantic_contradictions",
+            limit=limit,
+            with_payload=True,
+            with_documents=True,
+        )
+        for p in points:
+            m = p.payload or {}
+            if m.get("resolved"):
+                continue
+            out["pending_contradictions"].append(
+                {
+                    "id": p.id,
+                    "preview": (p.document or "")[:200],
+                    "memory_id_a": m.get("memory_id_a"),
+                    "memory_id_b": m.get("memory_id_b"),
+                    "created_at": m.get("created_at"),
+                }
             )
-            metas = _resp.get("metadatas") or []
-            docs = _resp.get("documents") or []
-            ids = _resp.get("ids") or []
-            for i, m in enumerate(metas):
-                if not m or m.get("resolved"):
-                    continue
-                out["pending_contradictions"].append(
-                    {
-                        "id": ids[i] if i < len(ids) else "",
-                        "preview": (docs[i] or "")[:200] if i < len(docs) else "",
-                        "memory_id_a": m.get("memory_id_a"),
-                        "memory_id_b": m.get("memory_id_b"),
-                        "created_at": m.get("created_at"),
-                    }
-                )
     except Exception:
         pass
 
@@ -4586,17 +4565,11 @@ def brain_consolidate_trigger() -> dict:
 
 @app.delete("/memory/{mem_id}", tags=["memory"], dependencies=[Depends(verify_bearer)])
 def delete_memory(mem_id: Annotated[str, PathParam()]) -> dict:
-    col_id = _memory_collection_id()
-    if not col_id:
-        raise HTTPException(status_code=503, detail="semantic_memory collection unavailable")
+    collection = _memory_collection_id()
     try:
-        _chroma_api(
-            "POST",
-            f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/delete",
-            {"ids": [mem_id]},
-        )
+        get_vector_store().delete(collection, ids=[mem_id])
     except Exception as e:
-        raise HTTPException(status_code=502, detail=_safe_http_detail("chroma delete", e))
+        raise HTTPException(status_code=502, detail=_safe_http_detail("vector delete", e))
     return {"status": "deleted", "id": mem_id}
 
 
@@ -4608,106 +4581,75 @@ def resolve_contradiction(
     req: ContradictionResolveRequest,
 ) -> dict:
     contra_col = _contradictions_collection_id()
-    if not contra_col:
-        raise HTTPException(status_code=503, detail="contradictions collection unavailable")
+    sem_col = _memory_collection_id()
+    store = get_vector_store()
 
     # Read the contradiction record
     try:
-        res = _chroma_api(
-            "POST",
-            f"/api/v2/tenants/default_tenant/databases/default_database/collections/{contra_col}/get",
-            {"ids": [contra_id], "include": ["metadatas"]},
-        )
+        points = store.get(contra_col, ids=[contra_id], with_payload=True, with_documents=False)
     except Exception as e:
-        raise HTTPException(status_code=502, detail=_safe_http_detail("chroma get", e))
-
-    ids = res.get("ids") or []
-    if not ids:
+        raise HTTPException(status_code=502, detail=_safe_http_detail("vector get", e))
+    if not points:
         raise HTTPException(status_code=404, detail=f"contradiction '{contra_id}' not found")
-    meta = (res.get("metadatas") or [{}])[0] or {}
+    meta = points[0].payload or {}
     new_id = meta.get("new_id")
     old_id = meta.get("old_id")
 
-    sem_col = _memory_collection_id()
-    if sem_col:
-        if req.action == "keep_new" and old_id:
-            try:
-                _chroma_api(
-                    "POST",
-                    f"/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col}/delete",
-                    {"ids": [old_id]},
-                )
-            except Exception as e:
-                log.warning("contradiction_resolution_error", phase="delete_old", error=str(e))
-            # Mark winner as superseding loser
-            try:
-                _chroma_api(
-                    "POST",
-                    f"/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col}/update",
-                    {
-                        "ids": [new_id],
-                        "metadatas": [{"supersedes": old_id}],
-                    },
-                )
-            except Exception as e:
-                log.warning("contradiction_resolution_error", phase="supersede", error=str(e))
-        elif req.action == "keep_old" and new_id:
-            try:
-                _chroma_api(
-                    "POST",
-                    f"/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col}/delete",
-                    {"ids": [new_id]},
-                )
-            except Exception as e:
-                log.warning("contradiction_resolution_error", phase="delete_new", error=str(e))
-        elif req.action == "merge" and old_id and new_id:
-            # Combine both entries: keep old ID, merge content
-            try:
-                old_data = _chroma_api(
-                    "POST",
-                    f"/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col}/get",
-                    {
-                        "ids": [old_id, new_id],
-                        "include": ["documents", "metadatas", "embeddings"],
-                    },
-                )
-                docs = old_data.get("documents", [])
-                if len(docs) == 2 and docs[0] and docs[1]:
-                    merged = docs[0].strip() + "\n\n" + docs[1].strip()
-                    merged = merged[:1000]
-                    # Re-embed merged content so vector search stays accurate
-                    try:
-                        new_emb = _get_embedding(merged, use_cache=False, prefix="passage")
-                        _chroma_api(
-                            "POST",
-                            f"/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col}/update",
-                            {
-                                "ids": [old_id],
-                                "documents": [merged],
-                                "embeddings": [new_emb],
-                            },
-                        )
-                    except Exception as e:
-                        log.warning("contradiction_resolution_error", error=str(e))
-                        _chroma_api(
-                            "POST",
-                            f"/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col}/update",
-                            {
-                                "ids": [old_id],
-                                "documents": [merged],
-                            },
-                        )
-                    _chroma_api(
-                        "POST",
-                        f"/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col}/delete",
-                        {
-                            "ids": [new_id],
-                        },
+    if req.action == "keep_new" and old_id:
+        try:
+            store.delete(sem_col, ids=[old_id])
+        except Exception as e:
+            log.warning("contradiction_resolution_error", phase="delete_old", error=str(e))
+        # Mark winner as superseding loser
+        try:
+            store.update_payload(sem_col, ids=[new_id], patch={"supersedes": old_id})
+        except Exception as e:
+            log.warning("contradiction_resolution_error", phase="supersede", error=str(e))
+    elif req.action == "keep_old" and new_id:
+        try:
+            store.delete(sem_col, ids=[new_id])
+        except Exception as e:
+            log.warning("contradiction_resolution_error", phase="delete_new", error=str(e))
+    elif req.action == "merge" and old_id and new_id:
+        # Combine both entries: keep old ID, merge content
+        try:
+            both = store.get(
+                sem_col,
+                ids=[old_id, new_id],
+                with_payload=True,
+                with_documents=True,
+                with_vectors=False,
+            )
+            by_id = {p.id: p for p in both}
+            old_p = by_id.get(old_id)
+            new_p = by_id.get(new_id)
+            if old_p and new_p and old_p.document and new_p.document:
+                merged = (old_p.document.strip() + "\n\n" + new_p.document.strip())[:1000]
+                merged_payload = dict(old_p.payload or {})
+                # Re-embed merged content so vector search stays accurate
+                try:
+                    new_emb = _get_embedding(merged, use_cache=False, prefix="passage")
+                    store.upsert(
+                        sem_col,
+                        ids=[old_id],
+                        vectors=[new_emb],
+                        documents=[merged],
+                        payloads=[merged_payload],
                     )
-            except Exception as e:
-                log.warning("contradiction_resolution_error", error=str(e))
-                raise HTTPException(status_code=500, detail=f"resolution failed: {e}")
-        # both_true / dismiss: leave both entries, just resolve the contradiction record
+                except Exception as e:
+                    log.warning("contradiction_resolution_error", error=str(e))
+                    # Fall back to metadata-only merge — keep the old vector
+                    # since re-embed failed; content patch is best-effort.
+                    store.update_payload(
+                        sem_col,
+                        ids=[old_id],
+                        patch={"merged_content": merged},
+                    )
+                store.delete(sem_col, ids=[new_id])
+        except Exception as e:
+            log.warning("contradiction_resolution_error", error=str(e))
+            raise HTTPException(status_code=500, detail=f"resolution failed: {e}")
+    # both_true / dismiss: leave both entries, just resolve the contradiction record
 
     # Audit trail
     try:
@@ -4727,11 +4669,7 @@ def resolve_contradiction(
 
     # Mark contradiction resolved (delete from queue)
     try:
-        _chroma_api(
-            "POST",
-            f"/api/v2/tenants/default_tenant/databases/default_database/collections/{contra_col}/delete",
-            {"ids": [contra_id]},
-        )
+        store.delete(contra_col, ids=[contra_id])
     except Exception as e:
         log.warning("contradiction_resolution_error", error=str(e))
 
@@ -6959,17 +6897,15 @@ def timetravel(
                 "results": payload.get("results", [])[:limit],
             }
         # No query — summarize: count memories by class that existed on date
-        col_id = _memory_collection_id()
-        if not col_id:
-            raise HTTPException(status_code=503, detail="semantic_memory unavailable")
+        collection = _memory_collection_id()
         # Fetch all memories, filter by temporal validity
-        resp = _chroma_api(
-            "POST",
-            f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/get",
-            {"limit": 10000, "include": ["metadatas"]},
+        points = get_vector_store().get(
+            collection,
+            limit=10000,
+            with_payload=True,
+            with_documents=False,
         )
-        ids = resp.get("ids", [])
-        metas = resp.get("metadatas", []) or []
+        metas = [p.payload or {} for p in points]
 
         as_of_date = date[:10]
         valid_count = 0
