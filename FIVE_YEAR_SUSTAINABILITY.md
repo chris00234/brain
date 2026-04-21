@@ -20,7 +20,7 @@ Brain is solid today. Main 5-year risks are **data growth without retention, emb
 | 5 | Schema migration discipline | MEDIUM | ongoing | PARTIAL | `migrations_brain_db.py` exists, procedure documented §Migrations |
 | 6 | Chris's preferences drift over time | MEDIUM | ongoing | PARTIAL | supersede_by + memory_lifecycle handle some. No explicit "retire preference" UI. |
 | 7 | Canonical page quality decay | MEDIUM | 18-24 months | PARTIAL | canonical_lint + canonical_design_drift jobs exist; no auto-retirement |
-| 8 | Dependency version bumps (Python, ChromaDB, Neo4j, Ollama) | MEDIUM | 1-2 years per | OPEN | Locked pyproject.toml; upgrade plan below |
+| 8 | Dependency version bumps (Python, Qdrant, Neo4j, Ollama) | MEDIUM | 1-2 years per | OPEN | Locked pyproject.toml; upgrade plan below |
 | 9 | API endpoint proliferation without versioning | LOW | 3-5 years | OPEN | ~90+ endpoints today; no /v1 prefix strategy |
 | 10 | Backup restore not drilled | MEDIUM | incident-triggered | OPEN | Daily brain-backup runs; RESTORE procedure needs yearly drill |
 | 11 | raw_events doubles storage via FTS5 | LOW | 2-3 years | ACCEPTED | FTS5 is critical for extended-eval literal-wording; 2× is worth it |
@@ -119,7 +119,7 @@ Chris's atoms from 2026-04 may not reflect Chris in 2031. Current handling:
 ### §Dependency Upgrades (every 18 months)
 
 - Python 3.14 → 3.15/3.16 within 2 years
-- ChromaDB: breaking changes in major versions (seen already)
+- Qdrant: breaking changes in major versions (seen already)
 - Neo4j: schema migrations required
 - Ollama: model format shifts possible
 - APScheduler: stable
@@ -138,9 +138,9 @@ Chris's atoms from 2026-04 may not reflect Chris in 2031. Current handling:
 - Two-track eval (stable vs extended)
 
 **Data durability**:
-- Daily brain-backup + chroma-backup (independent failure domains)
+- Daily brain-backup + qdrant-backup (independent failure domains)
 - SQLite WAL mode
-- ChromaDB persistent volume
+- Qdrant persistent volume
 
 **Observability**:
 - /brain/slos 12 metrics
@@ -160,7 +160,7 @@ Every April 17 (anniversary of this assessment):
 3. [ ] Run backup restore drill end-to-end
 4. [ ] Audit `migrations_brain_db.py` completeness
 5. [ ] Audit `uv.lock` for major-version bumps available
-6. [ ] Review Python/ChromaDB/Neo4j/Ollama versions vs latest stable
+6. [ ] Review Python/Qdrant/Neo4j/Ollama versions vs latest stable
 7. [ ] Spot-check 10 random canonical pages — still relevant? still accurate?
 8. [ ] Read 12 months of `llm_usage_monthly` — any anomalies, trends?
 9. [ ] Review `action_audit_retention` and `llm_usage_retention` actual vs expected behavior

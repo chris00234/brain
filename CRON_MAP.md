@@ -27,7 +27,7 @@
 | `gmail_ingest` | `cron(hour=1, minute=30)` | 300s | Gmail signal classifier → raw/inbox |
 | `obsidian_sync` | `interval(1:00:00)` | 300s | Obsidian vault ↔ CouchDB pull |
 | `openclaw_sessions_ingest` | `cron(hour=0,3,6,19,21,23, minute=35)` | 300s | OpenClaw agent session distillation via Jenna → raw/inbox (6×/day off-peak, respects 9am-6pm no-Ollama rule) |
-| `personal_ingest` | `cron(hour=6,14,22, minute=0)` | 300s | Apple Notes + iMessage + Calendar + Reminders → ChromaDB (3x daily off-peak) |
+| `personal_ingest` | `cron(hour=6,14,22, minute=0)` | 300s | Apple Notes + iMessage + Calendar + Reminders → Qdrant (3x daily off-peak) |
 
 ### market (1 jobs)
 
@@ -71,7 +71,6 @@
 | `canonical_quality_filter_report` | `cron(day_of_week=sun, hour=6, minute=35)` | 900s | Weekly quality filter dry-run report (Sunday 6:35am, review only) |
 | `canonical_quality_triage` | `cron(day_of_week=sun, hour=7, minute=0)` | 1800s | LLM classifies score=2 canonical_quality items as archive/keep/uncertain |
 | `canonicalize_entities_dryrun` | `cron(day_of_week=sun, hour=6, minute=45)` | 900s | v3: weekly entity dedup proposal scan (Sun 06:45, dry-run) |
-| `chroma_integrity` | `cron(day_of_week=sun, hour=3, minute=35)` | 300s | Weekly PRAGMA integrity_check on ChromaDB SQLite (Sun 3:35am) |
 | `code_index_refresh` | `cron(hour=3, minute=35)` | 1200s | Daily incremental code function indexer (3:35am — staggered off sm2_nightly at 03:25) |
 | `confidence_calibration` | `cron(day_of_week=sun, hour=4, minute=10)` | 900s | Weekly Platt calibration of atoms.confidence vs eval outcomes (Sun 04:10) |
 | `content_quality_slo` | `cron(hour=4, minute=5)` | 300s | Daily content quality SLO check (4:00am, after eval_run) |
@@ -123,7 +122,7 @@
 | `proactive_insights` | `cron(hour=8, minute=0)` | 900s | Daily proactive insights surfacing (8:00am PST) |
 | `prune_raw_orphaned` | `cron(month=1,4,7,10, day=1, hour=4, minute=25)` | 1800s | Quarterly raw/orphaned prune (180d retention; 1st of Jan/Apr/Jul/Oct @ 04:25) |
 | `re_examine_rejected` | `cron(day=2, hour=4, minute=30)` | 1800s | Monthly rejected-proposal re-examination (2nd of month @ 04:30) |
-| `reindex` | `cron(hour=3,23, minute=17)` | 900s | Full ChromaDB reindex (2x daily, off-hours) |
+| `reindex` | `cron(hour=3,23, minute=17)` | 900s | Full Qdrant reindex (2x daily, off-hours) |
 | `retrieval_inhibition` | `cron(hour=3, minute=58)` | 600s | Nightly Bjork-style inhibition of consistent retrieval losers (03:58am) |
 | `schema_learner` | `cron(day_of_week=sun, hour=4, minute=40)` | 900s | CLS spectral clustering on atom coactivation → compaction candidates (Sun 04:40) |
 | `schema_revision` | `cron(day_of_week=sun, hour=8, minute=45)` | 900s | Weekly free-energy schema revision (Sun 08:45) |
@@ -164,7 +163,6 @@
 | `canonical_quality_filter_report` | `cron(day_of_week=sun, hour=6, minute=35)` | system | 900s |
 | `canonical_quality_triage` | `cron(day_of_week=sun, hour=7, minute=0)` | system | 1800s |
 | `canonicalize_entities_dryrun` | `cron(day_of_week=sun, hour=6, minute=45)` | system | 900s |
-| `chroma_integrity` | `cron(day_of_week=sun, hour=3, minute=35)` | system | 300s |
 | `claude_code_sessions_ingest` | `cron(hour=1, minute=15)` | jenna | 300s |
 | `code_index_refresh` | `cron(hour=3, minute=35)` | system | 1200s |
 | `community_summaries` | `cron(day_of_week=sun, hour=5, minute=0)` | sage | 1800s |

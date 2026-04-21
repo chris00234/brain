@@ -12,7 +12,7 @@ Authoritative list of every on-disk store brain owns. Anything not listed here i
 | `autonomy.db` | ~600 KB | **Executive state.** Tasks, goals, outcomes, agent messages, focus, triggers, breakers, session context, todos, procedures, autopilot state. | `tasks`, `goals`, `outcomes`, `accuracy_tracker`, `focus_items`, `messages`, `triggers`, `entities`, `entity_relations`, `memory_access`, `session_context`, `todos`, `contradiction_votes`, `entity_activation`, `episodes`, `episode_membership`, `procedures`, `agent_source_prefs`, `heal_breakers`, `brain_config`, `eval_proposals` | `brain_core/task_queue.py`, `brain_core/working_memory.py`, `brain_core/agent_messenger.py`, `brain_core/autonomy.py`, `brain_core/brain_config_store.py` |
 | `facts.db` | ~32 KB | Structured `(entity, attribute, value)` triple store with temporal validity. Separate from atoms because facts have different lifecycle semantics. | `facts` | `brain_core/fact_store.py` |
 | `audit.db` | ~80 KB | Unified audit log for merges, conflicts, dedup events. Separate from `action_audit` (which lives in brain.db for atom lineage). | `audit_events` | `brain_core/audit_log.py` |
-| `fts_index.db` | ~26 MB | SQLite FTS5 keyword index as fallback when Chroma is slow or unreachable. | `fts_docs`, `fts_docs_fts` | `brain_core/fts_index.py` |
+| `fts_index.db` | ~26 MB | SQLite FTS5 keyword index as fallback when Qdrant is slow or unreachable. Nightly rebuild via `rebuild_from_vector_store`. | `fts_docs`, `fts_docs_fts` | `brain_core/fts_index.py` |
 | `embedding_cache.db` | ~525 MB | Shared query/document embedding cache. The size reflects the multilingual-e5-large-instruct 1024-dim vectors accumulated since model swap. | `embeddings` | `brain_core/embed_cache.py` |
 | `hyde_cache.db` | ~12 KB | HyDE hypothetical document expansion cache. | `hyde_expansions` | `brain_core/hyde.py` |
 | `llm_usage.db` | ~131 KB | LLM token/cost accounting per agent and per call. | `llm_calls` | `brain_core/openclaw_dispatch.py` (writer) |
@@ -36,7 +36,7 @@ Authoritative list of every on-disk store brain owns. Anything not listed here i
 | `recall-gaps.jsonl` | Detected recall gaps (max_score < threshold) for eval proposal mining. | Daily |
 | `dispatch-failures.jsonl` | Failed LLM dispatch attempts. | Daily |
 | `focus-aggregate.jsonl` | Day-of-week/hour activity rollup consumed by `_predictive_queries`. | Weekly overwrite |
-| `collection_size_history.jsonl` | Chroma collection size snapshots over time. | Daily append |
+| `collection_size_history.jsonl` | Qdrant collection size snapshots over time. | Daily append |
 | `eval-history.jsonl` / `eval-history-extended.jsonl` | Regression eval run history. | Persistent |
 | `ghost-ingest-failures.jsonl`, `pdf-ingest-failures.jsonl`, `personal-ingest-failures.jsonl`, `openclaw-sessions-failures.jsonl`, `screen-time-failures.jsonl` | Per-source ingest failure logs. | Daily |
 | `hooks.jsonl` | Hook firing log (brain_core/hooks.py). | Daily |
@@ -55,13 +55,13 @@ Authoritative list of every on-disk store brain owns. Anything not listed here i
 | `/tmp/.brain_loop_wake` | **NEW (v3 plan).** Event-driven wake file — any caller touches it to request immediate `brain_loop.tick()`. | mtime-triggered |
 | `/tmp/.claude_memory_regen.ts` | **NEW (v3 plan).** Throttle sentinel for MEMORY.md regeneration (60 s floor). | Overwritten per regen |
 
-## External services (native, not Docker)
+## External services
 
 | Service | Endpoint | Role |
 |---|---|---|
-| Chroma | `http://127.0.0.1:8000` | Vector store. Collections: `knowledge`, `experience`, `context`, `semantic_memory`, `obsidian`, `canonical`, `personal`. Also `calendar`, `messages`, `notes`, `tasks` for Apple-source ingests (not in `_ALL_COLLECTIONS`). |
-| Ollama | `http://127.0.0.1:11434` | Embedder only. Model: `blaifa/multilingual-e5-large-instruct` (1024-dim). No LLM inference. |
-| Neo4j | `bolt://127.0.0.1:7687` | Entity graph + 2-hop expansion + `MemoryAccess` utility scoring (Zep/Graphiti pattern). No auth (localhost). |
+| Qdrant | `http://127.0.0.1:6333` (Docker) | Vector store. 7 collections: `canonical`, `semantic_memory`, `experience`, `knowledge`, `code`, `personal`, `obsidian`. Legacy names (`semantic_contradictions`, `canonical_raptor`, `experience_compressed`, `context`, `patterns`) are aliased to their target collection via payload discriminators. int8 scalar quantization, HNSW m=16 / ef_construct=128, named `dense`/`contextual`/`raptor` vectors on canonical. |
+| Ollama | `http://127.0.0.1:11434` (native) | Embedder only. Model: `blaifa/multilingual-e5-large-instruct` (1024-dim). No LLM inference. |
+| Neo4j | `bolt://127.0.0.1:7687` (native) | Entity graph + 2-hop expansion + `MemoryAccess` utility scoring (Zep/Graphiti pattern). No auth (localhost). |
 
 ## Staleness rule
 

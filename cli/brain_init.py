@@ -32,13 +32,10 @@ OUTBOX_ROOT = Path("~/.openclaw/outbox/brain-learn").expanduser()
 
 PLISTS = [
     "ai.openclaw.brain-server.plist",
-    "ai.openclaw.chromadb-native.plist",
     "ai.openclaw.ollama-native.plist",
     "ai.openclaw.neo4j-native.plist",
-    "ai.openclaw.chroma-backup.plist",
     "ai.openclaw.log-rotation.plist",
     "ai.openclaw.gateway.plist",
-    "ai.openclaw.command-center.plist",
     "ai.openclaw.watchdog.plist",
     "ai.openclaw.orbstack-watchdog.plist",
 ]
@@ -87,7 +84,7 @@ def cmd_check() -> int:
             gaps.append(f"plist not installed: {name}")
 
     services = [
-        ("chromadb", 8000),
+        ("qdrant", 6333),
         ("ollama", 11434),
         ("neo4j (bolt)", 7687),
         ("brain-server", 8791),

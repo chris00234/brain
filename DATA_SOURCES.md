@@ -5,8 +5,8 @@ How to add a new data source to the brain system.
 ## Architecture
 
 ```
-[Data Source] → [Ingest Adapter] → raw/inbox/*.json → [Canonical Pipeline] → ChromaDB
-                                                    → [Reindex] → ChromaDB
+[Data Source] → [Ingest Adapter] → raw/inbox/*.json → [Canonical Pipeline] → Qdrant
+                                                    → [Reindex] → Qdrant
 ```
 
 Every data source follows this pattern:

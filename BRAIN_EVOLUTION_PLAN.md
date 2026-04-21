@@ -85,7 +85,7 @@ Each touches the production retrieval path or adds LLM-as-judge cost. Summary ta
 **Solves W1 + W4**: catches consolidation recall failures; replaces several downstream reranking stages when confidence is already high.
 
 ### T2.3 — Pre-action lesson query in `autonomy.authorize()` — **DEFERRED 2026-04-17**
-**Architectural constraint found during code review**: `autonomy.py:7-11` explicitly declares hot-path target <5ms p99 with "NO synchronous LLM, Neo4j, or Chroma calls." The proposed Neo4j `get_similar_lessons` call is 20-50ms — 4-10x the budget — and `authorize()` is called per task.dispatch, per trigger fire, per self_heal, per slo_monitor. Violating the constraint would regress the p99 of every autonomous action.
+**Architectural constraint found during code review**: `autonomy.py:7-11` explicitly declares hot-path target <5ms p99 with "NO synchronous LLM, Neo4j, or vector-store calls." The proposed Neo4j `get_similar_lessons` call is 20-50ms — 4-10x the budget — and `authorize()` is called per task.dispatch, per trigger fire, per self_heal, per slo_monitor. Violating the constraint would regress the p99 of every autonomous action.
 
 T1 prompt injection (at task_queue.py:631) already delivers lesson content to the dispatched agent, which is where action actually happens. The agent can self-gate on the `avoid` field.
 
@@ -151,7 +151,7 @@ Hermes Agent (NousResearch, ICLR 2026 Oral) is the current state of the art here
 | **agentskills.io open standard format** | No standard format | Use same frontmatter structure Hermes uses; interop-ready. |
 | **Skills self-improve during use** (trace analysis when better approach found) | Procedures upsert success_count only, never mutate steps | **T2.11** — when a retrieved procedure is used AND task failed, don't just record lesson; fork procedure variant with the delta. |
 | **Periodic nudges** (cron extracts patterns → memory) | `canonical_pipeline` + `brain_reflect` + `sm2_nightly` | Already have. Hermes just calls them "nudges" — rename unnecessary. |
-| **FTS5 cross-session recall with LLM summarization** | Semantic-only (ChromaDB + canonical) | **T2.9** — add SQLite FTS5 index on `raw_events` table. Wire into `search_unified` fan-out. Directly addresses extended eval 64% literal-wording gap. |
+| **FTS5 cross-session recall with LLM summarization** | Semantic-only (Qdrant + canonical) | **T2.9** — add SQLite FTS5 index on `raw_events` table. Wire into `search_unified` fan-out. Directly addresses extended eval 64% literal-wording gap. |
 | **Honcho dialectic user modeling** (per-session) | Sage `profile_regen` weekly (batch) | **SKIP** — Sage weekly is sufficient for solo user; Honcho's value is multi-user. Explicit no-go. |
 | **DSPy + GEPA prompt/skill evolution** ($2-10/run, API-only, no GPU) | LoRA weekly (weight-level only) | **T3** — Sunday 5:15am cron: `gepa_evolve` top-10 most-used procedures. 5 gates: tests pass, size ≤ 15KB, semantic preservation, human review, cache compat. Defer until T2 stable. |
 
@@ -243,7 +243,7 @@ When a procedure is retrieved for a task (by `_get_relevant_procedures`), tag th
 **All Tier 1 + Combo A + Hermes absorption + Weak-point reinforcement.**
 
 ### Shipped in session B (this update)
-- **T2.9 FTS5 raw_events** — `raw_events_fts.py` new module + live triggers on brain.db. 7402 rows indexed, 0.08s initial build. `search_unified._search_fts` now merges Chroma-synced FTS + live raw_events FTS. Direct attack on extended eval 64% literal-wording gap.
+- **T2.9 FTS5 raw_events** — `raw_events_fts.py` new module + live triggers on brain.db. 7402 rows indexed, 0.08s initial build. `search_unified._search_fts` now merges Qdrant-synced FTS + live raw_events FTS. Direct attack on extended eval 64% literal-wording gap.
 - **W3 brain.db backup** — `cli/backup_brain_db.py` + `ai.openclaw.brain-backup.plist` daily 3:10am. SQLite online .backup, 14-day retention. 36MB brain.db backed up in 31ms. autonomy.db (745KB) in 1ms. First-run verified.
 - **W5 calibration drift alarm** — new SLO `calibration_brier_drift_7d` target 0.05 warning. `confidence_calibration.run()` now stores abs(new_brier - prev_brier) to `brain_config_store` → SLO reads on each check. Prevents silent self-learning drift.
 - **W7 CLAUDE.md brain-recall guidance** — ACTION BIAS section updated with "Exception — Brain-first lookup BEFORE action" clause listing when brain_recall is the first tool call (preferences/design/infra/corrected-before topics) vs direct action (trivial/self-contained).
@@ -271,7 +271,7 @@ Agent research surfaced **Contextual Retrieval (Anthropic)** as the highest-leve
 - Env flag: `BRAIN_CONTEXTUAL_EMBED_ENABLED=1` in brain-server plist
 - CLI: `--dry-run`, `--limit N`, `--force`, `--only <subdir>` for safe rollout
 - Per-doc strategy (not per-chunk): ~60 active canonical docs × 1 Jenna call = ~60 calls total instead of ~6K. All chunks from the same parent inherit the prefix. Verified prefix quality: "Canonical workflow decision document, global scope, created 2026-04-09 from distilled memory evidence..."
-- Verified write path: 5 initial decisions docs → 16 chunks with `contextualized: true` metadata + `contextual_prefix` populated in ChromaDB
+- Verified write path: 5 initial decisions docs → 16 chunks with `contextualized: true` metadata + `contextual_prefix` populated in the vector store
 
 **Verification target**: measure extended eval 64% → 75%+ after full pass completes. Cross-reference against stable eval (should stay ≥95%).
 

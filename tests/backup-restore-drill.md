@@ -1,5 +1,11 @@
 # Backup & Restore Drill
 
+> **Historical note (2026-04-21):** this drill describes the ChromaDB era.
+> Brain migrated to Qdrant on 2026-04-21 — see `brain/DEPLOY.md` and
+> `RUNBOOK.md` §6 for current backup/restore procedure (Qdrant snapshot
+> API + `cli/backup_qdrant.py` → MinIO `rag-backups/qdrant-backup-*.tar.gz`).
+> Retaining this file as an incident log only.
+
 **Last run:** 2026-04-07
 
 ## Summary

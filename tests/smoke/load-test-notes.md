@@ -1,5 +1,10 @@
 # Load Test Notes
 
+> **Historical note (2026-04-21):** results below were measured against
+> ChromaDB before the Qdrant migration. Qdrant moved to int8 scalar
+> quantization + HNSW ef_construct=128, which changed the p95 baseline.
+> Rerun `tests/load_test.py` to establish new numbers.
+
 **Last run:** 2026-04-07
 
 ## Results (20 concurrent, 15s duration)

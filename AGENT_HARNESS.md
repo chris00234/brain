@@ -109,7 +109,7 @@ Always pass `agent` in MCP arg or `x-agent` in HTTP header. Used for:
   "query": "...",
   "results": [
     {
-      "id": "<raw chroma UUID>",
+      "id": "<vector store id (UUIDv5 or string)>",
       "path": "<file path or graph:// or raptor:// uri>",
       "title": "...",
       "content": "...",
@@ -174,7 +174,7 @@ Wrapped as `{"content": [{"type": "text", "text": "{\"error\": \"...\"}" }]}`. P
 - `422` : validation failed (Pydantic rejected shape); response body explains
 - `429` : rate-limited (back off + retry; rate is per-agent)
 - `503` : brain-server starting or dependency unavailable
-- `502` : ChromaDB/Ollama/Neo4j unreachable
+- `502` : Qdrant/Ollama/Neo4j unreachable
 
 ### 5.3 Brain in degraded state
 Check `GET /brain/health`. If `status=degraded`:
@@ -240,7 +240,7 @@ sqlite3 ~/server/brain/logs/brain.db \
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | 401 on every call | secret file not readable | `chmod 600 ~/.openclaw/credentials/.personal_webhook_secret` |
-| Empty results on known facts | brain-server pointing at wrong Chroma | check `/brain/health` → `services.chromadb` |
+| Empty results on known facts | brain-server pointing at wrong Qdrant | check `/brain/health` → `services.qdrant` |
 | MCP tool not found | stale MCP server process | kill `brain_mcp_server.py` PID; Claude Code respawns it |
 | Results missing confidence field | older-than-2026-04-16 brain-server | restart: `launchctl kickstart -k gui/$(id -u)/ai.openclaw.brain-server` |
 | High p95 latency | RAPTOR firing on short query | fine — it skips queries with fewer than 5 tokens |

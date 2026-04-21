@@ -71,7 +71,7 @@ curl -sf -H "Authorization: Bearer $SECRET" http://127.0.0.1:8791/brain/health |
    curl -sf -X POST -H "Authorization: Bearer $SECRET" http://127.0.0.1:8791/jobs/<job_name>
    ```
 2. Watch its log: `tail -30 logs/jobs/<job_name>.log`
-3. If it's a recurring failure, check upstream services (chromadb, ollama, neo4j).
+3. If it's a recurring failure, check upstream services (qdrant, ollama, neo4j).
 
 ---
 
@@ -171,29 +171,33 @@ sqlite3 /Users/chrischo/server/brain/logs/scheduler_history.db "SELECT * FROM jo
 
 ---
 
-## 6. ChromaDB outage
+## 6. Qdrant outage
 
 ### Symptoms
-- `/brain/health` shows `services.chromadb=down`
+- `/brain/health` shows `services.qdrant=down`
 - `/recall/v2` returns errors
 
 ### First-line check
 ```bash
-curl -sf http://127.0.0.1:8000/api/v2/heartbeat
-launchctl list | grep chromadb
-tail -30 ~/server/rag/chroma-data/logs/chroma.log 2>/dev/null
+curl -sf http://127.0.0.1:6333/readyz
+docker ps --filter name=qdrant
+docker logs --tail 50 qdrant 2>&1
 ```
 
 ### Fix
-1. Restart chromadb-native:
+1. Restart Qdrant container:
    ```bash
-   launchctl kickstart -k gui/$(id -u)/ai.openclaw.chromadb-native
+   docker compose -f ~/server/brain/docker-compose.yml restart qdrant
    ```
-2. Wait 10s, re-check.
-3. If persistent failure, check disk space on `~/server/rag/chroma-data/`.
-4. If corrupt (rare), restore from backup:
+2. Wait 5s, re-check `/readyz`.
+3. If persistent failure, check disk space on `~/server/brain/qdrant-data/`.
+4. If data corrupt (rare), restore a snapshot from MinIO:
    ```bash
-   /Users/chrischo/server/brain/.venv/bin/python /Users/chrischo/server/brain/cli/restore_chroma.py --date YYYY-MM-DD
+   # Pull latest backup
+   mc cp local/rag-backups/qdrant-backup-YYYY-MM-DD.tar.gz /tmp/
+   tar xzf /tmp/qdrant-backup-YYYY-MM-DD.tar.gz -C /tmp/
+   # Upload per-collection snapshot via PUT /collections/{name}/snapshots/upload
+   # Then re-run cli/qdrant_bootstrap.py to recreate payload indexes if needed.
    ```
 
 ---
@@ -224,7 +228,7 @@ tail -30 /opt/homebrew/var/log/neo4j/debug.log 2>/dev/null
 
 ### MinIO is no longer monitored by /brain/health
 The probe was removed in Phase A2 (2026-04-13). MinIO is a docker container
-on `server-net` for chroma backups only — brain has no direct dependency.
+on `server-net` for qdrant backups only — brain has no direct dependency.
 Container health is verified by docker-compose healthcheck.
 
 ```bash
@@ -279,7 +283,7 @@ launchctl kickstart -k gui/$(id -u)/ai.openclaw.brain-server
 curl -sf http://127.0.0.1:8791/healthz
 ```
 
-ChromaDB, Ollama, Neo4j must be installed separately (not packaged with brain).
+Qdrant, Ollama, Neo4j must be installed separately (not packaged with brain).
 
 ---
 
@@ -303,7 +307,7 @@ ChromaDB, Ollama, Neo4j must be installed separately (not packaged with brain).
    launchctl bootout gui/$(id -u)/ai.openclaw.brain-server
    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.openclaw.brain-server.plist
    ```
-4. Brain falls back to Chroma metadata for tier/supersession (the dual-write mirror).
+4. Brain falls back to Qdrant payload metadata for tier/supersession.
 5. The brain.db is not deleted — re-enabling the flag picks up where it left off.
 
 ---
@@ -336,7 +340,7 @@ To re-enable, unset the env var or set `enabled=true`.
 
 | SLO | Target | Severity | Action on breach |
 |---|---|---|---|
-| `recall_v2_p95_ms` | ≤ 350ms | warning | Investigate latency: check ChromaDB load, embed cache hit rate, cross-encoder enabled |
+| `recall_v2_p95_ms` | ≤ 350ms | warning | Investigate latency: check Qdrant load, embed cache hit rate, cross-encoder enabled |
 | `recall_v2_content_hit_pct` | ≥ 95% | critical | Run stable eval, compare baseline. Rollback recent search changes if regressed |
 | `breaker_open_count` | 0 | critical | See section 3 |
 | `outbox_pending_count` | ≤ 20 | warning | See section 4 |
@@ -424,7 +428,7 @@ BRAIN_ATOMS_ENABLED=true .venv/bin/python cli/canonicalize_entities.py --thresho
 ## Reference
 
 - Brain entry: `~/server/brain/server.py` (FastAPI on :8791)
-- Native services: chromadb (8000), ollama (11434), neo4j (7687)
+- Services: qdrant (docker, 6333), ollama (native, 11434), neo4j (native, 7687)
 - Schema migrations: `~/server/brain/brain_core/schema_versions.py`
 - Autonomy gate: `~/server/brain/brain_core/autonomy.py`
 - Persistent breakers: `~/server/brain/brain_core/breakers.py`
@@ -453,7 +457,7 @@ New subsystems shipped this cycle. Each has its own failure + recovery pattern.
 - **Fix:** run `graph_rebuild_mentions` + `graph_backfill_co_mention` Sunday jobs to populate entity graph first.
 
 ### RAPTOR tree empty
-- **Symptom:** `canonical_raptor` Chroma collection stays empty after `raptor_build` job.
+- **Symptom:** canonical collection has no `raptor_level>0` rows after `raptor_build` job (Qdrant stores raptor summaries under the same collection, discriminated by `raptor_level`).
 - **Cause:** fewer than 2 × MIN_CLUSTER_SIZE (4) active canonical notes.
 - **Fix:** verify `canonical` collection has documents with `status=active`. The job returns status=skip.
 
@@ -473,6 +477,6 @@ New subsystems shipped this cycle. Each has its own failure + recovery pattern.
 - **Fix:** flip `BRAIN_SELF_RAG_ENABLED=false` in launchd plist. Heuristic `_crag_score` stays live.
 
 ### Conjectures leaking into factual recall
-- **Symptom:** top-K results include atoms with `kind=conjecture` or `dream:*` chroma_ids.
+- **Symptom:** top-K results include atoms with `kind=conjecture` or `dream:*` ids.
 - **Cause:** `include_provisional=True` passed to `search_all`.
 - **Fix:** default is False. Verify callers aren't overriding.

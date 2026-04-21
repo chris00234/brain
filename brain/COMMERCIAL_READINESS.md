@@ -37,7 +37,7 @@ A score of 5 across 7+ axes ≈ "$50k SKU with a sales motion."
 
 1. **Benchmarks (2 → 4)**: run `eval_compare.py` against BEIR NQ + HotpotQA dev subsets. Publish source/content hit pcts vs published baselines. ~4-6h of work + 1-2h of compute.
 
-2. **Multi-tenant + RBAC (0 → 4)**: ~2 weeks of refactor. Per-token namespacing in atoms + chroma collection prefixing + RBAC middleware on all routes. Big lift.
+2. **Multi-tenant + RBAC (0 → 4)**: ~2 weeks of refactor. Per-token namespacing in atoms + Qdrant collection prefixing + RBAC middleware on all routes. Big lift.
 
 3. **Security (3 → 4)**: API key rotation flow (1-2h), secrets vault integration (1d), pen-test audit (external, ~$3k), CVE scanning in CI (1h). The current bearer-token-only model is the gating issue.
 

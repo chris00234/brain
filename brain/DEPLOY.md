@@ -1,6 +1,6 @@
 # Brain — Deployment
 
-**Status (2026-04-13)**: Chris runs the brain natively on his M4 Max Mac Studio via launchd. The deployment artifacts in this document (`Dockerfile`, `docker-compose.yml`) are a portable fallback — they prove the brain CAN be containerized, run on a fresh Linux box, and recovered from cold-start in under 5 minutes. They are **not** how production runs day-to-day, because OrbStack's VM disk I/O exceeded macOS's ~2.1 GB/day write limit (see ChromaDB native migration story in CLAUDE.md).
+**Status (2026-04-21)**: Chris runs the brain natively on his M4 Max Mac Studio via launchd. Qdrant runs as a Docker container (OrbStack). The deployment artifacts in this document (`Dockerfile`, `docker-compose.yml`) are a portable fallback — they prove the brain CAN be containerized, run on a fresh Linux box, and recovered from cold-start in under 5 minutes.
 
 ## Deployment modes
 
@@ -11,10 +11,9 @@ Chris's box runs nine launchd services:
 | Service | Plist | Purpose |
 |---|---|---|
 | `ai.openclaw.brain-server` | `~/Library/LaunchAgents/` | Brain FastAPI on :8791 (KeepAlive supervisor) |
-| `ai.openclaw.chromadb-native` | same | ChromaDB on :8000 (data at `~/server/rag/chroma-data/`) |
 | `ai.openclaw.ollama-native` | same | Ollama on :11434, Apple Silicon GPU/NE |
 | `ai.openclaw.neo4j-native` | same | Neo4j Bolt :7687 / HTTP :7474, 512MB heap |
-| `ai.openclaw.chroma-backup` | same | Independent failure domain backup loop |
+| `ai.openclaw.qdrant-backup` | same | Independent failure domain backup loop (Qdrant snapshots + knowledge tree) |
 | `ai.openclaw.gateway` | same | OpenClaw gateway on :18789 |
 | `ai.openclaw.orbstack-watchdog` | same | Docker auto-recovery |
 | `ai.openclaw.watchdog` | same | Gateway watchdog |
@@ -50,13 +49,13 @@ curl -sf -H "Authorization: Bearer $SECRET" http://127.0.0.1:8791/brain/health |
 
 First-boot expectations:
 - `docker compose up` builds the brain image (~3-5 min on first build, cached after)
-- ChromaDB starts in ~10s
+- Qdrant starts in ~5s
 - Ollama starts in ~5s but the embedder model is NOT pre-pulled — fetch it inside the container before first eval:
   ```bash
   docker exec -it brain-ollama ollama pull blaifa/multilingual-e5-large-instruct
   ```
 - Neo4j starts in ~20s (waits for healthcheck)
-- Brain blocks on Chroma+Neo4j healthchecks via `depends_on`, then runs `check_and_migrate` and serves :8791
+- Brain blocks on Qdrant+Neo4j healthchecks via `depends_on`, then runs `check_and_migrate` and serves :8791
 - Total cold start: ~60-90s
 
 `BRAIN_AUTOPILOT_DISABLED=1` is set by default so the autonomous self-learning loops don't fire on a fresh box. Flip it to `0` once you've verified manual operation works.
@@ -73,7 +72,7 @@ python3.14 -m venv .venv
 .venv/bin/pip install -e .
 
 # Install the three storage backends manually
-# - ChromaDB:  pip install chromadb && chroma run --path ./chroma-data
+# - Qdrant:    docker run -d -p 6333:6333 -v $PWD/qdrant-data:/qdrant/storage qdrant/qdrant:v1.14.0
 # - Ollama:    curl -fsSL https://ollama.com/install.sh | sh
 # - Neo4j:     apt install neo4j  (or download tarball)
 
@@ -112,16 +111,16 @@ WantedBy=multi-user.target
 
 ## Backups
 
-- **ChromaDB**: `cli/backup_chroma.py` — runs nightly via APScheduler, creates a zstandard-compressed tar of `~/server/rag/chroma-data/` to `~/server/brain/backups/chroma/`. Independent failure domain via `ai.openclaw.chroma-backup` plist (separate from brain-server) so a brain crash doesn't take backups with it.
+- **Qdrant**: `cli/backup_qdrant.py` — runs nightly via `ai.openclaw.qdrant-backup` launchd plist (3am). Uses Qdrant's snapshot API per collection, tars all snapshots, uploads to MinIO `rag-backups/`. Independent failure domain from brain-server so a brain crash doesn't take backups with it. Also dumps knowledge tree (`raw/inbox` + `canonical` + `distilled`) and a raw JSON of `semantic_memory` as extra safety nets.
 - **Neo4j**: `cli/backup_neo4j.py` — daily `neo4j-admin database dump`.
 - **Brain DBs** (`brain.db`, `autonomy.db`): SQLite WAL files. Backup script copies via `sqlite3 .backup` (atomic snapshot, no downtime).
-- **Restore**: `cli/restore_chroma.py <archive.tar.zst>` then restart brain-server.
+- **Restore**: stop brain → `qdrant-client` snapshot restore API (`PUT /collections/{name}/snapshots/upload`) → restart brain.
 
-Backup verification is automated: `cli/backup_verify.py` runs monthly (1st of month, 4:30am) — extracts the latest backup into a sandbox, starts a temp Chroma instance against it, runs a smoke query, asserts non-empty.
+Backup verification is automated: `cli/backup_verify.py` runs monthly (1st of month, 4:30am) — extracts the latest backup into a sandbox, loads the snapshot into a temp Qdrant instance, runs a smoke query, asserts non-empty.
 
 ## Health monitoring
 
-- **Self-monitoring**: `/brain/health` returns `{status: "healthy"|"degraded"|"down", services: {chromadb, ollama, neo4j}, alerts: [...]}`. SLOs check every 5 min.
+- **Self-monitoring**: `/brain/health` returns `{status: "healthy"|"degraded"|"down", services: {qdrant, ollama, neo4j}, alerts: [...]}`. SLOs check every 5 min.
 - **External**: Add `https://brain.chrischodev.com/healthz` to Uptime Kuma. The `/healthz` route is unauth and returns `{status: "ok"}` if the FastAPI server is up; it doesn't probe storage backends — use `/brain/health` for full status.
 - **Telegram alerts**: SLO breaches dispatch via openclaw_dispatch → jenna-bot. Rate-limited per SLO+severity (1 alert per hour per breach class).
 
@@ -143,7 +142,7 @@ Schema migrations are idempotent (`CREATE TABLE IF NOT EXISTS` + `ALTER TABLE ..
 
 Brain is single-tenant single-user by design. Multi-tenancy would require:
 - Per-tenant bearer tokens + RBAC
-- Per-tenant ChromaDB collections
+- Per-tenant Qdrant collections
 - Per-tenant atoms tables
 - Per-tenant rate limit buckets
 
@@ -152,7 +151,7 @@ None of this is implemented. Treat the brain as a personal device, not a SaaS.
 ## Pre-flight checklist (fresh machine)
 
 1. ✅ Python 3.14 installed
-2. ✅ ChromaDB + Ollama + Neo4j running and reachable on localhost
+2. ✅ Qdrant + Ollama + Neo4j running and reachable on localhost
 3. ✅ Bearer secret at `~/.openclaw/credentials/.personal_webhook_secret` (chmod 600)
 4. ✅ Embed model pulled in Ollama: `ollama pull blaifa/multilingual-e5-large-instruct`
 5. ✅ Brain venv installed: `pip install -e .` from project root

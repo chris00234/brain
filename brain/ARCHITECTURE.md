@@ -40,10 +40,10 @@ A single-user, local-first second brain that combines RAG, episodic + semantic m
         └───┬────────┬──────────┬──────────┬──────────┬──────────────┘
             │        │          │          │          │
        ┌────▼──┐ ┌──▼────┐ ┌───▼────┐ ┌───▼────┐ ┌──▼─────┐
-       │Chroma │ │Neo4j  │ │atoms   │ │ FTS    │ │SearXNG │
-       │ DB    │ │entity │ │store   │ │ index  │ │ web    │
+       │Qdrant │ │Neo4j  │ │atoms   │ │ FTS    │ │SearXNG │
+       │ v1.14 │ │entity │ │store   │ │ index  │ │ web    │
        │       │ │ graph │ │(brain. │ │(SQLite)│ │ search │
-       │ 12856 │ │ (Bolt)│ │ db)    │ │        │ │ M6     │
+       │ 33552 │ │ (Bolt)│ │ db)    │ │        │ │ M6     │
        │chunks │ │       │ │523+    │ │        │ │        │
        │ 12    │ │       │ │atoms   │ │        │ │        │
        │ collxs│ │       │ │        │ │        │ │        │
@@ -92,7 +92,7 @@ FastAPI on `127.0.0.1:8791`. Bearer-token auth (`~/.openclaw/credentials/.person
 Parallel fan-out across 6 sources → RRF fuse with trust weights → cross-encoder rerank (BGE-reranker-base) → token-overlap rerank → time decay (category-aware) → preference recency boost → graph entity boost → spreading activation (HippoRAG PPR) → triple_link boost (HippoRAG2, M7-WS3) → MMR diversity → source diversity cap. Optional `?iterative=true` activates CRAG (M9) for low-confidence retry.
 
 ### 4. Storage layer (3 native services + SQLite)
-- **ChromaDB** native at `127.0.0.1:8000` — 12 collections, 12,856 chunks, 1024-dim embeddings.
+- **Qdrant** 1.14 via Docker at `127.0.0.1:6333` — 7 collections (13→7 collapse via payload discriminators), 33,552 points, 1024-dim e5-large-instruct. int8 scalar quantization, HNSW m=16/ef_construct=128, named vectors on canonical (`dense`/`contextual`/`raptor`).
 - **Ollama** native at `127.0.0.1:11434` — embedder only. `multilingual-e5-large-instruct`. Asymmetric `passage:`/`query:` prefixes. Apple Silicon GPU/NE. Zero LLM duty.
 - **Neo4j** native at `127.0.0.1:7687` — entity knowledge graph (atoms ↔ entities ↔ relationships). 512MB heap.
 - **SQLite WAL** — `brain.db` (atoms truth layer + action_audit + web_search), `autonomy.db` (eval_proposals, autopilot, breakers, accuracy_tracker), `metrics_history.db`, `audit.db`.
@@ -128,7 +128,7 @@ operator → MCP brain_recall(q="how do we deploy ghost?")
         → brain_mcp_server proxies to /recall/v2?q=...&actor=claude-code
         → server.py recall_v2 handler
         → search_unified.search_all(q, n=5, sources=[rag,canonical,obsidian])
-        → parallel: rag(chroma), canonical(chroma), obsidian(chroma), graph(neo4j),
+        → parallel: rag(qdrant), canonical(qdrant), obsidian(qdrant), graph(neo4j),
                     fts(sqlite), graph_prefetch(neo4j)
         → RRF fuse with trust weights {0.9, 1.0, 0.6, 0.5, 0.4, 0.7}
         → atoms tier filter (drop superseded / obsolete)
@@ -179,6 +179,6 @@ operator → MCP brain_recall(q="how do we deploy ghost?")
 ## Out-of-band assumptions
 
 - The brain runs on Chris's M4 Max Mac Studio. Single user, single tenant, single token. `~/.openclaw/credentials/.personal_webhook_secret` is the auth root.
-- Docker is OrbStack. Brain server itself runs natively (not in Docker) via `~/Library/LaunchAgents/ai.openclaw.brain-server.plist`. ChromaDB, Ollama, Neo4j also native via launchd.
+- Docker is OrbStack. Brain server itself runs natively (not in Docker) via `~/Library/LaunchAgents/ai.openclaw.brain-server.plist`. Ollama, Neo4j also native via launchd. Qdrant runs as a Docker container.
 - Cloudflare tunnel exposes `brain.chrischodev.com` for remote access. Bearer auth required.
 - Every LLM dispatch uses Chris's existing OpenAI subscription via OpenClaw — no per-call billing surprises.
