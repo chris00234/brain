@@ -14,16 +14,18 @@
 # container restarts.
 
 services:
-  chromadb:
-    image: chromadb/chroma:latest
-    container_name: brain-chromadb
+  qdrant:
+    image: qdrant/qdrant:v1.17.0
+    container_name: qdrant
     restart: unless-stopped
     ports:
-      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:6333:6333"
+      - "127.0.0.1:6334:6334"
     volumes:
-      - chroma-data:/chroma/chroma
+      - ./qdrant-data:/qdrant/storage
+    mem_limit: 4g
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/api/v2/heartbeat"]
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/6333'"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -77,7 +79,8 @@ services:
       BRAIN_AUTOPILOT_DISABLED: "1"  # safe first boot — flip to 0 after testing
       BRAIN_ATOMS_ENABLED: "true"
       BRAIN_ATOMS_READ: "true"
-      CHROMA_HOST: chromadb
+      VECTOR_BACKEND: qdrant
+      QDRANT_URL: http://qdrant:6333
       OLLAMA_HOST: ollama
       NEO4J_URI: bolt://neo4j:7687
     volumes:
@@ -85,7 +88,7 @@ services:
       - ./brain.db:/app/brain.db
       - ${HOME}/.openclaw/credentials:/credentials:ro
     depends_on:
-      chromadb:
+      qdrant:
         condition: service_healthy
       ollama:
         condition: service_started
@@ -98,6 +101,5 @@ services:
       retries: 3
 
 volumes:
-  chroma-data:
   ollama-data:
   neo4j-data:

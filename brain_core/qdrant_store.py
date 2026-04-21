@@ -158,6 +158,30 @@ def _resolve_qdrant_url() -> str:
     return os.getenv("QDRANT_URL", "http://127.0.0.1:6333")
 
 
+def _search_params_for(collection: str) -> Any:
+    """Per-collection HNSW runtime params.
+
+    hnsw_tuner keeps recommended ef_search per collection (tuned for
+    p95 vs recall tradeoffs). Reading it here so the adaptive tuner's
+    recommendations actually flow into live queries without every
+    caller having to pass SearchParams explicitly.
+    """
+    try:
+        import sys
+        from pathlib import Path
+
+        sys.path.insert(0, str(Path(__file__).resolve().parent / "pipeline"))
+        from hnsw_tuner import SETTINGS  # type: ignore[import]
+    except Exception:
+        return None
+    ef = SETTINGS.get(collection)
+    if not ef:
+        return None
+    from qdrant_client.models import SearchParams
+
+    return SearchParams(hnsw_ef=int(ef))
+
+
 class QdrantStore:
     """VectorStore backed by Qdrant ≥ 1.14 via the Python client."""
 
@@ -314,23 +338,65 @@ class QdrantStore:
         with_vectors: bool = False,
     ) -> list[VectorHit]:
         # qdrant-client 1.17+ uses `query_points` instead of deprecated
-        # `search`. We always query against the primary `dense` named
-        # vector — bootstrap guarantees every collection has one.
+        # `search`. Bootstrap guarantees every collection has a primary
+        # `dense` named vector; `canonical` additionally has `contextual`
+        # populated on contextualized rows, so we issue a multi-vector
+        # prefetch + RRF fusion for it. Non-canonical collections stay on
+        # single-vector dense search.
         real, merged_filter = _resolve_alias(collection, filter)
-        try:
-            resp = self._client.query_points(
-                collection_name=real,
-                query=vector,
-                using="dense",
-                limit=k,
-                query_filter=_translate_filter(merged_filter),
-                with_payload=with_payload,
-                with_vectors=with_vectors,
-            )
-            hits = resp.points
-        except Exception as exc:
-            log.warning("qdrant query(%s) failed: %s", collection, exc)
-            return []
+        search_params = _search_params_for(real)
+        qfilter = _translate_filter(merged_filter)
+
+        if real == "canonical":
+            try:
+                from qdrant_client.models import FusionQuery, Prefetch
+
+                resp = self._client.query_points(
+                    collection_name=real,
+                    prefetch=[
+                        Prefetch(
+                            query=vector,
+                            using="dense",
+                            limit=max(k * 3, 30),
+                            filter=qfilter,
+                            params=search_params,
+                        ),
+                        Prefetch(
+                            query=vector,
+                            using="contextual",
+                            limit=max(k * 3, 30),
+                            filter=qfilter,
+                            params=search_params,
+                        ),
+                    ],
+                    query=FusionQuery(fusion="rrf"),
+                    limit=k,
+                    with_payload=with_payload,
+                    with_vectors=with_vectors,
+                )
+                hits = resp.points
+            except Exception as exc:
+                log.warning("qdrant hybrid-query(%s) failed, falling back to dense: %s", collection, exc)
+                hits = []
+        else:
+            hits = []
+
+        if not hits:
+            try:
+                resp = self._client.query_points(
+                    collection_name=real,
+                    query=vector,
+                    using="dense",
+                    limit=k,
+                    query_filter=qfilter,
+                    search_params=search_params,
+                    with_payload=with_payload,
+                    with_vectors=with_vectors,
+                )
+                hits = resp.points
+            except Exception as exc:
+                log.warning("qdrant query(%s) failed: %s", collection, exc)
+                return []
 
         results: list[VectorHit] = []
         for h in hits:
