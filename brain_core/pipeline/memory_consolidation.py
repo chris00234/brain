@@ -20,11 +20,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from http_pool import http_json
-from search import get_collections
+from vector_store import get_vector_store
 
-CHROMA_URL = "http://127.0.0.1:8000"
-CHROMA_API = f"{CHROMA_URL}/api/v2/tenants/default_tenant/databases/default_database/collections"
 BATCH_SIZE = 50
 
 
@@ -60,33 +57,29 @@ def _parse_iso(ts: str) -> datetime | None:
 
 
 def consolidate() -> dict:
-    cols = get_collections()
-    sem_col_id = cols.get("semantic_memory")
-    if not sem_col_id:
-        return {"error": "semantic_memory collection not found"}
+    store = get_vector_store()
 
-    # Paginate the full scan in 1000-doc pages. A single 50k fetch would
-    # allocate the full body multiple times (FastAPI response → subprocess
-    # memory → list comprehensions) and grow linearly with memory size.
+    # Paginate the full scan in 1000-doc pages.
     ids: list[str] = []
     metas: list[dict] = []
     PAGE = 1000
     offset = 0
     while True:
         try:
-            resp = http_json(
-                "POST",
-                f"{CHROMA_API}/{sem_col_id}/get",
-                {"limit": PAGE, "offset": offset, "include": ["metadatas"]},
+            points = store.get(
+                "semantic_memory",
+                limit=PAGE,
+                offset=offset,
+                with_payload=True,
+                with_documents=False,
             )
         except Exception as e:
             return {"error": f"fetch failed at offset={offset}: {e}"}
-        page_ids = resp.get("ids", [])
-        if not page_ids:
+        if not points:
             break
-        ids.extend(page_ids)
-        metas.extend(resp.get("metadatas", []) or [])
-        if len(page_ids) < PAGE:
+        ids.extend(p.id for p in points)
+        metas.extend((p.payload or {}) for p in points)
+        if len(points) < PAGE:
             break
         offset += PAGE
 
@@ -155,12 +148,12 @@ def consolidate() -> dict:
             )
             updates_batch.append((mid, update_meta))
             if len(updates_batch) >= BATCH_SIZE:
-                _apply_updates(sem_col_id, updates_batch)
+                _apply_updates("semantic_memory", updates_batch)
                 updates_batch = []
 
     # Flush
     if updates_batch:
-        _apply_updates(sem_col_id, updates_batch)
+        _apply_updates("semantic_memory", updates_batch)
 
     return {
         "status": "ok",
@@ -172,18 +165,14 @@ def consolidate() -> dict:
     }
 
 
-def _apply_updates(col_id: str, updates: list[tuple[str, dict]]):
-    """Apply a batch of metadata updates to ChromaDB."""
+def _apply_updates(collection: str, updates: list[tuple[str, dict]]):
+    """Apply a batch of metadata patches via the vector store."""
     if not updates:
         return
-    ids = [u[0] for u in updates]
-    metas = [u[1] for u in updates]
+    store = get_vector_store()
     try:
-        http_json(
-            "POST",
-            f"{CHROMA_API}/{col_id}/update",
-            {"ids": ids, "metadatas": metas},
-        )
+        for mid, patch in updates:
+            store.update_payload(collection, ids=[mid], patch=patch)
     except Exception as e:
         print(f"update batch failed: {e}")
 

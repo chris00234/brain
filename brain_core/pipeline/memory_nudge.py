@@ -14,15 +14,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from cli_llm import dispatch_with_schema  # migrated 2026-04-17
-from http_pool import http_json
-from search import get_collections
+from vector_store import get_vector_store
 
 OUT_FILE = Path("/Users/chrischo/server/brain/logs/memory-nudge-latest.json")
 DISPATCH_STATE = Path("/Users/chrischo/server/brain/logs/memory-nudge-state.json")
 DISPATCH_COOLDOWN_HOURS = 22  # ~daily
 
-CHROMA_URL = "http://127.0.0.1:8000"
-CHROMA_API = f"{CHROMA_URL}/api/v2/tenants/default_tenant/databases/default_database/collections"
 BRAIN_URL = "http://127.0.0.1:8791"
 
 try:
@@ -47,30 +44,26 @@ SCHEMA = '{"durable": [<memory_id>, ...], "obsolete": [<memory_id>, ...], "patte
 
 
 def fetch_recent(days: int = 7) -> list[dict]:
-    cols = get_collections()
-    sem_id = cols.get("semantic_memory")
-    if not sem_id:
-        return []
-    resp = http_json(
-        "POST",
-        f"{CHROMA_API}/{sem_id}/get",
-        {"limit": 200, "include": ["documents", "metadatas"]},
+    points = get_vector_store().get(
+        "semantic_memory",
+        limit=200,
+        with_payload=True,
+        with_documents=True,
     )
-    ids = resp.get("ids", [])
-    docs = resp.get("documents", []) or []
-    metas = resp.get("metadatas", []) or []
+    if not points:
+        return []
     cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
     recent = []
-    for i, d, m in zip(ids, docs, metas, strict=False):
-        m = m or {}
+    for p in points:
+        m = p.payload or {}
         if (m.get("memory_class") or "") == "obsolete":
             continue  # skip already-obsolete
         ts = m.get("created_at", "")
         if ts >= cutoff:
             recent.append(
                 {
-                    "id": i,
-                    "content": (d or "")[:200],
+                    "id": p.id,
+                    "content": (p.document or "")[:200],
                     "category": m.get("category", "other"),
                 }
             )
@@ -78,17 +71,17 @@ def fetch_recent(days: int = 7) -> list[dict]:
 
 
 def mark_obsolete(sem_id: str, memory_ids: list[str]) -> int:
+    """Mark memories as obsolete. ``sem_id`` is accepted for back-compat
+    (callers used to pass a ChromaDB UUID); ignored under VectorStore."""
+    del sem_id  # unused — collection is addressed by name
     if not memory_ids:
         return 0
+    store = get_vector_store()
     try:
-        http_json(
-            "POST",
-            f"{CHROMA_API}/{sem_id}/update",
-            {
-                "ids": memory_ids,
-                "metadatas": [{"memory_class": "obsolete"} for _ in memory_ids],
-            },
-        )
+        for mid in memory_ids:
+            store.update_payload(
+                "semantic_memory", ids=[mid], patch={"memory_class": "obsolete"}
+            )
         return len(memory_ids)
     except Exception as e:
         print(f"mark_obsolete failed: {e}")
@@ -96,20 +89,18 @@ def mark_obsolete(sem_id: str, memory_ids: list[str]) -> int:
 
 
 def mark_promotion_candidate(sem_id: str, memory_ids: list[str]) -> int:
+    del sem_id  # unused — see mark_obsolete
     if not memory_ids:
         return 0
+    store = get_vector_store()
+    now_iso = datetime.now(UTC).isoformat()
     try:
-        http_json(
-            "POST",
-            f"{CHROMA_API}/{sem_id}/update",
-            {
-                "ids": memory_ids,
-                "metadatas": [
-                    {"promotion_candidate": "true", "promotion_flagged_at": datetime.now(UTC).isoformat()}
-                    for _ in memory_ids
-                ],
-            },
-        )
+        for mid in memory_ids:
+            store.update_payload(
+                "semantic_memory",
+                ids=[mid],
+                patch={"promotion_candidate": "true", "promotion_flagged_at": now_iso},
+            )
         return len(memory_ids)
     except Exception as e:
         print(f"mark_promotion_candidate failed: {e}")
