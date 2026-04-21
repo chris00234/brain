@@ -23,7 +23,7 @@ from pathlib import Path
 
 sys.path.insert(0, "/Users/chrischo/server/brain/brain_core")
 from cli_llm import dispatch_with_schema  # migrated 2026-04-17
-from indexer import _get_collection_id, chroma_api
+from vector_store import get_vector_store
 from safe_state import atomic_write_text
 
 SEMANTIC_COLLECTION = "semantic_memory"
@@ -51,31 +51,29 @@ def _log(msg: str) -> None:
 
 def fetch_recent_memories() -> tuple[list[dict], list[dict]]:
     """Return (new_memories, all_preferences) for contradiction detection."""
-    col_id = _get_collection_id(SEMANTIC_COLLECTION)
-    if not col_id:
-        _log("ERROR semantic_memory collection not found")
-        return [], []
-
     try:
-        res = chroma_api(
-            "POST",
-            f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/get",
-            {"limit": 500, "include": ["documents", "metadatas"]},
+        points = get_vector_store().get(
+            SEMANTIC_COLLECTION,
+            limit=500,
+            with_payload=True,
+            with_documents=True,
         )
     except Exception as e:
         _log(f"ERROR chroma get: {e}")
         return [], []
+    if not points:
+        _log("ERROR semantic_memory collection empty or missing")
+        return [], []
 
     cutoff = datetime.now(UTC) - timedelta(days=LOOKBACK_DAYS)
-    ids = res.get("ids") or []
-    docs = res.get("documents") or []
-    metas = res.get("metadatas") or []
 
     new_memories: list[dict] = []
     all_preferences: list[dict] = []
 
-    for mem_id, doc, meta in zip(ids, docs, metas, strict=False):
-        meta = meta or {}
+    for p in points:
+        mem_id = p.id
+        doc = p.document or ""
+        meta = p.payload or {}
         ts_raw = meta.get("created_at") or meta.get("updated_at") or ""
         category = meta.get("category", "other")
         superseded = meta.get("superseded_by", "")

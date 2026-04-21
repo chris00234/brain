@@ -332,9 +332,8 @@ def main() -> int:
     try:
         _s.path.insert(0, str(Path(__file__).resolve().parent.parent / "brain_core"))
         from hyde import generate_hypothetical as _gen_hyp
-        from indexer import chroma_api as _chroma_api_pc
-        from indexer import ensure_collection as _ensure_col_pc
         from indexer import get_embedding as _get_emb_pc
+        from vector_store import get_vector_store as _get_store_pc
 
         hyp_title = metadata.get("title", "")[:100]
         hyp_body = body[:500]
@@ -359,16 +358,12 @@ def main() -> int:
         # pointing at the canonical_id. Uses a dedicated sub-id namespace
         # so they don't collide with the canonical doc embedding.
         if hypothetical_queries:
-            canonical_col = _ensure_col_pc("canonical")
             ids = [f"{canonical_id}::hyde::{i}" for i in range(len(hypothetical_queries))]
             embeddings = []
             for hq in hypothetical_queries:
                 try:
                     e = _get_emb_pc(hq, use_cache=True, prefix="query")
-                    if e:
-                        embeddings.append(e)
-                    else:
-                        embeddings.append(None)
+                    embeddings.append(e or None)
                 except Exception:
                     embeddings.append(None)
             # Drop failed embeds
@@ -376,25 +371,22 @@ def main() -> int:
                 (i, h, e) for i, h, e in zip(ids, hypothetical_queries, embeddings, strict=False) if e
             ]
             if filtered:
-                _chroma_api_pc(
-                    "POST",
-                    f"/api/v2/tenants/default_tenant/databases/default_database/collections/{canonical_col}/upsert",
-                    {
-                        "ids": [f[0] for f in filtered],
-                        "embeddings": [f[2] for f in filtered],
-                        "documents": [f[1] for f in filtered],
-                        "metadatas": [
-                            {
-                                "type": "canonical-hyde",
-                                "canonical_id": canonical_id,
-                                "canonical_path": str(target),
-                                "title": hyp_title,
-                                "hyde_index": i,
-                                "created_at": utc_now(),
-                            }
-                            for i, (_, _, _) in enumerate(filtered)
-                        ],
-                    },
+                _get_store_pc().upsert(
+                    "canonical",
+                    ids=[f[0] for f in filtered],
+                    vectors=[f[2] for f in filtered],
+                    documents=[f[1] for f in filtered],
+                    payloads=[
+                        {
+                            "type": "canonical-hyde",
+                            "canonical_id": canonical_id,
+                            "canonical_path": str(target),
+                            "title": hyp_title,
+                            "hyde_index": i,
+                            "created_at": utc_now(),
+                        }
+                        for i, (_, _, _) in enumerate(filtered)
+                    ],
                 )
                 print(f"  HyDE: indexed {len(filtered)} hypothetical query vectors for {canonical_id}")
     except Exception as _hyde_err:

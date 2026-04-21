@@ -30,7 +30,8 @@ from pathlib import Path
 
 # Reuse brain_core helpers (ChromaDB HTTP + Ollama embed).
 sys.path.insert(0, "/Users/chrischo/server/brain/brain_core")
-from indexer import _get_collection_id, chroma_api, ensure_collection, get_embedding
+from indexer import get_embedding
+from vector_store import get_vector_store
 
 CREDENTIALS = Path("/Users/chrischo/.openclaw/credentials/ghost-admin.json")
 COLLECTION = "knowledge"
@@ -170,14 +171,12 @@ def _chunk_post(title: str, html_body: str) -> list[str]:
     return chunks
 
 
-# ── ChromaDB upsert ──────────────────────────────────────
+# ── Vector store upsert ─────────────────────────────────
 def _upsert(chunks: list[dict]) -> int:
     if not chunks:
         return 0
-    ensure_collection(COLLECTION)
-    col_id = _get_collection_id(COLLECTION)
-    if not col_id:
-        return 0
+    store = get_vector_store()
+    store.create_collection(COLLECTION)
 
     ids, embeddings, documents, metadatas = [], [], [], []
     for c in chunks:
@@ -211,15 +210,12 @@ def _upsert(chunks: list[dict]) -> int:
     BATCH = 20
     for start in range(0, len(ids), BATCH):
         end = min(start + BATCH, len(ids))
-        chroma_api(
-            "POST",
-            f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/upsert",
-            {
-                "ids": ids[start:end],
-                "embeddings": embeddings[start:end],
-                "documents": documents[start:end],
-                "metadatas": metadatas[start:end],
-            },
+        store.upsert(
+            COLLECTION,
+            ids=ids[start:end],
+            vectors=embeddings[start:end],
+            documents=documents[start:end],
+            payloads=metadatas[start:end],
         )
     return len(ids)
 
