@@ -1070,28 +1070,15 @@ def add_documents(collection_name, docs, skip_stale_cleanup=False, force_increme
     # Include incrementally-skipped IDs so they aren't treated as stale and deleted.
     upserted_ids = set(ids) | skipped_ids
     try:
-        # Page through the collection; Qdrant's scroll limit is bounded per call.
-        total_count = store.count(collection_name) or len(ids)
-        existing_ids: set[str] = set()
-        _page = 0
-        _page_size = 1000
-        while True:
-            _pts = store.get(
-                collection_name,
-                limit=_page_size,
-                offset=_page * _page_size,
-                with_payload=False,
-                with_vectors=False,
-                with_documents=False,
-            )
-            if not _pts:
-                break
-            existing_ids.update(p.id for p in _pts)
-            if len(_pts) < _page_size:
-                break
-            _page += 1
-            if _page * _page_size > max(total_count, len(ids)) * 2:  # safety stop
-                break
+        # Single-call full scan — QdrantStore.get walks the native cursor.
+        _pts = store.get(
+            collection_name,
+            limit=1_000_000,
+            with_payload=False,
+            with_vectors=False,
+            with_documents=False,
+        )
+        existing_ids: set[str] = {p.id for p in _pts}
         stale_ids = list(existing_ids - upserted_ids)
         if stale_ids:
             # Delete in batches
