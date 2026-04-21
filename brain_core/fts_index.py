@@ -85,7 +85,6 @@ def rebuild_from_vector_store():
 
     conn = _get_conn()
     total = 0
-    PAGE = 1000
     try:
         conn.execute("DROP TABLE IF EXISTS memories_new")
         conn.execute("""
@@ -102,40 +101,32 @@ def rebuild_from_vector_store():
         for col_name in MONITORED_COLLECTIONS:
             if col_name not in available:
                 continue
+            try:
+                pts = store.get(
+                    col_name,
+                    limit=1_000_000,
+                    with_payload=True,
+                    with_documents=True,
+                    with_vectors=False,
+                )
+            except Exception as e:
+                print(f"  {col_name}: fetch failed: {e}")
+                continue
             count = 0
-            offset = 0
-            while True:
-                try:
-                    pts = store.get(
+            for p in pts:
+                meta = p.payload or {}
+                conn.execute(
+                    "INSERT INTO memories_new (id, collection, content, title, path) VALUES (?, ?, ?, ?, ?)",
+                    (
+                        p.id,
                         col_name,
-                        limit=PAGE,
-                        offset=offset,
-                        with_payload=True,
-                        with_documents=True,
-                        with_vectors=False,
-                    )
-                except Exception as e:
-                    print(f"  {col_name}: fetch failed at offset={offset}: {e}")
-                    break
-                if not pts:
-                    break
-                for p in pts:
-                    meta = p.payload or {}
-                    conn.execute(
-                        "INSERT INTO memories_new (id, collection, content, title, path) VALUES (?, ?, ?, ?, ?)",
-                        (
-                            p.id,
-                            col_name,
-                            p.document or "",
-                            meta.get("title", ""),
-                            meta.get("source", meta.get("path", "")),
-                        ),
-                    )
-                    count += 1
-                    total += 1
-                if len(pts) < PAGE:
-                    break
-                offset += PAGE
+                        p.document or "",
+                        meta.get("title", ""),
+                        meta.get("source", meta.get("path", "")),
+                    ),
+                )
+                count += 1
+                total += 1
             print(f"  {col_name}: indexed {count} docs")
 
         conn.execute("BEGIN")

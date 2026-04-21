@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import uuid
 from typing import Any
 
@@ -214,23 +215,36 @@ class QdrantStore:
     # explicit schema, i.e., the legacy one-arg path.
     DEFAULT_VECTOR_SIZE = 1024
 
+    # Bound the id cache so a long-running server process can't grow it
+    # unbounded as new memories stream in. 50000 entries x ~120 bytes
+    # approx 6 MB ceiling; UUIDv5 hashing on miss is cheap (~us), so LRU
+    # eviction is free to discard cold ids.
+    _ID_CACHE_MAX = 50_000
+
     def __init__(self, url: str | None = None) -> None:
+        from collections import OrderedDict
+
         from qdrant_client import QdrantClient
 
         self._url = url or _resolve_qdrant_url()
         self._client = QdrantClient(url=self._url, timeout=30)
-        # Many callers pass legacy string ids; we cache the mapping for
-        # the duration of a process rather than re-hash every call.
-        self._id_cache: dict[str, str] = {}
+        self._id_cache: OrderedDict[str, str] = OrderedDict()
+        self._id_cache_lock = threading.Lock()
 
     # ── helpers ──────────────────────────────────────────────────
 
     def _qid(self, string_id: str) -> str:
-        cached = self._id_cache.get(string_id)
-        if cached:
-            return cached
+        with self._id_cache_lock:
+            cached = self._id_cache.get(string_id)
+            if cached is not None:
+                self._id_cache.move_to_end(string_id)
+                return cached
         qid = _string_to_uuid(string_id)
-        self._id_cache[string_id] = qid
+        with self._id_cache_lock:
+            self._id_cache[string_id] = qid
+            self._id_cache.move_to_end(string_id)
+            if len(self._id_cache) > self._ID_CACHE_MAX:
+                self._id_cache.popitem(last=False)
         return qid
 
     def _build_prefetch(

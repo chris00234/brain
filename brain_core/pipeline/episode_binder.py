@@ -98,57 +98,48 @@ def _fetch_recent_memories() -> list[dict]:
     store = get_vector_store()
     out: list[dict] = []
     for col_name in ("semantic_memory", "experience"):
-        offset = 0
-        PAGE = 500
-        while True:
-            try:
-                points = store.get(
-                    col_name,
-                    limit=PAGE,
-                    offset=offset,
-                    with_payload=True,
-                    with_documents=False,
-                )
-            except Exception as e:
-                print(f"  warning: {col_name} fetch failed at offset={offset}: {e}", file=sys.stderr)
-                break
-            if not points:
-                break
-            for p in points:
-                mid = p.id
-                meta = p.payload or {}
-                ts = _parse_ts(meta.get("created_at", "") or meta.get("updated_at", ""))
-                if ts is None or ts < cutoff:
-                    continue
-                # Skip obsolete and superseded — we don't want them anchoring an episode
-                if (meta.get("memory_class") or "") == "obsolete":
-                    continue
-                if meta.get("superseded_by"):
-                    continue
-                # Extract entities — may be a list, JSON string, or comma-separated
-                entities = meta.get("entities") or []
-                if isinstance(entities, str):
-                    s = entities.strip()
-                    if s.startswith("["):
-                        try:
-                            entities = json.loads(s)
-                        except Exception:
-                            entities = [e.strip() for e in s.split(",") if e.strip()]
-                    else:
+        try:
+            points = store.get(
+                col_name,
+                limit=1_000_000,
+                with_payload=True,
+                with_documents=False,
+            )
+        except Exception as e:
+            print(f"  warning: {col_name} fetch failed: {e}", file=sys.stderr)
+            continue
+        for p in points:
+            mid = p.id
+            meta = p.payload or {}
+            ts = _parse_ts(meta.get("created_at", "") or meta.get("updated_at", ""))
+            if ts is None or ts < cutoff:
+                continue
+            # Skip obsolete and superseded — we don't want them anchoring an episode
+            if (meta.get("memory_class") or "") == "obsolete":
+                continue
+            if meta.get("superseded_by"):
+                continue
+            # Extract entities — may be a list, JSON string, or comma-separated
+            entities = meta.get("entities") or []
+            if isinstance(entities, str):
+                s = entities.strip()
+                if s.startswith("["):
+                    try:
+                        entities = json.loads(s)
+                    except Exception:
                         entities = [e.strip() for e in s.split(",") if e.strip()]
-                if not isinstance(entities, list):
-                    entities = []
-                out.append(
-                    {
-                        "id": mid,
-                        "created_at": ts,
-                        "collection": col_name,
-                        "entities": [e for e in entities if isinstance(e, str) and e],
-                    }
-                )
-            if len(points) < PAGE:
-                break
-            offset += PAGE
+                else:
+                    entities = [e.strip() for e in s.split(",") if e.strip()]
+            if not isinstance(entities, list):
+                entities = []
+            out.append(
+                {
+                    "id": mid,
+                    "created_at": ts,
+                    "collection": col_name,
+                    "entities": [e for e in entities if isinstance(e, str) and e],
+                }
+            )
     return out
 
 

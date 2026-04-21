@@ -59,29 +59,18 @@ def _parse_iso(ts: str) -> datetime | None:
 def consolidate() -> dict:
     store = get_vector_store()
 
-    # Paginate the full scan in 1000-doc pages.
-    ids: list[str] = []
-    metas: list[dict] = []
-    PAGE = 1000
-    offset = 0
-    while True:
-        try:
-            points = store.get(
-                "semantic_memory",
-                limit=PAGE,
-                offset=offset,
-                with_payload=True,
-                with_documents=False,
-            )
-        except Exception as e:
-            return {"error": f"fetch failed at offset={offset}: {e}"}
-        if not points:
-            break
-        ids.extend(p.id for p in points)
-        metas.extend((p.payload or {}) for p in points)
-        if len(points) < PAGE:
-            break
-        offset += PAGE
+    # Single-call full scan — QdrantStore.get walks the native cursor.
+    try:
+        points = store.get(
+            "semantic_memory",
+            limit=1_000_000,
+            with_payload=True,
+            with_documents=False,
+        )
+    except Exception as e:
+        return {"error": f"fetch failed: {e}"}
+    ids: list[str] = [p.id for p in points]
+    metas: list[dict] = [(p.payload or {}) for p in points]
 
     if not ids:
         return {"status": "empty", "total": 0}

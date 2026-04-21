@@ -23,23 +23,18 @@ def create_collection(name: str) -> str:
 
 
 def fetch_all_docs(collection: str, batch: int = 500):
-    offset = 0
+    # Single-call full scan — QdrantStore.get walks the native cursor.
+    # `batch` kept as a parameter for API compat but is no longer used.
+    del batch
     store = get_vector_store()
-    while True:
-        points = store.get(
-            collection,
-            limit=batch,
-            offset=offset,
-            with_payload=True,
-            with_documents=True,
-        )
-        if not points:
-            break
-        for p in points:
-            yield p.id, (p.document or ""), (p.payload or {})
-        if len(points) < batch:
-            break
-        offset += batch
+    points = store.get(
+        collection,
+        limit=1_000_000,
+        with_payload=True,
+        with_documents=True,
+    )
+    for p in points:
+        yield p.id, (p.document or ""), (p.payload or {})
 
 
 def _embed_batch(docs: list, model: str = "") -> list:

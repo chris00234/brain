@@ -28,41 +28,32 @@ KNOWLEDGE_DIR = Path("/Users/chrischo/server/knowledge")
 
 def export_collection(col_name: str, out_file: Path, batch: int = 500) -> int:
     """Export all docs from a vector-store collection to JSONL."""
+    del batch  # kept for API compat; QdrantStore walks the native cursor internally
     count = 0
-    offset = 0
     store = get_vector_store()
+    try:
+        points = store.get(
+            col_name,
+            limit=1_000_000,
+            with_payload=True,
+            with_documents=True,
+            with_vectors=True,
+        )
+    except Exception as e:
+        print(f"  {col_name}: fetch failed: {e}", file=sys.stderr)
+        return 0
+
     with out_file.open("w") as f:
-        while True:
-            try:
-                points = store.get(
-                    col_name,
-                    limit=batch,
-                    offset=offset,
-                    with_payload=True,
-                    with_documents=True,
-                    with_vectors=True,
-                )
-            except Exception as e:
-                print(f"  {col_name}: fetch failed at offset {offset}: {e}", file=sys.stderr)
-                break
-
-            if not points:
-                break
-
-            for p in points:
-                record = {
-                    "id": p.id,
-                    "content": p.document or "",
-                    "metadata": p.payload or {},
-                }
-                if p.vector:
-                    record["embedding"] = p.vector
-                f.write(json.dumps(record, ensure_ascii=False) + "\n")
-                count += 1
-
-            if len(points) < batch:
-                break
-            offset += batch
+        for p in points:
+            record = {
+                "id": p.id,
+                "content": p.document or "",
+                "metadata": p.payload or {},
+            }
+            if p.vector:
+                record["embedding"] = p.vector
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            count += 1
     return count
 
 

@@ -73,33 +73,20 @@ def main() -> int:
     store = get_vector_store()
     cutoff_date = (datetime.now(UTC) - timedelta(days=CUTOFF_DAYS)).isoformat()
 
-    # Paginate so every old event is seen exactly once (a single large
-    # limit would silently cap past its limit).
-    ids: list[str] = []
-    docs: list[str] = []
-    metas: list[dict] = []
-    PAGE = 1000
-    offset = 0
-    while True:
-        try:
-            points = store.get(
-                "experience",
-                limit=PAGE,
-                offset=offset,
-                with_payload=True,
-                with_documents=True,
-            )
-        except Exception as e:
-            print(f"fetch from experience failed at offset={offset}: {e}")
-            return 1
-        if not points:
-            break
-        ids.extend(p.id for p in points)
-        docs.extend((p.document or "") for p in points)
-        metas.extend((p.payload or {}) for p in points)
-        if len(points) < PAGE:
-            break
-        offset += PAGE
+    # Single-call full scan via native cursor.
+    try:
+        points = store.get(
+            "experience",
+            limit=1_000_000,
+            with_payload=True,
+            with_documents=True,
+        )
+    except Exception as e:
+        print(f"fetch from experience failed: {e}")
+        return 1
+    ids: list[str] = [p.id for p in points]
+    docs: list[str] = [(p.document or "") for p in points]
+    metas: list[dict] = [(p.payload or {}) for p in points]
 
     by_month: dict[str, list[dict]] = defaultdict(list)
     to_compress_ids: list[str] = []

@@ -600,37 +600,28 @@ def cleanup_supersession_chains() -> dict:
 
     store = get_vector_store()
 
-    # Fetch all entries in pages — IDs + payloads to find superseded_by refs
-    PAGE = 500
-    offset = 0
+    # Single-call full scan — QdrantStore.get walks the native cursor
+    # internally. The previous `while True: offset+=PAGE` pattern silently
+    # re-fetched the first page on every iteration under Qdrant 1.17.
     all_ids: set[str] = set()
     superseded: list[tuple[str, dict]] = []
 
-    while True:
-        try:
-            points = store.get(
-                "semantic_memory",
-                limit=PAGE,
-                offset=offset,
-                with_payload=True,
-                with_documents=False,
-            )
-        except Exception as e:
-            return {"checked": 0, "orphaned": 0, "fixed": 0, "error": f"fetch failed: {e}"}
+    try:
+        points = store.get(
+            "semantic_memory",
+            limit=1_000_000,
+            with_payload=True,
+            with_documents=False,
+        )
+    except Exception as e:
+        return {"checked": 0, "orphaned": 0, "fixed": 0, "error": f"fetch failed: {e}"}
 
-        if not points:
-            break
-
-        for p in points:
-            all_ids.add(p.id)
-            meta = p.payload or {}
-            target = (meta.get("superseded_by") or "").strip()
-            if target:
-                superseded.append((p.id, dict(meta)))
-
-        if len(points) < PAGE:
-            break
-        offset += PAGE
+    for p in points:
+        all_ids.add(p.id)
+        meta = p.payload or {}
+        target = (meta.get("superseded_by") or "").strip()
+        if target:
+            superseded.append((p.id, dict(meta)))
 
     # Build lookup for O(1) chain walking
     superseded_map: dict[str, dict] = dict(superseded)
@@ -706,54 +697,44 @@ def recompute_trust_scores() -> dict:
 
     store = get_vector_store()
 
-    PAGE = 500
-    offset = 0
     total = 0
     updated = 0
     drift_up = 0
     drift_down = 0
-    while True:
+    try:
+        points = store.get(
+            "semantic_memory",
+            limit=1_000_000,
+            with_payload=True,
+            with_documents=True,
+        )
+    except Exception as e:
+        return {"status": "error", "reason": f"fetch failed: {e}"}
+
+    for p in points:
+        total += 1
+        meta = p.payload or {}
         try:
-            points = store.get(
+            old = float(meta.get("trust_score", "0.5"))
+        except Exception:
+            old = 0.5
+        new = _count_corroborating_trust(p.document or "")
+        if abs(new - old) < 0.05:
+            continue
+        if new > old:
+            drift_up += 1
+        else:
+            drift_down += 1
+        try:
+            store.update_payload(
                 "semantic_memory",
-                limit=PAGE,
-                offset=offset,
-                with_payload=True,
-                with_documents=True,
+                ids=[p.id],
+                patch={"trust_score": float(new)},
             )
+            updated += 1
         except Exception as e:
-            return {"status": "error", "reason": f"fetch failed at offset={offset}: {e}"}
-        if not points:
-            break
-
-        for p in points:
-            total += 1
-            meta = p.payload or {}
-            try:
-                old = float(meta.get("trust_score", "0.5"))
-            except Exception:
-                old = 0.5
-            new = _count_corroborating_trust(p.document or "")
-            if abs(new - old) < 0.05:
-                continue
-            if new > old:
-                drift_up += 1
-            else:
-                drift_down += 1
-            try:
-                store.update_payload(
-                    "semantic_memory",
-                    ids=[p.id],
-                    patch={"trust_score": float(new)},
-                )
-                updated += 1
-            except Exception as e:
-                # Continue — partial updates are fine for a weekly job.
-                print(f"  trust_recompute update failed for {p.id}: {e}")
-
-        if len(points) < PAGE:
-            break
-        offset += PAGE
+            # Continue — partial updates are fine for a weekly job.
+            print(f"  trust_recompute update failed for {p.id}: {e}")
 
     return {
         "status": "ok",
@@ -984,73 +965,63 @@ def prune_atrophied_memories(
     except Exception:
         pass
 
-    # Fetch all of semantic_memory in pages - we need every entry to evaluate
-    PAGE = 500
-    offset = 0
+    # Single-call full scan via cursor.
     candidates: list[dict] = []
     total_scanned = 0
-    while True:
+    try:
+        points = store.get(
+            "semantic_memory",
+            limit=1_000_000,
+            with_payload=True,
+            with_documents=True,
+        )
+    except Exception as e:
+        return {"status": "error", "reason": f"fetch failed: {e}"}
+
+    for p in points:
+        total_scanned += 1
+        mid = p.id
+        doc = p.document or ""
+        meta = p.payload or {}
+        tier = (meta.get("memory_class") or "").lower()
+        if tier != "obsolete":
+            continue
         try:
-            points = store.get(
-                "semantic_memory",
-                limit=PAGE,
-                offset=offset,
-                with_payload=True,
-                with_documents=True,
-            )
-        except Exception as e:
-            return {"status": "error", "reason": f"fetch failed: {e}"}
-        if not points:
-            break
+            count = int(meta.get("access_count", 0))
+        except (ValueError, TypeError):
+            count = 0
+        if count > 0:
+            continue
+        try:
+            trust = float(meta.get("trust_score", 0.5))
+        except (ValueError, TypeError):
+            trust = 0.5
+        if trust >= 0.5:
+            continue
+        last_accessed = (
+            meta.get("last_accessed_at") or meta.get("updated_at") or meta.get("created_at") or ""
+        )
+        if not last_accessed:
+            continue
+        # Normalize Z/+00:00 suffix for lexicographic comparison (round 11 fix)
+        last_accessed_norm = last_accessed.replace("+00:00", "Z")
+        if last_accessed_norm >= cutoff_iso:
+            continue
+        # Provenance check: don't delete if any canonical/distilled note
+        # references this memory id (real check, not the no-op metadata
+        # field that round 10 originally used).
+        if mid in canonical_refs:
+            continue
 
-        for p in points:
-            total_scanned += 1
-            mid = p.id
-            doc = p.document or ""
-            meta = p.payload or {}
-            tier = (meta.get("memory_class") or "").lower()
-            if tier != "obsolete":
-                continue
-            try:
-                count = int(meta.get("access_count", 0))
-            except (ValueError, TypeError):
-                count = 0
-            if count > 0:
-                continue
-            try:
-                trust = float(meta.get("trust_score", 0.5))
-            except (ValueError, TypeError):
-                trust = 0.5
-            if trust >= 0.5:
-                continue
-            last_accessed = (
-                meta.get("last_accessed_at") or meta.get("updated_at") or meta.get("created_at") or ""
-            )
-            if not last_accessed:
-                continue
-            # Normalize Z/+00:00 suffix for lexicographic comparison (round 11 fix)
-            last_accessed_norm = last_accessed.replace("+00:00", "Z")
-            if last_accessed_norm >= cutoff_iso:
-                continue
-            # Provenance check: don't delete if any canonical/distilled note
-            # references this memory id (real check, not the no-op metadata
-            # field that round 10 originally used).
-            if mid in canonical_refs:
-                continue
-
-            candidates.append(
-                {
-                    "id": mid,
-                    "content": (doc or "")[:300],
-                    "trust": trust,
-                    "last_accessed": last_accessed,
-                    "tier": tier,
-                }
-            )
-
-        if len(points) < PAGE:
-            break
-        offset += PAGE
+        candidates.append(
+            {
+                "id": mid,
+                "content": (doc or "")[:300],
+                "trust": trust,
+                "last_accessed": last_accessed,
+                "tier": tier,
+            }
+        )
 
     n_candidates = len(candidates)
     # Take the SMALLER of the two limits - never delete >100/run AND never
@@ -1206,39 +1177,28 @@ def cleanup_stale_superseded() -> dict:
     cutoff = datetime.now(UTC) - timedelta(days=30)
     cutoff_iso = cutoff.isoformat().replace("+00:00", "Z")
 
-    # Fetch all entries in pages
-    PAGE = 500
-    offset = 0
+    # Single-call full scan via cursor.
     all_ids: set[str] = set()
     superseded: list[tuple[str, dict]] = []
     total_scanned = 0
 
-    while True:
-        try:
-            points = store.get(
-                "semantic_memory",
-                limit=PAGE,
-                offset=offset,
-                with_payload=True,
-                with_documents=False,
-            )
-        except Exception as e:
-            return {"cleaned": 0, "checked": 0, "error": f"fetch failed: {e}"}
+    try:
+        points = store.get(
+            "semantic_memory",
+            limit=1_000_000,
+            with_payload=True,
+            with_documents=False,
+        )
+    except Exception as e:
+        return {"cleaned": 0, "checked": 0, "error": f"fetch failed: {e}"}
 
-        if not points:
-            break
-
-        for p in points:
-            total_scanned += 1
-            all_ids.add(p.id)
-            meta = p.payload or {}
-            target = (meta.get("superseded_by") or "").strip()
-            if target:
-                superseded.append((p.id, dict(meta)))
-
-        if len(points) < PAGE:
-            break
-        offset += PAGE
+    for p in points:
+        total_scanned += 1
+        all_ids.add(p.id)
+        meta = p.payload or {}
+        target = (meta.get("superseded_by") or "").strip()
+        if target:
+            superseded.append((p.id, dict(meta)))
 
     # Filter to deletion candidates
     candidates: list[str] = []
@@ -1314,27 +1274,17 @@ def memory_health_report() -> dict:
 
     store = get_vector_store()
 
-    # Fetch all entries in pages
-    PAGE = 500
-    offset = 0
-    all_metas: list[dict] = []
-    while True:
-        try:
-            points = store.get(
-                "semantic_memory",
-                limit=PAGE,
-                offset=offset,
-                with_payload=True,
-                with_documents=False,
-            )
-        except Exception as e:
-            return {"status": "error", "reason": f"fetch failed at offset={offset}: {e}"}
-        if not points:
-            break
-        all_metas.extend((p.payload or {}) for p in points)
-        if len(points) < PAGE:
-            break
-        offset += PAGE
+    # Single-call full scan via cursor.
+    try:
+        points = store.get(
+            "semantic_memory",
+            limit=1_000_000,
+            with_payload=True,
+            with_documents=False,
+        )
+    except Exception as e:
+        return {"status": "error", "reason": f"fetch failed: {e}"}
+    all_metas: list[dict] = [(p.payload or {}) for p in points]
 
     now = datetime.now(UTC)
     now_iso = now.isoformat().replace("+00:00", "Z")
