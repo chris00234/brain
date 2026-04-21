@@ -371,7 +371,6 @@ JOB_REGISTRY: dict[str, list[str]] = {
     # Maintenance
     "log_rotation": [_py, f"{_bd}/brain_core/maintenance.py", "all_cleanup"],
     "embed_cache_prune": [_py, f"{_bd}/brain_core/embed_cache.py"],
-    "chroma_integrity": [_py, f"{_bd}/brain_core/maintenance.py", "chroma_integrity"],
     # 2026-04-16 Tier 2: quarterly prune of raw/orphaned/ — previously grew
     # without bound because pipeline_auto only ever MOVED inbox → orphaned.
     "prune_raw_orphaned": [_py, f"{_bd}/brain_core/maintenance.py", "prune_raw_orphaned"],

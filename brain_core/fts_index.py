@@ -1,8 +1,9 @@
 #!/opt/homebrew/bin/python3
 """brain_core/fts_index.py — SQLite FTS5 keyword search fallback.
 
-Rebuilds nightly from ChromaDB. Works as a fallback when ChromaDB is down.
-Portable — the entire search index is a single SQLite file.
+Rebuilds nightly from Qdrant via the VectorStore abstraction. Works as a
+fallback when Qdrant is down. Portable — the entire search index is a single
+SQLite file.
 
 Tokenizer: `unicode61 remove_diacritics 2` — handles CJK (Korean) + English
 without English-only stemming. The porter stemmer mangles Korean tokens.
@@ -67,25 +68,25 @@ def ensure_schema():
         conn.close()
 
 
-def rebuild_from_chroma():
-    """Full rebuild of FTS index from ChromaDB. Called nightly.
+def rebuild_from_vector_store():
+    """Full rebuild of FTS index from Qdrant. Called nightly.
 
     Uses a shadow-table swap so search remains available during the rebuild:
       1. Create `memories_new` virtual table
-      2. Populate it from ChromaDB
+      2. Populate it from Qdrant via VectorStore.get (paginated scroll)
       3. Atomically: drop old, rename new → memories
     """
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from http_pool import http_json
-    from search import get_collections
+    from vector_store import get_vector_store
 
     ensure_schema()
-    cols = get_collections()
+    store = get_vector_store()
+    available = set(store.list_collections())
 
     conn = _get_conn()
     total = 0
+    PAGE = 1000
     try:
-        # Drop any stale shadow from a previous failed run
         conn.execute("DROP TABLE IF EXISTS memories_new")
         conn.execute("""
             CREATE VIRTUAL TABLE memories_new USING fts5(
@@ -99,40 +100,49 @@ def rebuild_from_chroma():
         """)
 
         for col_name in MONITORED_COLLECTIONS:
-            col_id = cols.get(col_name)
-            if not col_id:
+            if col_name not in available:
                 continue
-            try:
-                resp = http_json(
-                    "POST",
-                    f"http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/get",
-                    {"limit": 50000, "include": ["documents", "metadatas"]},
-                )
-            except Exception as e:
-                print(f"  {col_name}: fetch failed: {e}")
-                continue
+            count = 0
+            offset = 0
+            while True:
+                try:
+                    pts = store.get(
+                        col_name,
+                        limit=PAGE,
+                        offset=offset,
+                        with_payload=True,
+                        with_documents=True,
+                        with_vectors=False,
+                    )
+                except Exception as e:
+                    print(f"  {col_name}: fetch failed at offset={offset}: {e}")
+                    break
+                if not pts:
+                    break
+                for p in pts:
+                    meta = p.payload or {}
+                    conn.execute(
+                        "INSERT INTO memories_new (id, collection, content, title, path) VALUES (?, ?, ?, ?, ?)",
+                        (
+                            p.id,
+                            col_name,
+                            p.document or "",
+                            meta.get("title", ""),
+                            meta.get("source", meta.get("path", "")),
+                        ),
+                    )
+                    count += 1
+                    total += 1
+                if len(pts) < PAGE:
+                    break
+                offset += PAGE
+            print(f"  {col_name}: indexed {count} docs")
 
-            ids = resp.get("ids", [])
-            docs = resp.get("documents", []) or []
-            metas = resp.get("metadatas", []) or []
-
-            for i, doc, meta in zip(ids, docs, metas, strict=False):
-                meta = meta or {}
-                conn.execute(
-                    "INSERT INTO memories_new (id, collection, content, title, path) VALUES (?, ?, ?, ?, ?)",
-                    (i, col_name, doc or "", meta.get("title", ""), meta.get("source", meta.get("path", ""))),
-                )
-                total += 1
-
-            print(f"  {col_name}: indexed {len(ids)} docs")
-
-        # Atomic swap — FTS5 rename is supported. Wrap in an explicit transaction.
         conn.execute("BEGIN")
         conn.execute("DROP TABLE IF EXISTS memories_old")
         conn.execute("ALTER TABLE memories RENAME TO memories_old")
         conn.execute("ALTER TABLE memories_new RENAME TO memories")
         conn.commit()
-        # Clean up old table outside transaction
         conn.execute("DROP TABLE IF EXISTS memories_old")
         conn.commit()
     finally:
@@ -213,4 +223,4 @@ if __name__ == "__main__":
             conn.close()
     except Exception:
         pass
-    rebuild_from_chroma()
+    rebuild_from_vector_store()

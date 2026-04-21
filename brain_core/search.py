@@ -35,11 +35,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from http_pool import http_json as _http_json  # noqa: E402
 
-# Direct localhost HTTP (chromadb + ollama expose 127.0.0.1 via docker-compose).
 try:
-    from config import CHROMA_URL, OLLAMA_URL
+    from config import OLLAMA_URL
 except ImportError:
-    CHROMA_URL = "http://127.0.0.1:8000"
     OLLAMA_URL = "http://127.0.0.1:11434"
 
 

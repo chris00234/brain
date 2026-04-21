@@ -78,46 +78,39 @@ def load_proposal(path: Path) -> tuple[dict, str]:
     return metadata, body
 
 
-def _mirror_supersession_to_chroma(note_path: Path, replacement_id: str) -> None:
-    """2026-04-16 Tier 2 + R-17: supersession → Chroma metadata mirror.
+def _mirror_supersession_to_vector_store(note_path: Path, replacement_id: str) -> None:
+    """Supersession → canonical payload mirror via VectorStore.
 
-    Chroma's /update endpoint requires `ids`, not `where` — initial R-2
-    impl used `where` and silently 422'd on every call. Now: /get by
-    where=path → collect ids → /update with ids. Multiple chroma rows
-    per canonical MD path (chunking) are all flipped in one call.
+    Multiple canonical rows per source path (chunking) are all flipped in
+    one update_payload call. Indexer convention stores the filesystem path
+    under `source`.
     """
     try:
         import sys as _sys
 
         _sys.path.insert(0, str(Path("/Users/chrischo/server/brain/brain_core")))
-        from http_pool import http_json  # type: ignore
-        from search import get_collections  # type: ignore
+        from vector_store import get_vector_store  # type: ignore
 
-        cols = get_collections()
-        col_id = cols.get("canonical")
-        if not col_id:
-            return
-        base = f"http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}"
-        # Step 1: fetch matching rows' ids. Chroma metadata stores the
-        # filesystem path under `source`, not `path` (indexer convention).
-        resp = http_json(
-            "POST",
-            f"{base}/get",
-            {"where": {"source": str(note_path)}, "limit": 100, "include": []},
+        store = get_vector_store()
+        pts = store.get(
+            "canonical",
+            filter={"source": str(note_path)},
+            limit=100,
+            with_payload=False,
+            with_vectors=False,
+            with_documents=False,
         )
-        ids = resp.get("ids", []) or []
+        ids = [p.id for p in pts]
         if not ids:
             return
-        # Step 2: update each matching id with identical metadata patch.
-        patch = {
-            "status": "superseded",
-            "superseded_by": replacement_id,
-            "updated_at": utc_now(),
-        }
-        http_json(
-            "POST",
-            f"{base}/update",
-            {"ids": ids, "metadatas": [patch] * len(ids)},
+        store.update_payload(
+            "canonical",
+            ids=ids,
+            patch={
+                "status": "superseded",
+                "superseded_by": replacement_id,
+                "updated_at": utc_now(),
+            },
         )
     except Exception:
         pass
@@ -200,7 +193,7 @@ def deactivate_superseded(
         metadata["updated_at"] = utc_now()
         metadata["valid_to"] = utc_now()
         write_markdown_frontmatter(note_path, metadata, body)
-        _mirror_supersession_to_chroma(note_path, replacement_id)
+        _mirror_supersession_to_vector_store(note_path, replacement_id)
         return
     # 2026-04-18: previously raised SystemExit. With multiple --supersede IDs,
     # one missing ID took out the whole promotion after earlier IDs had already

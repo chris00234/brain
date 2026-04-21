@@ -15,17 +15,15 @@ import sqlite3
 import subprocess
 import subprocess as _sp
 import sys
-import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 try:
     from config import BRAIN_LOGS_DIR as LOGS_DIR
-    from config import CHROMA_DB, JOBS_LOGS_DIR, OPENCLAW_BIN
+    from config import JOBS_LOGS_DIR, OPENCLAW_BIN
 except ImportError:
     LOGS_DIR = Path("/Users/chrischo/server/brain/logs")
     JOBS_LOGS_DIR = LOGS_DIR / "jobs"
-    CHROMA_DB = Path("/Users/chrischo/server/rag/chroma-data/chroma.sqlite3")
     OPENCLAW_BIN = "/Users/chrischo/.local/bin/openclaw"
 MAX_LOG_SIZE = 524_288  # 512KB
 MAX_LOG_AGE_DAYS = 3
@@ -89,58 +87,6 @@ def rotate_logs() -> dict:
 
     print(f"[log_rotation] rotated {rotated} files")
     return {"rotated": rotated}
-
-
-def check_chroma_integrity() -> dict:
-    """Run PRAGMA integrity_check on ChromaDB SQLite file.
-
-    Copies the file first (to avoid locking the live DB), then runs the check.
-    Alerts via Jenna Telegram if corruption is detected.
-    """
-    if not CHROMA_DB.exists():
-        return {"status": "skip", "reason": "chroma.sqlite3 not found"}
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tmp_db = Path(tmpdir) / "check.sqlite3"
-        try:
-            import shutil
-
-            shutil.copy2(CHROMA_DB, tmp_db)
-            for suffix in ("-shm", "-wal"):
-                src = CHROMA_DB.parent / f"chroma.sqlite3{suffix}"
-                if src.exists():
-                    shutil.copy2(src, Path(tmpdir) / f"check.sqlite3{suffix}")
-        except Exception as e:
-            return {"status": "error", "reason": f"copy failed: {e}"}
-
-        try:
-            conn = sqlite3.connect(str(tmp_db))
-            result = conn.execute("PRAGMA integrity_check").fetchone()
-            conn.close()
-        except Exception as e:
-            return {"status": "error", "reason": f"integrity_check failed: {e}"}
-
-    status = result[0] if result else "unknown"
-    if status == "ok":
-        print(f"[chroma_integrity] OK — {CHROMA_DB.stat().st_size / 1024 / 1024:.1f}MB")
-        return {"status": "ok", "size_mb": round(CHROMA_DB.stat().st_size / 1024 / 1024, 1)}
-
-    # Corruption detected — direct Telegram (no LLM; message body is fully
-    # pre-formatted). 2026-04-18: previously went through cli_llm.dispatch
-    # which ran the full codex→spark→claude fallback chain just to deliver
-    # a 100-char fixed alert. send_chris_telegram has its own backlog
-    # fallback if Telegram is rate-limited or the CLI is missing.
-    msg = f"ALERT: ChromaDB integrity check FAILED: {status}. Immediate attention required."
-    print(f"[chroma_integrity] {msg}")
-    try:
-        sys.path.insert(0, str(Path(__file__).parent))
-        from telegram_alert import send_chris_telegram
-
-        send_chris_telegram(body=msg, source="chroma_integrity", severity="urgent")
-    except Exception:
-        pass
-
-    return {"status": "corrupted", "detail": status}
 
 
 def vacuum_embed_cache(max_size_mb: int = 100, max_age_days: int = 14) -> dict:
@@ -553,7 +499,6 @@ if __name__ == "__main__":
         "task",
         choices=[
             "rotate_logs",
-            "chroma_integrity",
             "vacuum_embed_cache",
             "prune_memory_access",
             "rotate_jsonl",
@@ -570,8 +515,6 @@ if __name__ == "__main__":
 
     if args.task == "rotate_logs":
         print(json.dumps(rotate_logs()))
-    elif args.task == "chroma_integrity":
-        print(json.dumps(check_chroma_integrity()))
     elif args.task == "vacuum_embed_cache":
         print(json.dumps(vacuum_embed_cache()))
     elif args.task == "prune_memory_access":

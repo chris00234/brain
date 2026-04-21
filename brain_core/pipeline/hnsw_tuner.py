@@ -1,69 +1,51 @@
 #!/opt/homebrew/bin/python3
-"""Tune HNSW ef_search per collection. One-time setup script."""
+"""Recommend HNSW ef_search per collection based on measured p95 latency.
+
+Qdrant keeps HNSW `m` / `ef_construct` at the collection level (set at
+bootstrap via `HnswConfigDiff`) and `ef_search` is a per-query knob
+(`SearchParams(hnsw_ef=...)`). There is no live write-back equivalent to
+ChromaDB's `hnsw:search_ef` metadata PUT, so this module now emits
+recommendations to `logs/hnsw_tuning.jsonl` and leaves runtime tuning
+to the search path (which reads `SETTINGS` directly).
+"""
 
 import json
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # brain_core/
-from datetime import UTC
 
-from http_pool import http_json
-
-CHROMA_API = "http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections"
-
-# Recommended ef_search per collection based on size + precision needs.
-# Tuned 2026-04-15 for /recall/v2 latency budget — canonical/sem_mem/experience
-# dropped to hit the 350ms p95 target while stable eval content_hit held at
-# baseline 95.7%. The live Chroma metadata was updated via PUT at the same
-# time; these values are the source of truth for fresh-machine / restore-from-
-# backup paths and the nightly hnsw_tune adaptive job.
 SETTINGS = {
-    "canonical": 120,  # was 200; 4301 chunks, 200 was overkill
-    "knowledge": 100,  # medium
-    "experience": 75,  # was 100; 4775 chunks, speed-prioritized
-    "context": 100,
-    "semantic_memory": 100,  # was 150
-    "obsidian": 50,  # large, speed-prioritized
-    "notes": 50,
-    "messages": 50,
-    "calendar": 50,
-    "tasks": 50,
+    "canonical": 120,
+    "knowledge": 100,
+    "experience": 75,
+    "semantic_memory": 100,
+    "obsidian": 50,
     "personal": 75,
+    "code": 100,
 }
 
 TUNING_LOG = Path("/Users/chrischo/server/brain/logs/hnsw_tuning.jsonl")
 
-# Target p95 latency per collection type (ms)
 TARGETS = {
     "canonical": 150,
     "knowledge": 200,
     "experience": 300,
-    "context": 200,
     "semantic_memory": 200,
-    "obsidian": 400,  # large corpus
-    "notes": 400,
-    "messages": 400,
-    "calendar": 200,
-    "tasks": 200,
+    "obsidian": 400,
     "personal": 300,
+    "code": 250,
 }
 
 
 def get_current_ef_search(col_name: str) -> int:
-    """Return the configured ef_search for a collection.
-
-    We can't reliably read live HNSW state from ChromaDB via the v2 API —
-    `GET /collections/{name}` isn't exposed for native-mode collections
-    consistently. Treat the static SETTINGS dict as the source of truth
-    (it's what we pass at collection init).
-    """
+    """Return the configured ef_search for a collection."""
     return SETTINGS.get(col_name, 100)
 
 
 def measure_collection_p95(col_name: str) -> float | None:
-    """Measure p95 latency. Uses per-collection tracking if available,
-    otherwise returns the global p95 (all collections treated the same)."""
+    """Measure p95 latency via metrics_buffer if available."""
     try:
         from metrics_buffer import metrics_buffer as mb
 
@@ -77,70 +59,55 @@ def measure_collection_p95(col_name: str) -> float | None:
 
 
 def adaptive_tune(dry_run: bool = False) -> dict:
-    """Adjust ef_search based on measured latency vs target.
+    """Emit ef_search recommendations based on measured latency vs target.
 
     Rules:
-    - p95 > 2x target → reduce ef_search by 25%
-    - p95 < 0.5x target → increase ef_search by 25% (more quality)
-    - else → no change
+    - p95 > 2x target → recommend ef_search -25%
+    - p95 < 0.5x target → recommend ef_search +25%
     - bounds: [30, 300]
+
+    In Qdrant, applying the recommendation is a search-path concern (pass
+    `SearchParams(hnsw_ef=N)` on each query). This function logs the
+    recommendation; operators update `SETTINGS` when a trend persists.
     """
     results: dict = {"checked": 0, "adjusted": [], "no_change": [], "no_data": []}
 
-    cols = get_collections()
     for col_name, target_p95 in TARGETS.items():
-        col_id = cols.get(col_name)
-        if not col_id:
-            continue
         results["checked"] += 1
-
         current_ef = get_current_ef_search(col_name)
-
         measured_p95 = measure_collection_p95(col_name)
-        # Treat zero / None as "no signal" — tuning on an empty buffer would
-        # produce a false "increase ef_search" on every collection.
         if not measured_p95 or measured_p95 <= 0:
             results["no_data"].append(col_name)
             continue
 
         new_ef = current_ef
         action = "no_change"
-
         if measured_p95 > 2 * target_p95:
             new_ef = max(30, int(current_ef * 0.75))
-            action = "reduced"
+            action = "reduce"
         elif measured_p95 < 0.5 * target_p95:
             new_ef = min(300, int(current_ef * 1.25))
-            action = "increased"
+            action = "increase"
 
+        entry = {
+            "collection": col_name,
+            "current_ef": current_ef,
+            "recommended_ef": new_ef,
+            "p95_ms": measured_p95,
+            "target_p95": target_p95,
+            "action": action,
+        }
         if new_ef != current_ef:
-            entry = {
-                "collection": col_name,
-                "current_ef": current_ef,
-                "new_ef": new_ef,
-                "p95_ms": measured_p95,
-                "target_p95": target_p95,
-                "action": action,
-            }
             if not dry_run:
-                if update_collection_hnsw(col_id, new_ef):
-                    _log_tuning(entry)
-                    results["adjusted"].append(entry)
-                else:
-                    entry["error"] = "update failed"
-                    results["no_change"].append(entry)
-            else:
-                entry["dry_run"] = True
-                results["adjusted"].append(entry)
+                _log_tuning(entry)
+            results["adjusted"].append(entry)
         else:
-            results["no_change"].append({"collection": col_name, "ef": current_ef, "p95_ms": measured_p95})
+            results["no_change"].append(entry)
 
     return results
 
 
 def _log_tuning(entry: dict) -> None:
-    from datetime import datetime
-
     TUNING_LOG.parent.mkdir(parents=True, exist_ok=True)
     entry["timestamp"] = datetime.now(UTC).isoformat()
     try:
@@ -150,63 +117,13 @@ def _log_tuning(entry: dict) -> None:
         pass
 
 
-def get_collections() -> dict:
-    """Get {name: name} mapping (name doubles as identifier under VectorStore)."""
-    try:
-        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-        from vector_store import get_vector_store
-
-        return {n: n for n in get_vector_store().list_collections()}
-    except Exception:
-        pass
-    return {}
-
-
-def update_collection_hnsw(col_name: str, ef_search: int) -> bool:
-    """Persist a new ef_search hint on the collection metadata.
-
-    ChromaDB-specific: this PUTs against ChromaDB v2 `new_metadata` shape.
-    Under Qdrant the equivalent is an `update_collection` gRPC call with
-    a full `hnsw_config`; it's expressed in Phase A5 (QdrantStore) when
-    the HNSW tuner gets a backend-aware rewrite. This hybrid path keeps
-    the current ChromaDB installation tunable until then.
-    """
-    try:
-        # Resolve name → current ChromaDB UUID for the direct PUT call.
-        # We leave the ChromaDB path as-is; VectorStore has no
-        # update_collection_metadata primitive yet.
-        import urllib.request
-
-        CHROMA_API = (
-            "http://127.0.0.1:8000/api/v2/tenants/default_tenant/"
-            "databases/default_database/collections"
-        )
-        with urllib.request.urlopen(CHROMA_API, timeout=10) as resp:
-            cols = json.loads(resp.read())
-        col_id = next((c["id"] for c in cols if c.get("name") == col_name), None)
-        if not col_id:
-            print(f"  {col_name}: not found for HNSW tune")
-            return False
-        http_json(
-            "PUT",
-            f"{CHROMA_API}/{col_id}",
-            payload={"new_metadata": {"hnsw:search_ef": ef_search}},
-        )
-        return True
-    except Exception as e:
-        print(f"  failed to update {col_name}: {e}")
-        return False
-
-
 def main():
     import argparse
 
-    parser = argparse.ArgumentParser(description="Tune HNSW ef_search per collection")
-    parser.add_argument("--verify", action="store_true", help="Only verify current settings")
+    parser = argparse.ArgumentParser(description="Recommend HNSW ef_search per collection")
+    parser.add_argument("--verify", action="store_true", help="Only print current settings")
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument(
-        "--adaptive", action="store_true", help="Measure actual p95 and adjust ef_search dynamically"
-    )
+    parser.add_argument("--adaptive", action="store_true", help="Measure p95 and emit recommendations")
     args = parser.parse_args()
 
     if args.adaptive:
@@ -214,25 +131,9 @@ def main():
         print(json.dumps(result, indent=2))
         return 0
 
-    cols = get_collections()
-    print(f"Found {len(cols)} collections")
-
-    results = {}
-    for name, target_ef in SETTINGS.items():
-        col_id = cols.get(name)
-        if not col_id:
-            print(f"  {name}: not found, skipping")
-            continue
-
-        if args.verify or args.dry_run:
-            print(f"  {name}: would set ef_search={target_ef}")
-            continue
-
-        if update_collection_hnsw(col_id, target_ef):
-            print(f"  {name}: ef_search={target_ef} OK")
-            results[name] = target_ef
-
-    print(f"\n{len(results)} collections tuned")
+    print("Current ef_search settings:")
+    for name, ef in SETTINGS.items():
+        print(f"  {name}: {ef}")
     return 0
 
 

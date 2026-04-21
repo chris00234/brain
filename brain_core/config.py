@@ -15,7 +15,7 @@ RAG_DIR = Path(os.getenv("RAG_DIR", str(HOME / "server" / "rag")))
 OPENCLAW_DIR = Path(os.getenv("OPENCLAW_DIR", str(HOME / ".openclaw")))
 
 # ── Service URLs ──────────────────────────────────────────
-CHROMA_URL = os.getenv("CHROMA_URL", "http://127.0.0.1:8000")
+QDRANT_URL = os.getenv("QDRANT_URL", "http://127.0.0.1:6333")
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434")
 NEO4J_BOLT_URI = os.getenv("NEO4J_BOLT_URI", "bolt://127.0.0.1:7687")
 
@@ -41,8 +41,7 @@ MONTHLY_DIR = CANONICAL_DIR / "chris" / "monthly"
 
 # ── Derived paths: rag ────────────────────────────────────
 BRAIN_HOME = HOME / "server"  # ~/server — root of all server services
-CHROMA_DATA = RAG_DIR / "chroma-data"
-CHROMA_DB = CHROMA_DATA / "chroma.sqlite3"
+QDRANT_DATA = BRAIN_DIR / "qdrant-data"
 EMBED_CACHE_DB = BRAIN_LOGS_DIR / "embedding_cache.db"
 AUTONOMY_DB = BRAIN_LOGS_DIR / "autonomy.db"
 

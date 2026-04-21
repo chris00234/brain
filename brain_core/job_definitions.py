@@ -593,12 +593,6 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         misfire_grace=900,
     ),
     ScheduledJob(
-        name="chroma_integrity",
-        description="Weekly PRAGMA integrity_check on ChromaDB SQLite (Sun 3:35am)",
-        trigger=CronTrigger(day_of_week="sun", hour=3, minute=35),
-        agent="system",
-    ),
-    ScheduledJob(
         name="memory_observability",
         description="Weekly memory observability report (Sunday 5:20am - staggered off community_summaries @5:00 / contextual_embed @5:10)",
         trigger=CronTrigger(day_of_week="sun", hour=5, minute=20),

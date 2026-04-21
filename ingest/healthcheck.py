@@ -76,7 +76,6 @@ EXPECTED_JOB_CADENCE_HOURS = {
     "eval_run": 26,
     "backup": 26,
     "neo4j_backup": 26,
-    "chroma_integrity": 26,
     "memory_consolidation": 26,
     "gmail_ingest": 26,
     "code_index_refresh": 26,

@@ -64,7 +64,7 @@ def test_reasoning_loop_strip_json_fence():
     from reasoning_loop import _strip_json_fence
 
     assert _strip_json_fence('```json\n{"a":1}\n```') == '{"a":1}'
-    assert _strip_json_fence('```\n[1,2,3]\n```') == '[1,2,3]'
+    assert _strip_json_fence("```\n[1,2,3]\n```") == "[1,2,3]"
     assert _strip_json_fence('{"a":1}') == '{"a":1}'
 
 
@@ -98,14 +98,6 @@ def test_maintenance_rotate_logs_returns_dict():
     from maintenance import rotate_logs
 
     r = rotate_logs()
-    assert isinstance(r, dict)
-
-
-def test_maintenance_check_chroma_integrity_dict():
-    """Chroma may be up or down — either way we must get a dict (no raise)."""
-    from maintenance import check_chroma_integrity
-
-    r = check_chroma_integrity()
     assert isinstance(r, dict)
 
 

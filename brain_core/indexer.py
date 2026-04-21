@@ -1,5 +1,5 @@
 #!/opt/homebrew/bin/python3
-"""RAG Indexer — Phase 2: Initial data indexing into ChromaDB via Ollama embeddings."""
+"""RAG Indexer — Phase 2: Initial data indexing into Qdrant via Ollama embeddings."""
 
 import hashlib
 import json
@@ -12,13 +12,12 @@ from pathlib import Path
 log = logging.getLogger("brain.indexer")
 
 # ── Config ──────────────────────────────────────────────
-# Direct host-port access (chromadb + ollama expose 127.0.0.1:8000 and 11434
-# via docker-compose). Eliminates the ~50-100ms subprocess penalty per query
-# that the old `docker exec nginx curl ...` path incurred.
+# Ollama exposes 127.0.0.1:11434 via docker-compose. Qdrant access goes
+# through the VectorStore abstraction (brain_core/vector_store.py) — no
+# direct HTTP needed from this module anymore.
 try:
-    from config import BRAIN_HOME, CHROMA_URL, EMBED_MODEL, EMBED_MODEL_VERSION, OLLAMA_URL, OPENCLAW_DIR
+    from config import BRAIN_HOME, EMBED_MODEL, EMBED_MODEL_VERSION, OLLAMA_URL, OPENCLAW_DIR
 except ImportError:
-    CHROMA_URL = "http://127.0.0.1:8000"
     OLLAMA_URL = "http://127.0.0.1:11434"
     EMBED_MODEL = "blaifa/multilingual-e5-large-instruct"
     EMBED_MODEL_VERSION = "multilingual-e5-large-instruct:v1"
@@ -30,11 +29,6 @@ import sys as _sys
 
 _sys.path.insert(0, str(Path(__file__).parent))
 from http_pool import http_json as _http_json
-
-
-def chroma_api(method, path, data=None):
-    """Call ChromaDB directly via localhost HTTP with keep-alive."""
-    return _http_json(method, f"{CHROMA_URL}{path}", payload=data, timeout=120)
 
 
 # ── Embedding Cache ────────────────────────────────────
@@ -841,58 +835,21 @@ def chunk_learnings(text, source):
 
 # ── Collection Setup ────────────────────────────────────
 def ensure_collection(name, _retries=5):
-    """Get or create collection with retry on transient ChromaDB failures."""
-    import time as _time
+    """Ensure a Qdrant collection exists. Backend handles idempotency."""
+    from vector_store import get_vector_store
 
     last_err = None
+    import time as _time
+
     for attempt in range(_retries):
         try:
-            cols = chroma_api("GET", "/api/v2/tenants/default_tenant/databases/default_database/collections")
-            if isinstance(cols, list):
-                for c in cols:
-                    if c.get("name") == name:
-                        log.debug("collection %r exists: %s", name, c["id"])
-                        return c["id"]
-
-            result = chroma_api(
-                "POST",
-                "/api/v2/tenants/default_tenant/databases/default_database/collections",
-                {"name": name, "metadata": {"hnsw:space": "cosine"}},
-            )
-            log.info("collection %r created: %s", name, result.get("id", "unknown"))
-            return result.get("id")
+            get_vector_store().create_collection(name)
+            return name
         except Exception as e:
             last_err = str(e)
             if attempt < _retries - 1:
-                wait = 3 * (attempt + 1)
-                print(f"  ChromaDB unavailable (attempt {attempt + 1}/{_retries}), retrying in {wait}s...")
-                _time.sleep(wait)
+                _time.sleep(3 * (attempt + 1))
     raise RuntimeError(f"ensure_collection('{name}') failed after {_retries} retries: {last_err}")
-
-
-# Cache collection name -> ID mapping (thread-safe, re-fetches on miss)
-import threading as _threading
-
-_collection_ids: dict[str, str] = {}
-_collection_ids_lock = _threading.Lock()
-
-
-def _get_collection_id(name):
-    with _collection_ids_lock:
-        cached = _collection_ids.get(name)
-        if cached:
-            return cached
-    # Re-fetch from ChromaDB — collection may have been created since last cache fill
-    try:
-        cols = chroma_api("GET", "/api/v2/tenants/default_tenant/databases/default_database/collections")
-    except Exception:
-        return None
-    with _collection_ids_lock:
-        if isinstance(cols, list):
-            for c in cols:
-                if c.get("name") and c.get("id"):
-                    _collection_ids[c["name"]] = c["id"]
-        return _collection_ids.get(name)
 
 
 INCREMENTAL_REINDEX_COLLECTIONS = frozenset({"knowledge"})
@@ -910,8 +867,10 @@ def add_documents(collection_name, docs, skip_stale_cleanup=False, force_increme
     if not docs:
         return 0
 
-    col_id = _get_collection_id(collection_name)
-    if not col_id:
+    from vector_store import get_vector_store
+
+    store = get_vector_store()
+    if collection_name not in set(store.list_collections()):
         print(f"    ERROR: Collection '{collection_name}' not found")
         return 0
 
@@ -1035,15 +994,15 @@ def add_documents(collection_name, docs, skip_stale_cleanup=False, force_increme
             _existing: dict[str, dict] = {}
             for _start in range(0, len(prepared_ids), 200):
                 _chunk = prepared_ids[_start : _start + 200]
-                _resp = chroma_api(
-                    "POST",
-                    f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/get",
-                    {"ids": _chunk, "include": ["metadatas"]},
+                _points = store.get(
+                    collection_name,
+                    ids=_chunk,
+                    with_payload=True,
+                    with_vectors=False,
+                    with_documents=False,
                 )
-                _rids = _resp.get("ids") or []
-                _rmetas = _resp.get("metadatas") or []
-                for _rid, _rmeta in zip(_rids, _rmetas, strict=False):
-                    _existing[_rid] = _rmeta or {}
+                for _pt in _points:
+                    _existing[_pt.id] = _pt.payload or {}
             for _doc_id, _content, _meta, _etxt in prepared:
                 _prev = _existing.get(_doc_id)
                 if not _prev:
@@ -1091,15 +1050,12 @@ def add_documents(collection_name, docs, skip_stale_cleanup=False, force_increme
     BATCH = 20
     for start in range(0, len(ids), BATCH):
         end = min(start + BATCH, len(ids))
-        chroma_api(
-            "POST",
-            f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/upsert",
-            {
-                "ids": ids[start:end],
-                "embeddings": embeddings[start:end],
-                "documents": documents[start:end],
-                "metadatas": metadatas[start:end],
-            },
+        store.upsert(
+            collection_name,
+            ids=ids[start:end],
+            vectors=embeddings[start:end],
+            payloads=metadatas[start:end],
+            documents=documents[start:end],
         )
         print(f"    Batch {start//BATCH + 1}: upserted {end - start} chunks")
 
@@ -1114,32 +1070,34 @@ def add_documents(collection_name, docs, skip_stale_cleanup=False, force_increme
     # Include incrementally-skipped IDs so they aren't treated as stale and deleted.
     upserted_ids = set(ids) | skipped_ids
     try:
-        # Get actual collection count to avoid unbounded 1M limit (scales to 100K+)
-        count_resp = chroma_api(
-            "GET", f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/count"
-        )
-        total_count = int(count_resp) if isinstance(count_resp, (int, str)) else 100000
-        resp = chroma_api(
-            "POST",
-            f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/get",
-            {
-                "limit": max(total_count, len(ids)),
-                "include": [],
-            },
-        )
-        existing_ids = set(resp.get("ids", []))
+        # Page through the collection; Qdrant's scroll limit is bounded per call.
+        total_count = store.count(collection_name) or len(ids)
+        existing_ids: set[str] = set()
+        _page = 0
+        _page_size = 1000
+        while True:
+            _pts = store.get(
+                collection_name,
+                limit=_page_size,
+                offset=_page * _page_size,
+                with_payload=False,
+                with_vectors=False,
+                with_documents=False,
+            )
+            if not _pts:
+                break
+            existing_ids.update(p.id for p in _pts)
+            if len(_pts) < _page_size:
+                break
+            _page += 1
+            if _page * _page_size > max(total_count, len(ids)) * 2:  # safety stop
+                break
         stale_ids = list(existing_ids - upserted_ids)
         if stale_ids:
             # Delete in batches
             for start in range(0, len(stale_ids), BATCH):
                 end = min(start + BATCH, len(stale_ids))
-                chroma_api(
-                    "POST",
-                    f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/delete",
-                    {
-                        "ids": stale_ids[start:end],
-                    },
-                )
+                store.delete(collection_name, ids=stale_ids[start:end])
             print(f"    Cleaned {len(stale_ids)} stale docs from '{collection_name}'")
     except Exception as e:
         print(f"    WARNING: Stale cleanup failed: {e}")
@@ -1456,16 +1414,19 @@ CHECKPOINT_FILE = Path("/tmp/.reindex-checkpoint.json")
 
 
 def _wait_for_services(timeout=120):
-    """Wait for ChromaDB + Ollama to be healthy."""
+    """Wait for Qdrant + Ollama to be healthy."""
     import time as _t
+
+    from vector_store import get_vector_store
 
     for _ in range(timeout // 2):
         try:
-            chroma_api("GET", "/api/v2/tenants/default_tenant/databases/default_database/collections")
-            get_embedding("health check")
-            return True
+            if get_vector_store().heartbeat():
+                get_embedding("health check")
+                return True
         except Exception:
-            _t.sleep(2)
+            pass
+        _t.sleep(2)
     return False
 
 
@@ -1531,7 +1492,7 @@ if __name__ == "__main__":
         # Health check before each collection
         print(f"\n[index] {name} ({label})...")
         if not _wait_for_services(30):
-            print("  ERROR: ChromaDB/Ollama not ready. Saving checkpoint.")
+            print("  ERROR: Qdrant/Ollama not ready. Saving checkpoint.")
             _save_checkpoint(done)
             _sys.exit(1)
 
