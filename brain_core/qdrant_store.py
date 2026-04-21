@@ -483,6 +483,7 @@ class QdrantStore:
         with_payload: bool = True,
         with_vectors: bool = False,
         query_text: str | None = None,
+        include_document: bool = True,
     ) -> list[VectorHit]:
         # qdrant-client 1.17+ uses `query_points`. Hybrid search combines
         # the primary `dense` vector with the collection's extra named
@@ -502,6 +503,16 @@ class QdrantStore:
             qfilter=qfilter,
             search_params=search_params,
         )
+
+        # Payload selector: when the caller doesn't need the chunk text
+        # (fan-out ranking stages), ask Qdrant to exclude `_document` from
+        # the returned payload. Cuts response size by ~500B-2KB per point,
+        # meaningful on the ~14 parallel /recall/v2 fan-out queries.
+        payload_arg: Any = with_payload
+        if with_payload and not include_document:
+            from qdrant_client.models import PayloadSelectorExclude
+
+            payload_arg = PayloadSelectorExclude(exclude=["_document"])
 
         hits: list = []
         if prefetch_list:
@@ -528,7 +539,7 @@ class QdrantStore:
                     limit=k,
                     query_filter=qfilter,
                     search_params=search_params,
-                    with_payload=with_payload,
+                    with_payload=payload_arg,
                     with_vectors=with_vectors,
                 )
                 hits = resp.points
@@ -545,7 +556,7 @@ class QdrantStore:
                     limit=k,
                     query_filter=qfilter,
                     search_params=search_params,
-                    with_payload=with_payload,
+                    with_payload=payload_arg,
                     with_vectors=with_vectors,
                 )
                 hits = resp.points
@@ -585,12 +596,23 @@ class QdrantStore:
         with_documents: bool = True,
     ) -> list[VectorPoint]:
         real, merged_filter = _resolve_alias(collection, filter)
+        # Payload projection: callers that don't need the chunk text ask
+        # Qdrant to omit `_document` from the returned payload. Saves
+        # bandwidth proportional to doc size times row count.
+        want_payload = bool(with_payload or with_documents)
+        if want_payload and with_payload and not with_documents:
+            from qdrant_client.models import PayloadSelectorExclude
+
+            payload_arg: Any = PayloadSelectorExclude(exclude=["_document"])
+        else:
+            payload_arg = want_payload
+
         if ids is not None:
             try:
                 records = self._client.retrieve(
                     collection_name=real,
                     ids=[self._qid(sid) for sid in ids],
-                    with_payload=with_payload or with_documents,
+                    with_payload=payload_arg,
                     with_vectors=with_vectors,
                 )
             except Exception as exc:
@@ -631,7 +653,7 @@ class QdrantStore:
                     scroll_filter=_translate_filter(merged_filter),
                     limit=page_size,
                     offset=cursor,
-                    with_payload=with_payload or with_documents,
+                    with_payload=payload_arg,
                     with_vectors=with_vectors,
                 )
             except Exception as exc:
