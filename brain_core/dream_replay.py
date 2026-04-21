@@ -159,14 +159,12 @@ def _store_conjecture(pair: tuple[dict, dict], hypothesis: str) -> str | None:
             valid_from=now_iso,
             speaker_entity="sage",
             scope="global",
-            provenance_json=json.dumps(
-                {
-                    "origin": "dream_replay",
-                    "entity_a": a["name"],
-                    "entity_b": b["name"],
-                    "generated_at": now_iso,
-                }
-            ),
+            provenance={
+                "origin": "dream_replay",
+                "entity_a": a["name"],
+                "entity_b": b["name"],
+                "generated_at": now_iso,
+            },
         )
     except Exception:
         return None
