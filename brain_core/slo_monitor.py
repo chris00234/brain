@@ -32,19 +32,21 @@ EVAL_REPORT_FILE = Path("/Users/chrischo/server/brain/logs/eval-report.json")
 # SLO thresholds in brain_core/slos.py so the monitor and the SLO gauge don't
 # disagree on what a breach means.
 DEFAULT_SLOS = {
-    "recall_p95_ms": 350,
-    "recall_v2_p95_ms": 350,
+    # Tightened 2026-04-21 from 350ms to 250ms: native Qdrant + int8 quant
+    # rescoring runs at ~130-200ms p95 under normal load. The 350ms ceiling
+    # was sized for ChromaDB through the OrbStack virtiofs bridge, which
+    # we no longer pay.
+    "recall_p95_ms": 250,
+    "recall_v2_p95_ms": 250,
     "memory_growth_weekly_pct": 20,
 }
 
-# Content quality baselines — 2026-04-17 recalibrated after the eval path
-# swap from eval-report.json (extended track, 71.9%) to eval-report-stable.json
-# (stable track, currently 97.8% content / 89.1% source). Prior thresholds
-# (67.0 / 76.0) were stale against the new track and effectively disabled the
-# content-quality auto-heal path. Set ~4pt below stable-track numbers so
-# normal variance doesn't trip the doom loop.
+# Content quality baselines. Tightened 2026-04-21 after the dense-rescore
+# hybrid + int8 quant rescore landed; stable-track eval measures 98.6
+# content / 87.0 source. Setting thresholds ~3pt below keeps natural
+# variance inside the budget while catching real regressions.
 CONTENT_QUALITY_SLOS = {
-    "content_hit_pct": 93.0,
+    "content_hit_pct": 95.0,
     "source_hit_pct": 84.0,
 }
 
@@ -54,7 +56,7 @@ PROBE_QUERIES = [
     "python pipeline",
     "openclaw agent",
     "brain memory",
-    "chromadb collection",
+    "qdrant collection",
     "neo4j graph",
     "canonical knowledge",
     "search index",
@@ -222,10 +224,9 @@ def check_slos() -> dict:
     # SLO gauge's notion of a breach.
     # 2026-04-18: previous `max(x*2, x)` was a no-op (x*2 is always >= x).
     # Intent was "2x baseline, floored at the production SLO target so we
-    # don't breach tighter than the alert gauge". Align with slos.py's
-    # recall_v2_p95_ms=500 so the probe and SLO agree on what counts as
-    # "bad enough to remediate".
-    recall_threshold = max(baseline["recall_p95_ms"] * 2, 500)
+    # don't breach tighter than the alert gauge". Aligned to slos.py's
+    # recall_v2_p95_ms=250 (2026-04-21 native-Qdrant tightening).
+    recall_threshold = max(baseline["recall_p95_ms"] * 2, 250)
     recall_p95 = current["recall"]["p95"]
     if current["recall"]["samples"] >= 5 and recall_p95 > recall_threshold:
         violations.append(
@@ -237,7 +238,7 @@ def check_slos() -> dict:
             }
         )
 
-    v2_threshold = max(baseline["recall_v2_p95_ms"] * 2, 500)
+    v2_threshold = max(baseline["recall_v2_p95_ms"] * 2, 250)
     v2_p95 = current["recall_v2"]["p95"]
     if current["recall_v2"]["samples"] >= 2 and v2_p95 > v2_threshold:
         violations.append(

@@ -52,6 +52,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 log = logging.getLogger("brain.contextual_embed")
 
 KNOWLEDGE_CANONICAL_DIR = Path("/Users/chrischo/server/knowledge/canonical")
+KNOWLEDGE_DISTILLED_DIR = Path("/Users/chrischo/server/knowledge/distilled")
 try:
     from config import BRAIN_DB
 except ImportError:
@@ -147,18 +148,20 @@ def _record_audit(
 
 
 def _list_canonical_docs() -> list[Path]:
-    """Walk canonical dir, skip archived/ and entity .zip snapshots."""
+    """Walk canonical + distilled dirs — canonical collection holds chunks
+    from both. Skip archived/ and live_state/ subtrees."""
     docs: list[Path] = []
-    for p in KNOWLEDGE_CANONICAL_DIR.rglob("*.md"):
-        # Skip archived content
-        if "archived" in p.parts:
+    for root in (KNOWLEDGE_CANONICAL_DIR, KNOWLEDGE_DISTILLED_DIR):
+        if not root.exists():
             continue
-        # Skip live_state/ (auto-generated dashboards, not canonical knowledge)
-        if "live_state" in p.parts:
-            continue
-        if not p.is_file():
-            continue
-        docs.append(p)
+        for p in root.rglob("*.md"):
+            if "archived" in p.parts:
+                continue
+            if "live_state" in p.parts:
+                continue
+            if not p.is_file():
+                continue
+            docs.append(p)
     return sorted(docs)
 
 
@@ -263,12 +266,29 @@ def _reembed_chunks_for_doc(doc_path: Path, prefix: str, dry_run: bool) -> int:
         new_meta["contextualized"] = True
         new_meta["contextualized_at"] = now_iso
         try:
-            store.upsert(
-                CANONICAL_COLLECTION,
-                ids=[p.id],
-                vectors=[embedding],
-                payloads=[new_meta],
-                documents=[doc],
+            # 2026-04-21: canonical has named vectors dense + contextual + raptor.
+            # Write the prefix-enriched embedding to the `contextual` slot only
+            # and patch metadata via set_payload — keeping `dense` as the raw
+            # chunk embedding. Old code did a full upsert which replaced dense,
+            # collapsing the multi-view hybrid retrieval back to single-vector.
+            from qdrant_client.models import PointVectors
+
+            raw_client = store._client  # type: ignore[attr-defined]
+            qid = store._qid(p.id)  # type: ignore[attr-defined]
+            raw_client.update_vectors(
+                collection_name=CANONICAL_COLLECTION,
+                points=[PointVectors(id=qid, vector={"contextual": embedding})],
+                wait=True,
+            )
+            raw_client.set_payload(
+                collection_name=CANONICAL_COLLECTION,
+                payload={
+                    "contextual_prefix": prefix[:PREFIX_MAX_CHARS],
+                    "contextualized": True,
+                    "contextualized_at": now_iso,
+                },
+                points=[qid],
+                wait=True,
             )
             updated += 1
         except Exception as exc:

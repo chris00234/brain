@@ -65,16 +65,16 @@ class SLOResult:
 SLOS: dict[str, SLO] = {
     "recall_v2_p95_ms": SLO(
         name="recall_v2_p95_ms",
-        description="/recall/v2 p95 latency budget (production hot path). Target 500ms reflects realistic warm+parallel-fanout behavior: RAG+canonical+obsidian run parallel ~200-300ms each, plus FTS merge ~100ms, plus rerank. Cold-start queries after brain-server reloads add noise. Warm steady-state is 27-50ms.",
-        target=500.0,
+        description="/recall/v2 p95 latency budget (production hot path). Tightened 2026-04-21 from 500ms to 250ms to reflect the native-Qdrant + int8-quant steady state (observed p95 ~130-200ms under load). Warm steady-state is 27-50ms. Pre-migration ChromaDB era needed the 500ms headroom because of the 9p virtiofs bridge; native binary removes that.",
+        target=250.0,
         severity="warning",
         metric_unit="ms",
         consecutive_breaches_required=3,
     ),
     "recall_v2_content_hit_pct": SLO(
         name="recall_v2_content_hit_pct",
-        description="/recall/v2 stable-track content hit rate (regression gate)",
-        target=95.0,
+        description="/recall/v2 stable-track content hit rate (regression gate). Raised 2026-04-21 from 95% to 96% — hybrid rescore + int8 rescoring measured 98.6% stable, so a drop below 96 indicates a real retrieval regression not noise.",
+        target=96.0,
         severity="critical",
         metric_unit="%",
         consecutive_breaches_required=1,
