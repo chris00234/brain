@@ -14,14 +14,18 @@ from urllib.parse import urlparse
 log = logging.getLogger("brain.http_pool")
 
 
-class ChromaAPIError(Exception):
-    """Raised when ChromaDB/Ollama returns a 4xx error response."""
+class HttpPoolError(Exception):
+    """Raised when an upstream HTTP call (Ollama, any external API) returns 4xx/5xx."""
 
     def __init__(self, status: int, message: str, path: str = ""):
         self.status = status
         self.message = message
         self.path = path
         super().__init__(f"HTTP {status} from {path}: {message}")
+
+
+# Backward-compat alias — some older code + tests import ChromaAPIError.
+ChromaAPIError = HttpPoolError
 
 
 _thread_local = threading.local()
@@ -90,7 +94,7 @@ def http_json(method: str, url: str, payload=None, timeout: int = 60):
             err_msg = f"{raw_err}: {raw_msg}"
         else:
             err_msg = raw_msg or raw_err or f"status {resp.status}"
-        raise ChromaAPIError(resp.status, err_msg, path[:80])
+        raise HttpPoolError(resp.status, err_msg, path[:80])
     if not raw:
         return {}
     return json.loads(raw)
