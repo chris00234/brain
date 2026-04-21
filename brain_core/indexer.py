@@ -3,10 +3,13 @@
 
 import hashlib
 import json
+import logging
 import os
 import re
 from datetime import UTC, datetime
 from pathlib import Path
+
+log = logging.getLogger("brain.indexer")
 
 # ── Config ──────────────────────────────────────────────
 # Direct host-port access (chromadb + ollama expose 127.0.0.1:8000 and 11434
@@ -848,7 +851,7 @@ def ensure_collection(name, _retries=5):
             if isinstance(cols, list):
                 for c in cols:
                     if c.get("name") == name:
-                        print(f"  Collection '{name}' exists: {c['id']}")
+                        log.debug("collection %r exists: %s", name, c["id"])
                         return c["id"]
 
             result = chroma_api(
@@ -856,7 +859,7 @@ def ensure_collection(name, _retries=5):
                 "/api/v2/tenants/default_tenant/databases/default_database/collections",
                 {"name": name, "metadata": {"hnsw:space": "cosine"}},
             )
-            print(f"  Collection '{name}' created: {result.get('id', 'unknown')}")
+            log.info("collection %r created: %s", name, result.get("id", "unknown"))
             return result.get("id")
         except Exception as e:
             last_err = str(e)
@@ -892,8 +895,18 @@ def _get_collection_id(name):
         return _collection_ids.get(name)
 
 
-def add_documents(collection_name, docs, skip_stale_cleanup=False):
-    """Add documents to a collection with content-hash dedup and optional stale cleanup."""
+INCREMENTAL_REINDEX_COLLECTIONS = frozenset({"knowledge"})
+
+
+def add_documents(collection_name, docs, skip_stale_cleanup=False, force_incremental=False):
+    """Add documents to a collection with content-hash dedup and optional stale cleanup.
+
+    When `force_incremental` is True (or the collection is in
+    INCREMENTAL_REINDEX_COLLECTIONS), docs whose (id, mtime, embed model)
+    already match the collection are left untouched — no re-embed, no upsert,
+    and stale-cleanup preserves them. Safe to enable for collections whose
+    source files have trustworthy mtimes (docker-compose, nginx, AGENTS.md).
+    """
     if not docs:
         return 0
 
@@ -1010,7 +1023,12 @@ def add_documents(collection_name, docs, skip_stale_cleanup=False):
     # semantics: docs that mutate WITHOUT a corresponding mtime change would be
     # silently skipped. Enable only when source mtimes are trustworthy.
     skipped_ids: set[str] = set()
-    if os.getenv("BRAIN_INCREMENTAL_REINDEX", "").lower() in ("1", "true", "yes"):
+    incremental_on = (
+        force_incremental
+        or collection_name in INCREMENTAL_REINDEX_COLLECTIONS
+        or os.getenv("BRAIN_INCREMENTAL_REINDEX", "").lower() in ("1", "true", "yes")
+    )
+    if incremental_on:
         prepared_ids = [p[0] for p in prepared]
         try:
             # Batch fetch existing metadata in chunks of 200 to keep request small
