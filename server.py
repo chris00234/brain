@@ -78,17 +78,18 @@ from config import (  # noqa: E402
     WEEKLY_DIR,
 )
 from indexer import (
-    _get_collection_id as _get_col_id,
+    _get_collection_id as _get_col_id,  # legacy; kept for Pattern-A transitional callers
 )
 from indexer import (  # noqa: E402
-    chroma_api as _chroma_api,
+    chroma_api as _chroma_api,  # legacy; kept for Pattern-A transitional callers
 )
 from indexer import (
-    ensure_collection as _ensure_collection,
+    ensure_collection as _ensure_collection,  # legacy; kept for Pattern-A transitional callers
 )
 from indexer import (
     get_embedding as _get_embedding,
 )
+from vector_store import get_vector_store  # noqa: E402
 from scheduler import brain_scheduler  # noqa: E402
 
 LISTEN_HOST = os.getenv("BRAIN_SERVER_HOST", "127.0.0.1")
@@ -1038,25 +1039,16 @@ def _log_failure(reason: str, route: str = "?") -> None:
 
 
 def _get_collection_counts() -> dict[str, int]:
-    """Collection counts via direct HTTP to ChromaDB (no docker exec)."""
+    """Per-collection row counts via the VectorStore abstraction."""
     try:
-        cols = _chroma_api("GET", "/api/v2/tenants/default_tenant/databases/default_database/collections")
+        store = get_vector_store()
+        names = store.list_collections()
     except Exception as e:
         return {"_error": str(e)[:200]}
-    if not isinstance(cols, list):
-        return {"_error": "unexpected chroma response"}
     counts: dict[str, int] = {}
-    for c in cols:
-        cid = c.get("id")
-        name = c.get("name")
-        if not cid or not name:
-            continue
+    for name in names:
         try:
-            cnt = _chroma_api(
-                "GET",
-                f"/api/v2/tenants/default_tenant/databases/default_database/collections/{cid}/count",
-            )
-            counts[name] = int(cnt) if isinstance(cnt, (int, str)) else -1
+            counts[name] = store.count(name)
         except Exception:
             counts[name] = -1
     return counts
@@ -2213,26 +2205,24 @@ def recall_v2(
     # rows that reference any top result's chroma_id. This is the signal
     # that tells a caller "this fact has an open dispute."
     try:
-        from search import get_collections as _get_cols
-
-        _cols = _get_cols()
-        _contra_col = _cols.get("semantic_contradictions")
-        if _contra_col and fused:
-            # Reuse the already-in-scope http_json via indexer.chroma_api.
+        if fused:
             top_ids = [r.get("id", "") for r in fused[:n] if r.get("id")]
             if top_ids:
-                _ids_disjunction = {
-                    "$or": [{"memory_id_a": {"$in": top_ids}}, {"memory_id_b": {"$in": top_ids}}]
-                }
-                _contra_resp = _chroma_api(
-                    "POST",
-                    f"/api/v2/tenants/default_tenant/databases/default_database/collections/{_contra_col}/get",
-                    {"where": _ids_disjunction, "limit": 100, "include": ["metadatas"]},
+                points = get_vector_store().get(
+                    "semantic_contradictions",
+                    filter={
+                        "$or": [
+                            {"memory_id_a": {"$in": top_ids}},
+                            {"memory_id_b": {"$in": top_ids}},
+                        ]
+                    },
+                    limit=100,
+                    with_payload=True,
+                    with_documents=False,
                 )
                 contra_count: dict[str, int] = {}
-                for meta in _contra_resp.get("metadatas") or []:
-                    if not meta:
-                        continue
+                for p in points:
+                    meta = p.payload or {}
                     if meta.get("resolved"):
                         continue
                     a, b = meta.get("memory_id_a"), meta.get("memory_id_b")
@@ -7410,14 +7400,15 @@ def brain_health() -> dict:
     alerts: list[str] = []
     services: dict[str, str] = {}
 
-    # Probe ChromaDB
+    # Probe the vector backend via VectorStore heartbeat (backend-agnostic).
+    # Reports under "chromadb" key for compat with existing Glance dashboard
+    # and /brain/status consumers; will become store.name once Phase C lands.
     try:
-        with urllib.request.urlopen("http://127.0.0.1:8000/api/v2/heartbeat", timeout=3):
-            pass
-        services["chromadb"] = "up"
+        services["chromadb"] = "up" if get_vector_store().heartbeat() else "down"
     except Exception:
         services["chromadb"] = "down"
-        alerts.append("ChromaDB unreachable")
+    if services["chromadb"] == "down":
+        alerts.append("Vector store unreachable")
 
     # Probe Ollama
     try:
@@ -7446,15 +7437,9 @@ def brain_health() -> dict:
     # Collection counts
     collections: dict[str, int] = {}
     try:
-        from brain_core.indexer import chroma_api
-
-        cols = chroma_api("GET", "/api/v2/tenants/default_tenant/databases/default_database/collections")
-        for c in cols:
-            cnt = chroma_api(
-                "GET",
-                f"/api/v2/tenants/default_tenant/databases/default_database/collections/{c['id']}/count",
-            )
-            collections[c["name"]] = int(cnt) if isinstance(cnt, (int, str)) else -1
+        store = get_vector_store()
+        for name in store.list_collections():
+            collections[name] = store.count(name)
     except Exception:
         alerts.append("Cannot read collection counts")
 
