@@ -3685,14 +3685,19 @@ def _run_learn_pipeline(transcript: str, source: str, agent: str) -> None:
 
 
 # ── Routes: memory CRUD ─────────────────────────────────
-def _memory_collection_id() -> str | None:
-    _ensure_collection(learn.SEMANTIC_COLLECTION)
-    return _get_col_id(learn.SEMANTIC_COLLECTION)
+# 2026-04-21: helpers now return collection NAMES under the VectorStore
+# abstraction (Phase A2 of Qdrant migration). Callers previously received
+# a ChromaDB UUID and interpolated it into raw REST URLs; with VectorStore
+# we address by name everywhere. Kept the same function names so the call
+# sites don't have to change signature.
+def _memory_collection_id() -> str:
+    get_vector_store().create_collection(learn.SEMANTIC_COLLECTION)
+    return learn.SEMANTIC_COLLECTION
 
 
-def _contradictions_collection_id() -> str | None:
-    _ensure_collection(learn.CONTRADICTIONS_COLLECTION)
-    return _get_col_id(learn.CONTRADICTIONS_COLLECTION)
+def _contradictions_collection_id() -> str:
+    get_vector_store().create_collection(learn.CONTRADICTIONS_COLLECTION)
+    return learn.CONTRADICTIONS_COLLECTION
 
 
 # ── /memory GET response cache (30s TTL) ──
@@ -3742,46 +3747,41 @@ def list_memory(
         # Primary failed or timed out — fall through and do it ourselves.
 
     try:
-        col_id = _memory_collection_id()
-        if not col_id:
-            raise HTTPException(status_code=503, detail="semantic_memory collection unavailable")
+        collection = _memory_collection_id()
+        store = get_vector_store()
 
         where: dict[str, Any] = {}
         if category:
             where["category"] = category
         if agent:
             where["agent"] = agent
-
-        # ChromaDB GET doesn't support ordering. Fetch up to 500 matching entries,
-        # sort by created_at descending (newest first), then paginate in-memory.
-        # NOTE: 500-entry fetch cap is a performance trade-off — keeps Chroma
-        # response times under ~300ms. Pagination beyond 500 returns stale results.
-        fetch_body: dict[str, Any] = {
-            "limit": min(limit * 3, 500),
-            "include": ["documents", "metadatas"],
-        }
+        chroma_where: dict[str, Any] | None = None
         if where:
-            fetch_body["where"] = where if len(where) == 1 else {"$and": [{k: v} for k, v in where.items()]}
+            chroma_where = where if len(where) == 1 else {"$and": [{k: v} for k, v in where.items()]}
 
-        _col_base = f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}"
+        # Vector store GET doesn't support ordering. Fetch up to 500 matching
+        # entries, sort by created_at descending (newest first), then paginate
+        # in-memory. 500-entry cap keeps response time under ~300ms.
         try:
-            res = _chroma_api("POST", f"{_col_base}/get", fetch_body)
+            points = store.get(
+                collection,
+                filter=chroma_where,
+                limit=min(limit * 3, 500),
+                with_payload=True,
+                with_documents=True,
+            )
         except Exception as e:
-            raise HTTPException(status_code=502, detail=_safe_http_detail("chroma get", e))
+            raise HTTPException(status_code=502, detail=_safe_http_detail("vector get", e))
 
-        # Get real total count from ChromaDB (not just len of capped fetch)
+        # Real total count (not just len of capped fetch).
         try:
-            real_count = _chroma_api("GET", f"{_col_base}/count")
-            total = int(real_count) if isinstance(real_count, (int, str)) else 0
+            total = store.count(collection)
         except Exception:
             total = 0
 
-        ids = res.get("ids") or []
-        docs = res.get("documents") or []
-        metas = res.get("metadatas") or []
         all_entries = [
-            MemoryEntry(id=i, content=d or "", metadata=(m or {}))
-            for i, d, m in zip(ids, docs, metas, strict=False)
+            MemoryEntry(id=p.id, content=p.document or "", metadata=p.payload or {})
+            for p in points
         ]
 
         # Sort newest first by created_at
@@ -3817,35 +3817,35 @@ def list_memory(
     dependencies=[Depends(verify_bearer)],
 )
 def list_contradictions(limit: int = 50) -> ContradictionListResponse:
-    col_id = _contradictions_collection_id()
-    if not col_id:
-        return ContradictionListResponse(results=[], total=0)
-
+    collection = _contradictions_collection_id()
+    store = get_vector_store()
     _where = {"review_state": "pending"}
-    _col_path = f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}"
     try:
-        # Total count (IDs only, cheap)
-        count_res = _chroma_api("POST", f"{_col_path}/get", {"where": _where, "include": [], "limit": 10000})
-        total = len(count_res.get("ids") or [])
+        # Total count of pending contradictions (ids-only fetch).
+        total_points = store.get(
+            collection,
+            filter=_where,
+            limit=10000,
+            with_payload=False,
+            with_documents=False,
+        )
+        total = len(total_points)
         # Paginated fetch with content
-        res = _chroma_api(
-            "POST",
-            f"{_col_path}/get",
-            {
-                "limit": min(max(limit, 1), 200),
-                "where": _where,
-                "include": ["documents", "metadatas"],
-            },
+        points = store.get(
+            collection,
+            filter=_where,
+            limit=min(max(limit, 1), 200),
+            with_payload=True,
+            with_documents=True,
         )
     except Exception:
         return ContradictionListResponse(results=[], total=0)
 
-    ids = res.get("ids") or []
-    docs = res.get("documents") or []
-    metas = res.get("metadatas") or []
     entries: list[ContradictionEntry] = []
-    for i, doc, meta in zip(ids, docs, metas, strict=False):
-        meta = meta or {}
+    for p in points:
+        i = p.id
+        doc = p.document or ""
+        meta = p.payload or {}
         new_content = ""
         old_content = ""
         if doc:
@@ -3880,34 +3880,27 @@ def list_contradictions(limit: int = 50) -> ContradictionListResponse:
 @app.get("/memory/export", tags=["memory"], dependencies=[Depends(verify_bearer)])
 def export_memory() -> list[dict]:
     """Export all semantic_memory entries as a JSON array for backup/migration."""
-    col_id = _memory_collection_id()
-    if not col_id:
-        raise HTTPException(status_code=503, detail="semantic_memory collection unavailable")
-    _col_base = f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}"
+    collection = _memory_collection_id()
+    store = get_vector_store()
     page_size = 2000
     all_results: list[dict] = []
     offset = 0
     try:
         while True:
-            res = _chroma_api(
-                "POST",
-                f"{_col_base}/get",
-                {
-                    "limit": page_size,
-                    "offset": offset,
-                    "include": ["documents", "metadatas"],
-                },
+            points = store.get(
+                collection,
+                limit=page_size,
+                offset=offset,
+                with_payload=True,
+                with_documents=True,
             )
-            ids = res.get("ids") or []
-            docs = res.get("documents") or []
-            metas = res.get("metadatas") or []
-            for i, d, m in zip(ids, docs, metas, strict=False):
-                all_results.append({"id": i, "content": d or "", "metadata": m or {}})
-            if len(ids) < page_size:
+            for p in points:
+                all_results.append({"id": p.id, "content": p.document or "", "metadata": p.payload or {}})
+            if len(points) < page_size:
                 break
             offset += page_size
     except Exception as e:
-        raise HTTPException(status_code=502, detail=_safe_http_detail("chroma get", e))
+        raise HTTPException(status_code=502, detail=_safe_http_detail("vector get", e))
     return all_results
 
 
@@ -3915,23 +3908,20 @@ def export_memory() -> list[dict]:
     "/memory/{mem_id}", response_model=MemoryEntry, tags=["memory"], dependencies=[Depends(verify_bearer)]
 )
 def get_memory(mem_id: Annotated[str, PathParam()]) -> MemoryEntry:
-    col_id = _memory_collection_id()
-    if not col_id:
-        raise HTTPException(status_code=503, detail="semantic_memory collection unavailable")
+    collection = _memory_collection_id()
     try:
-        res = _chroma_api(
-            "POST",
-            f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/get",
-            {"ids": [mem_id], "include": ["documents", "metadatas"]},
+        points = get_vector_store().get(
+            collection,
+            ids=[mem_id],
+            with_payload=True,
+            with_documents=True,
         )
     except Exception as e:
-        raise HTTPException(status_code=502, detail=_safe_http_detail("chroma get", e))
-    ids = res.get("ids") or []
-    if not ids:
+        raise HTTPException(status_code=502, detail=_safe_http_detail("vector get", e))
+    if not points:
         raise HTTPException(status_code=404, detail=f"memory '{mem_id}' not found")
-    docs = res.get("documents") or [""]
-    metas = res.get("metadatas") or [{}]
-    return MemoryEntry(id=ids[0], content=docs[0] or "", metadata=metas[0] or {})
+    p = points[0]
+    return MemoryEntry(id=p.id, content=p.document or "", metadata=p.payload or {})
 
 
 @app.post("/memory", response_model=MemoryEntry, tags=["memory"], dependencies=[Depends(verify_bearer)])
@@ -3964,9 +3954,8 @@ def create_memory(request: Request, req: MemoryCreateRequest) -> MemoryEntry:
             f"session_context if you need test persistence.",
         )
 
-    col_id = _memory_collection_id()
-    if not col_id:
-        raise HTTPException(status_code=503, detail="semantic_memory collection unavailable")
+    collection = _memory_collection_id()
+    store = get_vector_store()
 
     mem_id = f"{learn.SEMANTIC_COLLECTION}:{learn._digest(req.content)}"
     embedding = _get_embedding(req.content[: learn.EMBED_TRUNCATE])
@@ -3986,7 +3975,7 @@ def create_memory(request: Request, req: MemoryCreateRequest) -> MemoryEntry:
             req.content,
             embedding,
             req.confidence,
-            col_id,
+            collection,
             category=req.category,
         )
         supersede_target = target_id
@@ -4010,11 +3999,7 @@ def create_memory(request: Request, req: MemoryCreateRequest) -> MemoryEntry:
     # If no target found, fall through to ADD (user said "forget X" but brain had no X).
     if operation == "DELETE" and supersede_target:
         try:
-            _chroma_api(
-                "POST",
-                f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/delete",
-                {"ids": [supersede_target]},
-            )
+            store.delete(collection, ids=[supersede_target])
         except Exception as e:
             print(f"WARNING DELETE failed to remove {supersede_target}: {e}")
         return MemoryEntry(
@@ -4055,30 +4040,24 @@ def create_memory(request: Request, req: MemoryCreateRequest) -> MemoryEntry:
     # Phase 1B: on UPDATE, mark old memory as superseded
     if operation == "UPDATE" and supersede_target:
         try:
-            _chroma_api(
-                "POST",
-                f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/update",
-                {
-                    "ids": [supersede_target],
-                    "metadatas": [{"superseded_by": mem_id, "valid_until": now_iso}],
-                },
+            store.update_payload(
+                collection,
+                ids=[supersede_target],
+                patch={"superseded_by": mem_id, "valid_until": now_iso},
             )
         except Exception as e:
             print(f"WARNING failed to mark {supersede_target} superseded: {e}")
 
     try:
-        _chroma_api(
-            "POST",
-            f"/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/upsert",
-            {
-                "ids": [mem_id],
-                "embeddings": [embedding],
-                "documents": [req.content],
-                "metadatas": [metadata],
-            },
+        store.upsert(
+            collection,
+            ids=[mem_id],
+            vectors=[embedding],
+            documents=[req.content],
+            payloads=[metadata],
         )
     except Exception as e:
-        raise HTTPException(status_code=502, detail=_safe_http_detail("chroma upsert", e))
+        raise HTTPException(status_code=502, detail=_safe_http_detail("vector upsert", e))
 
     _metrics_buf.record_memory_write()
     # Fire hook (Phase 6A)
