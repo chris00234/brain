@@ -167,7 +167,7 @@ SLOS: dict[str, SLO] = {
     # deadlock, Neo4j timeout) emits ZERO events and fail_rate stays green
     # while no atoms actually land. This floor catches the "suspiciously
     # quiet" case: every active brain usually produces 5+ atoms/hour during
-    # waking hours (06:00–23:00 PT). Below that → stuck or ingest down.
+    # waking hours (06:00-23:00 PT). Below that — stuck or ingest down.
     # Higher-is-better SLO — breaches when throughput falls BELOW target.
     "atoms_write_throughput_1h": SLO(
         name="atoms_write_throughput_1h",
@@ -247,10 +247,12 @@ def _measure_recall_v2_p95() -> float:
                     continue
                 routes = payload.get("routes", {}) or {}
                 v2 = routes.get("/recall/v2") or {}
-                if v2.get("count", 0) >= _RECALL_MIN_SAMPLES and v2.get("p95_ms") is not None:
+                v2_samples = v2.get("window_count", v2.get("count", 0))
+                if v2_samples >= _RECALL_MIN_SAMPLES and v2.get("p95_ms") is not None:
                     return float(v2["p95_ms"])
                 v1 = routes.get("/recall") or {}
-                if v1.get("count", 0) >= _RECALL_MIN_SAMPLES and v1.get("p95_ms") is not None:
+                v1_samples = v1.get("window_count", v1.get("count", 0))
+                if v1_samples >= _RECALL_MIN_SAMPLES and v1.get("p95_ms") is not None:
                     return float(v1["p95_ms"])
             return 0.0
         finally:
@@ -742,7 +744,7 @@ def _in_quiet_hours_now() -> bool:
         import brain_config_store
 
         # 2026-04-17 fix: defaults MUST match the documented operational window
-        # (22:30–07:30 PT). The prior 23:00/07:00 fallbacks silently narrowed
+        # (22:30-07:30 PT). The prior 23:00/07:00 fallbacks silently narrowed
         # quiet hours by 30 min on each end when brain_config_store was
         # unreachable, waking Chris up at 22:31 / 07:01.
         start_s = brain_config_store.get("quiet_hours.start") or "22:30"

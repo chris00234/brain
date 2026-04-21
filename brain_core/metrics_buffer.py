@@ -26,24 +26,46 @@ from pathlib import Path
 from typing import Any
 
 HISTOGRAM_WINDOW = 512
+# Sliding time window for p50/p95/p99. A single slow outlier on a
+# low-traffic route (e.g. /recall/v2 with 30 lifetime hits) was pinning
+# p95 to the outlier value for hours and firing stale SLO alerts.
+# 30 min bounds how long one bad sample can haunt the gauge.
+WINDOW_SECONDS = 1800
+# Min samples within WINDOW_SECONDS required to publish a percentile.
+# Below this, percentile returns 0.0 so cold/idle routes don't page.
+MIN_WINDOW_SAMPLES = 20
 
 
 def _now_iso() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+def _window_percentile(samples: deque, p: float) -> float:
+    cutoff = time.time() - WINDOW_SECONDS
+    recent = [lat for ts, lat in samples if ts >= cutoff]
+    if len(recent) < MIN_WINDOW_SAMPLES:
+        return 0.0
+    recent.sort()
+    idx = min(len(recent) - 1, int(len(recent) * p))
+    return round(float(recent[idx]), 2)
+
+
+def _window_count(samples: deque) -> int:
+    cutoff = time.time() - WINDOW_SECONDS
+    return sum(1 for ts, _ in samples if ts >= cutoff)
+
+
 @dataclass
 class RouteStats:
     count: int = 0
     errors: int = 0
-    latencies_ms: deque = field(default_factory=lambda: deque(maxlen=HISTOGRAM_WINDOW))
+    samples: deque = field(default_factory=lambda: deque(maxlen=HISTOGRAM_WINDOW))
 
     def percentile(self, p: float) -> float:
-        if not self.latencies_ms:
-            return 0.0
-        sorted_lat = sorted(self.latencies_ms)
-        idx = min(len(sorted_lat) - 1, int(len(sorted_lat) * p))
-        return round(sorted_lat[idx], 2)
+        return _window_percentile(self.samples, p)
+
+    def window_count(self) -> int:
+        return _window_count(self.samples)
 
 
 @dataclass
@@ -56,14 +78,13 @@ class PhaseStats:
     """
 
     count: int = 0
-    latencies_ms: deque = field(default_factory=lambda: deque(maxlen=HISTOGRAM_WINDOW))
+    samples: deque = field(default_factory=lambda: deque(maxlen=HISTOGRAM_WINDOW))
 
     def percentile(self, p: float) -> float:
-        if not self.latencies_ms:
-            return 0.0
-        sorted_lat = sorted(self.latencies_ms)
-        idx = min(len(sorted_lat) - 1, int(len(sorted_lat) * p))
-        return round(float(sorted_lat[idx]), 2)
+        return _window_percentile(self.samples, p)
+
+    def window_count(self) -> int:
+        return _window_count(self.samples)
 
 
 @dataclass
@@ -143,7 +164,7 @@ class MetricsBuffer:
                     continue
                 phase = self._phases[key]
                 phase.count += 1
-                phase.latencies_ms.append(ms)
+                phase.samples.append((time.time(), ms))
 
     def search_latency_stats(self) -> dict:
         """Return p50/p95/p99 search latency from rolling window."""
@@ -188,7 +209,7 @@ class MetricsBuffer:
             key = self._normalize_path(path)
             stats = self._routes[key]
             stats.count += 1
-            stats.latencies_ms.append(latency_ms)
+            stats.samples.append((time.time(), latency_ms))
             if error:
                 stats.errors += 1
             # Per-status-band counters. Stored as attributes so legacy
@@ -260,6 +281,7 @@ class MetricsBuffer:
             routes = {
                 path: {
                     "count": s.count,
+                    "window_count": s.window_count(),
                     "errors": s.errors,
                     "p50_ms": s.percentile(0.50),
                     "p95_ms": s.percentile(0.95),
@@ -298,6 +320,7 @@ class MetricsBuffer:
             phase_latency = {
                 key: {
                     "count": stats.count,
+                    "window_count": stats.window_count(),
                     "p50_ms": stats.percentile(0.50),
                     "p95_ms": stats.percentile(0.95),
                     "p99_ms": stats.percentile(0.99),
@@ -375,8 +398,9 @@ class MetricsBuffer:
                         js.failure_count = stats_dict.get("failure_count", 0)
                         js.consecutive_failures = stats_dict.get("consecutive_failures", 0)
                     self._jobs[name] = js
-        except Exception:
-            pass
+        except Exception as _exc:
+            log = __import__("logging").getLogger("brain.metrics_buffer")
+            log.debug("metrics restore from sqlite skipped: %s", _exc)
 
     @staticmethod
     def _normalize_path(path: str) -> str:
