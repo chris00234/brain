@@ -210,46 +210,36 @@ def _migrate_semantic_memory_3_to_4() -> dict:
         import sys
 
         sys.path.insert(0, str(Path(__file__).parent))
-        from http_pool import http_json
-        from search import get_collections
+        from vector_store import get_vector_store
 
-        cols = get_collections()
-        sem_col = cols.get("semantic_memory")
-        if not sem_col:
-            return {"updated": 0, "reason": "collection missing"}
+        store = get_vector_store()
 
         # Fetch all docs missing trust_score
-        resp = http_json(
-            "POST",
-            f"http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col}/get",
-            {"limit": 50000, "include": ["metadatas"]},
+        points = store.get(
+            "semantic_memory",
+            limit=50000,
+            with_payload=True,
+            with_documents=False,
         )
-        ids = resp.get("ids", [])
-        metas = resp.get("metadatas", []) or []
+        if not points:
+            return {"updated": 0, "reason": "collection missing or empty"}
 
-        needs_update = []
-        for mid, meta in zip(ids, metas, strict=False):
-            if not meta or "trust_score" not in meta:
-                needs_update.append(mid)
+        needs_update = [p.id for p in points if "trust_score" not in (p.payload or {})]
 
         if not needs_update:
             return {"updated": 0}
 
-        # Batch update
-        BATCH = 200
+        # Per-id update_payload (patch semantics via read-merge-write in ChromaStore).
+        # Round 11 note kept: use string format to match all other writers —
+        # type-consistent values across rows so any future $lt/$gt filter works.
         updated = 0
-        for i in range(0, len(needs_update), BATCH):
-            batch = needs_update[i : i + BATCH]
-            http_json(
-                "POST",
-                f"http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections/{sem_col}/update",
-                # Round 11 fix: use string format to match all other writers
-                # (learn.py, memory_lifecycle.py, entity_graph.py). Float
-                # storage was breaking ChromaDB $lt/$gt where filters that
-                # expect type-consistent values across rows.
-                {"ids": batch, "metadatas": [{"trust_score": "0.5"} for _ in batch]},
+        for mid in needs_update:
+            store.update_payload(
+                "semantic_memory",
+                ids=[mid],
+                patch={"trust_score": "0.5"},
             )
-            updated += len(batch)
+            updated += 1
 
         return {"updated": updated}
     except Exception as e:

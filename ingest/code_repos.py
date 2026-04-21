@@ -23,12 +23,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "brain_core"))
-from http_pool import http_json
-from indexer import ensure_collection, get_embeddings_batch
+from indexer import get_embeddings_batch
+from vector_store import get_vector_store
 
 CODE_COLLECTION = "code"
 STATE_FILE = Path("/Users/chrischo/server/brain/logs/code-index-state.json")
-CHROMA_API = "http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections"
 
 # Same repo list as ingest/git_activity.py — keep in sync.
 REPOS: list[Path] = [
@@ -306,15 +305,12 @@ def _flush_batch(col_id: str, ids: list, texts: list, metas: list) -> None:
         return
     v_ids, v_texts, v_metas, v_embs = zip(*valid, strict=False)
     try:
-        http_json(
-            "POST",
-            f"{CHROMA_API}/{col_id}/upsert",
-            {
-                "ids": list(v_ids),
-                "embeddings": list(v_embs),
-                "documents": list(v_texts),
-                "metadatas": list(v_metas),
-            },
+        get_vector_store().upsert(
+            col_id,
+            ids=list(v_ids),
+            vectors=list(v_embs),
+            documents=list(v_texts),
+            payloads=list(v_metas),
         )
     except Exception as e:
         print(f"  upsert failed: {e}", flush=True)
@@ -325,10 +321,8 @@ def main() -> int:
     state = load_state()
     print(f"[code_index] state: {len(state.get('file_mtimes', {}))} files tracked", flush=True)
 
-    col_id = ensure_collection(CODE_COLLECTION)
-    if not col_id:
-        print("[code_index] FATAL: could not get/create code collection", file=sys.stderr)
-        return 2
+    get_vector_store().create_collection(CODE_COLLECTION)
+    col_id = CODE_COLLECTION
 
     t_start = time.time()
     results: list[dict] = []

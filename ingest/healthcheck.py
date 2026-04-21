@@ -93,7 +93,6 @@ BACKUP_STALENESS_HOURS = 36
 DISK_WARN_GB = 20
 DISK_CRIT_GB = 5
 OLLAMA_URL = "http://127.0.0.1:11434"
-CHROMA_URL = "http://127.0.0.1:8000"
 BRAIN_URL = "http://127.0.0.1:8791"
 
 # Add brain_core + cli to sys.path so we can reuse _minio and config
@@ -101,58 +100,85 @@ sys.path.insert(0, str(BRAIN_DIR / "brain_core"))
 sys.path.insert(0, str(BRAIN_DIR / "cli"))
 
 try:
-    from config import CHROMA_URL as _CHROMA_URL
-
-    CHROMA_URL = _CHROMA_URL
-except ImportError:
-    pass
-
-CHROMA_API = f"{CHROMA_URL}/api/v2/tenants/default_tenant/databases/default_database/collections"
-
-try:
     from config import EMBED_MODEL_VERSION
 except ImportError:
     EMBED_MODEL_VERSION = "multilingual-e5-large-instruct:v1"
 
 
-# ── ChromaDB collection counts ──────────────────────────
-def get_collection_counts() -> dict[str, int | str]:
-    """Live counts via ChromaDB HTTP API on localhost."""
-    import urllib.request
+# Collections small + stable enough that per-ID shrinkage diffs are useful.
+# For large churny collections (code, experience) per-ID diff is noisy and slow.
+ID_DIFF_COLLECTIONS = frozenset({"knowledge", "personal", "patterns", "semantic_memory"})
+
+
+def get_collection_ids(name: str, col_id: str, limit: int = 2000) -> dict[str, str]:
+    """Return {doc_id: human-readable source} for a collection. Best-effort.
+
+    Tries common metadata keys (source_path / path / source / title). If none
+    present, falls back to the raw id. Cost is a single /get call; caller
+    should only invoke for small collections (see ID_DIFF_COLLECTIONS).
+    """
+    from vector_store import get_vector_store
 
     try:
-        with urllib.request.urlopen(CHROMA_API, timeout=10) as resp:
-            cols = json.loads(resp.read())
+        points = get_vector_store().get(
+            name,  # VectorStore addresses by name; col_id is the same string now
+            limit=limit,
+            with_payload=True,
+            with_documents=False,
+        )
+    except Exception:
+        return {}
+
+    out: dict[str, str] = {}
+    for p in points:
+        meta = p.payload or {}
+        label = (
+            meta.get("source_path")
+            or meta.get("path")
+            or meta.get("source")
+            or meta.get("title")
+            or meta.get("file")
+            or p.id
+        )
+        out[p.id] = str(label)[:180]
+    return out
+
+
+# ── Collection counts ──────────────────────────────────
+def get_collection_counts() -> dict[str, int | str]:
+    """Live counts via the vector store abstraction."""
+    from vector_store import get_vector_store
+
+    try:
+        store = get_vector_store()
+        names = store.list_collections()
     except Exception as e:
         return {"_error": str(e)}
 
     counts: dict[str, int] = {}
-    for c in cols:
-        cid = c.get("id")
-        name = c.get("name")
-        if not cid or not name:
-            continue
+    for name in names:
         try:
-            with urllib.request.urlopen(f"{CHROMA_API}/{cid}/count", timeout=10) as resp:
-                counts[name] = int(resp.read().strip())
+            counts[name] = store.count(name)
         except Exception:
             counts[name] = -1
     return counts
 
 
 def get_collection_id(name: str) -> str | None:
-    """Return the ChromaDB v2 collection ID for a given name, or None."""
-    import urllib.request
+    """Resolve a collection name to its opaque backend identifier.
+
+    Under VectorStore the "identifier" is just the name itself — we
+    preserve the function signature (and its name) so call sites in
+    check_chroma_write() and external tooling keep compiling without
+    touching.
+    """
+    from vector_store import get_vector_store
 
     try:
-        with urllib.request.urlopen(CHROMA_API, timeout=10) as resp:
-            cols = json.loads(resp.read())
-        for c in cols:
-            if c.get("name") == name:
-                return c.get("id")
+        names = set(get_vector_store().list_collections())
+        return name if name in names else None
     except Exception:
-        pass
-    return None
+        return None
 
 
 # ── State (uses safe_state for file locking) ──────────────
@@ -289,63 +315,30 @@ def check_ollama_embedding() -> list[str]:
         return [f"❌ Ollama embedding probe failed: {e}"]
 
 
-# ── ChromaDB write probe ───────────────────────────────
+# ── Vector-store write probe ───────────────────────────
 def check_chroma_write() -> list[str]:
-    """Round-trip write/read/delete against a dedicated probe collection.
-    Catches: ChromaDB down, sqlite read-only, HNSW corrupted, write path broken.
-    """
-    import urllib.request
+    """Round-trip create/upsert/delete against a dedicated probe collection.
+    Catches: vector backend down, write path broken. Name kept for back-
+    compat with existing call sites + telemetry dashboards."""
+    from vector_store import get_vector_store
 
     probe_name = "healthcheck_probe"
     try:
-        # Ensure collection exists
-        req = urllib.request.Request(
-            CHROMA_API,
-            data=json.dumps({"name": probe_name, "metadata": {"purpose": "healthcheck"}}).encode(),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=10):
-                pass
-        except urllib.error.HTTPError as e:
-            # 409 = already exists, fine
-            if e.code not in (409, 400):
-                return [f"❌ ChromaDB collection create failed: HTTP {e.code}"]
-        col_id = get_collection_id(probe_name)
-        if not col_id:
-            return ["❌ ChromaDB write probe: cannot resolve probe collection id"]
-        # Upsert one probe doc
+        store = get_vector_store()
+        store.create_collection(probe_name, {"purpose": "healthcheck"})
         probe_id = f"probe:{datetime.now(UTC).isoformat()}"
-        # Use a cheap 8-dim embedding so we don't hit Ollama on every probe
         probe_emb = [0.1] * 1024
-        upsert_req = urllib.request.Request(
-            f"{CHROMA_API}/{col_id}/upsert",
-            data=json.dumps(
-                {
-                    "ids": [probe_id],
-                    "embeddings": [probe_emb],
-                    "documents": ["healthcheck probe"],
-                    "metadatas": [{"type": "probe", "created_at": datetime.now(UTC).isoformat()}],
-                }
-            ).encode(),
-            headers={"Content-Type": "application/json"},
-            method="POST",
+        store.upsert(
+            probe_name,
+            ids=[probe_id],
+            vectors=[probe_emb],
+            documents=["healthcheck probe"],
+            payloads=[{"type": "probe", "created_at": datetime.now(UTC).isoformat()}],
         )
-        with urllib.request.urlopen(upsert_req, timeout=10):
-            pass
-        # Delete the probe to avoid filling the collection
-        del_req = urllib.request.Request(
-            f"{CHROMA_API}/{col_id}/delete",
-            data=json.dumps({"ids": [probe_id]}).encode(),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(del_req, timeout=10):
-            pass
+        store.delete(probe_name, ids=[probe_id])
         return []
     except Exception as e:
-        return [f"❌ ChromaDB write probe failed: {e}"]
+        return [f"❌ vector store write probe failed: {e}"]
 
 
 def _bearer_secret() -> str | None:
@@ -580,6 +573,23 @@ def main() -> None:
     counts = get_collection_counts()
     state = load_state()
     yesterday_counts = state.get("counts", {})
+    yesterday_ids = state.get("collection_ids", {})
+
+    # Snapshot today's IDs for diff-worthy collections before we compare.
+    # Even when there's no shrinkage today, we need this to diff tomorrow.
+    today_ids: dict[str, dict[str, str]] = {}
+    if "_error" not in counts:
+        for name in ID_DIFF_COLLECTIONS:
+            if name not in MONITORED_COLLECTIONS:
+                continue
+            cid = get_collection_id(name)
+            if not cid:
+                continue
+            ids_map = get_collection_ids(name, cid)
+            if ids_map:
+                today_ids[name] = ids_map
+
+    shrinkage_details: dict[str, dict] = {}
 
     if "_error" in counts:
         issues.append(f"❌ ChromaDB unreachable: {counts['_error']}")
@@ -600,8 +610,25 @@ def main() -> None:
                     f"⚠️ Collection `{name}` = {today} (below min {spec['min_docs']}, source: {spec['source']})"
                 )
             if today < yesterday:
-                issues.append(f"⚠️ Collection `{name}` shrank ({yesterday} → {today})")
+                dropped_info = ""
+                if name in today_ids and name in yesterday_ids:
+                    prev_map = yesterday_ids[name] or {}
+                    curr_map = today_ids[name] or {}
+                    dropped = sorted(set(prev_map.keys()) - set(curr_map.keys()))
+                    if dropped:
+                        sample = [prev_map.get(d, d) for d in dropped[:5]]
+                        dropped_info = f" — dropped: {', '.join(sample)}"
+                        if len(dropped) > 5:
+                            dropped_info += f" (+{len(dropped) - 5} more)"
+                        shrinkage_details[name] = {
+                            "dropped_count": len(dropped),
+                            "dropped_ids": dropped[:20],
+                            "dropped_sources": [prev_map.get(d, d) for d in dropped[:20]],
+                        }
+                issues.append(f"⚠️ Collection `{name}` shrank ({yesterday} → {today}){dropped_info}")
     report["checks"]["collection_counts"] = counts
+    if shrinkage_details:
+        report["checks"]["shrinkage_details"] = shrinkage_details
 
     # 2. Content integrity sampling
     integrity_issues = check_content_integrity()
@@ -697,9 +724,20 @@ def main() -> None:
     issues.extend(recall_issues)
     report["checks"]["recall_issues"] = recall_issues
 
+    # 13. Pending contradictions queue depth — ingest-time near-duplicate
+    # gate (learn.py) clears most of these automatically, so a large backlog
+    # means something is slipping through and a human should look.
+    pending_contradictions = counts.get("semantic_contradictions")
+    if isinstance(pending_contradictions, int) and pending_contradictions >= 50:
+        issues.append(
+            f"⚠️ {pending_contradictions} pending contradictions — run `auto_resolve_contradictions` "
+            f"or review at /memory/contradictions"
+        )
+    report["checks"]["pending_contradictions"] = pending_contradictions
+
     # Persist baseline for tomorrow
     if "_error" not in counts:
-        save_state({"counts": counts})
+        save_state({"counts": counts, "collection_ids": today_ids})
 
     report["issues"] = issues
     report["issue_count"] = len(issues)
