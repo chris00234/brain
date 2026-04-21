@@ -118,20 +118,37 @@ def _summarize_cluster_via_sage(texts: list[str], level: int) -> str | None:
 
 
 def _load_active_canonical() -> list[dict]:
-    """Pull active canonical notes + embeddings via the vector store."""
+    """Pull leaf canonical notes + embeddings via the vector store.
+
+    Previously filtered by `status=active` but canonical rarely populates
+    `status` unless a note is superseded, so the old filter matched zero
+    rows and raptor_build always skipped. Now: pull everything, exclude
+    superseded + raptor-summary rows in Python. Qdrant `$gt`/`$lte` on
+    missing-field rows don't behave as MongoDB does, so server-side is
+    the wrong place to filter.
+    """
     try:
         from vector_store import get_vector_store
 
         points = get_vector_store().get(
             "canonical",
-            filter={"status": "active"},
-            limit=2000,
+            limit=20000,
             with_payload=True,
             with_documents=True,
             with_vectors=True,
         )
     except Exception:
         return []
+    leaves = []
+    for p in points:
+        meta = p.payload or {}
+        if meta.get("status") == "superseded":
+            continue
+        raptor_level = meta.get("raptor_level")
+        if isinstance(raptor_level, int) and raptor_level > 0:
+            continue
+        leaves.append(p)
+    points = leaves
     out = []
     for p in points:
         out.append(

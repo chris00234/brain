@@ -146,7 +146,7 @@ asyncio_default_fixture_loop_scope = "function"
 timeout = 60
 addopts = "-q --strict-markers --tb=short"
 markers = [
-  "integration: requires chroma/ollama/neo4j running",
+  "integration: requires qdrant/ollama/neo4j running + brain-server on :8791",
   "e2e: spawns brain-server subprocess",
   "slow: long-running test (>5s)",
 ]
