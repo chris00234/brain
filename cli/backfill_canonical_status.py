@@ -42,14 +42,9 @@ def _read_frontmatter(p: Path) -> dict | None:
 
 
 def main() -> int:
-    from http_pool import http_json  # type: ignore
-    from search import get_collections  # type: ignore
+    from vector_store import get_vector_store  # type: ignore
 
-    cols = get_collections()
-    col_id = cols.get("canonical")
-    if not col_id:
-        print(json.dumps({"status": "error", "reason": "no canonical collection"}))
-        return 1
+    store = get_vector_store()
 
     path_to_meta: dict[str, dict] = {}
     for p in CANONICAL_DIR.rglob("*.md"):
@@ -68,31 +63,26 @@ def main() -> int:
 
     print(f"scanned {len(path_to_meta)} canonical MD files")
 
-    # Chroma's /update requires ids, not where. Pull all canonical rows and
-    # build a path → [chroma_ids] index in one shot, then batch updates by id.
-    print("  fetching canonical Chroma id index...")
-    resp = http_json(
-        "POST",
-        f"http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/get",
-        {"limit": 20000, "include": ["metadatas"]},
+    # Pull all canonical rows + build path → [ids] index, then update
+    # by id via VectorStore.update_payload.
+    print("  fetching canonical id index...")
+    points = store.get(
+        "canonical",
+        limit=20000,
+        with_payload=True,
+        with_documents=False,
     )
-    chroma_ids = resp.get("ids", []) or []
-    metas_resp = resp.get("metadatas", []) or []
-    # Chroma's `source` field holds the filesystem path (indexer convention).
-    # Was `path` in search_unified result shape — the FIELD NAME in Chroma
-    # metadata is `source`. 2026-04-17 fix: previous version used `path` and
-    # matched zero rows silently.
+    # The `source` field holds the filesystem path (indexer convention).
+    # 2026-04-17 fix: previous version looked at `path` and matched
+    # zero rows silently — stick to `source`.
     path_to_ids: dict[str, list[str]] = {}
-    for cid, m in zip(chroma_ids, metas_resp, strict=False):
-        if not m:
-            continue
+    for p in points:
+        m = p.payload or {}
         src = m.get("source") or m.get("path")
         if not src:
             continue
-        path_to_ids.setdefault(src, []).append(cid)
-    print(
-        f"  indexed {sum(len(v) for v in path_to_ids.values())} chroma rows across {len(path_to_ids)} sources"
-    )
+        path_to_ids.setdefault(src, []).append(p.id)
+    print(f"  indexed {sum(len(v) for v in path_to_ids.values())} rows across {len(path_to_ids)} sources")
 
     updated_rows = 0
     errors = 0
@@ -101,16 +91,9 @@ def main() -> int:
         ids = path_to_ids.get(md_path)
         if not ids:
             continue
-        # Chroma /update: ids + aligned metadatas list
         try:
-            http_json(
-                "POST",
-                f"http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections/{col_id}/update",
-                {
-                    "ids": ids,
-                    "metadatas": [meta_updates] * len(ids),
-                },
-            )
+            for cid in ids:
+                store.update_payload("canonical", ids=[cid], patch=meta_updates)
             updated_rows += len(ids)
             s = meta_updates["status"]
             by_status[s] = by_status.get(s, 0) + 1

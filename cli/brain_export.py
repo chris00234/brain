@@ -21,50 +21,46 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "brain_core"))
-from http_pool import http_json
-from search import get_collections
+from vector_store import get_vector_store
 
-CHROMA_URL = "http://127.0.0.1:8000"
-CHROMA_API = f"{CHROMA_URL}/api/v2/tenants/default_tenant/databases/default_database/collections"
 KNOWLEDGE_DIR = Path("/Users/chrischo/server/knowledge")
 
 
-def export_collection(col_name: str, col_id: str, out_file: Path, batch: int = 500) -> int:
-    """Export all docs from a ChromaDB collection to JSONL."""
+def export_collection(col_name: str, out_file: Path, batch: int = 500) -> int:
+    """Export all docs from a vector-store collection to JSONL."""
     count = 0
     offset = 0
+    store = get_vector_store()
     with out_file.open("w") as f:
         while True:
             try:
-                resp = http_json(
-                    "POST",
-                    f"{CHROMA_API}/{col_id}/get",
-                    {"limit": batch, "offset": offset, "include": ["documents", "metadatas", "embeddings"]},
+                points = store.get(
+                    col_name,
+                    limit=batch,
+                    offset=offset,
+                    with_payload=True,
+                    with_documents=True,
+                    with_vectors=True,
                 )
             except Exception as e:
                 print(f"  {col_name}: fetch failed at offset {offset}: {e}", file=sys.stderr)
                 break
 
-            ids = resp.get("ids", [])
-            if not ids:
+            if not points:
                 break
-            docs = resp.get("documents", []) or []
-            metas = resp.get("metadatas", []) or []
-            embs = resp.get("embeddings", []) or []
 
-            for i, (doc_id, doc, meta) in enumerate(zip(ids, docs, metas, strict=False)):
+            for p in points:
                 record = {
-                    "id": doc_id,
-                    "content": doc,
-                    "metadata": meta or {},
+                    "id": p.id,
+                    "content": p.document or "",
+                    "metadata": p.payload or {},
                 }
-                # Include embedding if small enough
-                if i < len(embs) and embs[i]:
-                    record["embedding"] = embs[i]
+                if p.vector:
+                    record["embedding"] = p.vector
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
                 count += 1
 
-            if len(ids) < batch:
+            if len(points) < batch:
                 break
             offset += batch
     return count
@@ -139,12 +135,11 @@ def main():
             "neo4j": {"entities": 0, "lessons": 0, "skills": 0, "relations": 0},
         }
 
-        # ChromaDB collections
-        print("Exporting ChromaDB collections...")
-        cols = get_collections()
-        for col_name, col_id in cols.items():
+        # Vector store collections
+        print("Exporting vector store collections...")
+        for col_name in get_vector_store().list_collections():
             out_file = tmpdir / f"{col_name}.jsonl"
-            count = export_collection(col_name, col_id, out_file)
+            count = export_collection(col_name, out_file)
             manifest["collections"][col_name] = count
             print(f"  {col_name}: {count} docs")
 

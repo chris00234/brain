@@ -80,9 +80,9 @@ def _append_feedback(entries: list[dict]) -> None:
 
 def _recall_v2(query: str, token: str, n: int = 5) -> dict:
     url = f"{BRAIN_URL}/recall/v2?" + urllib.parse.urlencode({"q": query, "n": str(n)})
-    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})  # noqa: S310
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=30) as resp:  # noqa: S310
             return json.loads(resp.read().decode())
     except Exception as e:
         return {"error": str(e)[:200]}
@@ -218,31 +218,27 @@ def _read_frontmatter(p: Path) -> tuple[dict | None, str]:
 def bootstrap_from_canonical(existing: set) -> tuple[int, int]:
     """Walk active canonical + distilled markdown; emit title→chroma_id useful=true pairs."""
     sys.path.insert(0, str(BRAIN_ROOT / "brain_core"))
-    from http_pool import http_json  # type: ignore
-    from search import get_collections  # type: ignore
+    from vector_store import get_vector_store  # type: ignore
 
-    cols = get_collections()
-    canonical_col = cols.get("canonical")
-    if not canonical_col:
-        print("  SKIP: canonical collection missing")
-        return (0, 0)
+    store = get_vector_store()
 
-    # Build chroma id index: source_path → [chroma_ids]
-    resp = http_json(
-        "POST",
-        f"http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections/{canonical_col}/get",
-        {"limit": 20000, "include": ["metadatas"]},
+    # Build id index: source_path → [ids]
+    points = store.get(
+        "canonical",
+        limit=20000,
+        with_payload=True,
+        with_documents=False,
     )
-    ids = resp.get("ids", []) or []
-    metas = resp.get("metadatas", []) or []
+    if not points:
+        print("  SKIP: canonical collection empty")
+        return (0, 0)
     path_to_ids: dict[str, list[str]] = {}
-    for cid, m in zip(ids, metas, strict=False):
-        if not m:
-            continue
+    for p in points:
+        m = p.payload or {}
         src = m.get("source") or m.get("path")
         if not src:
             continue
-        path_to_ids.setdefault(src, []).append(cid)
+        path_to_ids.setdefault(src, []).append(p.id)
 
     positives = scanned = 0
     pending: list[dict] = []

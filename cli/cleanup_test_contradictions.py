@@ -28,10 +28,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "brain_core"))
 
-from http_pool import http_json  # type: ignore
-from search import get_collections  # type: ignore
-
-CHROMA_BASE = "http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections"
+from vector_store import get_vector_store  # type: ignore
 
 TEST_MARKERS = [
     "canonical test city",
@@ -54,62 +51,50 @@ def _is_test_noise(text: str) -> bool:
     # Protect the real canonical about frontend stack
     if "preferred frontend stack" in t or "react + vite + typescript" in t:
         return False
-    for marker in TEST_MARKERS:
-        if marker.lower() in t:
-            return True
-    return False
+    return any(marker.lower() in t for marker in TEST_MARKERS)
 
 
 def main() -> int:
-    cols = get_collections()
-    contra_col = cols.get("semantic_contradictions")
-    sm_col = cols.get("semantic_memory")
-    if not contra_col:
-        print("no semantic_contradictions collection")
-        return 1
+    store = get_vector_store()
 
     # 1. Fetch contradictions
-    resp = http_json(
-        "POST",
-        f"{CHROMA_BASE}/{contra_col}/get",
-        {"limit": 500, "include": ["documents", "metadatas"]},
+    points = store.get(
+        "semantic_contradictions",
+        limit=500,
+        with_payload=True,
+        with_documents=True,
     )
-    ids = resp.get("ids", []) or []
-    docs = resp.get("documents", []) or []
-    metas = resp.get("metadatas", []) or []
+    if not points:
+        print("no semantic_contradictions found")
+        return 1
 
     test_contra_ids: list[str] = []
     test_member_ids: set[str] = set()
-    for i, cid in enumerate(ids):
-        doc = docs[i] if i < len(docs) else ""
+    for p in points:
+        doc = p.document or ""
         if _is_test_noise(doc):
-            test_contra_ids.append(cid)
-            m = metas[i] if i < len(metas) else {}
+            test_contra_ids.append(p.id)
+            m = p.payload or {}
             for k in ("memory_id_a", "memory_id_b", "new_id", "old_id"):
-                v = (m or {}).get(k)
+                v = m.get(k)
                 if v and isinstance(v, str):
-                    # Normalize semantic_memory: prefix into raw chroma_id
                     if v.startswith("semantic_memory:"):
                         v = v.split(":", 1)[1]
                     test_member_ids.add(v)
 
-    print(f"found {len(test_contra_ids)}/{len(ids)} test-fixture contradictions")
+    print(f"found {len(test_contra_ids)}/{len(points)} test-fixture contradictions")
     print(f"linked test atoms to delete: {len(test_member_ids)}")
 
     # 2. Delete from semantic_contradictions
     if test_contra_ids:
-        http_json(
-            "POST",
-            f"{CHROMA_BASE}/{contra_col}/delete",
-            {"ids": test_contra_ids},
-        )
+        store.delete("semantic_contradictions", test_contra_ids)
         print(f"deleted {len(test_contra_ids)} contradiction rows")
 
     # 3. Also sweep semantic_memory for orphan test atoms by SQLite audit
     brain_db = Path("/Users/chrischo/server/brain/logs/brain.db")
     sqlite_atoms_deleted = 0
     chroma_atoms_deleted = 0
-    if brain_db.exists() and sm_col:
+    if brain_db.exists():
         conn = sqlite3.connect(str(brain_db))
         rows = conn.execute(
             "SELECT id, chroma_id, text FROM atoms "
@@ -124,7 +109,7 @@ def main() -> int:
                     test_chroma_ids.append(chroma_id)
         if test_atom_ids:
             placeholders = ",".join("?" for _ in test_atom_ids)
-            conn.execute(f"DELETE FROM atoms WHERE id IN ({placeholders})", test_atom_ids)
+            conn.execute(f"DELETE FROM atoms WHERE id IN ({placeholders})", test_atom_ids)  # noqa: S608 — placeholders are ? marks, not user input
             conn.commit()
             sqlite_atoms_deleted = len(test_atom_ids)
         conn.close()
@@ -133,14 +118,10 @@ def main() -> int:
             for i in range(0, len(test_chroma_ids), 100):
                 batch = test_chroma_ids[i : i + 100]
                 try:
-                    http_json(
-                        "POST",
-                        f"{CHROMA_BASE}/{sm_col}/delete",
-                        {"ids": batch},
-                    )
+                    store.delete("semantic_memory", batch)
                     chroma_atoms_deleted += len(batch)
                 except Exception as e:
-                    print(f"chroma delete batch failed: {e}")
+                    print(f"delete batch failed: {e}")
 
     summary = {
         "contradictions_deleted": len(test_contra_ids),
