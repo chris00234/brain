@@ -33,6 +33,10 @@ from pydantic import BaseModel, Field
 from rate_limit import limiter
 from vector_store import get_vector_store
 
+# First-failure flag so hook telemetry bugs surface once in logs instead of
+# being silently swallowed on every request.
+_hook_metrics_warned = False
+
 router = APIRouter(dependencies=[Depends(verify_bearer)])
 
 
@@ -1458,3 +1462,17 @@ def recall_active(request: Request, req: RecallActiveRequest) -> dict:
             log.warning("hook latency recording failed (suppressing further)", exc_info=True)
             _hook_metrics_warned = True
     return result
+
+
+# ── Cache management ──────────────────────────────────
+def clear_caches() -> dict:
+    """Clear recall response + embedding caches. Called by /admin/embed_adapter
+    after a LoRA adapter swap so A/B comparisons do not serve stale results.
+    """
+    with _recall_cache_lock:
+        n1 = len(_recall_cache)
+        _recall_cache.clear()
+    with _recall_emb_lock:
+        n2 = len(_recall_embedding_cache)
+        _recall_embedding_cache.clear()
+    return {"recall_cache_cleared": n1, "embedding_cache_cleared": n2}

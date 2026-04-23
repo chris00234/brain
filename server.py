@@ -61,9 +61,7 @@ import time_decay as _time_decay  # noqa: E402
 from metrics_buffer import metrics_buffer as _metrics_buf  # noqa: E402
 from openclaw_dispatch import dispatch as _openclaw_dispatch  # noqa: E402
 
-# 2026-04-17 — first-failure flag so hook telemetry bugs surface once in logs
-# instead of being silently swallowed by bare `except: pass` on every request.
-_hook_metrics_warned = False
+# _hook_metrics_warned moved to brain_core/routes/recall.py (its only user)
 # ── Config ──────────────────────────────────────────────
 from config import (  # noqa: E402
     BRAIN_DIR,

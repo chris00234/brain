@@ -3,43 +3,18 @@
 from __future__ import annotations
 
 import json
-import os
-import time
 from datetime import datetime as _dt
 from datetime import timedelta as _td
 
-from api_deps import SERVER_START, _safe_http_detail, verify_bearer
+from api_deps import _safe_http_detail, verify_bearer
 from config import DISTILLED_DAILY
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(verify_bearer)])
 
 
-# ── Heartbeat (unauthenticated) ───────────────────────
-@router.get("/agent/heartbeat", tags=["liveness"])
-def agent_heartbeat() -> dict:
-    """Ultra-cheap unauthenticated heartbeat agents can poll."""
-    try:
-        from brain_core import config as _cfg
-
-        flags = {
-            "atoms_read": getattr(_cfg, "BRAIN_ATOMS_READ", False),
-            "self_rag": os.environ.get("BRAIN_SELF_RAG_ENABLED", "false").lower()
-            in ("1", "true", "yes", "on"),
-            "autopilot_killed": os.environ.get("BRAIN_AUTOPILOT_DISABLED", "").strip().lower()
-            in ("1", "true", "yes", "on"),
-        }
-    except Exception:
-        flags = {}
-    return {
-        "status": "ok",
-        "uptime_sec": int(time.time() - SERVER_START),
-        "features": flags,
-    }
-
-
-# ── Proactive (auth required) ─────────────────────────
-@router.get("/brain/proactive", tags=["decide"], dependencies=[Depends(verify_bearer)])
+# ── Proactive ─────────────────────────────────────────
+@router.get("/brain/proactive", tags=["decide"])
 def brain_proactive(severity: str | None = None, max_age_hours: int = 24) -> dict:
     """Returns current proactive insights/alerts."""
     try:
@@ -54,7 +29,7 @@ def brain_proactive(severity: str | None = None, max_age_hours: int = 24) -> dic
         raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e)) from e
 
 
-@router.post("/brain/proactive/{insight_id}/dismiss", tags=["decide"], dependencies=[Depends(verify_bearer)])
+@router.post("/brain/proactive/{insight_id}/dismiss", tags=["decide"])
 def dismiss_proactive(insight_id: str) -> dict:
     """Mark a proactive insight as acknowledged."""
     try:
@@ -66,7 +41,7 @@ def dismiss_proactive(insight_id: str) -> dict:
         raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e)) from e
 
 
-@router.get("/brain/insights", tags=["decide"], dependencies=[Depends(verify_bearer)])
+@router.get("/brain/insights", tags=["decide"])
 def brain_insights(days: int = Query(default=7, ge=1, le=30)) -> dict:
     """Return recent daily insights produced by proactive_linker."""
     insights_dir = DISTILLED_DAILY.parent / "insights"

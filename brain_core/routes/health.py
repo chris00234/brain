@@ -205,20 +205,13 @@ def admin_embed_adapter(req: EmbedAdapterRequest) -> dict:
             result = set_lora_adapter(str(resolved))
         else:
             result = set_lora_adapter(None)
-        # Best-effort cache invalidation — recall caches live in server.py still.
+        # Invalidate recall caches so A/B comparisons don't serve stale
+        # pre-adapter responses. Best-effort — failure here doesn't revert
+        # the adapter swap.
         try:
-            import sys as _sys
+            from routes.recall import clear_caches
 
-            server_mod = _sys.modules.get("__main__") or _sys.modules.get("server")
-            if server_mod is not None:
-                cache = getattr(server_mod, "_recall_cache", None)
-                if cache is not None:
-                    cache.clear()
-                emb_cache = getattr(server_mod, "_recall_embedding_cache", None)
-                emb_lock = getattr(server_mod, "_recall_emb_lock", None)
-                if emb_cache is not None and emb_lock is not None:
-                    with emb_lock:
-                        emb_cache.clear()
+            clear_caches()
         except Exception:  # noqa: S110 — best-effort cache invalidation
             pass
         return result
