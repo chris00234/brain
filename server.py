@@ -82,15 +82,37 @@ from indexer import (
 )
 from vector_store import get_vector_store  # noqa: E402
 from scheduler import brain_scheduler  # noqa: E402
-
-LISTEN_HOST = os.getenv("BRAIN_SERVER_HOST", "127.0.0.1")
-LISTEN_PORT = int(os.getenv("BRAIN_SERVER_PORT", "8791"))
+from api_deps import (  # noqa: E402
+    LISTEN_HOST,
+    LISTEN_PORT,
+    SERVER_START,
+    HealthResponse,
+    _current_secret,
+    _load_secret,
+    _log_failure,
+    _safe_http_detail,
+    prime_secret_cache,
+    verify_bearer,
+)
 
 PROFILE_CACHE_TTL = 60
 
 _py = PYTHON
 _bd = str(BRAIN_DIR)
 JOB_REGISTRY: dict[str, list[str]] = {
+    # Brain's outbound voice — daily digest to Chris via Jenna/Telegram.
+    "brain_speak_digest": [_py, f"{_bd}/brain_core/speak.py", "run"],
+    # Real-time urgent path: scan every 5 min for severity >= 7.5 observations
+    # and write to /tmp/.brain_doorbell.<sid>.jsonl for each active Claude Code
+    # session. claude_boot.sh reads + consumes those on the next turn.
+    "brain_speak_urgent": [_py, f"{_bd}/brain_core/speak.py", "urgent_scan"],
+    # Canonical staleness detector: daily scan of distilled/*.md for claims
+    # invalidated by the current code. Retires stale files and deletes
+    # corresponding Qdrant atoms so brain stops surfacing fixed bugs.
+    "canonical_staleness_check": [_py, f"{_bd}/brain_core/canonical_staleness.py"],
+    # Self-eval: nightly sample of recent /recall calls; measures top-3
+    # overlap drift when re-run. Surfaces via self_eval_drift_7d SLO.
+    "self_eval": [_py, f"{_bd}/brain_core/self_eval.py"],
     # Ingestion
     "personal_ingest": ["/bin/bash", f"{_bd}/ingest/run_personal.sh"],
     "gmail_ingest": [_py, f"{_bd}/ingest/gmail.py"],
@@ -99,6 +121,8 @@ JOB_REGISTRY: dict[str, list[str]] = {
     "obsidian_sync": [_py, f"{_bd}/ingest/obsidian.py", "pull"],
     "healthcheck": [_py, f"{_bd}/ingest/healthcheck.py"],
     "ghost_blog_ingest": [_py, f"{_bd}/ingest/ghost_blog.py"],
+    "kuma_heartbeats_ingest": [_py, f"{_bd}/ingest/kuma_heartbeats.py"],
+    "apple_health_ingest": [_py, f"{_bd}/ingest/apple_health.py"],
     # New data source ingest (agent-distilled)
     "openclaw_sessions_ingest": [_py, f"{_bd}/ingest/openclaw_sessions.py"],
     "openclaw_sessions_ingest_market": [
@@ -453,6 +477,10 @@ JOB_REGISTRY: dict[str, list[str]] = {
         f"import sys; sys.path.insert(0,'{_bd}/brain_core'); from memory_lifecycle import cleanup_supersession_chains; import json; print(json.dumps(cleanup_supersession_chains()))",
     ],
     "feedback_aggregate": [_py, f"{_bd}/brain_core/feedback_aggregator.py"],
+    "recall_outcome_label": [_py, f"{_bd}/brain_core/recall_outcome_labeler.py", "--hours", "24"],
+    "recall_judge": [_py, f"{_bd}/brain_core/recall_judge.py", "--sample", "30", "--hours", "24"],
+    "cross_agent_lessons": [_py, f"{_bd}/brain_core/cross_agent_lessons.py", "--hours", "48"],
+    "prompt_survival_report": [_py, f"{_bd}/brain_core/prompt_attribution.py", "--days", "7"],
     "entity_resolution": [_py, f"{_bd}/pipeline/entity_resolution.py", "--apply"],
     "neo4j_backup": [_py, f"{_bd}/cli/backup_neo4j.py"],
     # Backup (also runs via independent launchd plist as a failure-domain safety net)
@@ -462,6 +490,7 @@ JOB_REGISTRY: dict[str, list[str]] = {
     # Invoke directly: python brain_core/pipeline/reembed_migrator.py <collection_name>
     "proactive_insights": [_py, f"{_bd}/brain_core/pipeline/proactive_linker.py"],
     "skill_extract": [_py, f"{_bd}/brain_core/pipeline/skill_extractor.py"],
+    "skill_sync": [_py, f"{_bd}/cli/skill_sync.py"],
     "memory_nudge": [_py, f"{_bd}/brain_core/pipeline/memory_nudge.py"],
     "memory_consolidation": [_py, f"{_bd}/brain_core/pipeline/memory_consolidation.py"],
     # Phase N4 — CLS sleep consolidation pipeline
@@ -508,7 +537,18 @@ JOB_REGISTRY: dict[str, list[str]] = {
     # LoRA fine-tuning — manual trigger only, behind BRAIN_FINETUNE_ENABLED flag.
     # Must run in the brain venv since sentence-transformers/peft/torch are only
     # installed there, not in the system Python.
-    "embed_finetune": [f"{_bd}/.venv/bin/python3", f"{_bd}/cli/brain_finetune.py"],
+    # Writes candidate adapter to models/adapters/lora_v_candidate/ so the
+    # weekly lora_ab_gate can find it (it defaults to that path). Prior to
+    # 2026-04-23 this called brain_finetune with no args, inheriting its
+    # default output=lora_v1 — which clobbered the live adapter AND never
+    # produced a candidate for the gate, so the weekly A/B loop silently
+    # skipped for weeks. Audit surfaced in 2026-04-23 session.
+    "embed_finetune": [
+        f"{_bd}/.venv/bin/python3",
+        f"{_bd}/cli/brain_finetune.py",
+        "--output",
+        f"{_bd}/models/adapters/lora_v_candidate",
+    ],
     # Infra validation + health reports
     "infra_validation": [_py, f"{_bd}/brain_core/maintenance.py", "validate_infra"],
     "memory_health_report": [
@@ -527,17 +567,7 @@ _running_jobs: dict[str, subprocess.Popen] = {}
 _running_jobs_lock = threading.Lock()
 _CRITICAL_JOBS = {"personal_ingest", "backup", "canonical_pipeline", "reindex"}
 
-SERVER_START = time.time()
-
-
 # ── Pydantic models ─────────────────────────────────────
-class HealthResponse(BaseModel):
-    status: Literal["ok"] = "ok"
-    service: str = "brain-server"
-    port: int = LISTEN_PORT
-    uptime_sec: int
-
-
 class MetricsResponse(BaseModel):
     collection_counts: dict[str, int]
     total_chunks: int
@@ -886,147 +916,10 @@ class BrainIngestRequest(BaseModel):
 
 
 # ── Caches ──────────────────────────────────────────────
-class ProfileCache:
-    def __init__(self, paths: list[Path] | Path, ttl_seconds: int = 60):
-        # Accept single Path (legacy) or list of Paths (identity + state split).
-        self.paths: list[Path] = paths if isinstance(paths, list) else [paths]
-        self.ttl = ttl_seconds
-        self._lock = threading.Lock()
-        self._content: str | None = None
-        self._mtimes: tuple[float, ...] = ()
-        self._last_check: float = 0.0
-
-    def get(self) -> str | None:
-        with self._lock:
-            now = time.time()
-            if self._content is not None and (now - self._last_check) < self.ttl:
-                return self._content
-            existing = [p for p in self.paths if p.exists()]
-            if not existing:
-                return None
-            current_mtimes = tuple(p.stat().st_mtime for p in existing)
-            if self._content is None or current_mtimes != self._mtimes:
-                parts = [p.read_text() for p in existing]
-                self._content = "\n\n".join(parts)
-                self._mtimes = current_mtimes
-            self._last_check = now
-            return self._content
-
-    def section(self, name: str) -> str | None:
-        full = self.get()
-        if not full:
-            return None
-        target = name.replace("_", " ").lower()
-        out_lines: list[str] = []
-        capturing = False
-        # Walk every line; strip frontmatter blocks inline so concatenated files parse correctly.
-        in_frontmatter = False
-        for line in full.splitlines():
-            stripped = line.strip()
-            if stripped.startswith("---"):
-                in_frontmatter = not in_frontmatter
-                continue
-            if in_frontmatter:
-                continue
-            if stripped.startswith("## "):
-                if capturing:
-                    break
-                if stripped[3:].strip().lower().startswith(target):
-                    capturing = True
-                    out_lines.append(line)
-                    continue
-            if capturing:
-                out_lines.append(line)
-        return "\n".join(out_lines).strip() if out_lines else None
-
-
-_profile_cache = ProfileCache([IDENTITY_FILE, STATE_FILE], ttl_seconds=PROFILE_CACHE_TTL)
+from profile_cache import profile_cache as _profile_cache  # noqa: E402
 
 
 # ── Helpers ─────────────────────────────────────────────
-_cached_secret: str | None = None
-# 2026-04-18: track mtime so we can detect rotation without reading on every
-# request. Previously the secret was loaded once at startup and the server kept
-# accepting the OLD secret indefinitely after rotation (and rejecting the new
-# one until the daemon was restarted — the opposite of expected behavior).
-_cached_secret_mtime: float = 0.0
-
-
-def _load_secret() -> str | None:
-    if not SECRET_FILE.exists():
-        return None
-    return SECRET_FILE.read_text().strip()
-
-
-def _current_secret() -> str | None:
-    """Return the current bearer secret, auto-reloading if the file changed.
-
-    Cheap mtime check (one stat syscall, ~μs) so /recall/v2 hot path pays
-    almost nothing when the file hasn't rotated.
-    """
-    global _cached_secret, _cached_secret_mtime
-    try:
-        mtime = SECRET_FILE.stat().st_mtime
-    except FileNotFoundError:
-        _cached_secret = None
-        _cached_secret_mtime = 0.0
-        return None
-    if mtime != _cached_secret_mtime:
-        _cached_secret = _load_secret()
-        _cached_secret_mtime = mtime
-    return _cached_secret
-
-
-def _safe_http_detail(kind: str, exc: Exception, *, route: str = "?") -> str:
-    """Return a user-safe HTTPException detail string.
-
-    Logs the full exception server-side with an err_id; callers embed the
-    err_id in the returned message so Chris can correlate. Internal details
-    (SQL schema, file paths, stack frames, secrets embedded in error text)
-    never reach the HTTP response.
-
-    Usage:
-        raise HTTPException(
-            status_code=502,
-            detail=_safe_http_detail("chroma get", e, route=request.url.path),
-        )
-    """
-    import uuid as _uuid
-
-    err_id = _uuid.uuid4().hex[:12]
-    try:
-        log.warning(
-            "HTTP error kind=%s route=%s err_id=%s exc_type=%s exc=%s",
-            kind,
-            route,
-            err_id,
-            type(exc).__name__,
-            str(exc)[:500],
-        )
-    except Exception:
-        pass
-    return f"{kind} failed (err_id={err_id})"
-
-
-def _log_failure(reason: str, route: str = "?") -> None:
-    try:
-        FAILURE_LOG.parent.mkdir(parents=True, exist_ok=True)
-        with FAILURE_LOG.open("a") as f:
-            f.write(
-                json.dumps(
-                    {
-                        "timestamp": datetime.now(UTC).isoformat(),
-                        "route": route,
-                        "reason": reason[:500],
-                    },
-                    ensure_ascii=False,
-                )
-                + "\n"
-            )
-    except Exception:
-        pass
-
-
 def _get_collection_counts() -> dict[str, int]:
     """Per-collection row counts via the VectorStore abstraction."""
     try:
@@ -1078,20 +971,7 @@ def _write_inbox(source_type: str, payload: dict) -> Path:
     return out
 
 
-# ── Auth dependency ─────────────────────────────────────
-def verify_bearer(authorization: Annotated[str | None, Header()] = None) -> None:
-    """Auth dependency injected into every protected route. /healthz and /docs skip this."""
-    # 2026-04-18: use mtime-aware reload so rotation takes effect without a
-    # daemon restart. The stat() is sub-millisecond; no impact on hot path.
-    secret = _current_secret()
-    if not secret:
-        _log_failure("server has no secret configured")
-        raise HTTPException(status_code=503, detail="server misconfigured")
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="missing bearer token")
-    provided = authorization[len("Bearer ") :].strip()
-    if not hmac.compare_digest(provided, secret):
-        raise HTTPException(status_code=401, detail="invalid bearer token")
+# ── Auth dependency ── moved to brain_core/api_deps.py (verify_bearer imported above)
 
 
 # ── App ─────────────────────────────────────────────────
@@ -1200,9 +1080,20 @@ async def lifespan(app: FastAPI):
         )
     except Exception as e:
         log.warning("metrics_persist_register_failed", error=str(e))
-    global _cached_secret
-    _cached_secret = _load_secret()
+    prime_secret_cache()
     _prewarm_caches()
+    # Start the brain_loop wake watcher so /tmp/.brain_loop_wake file touches
+    # fire a tick subprocess within ~50ms. attention.enqueue + coding_events
+    # outcome writes touch that file on important events. Without this the
+    # watcher daemon never starts (brain_loop_tick runs as an ephemeral
+    # subprocess, so an in-process-only watcher wouldn't persist).
+    try:
+        from brain_core.brain_loop import _ensure_wake_watcher as _start_wake_watcher
+
+        _start_wake_watcher()
+        log.info("brain_loop_wake_watcher_started")
+    except Exception as e:
+        log.warning("wake_watcher_start_failed", error=str(e))
     # Warm the real cross-encoder (BGE-reranker-base) if enabled so the first
     # /recall/v2 call doesn't eat the 2-5s cold model load. Runs in a background
     # thread so startup doesn't block on model download.
@@ -1247,50 +1138,12 @@ app = FastAPI(
 # Defends against token-leak runaway (hardest gap in the commercial-bar audit:
 # /learn dispatches openclaw LLM calls; an unbounded loop bills real money).
 # Disable in tests via BRAIN_RATE_LIMIT_DISABLED=1.
-from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
-from slowapi.util import get_remote_address
 
-_rate_limit_disabled = os.getenv("BRAIN_RATE_LIMIT_DISABLED", "").lower() in ("1", "true", "yes")
+from rate_limit import limiter  # shared instance for route modules
 
-
-def _rate_limit_key(request: Request) -> str:
-    """Bearer-token-keyed rate limiting (M7-WS7 C1 fix).
-
-    Threat model: external token leak ⇒ unbounded LLM cost. Brain runs behind
-    nginx in OrbStack and is reached via Cloudflare tunnel — every external
-    request lands at uvicorn with `request.client.host == "127.0.0.1"` because
-    we don't run a `forwarded_allow_ips` proxy header chain. Keying on client
-    IP would give EVERY tunnel request a free pass, which is what was
-    happening before this fix.
-
-    The right key is the bearer token itself (which is also the principal
-    being rate-limited). We only hash the first 16 hex chars to keep the key
-    space bounded and avoid leaking the secret into log buckets.
-
-    Anonymous requests (no Authorization header, e.g. /healthz) fall back to
-    client IP — fine because /healthz is unauth and not LLM-billable.
-    """
-    auth = request.headers.get("authorization", "")
-    if auth.lower().startswith("bearer "):
-        token = auth[7:].strip()
-        if token:
-            # 16 hex chars = 64 bits of bucket distinguishability — enough
-            # for a single-user brain, doesn't expose the actual secret.
-            return f"bearer:{hashlib.sha256(token.encode()).hexdigest()[:16]}"
-    return get_remote_address(request) or "anon"
-
-
-limiter = Limiter(
-    key_func=_rate_limit_key,
-    enabled=not _rate_limit_disabled,
-    default_limits=["1000/minute"],  # global ceiling; per-route overrides below
-    headers_enabled=False,  # informational X-RateLimit-* injection requires every
-    # rate-limited route to return Response; our routes
-    # return dict + Pydantic models, so we keep just the
-    # 429 enforcement on breach.
-)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(SlowAPIMiddleware)
@@ -1395,12 +1248,7 @@ async def _request_id_and_metrics_middleware(request, call_next):
         _request_id_ctx.reset(token)
 
 
-# ── Routes: liveness ────────────────────────────────────
-@app.get("/healthz", response_model=HealthResponse, tags=["liveness"])
-def healthz() -> HealthResponse:
-    """Liveness probe — no auth required."""
-    return HealthResponse(uptime_sec=int(time.time() - SERVER_START))
-
+# ── Routes: liveness ── moved to brain_core/routes/liveness.py (include_router below)
 
 # ── Routes: metrics ─────────────────────────────────────
 @app.get("/metrics", response_model=MetricsResponse, tags=["metrics"], dependencies=[Depends(verify_bearer)])
@@ -1459,33 +1307,67 @@ def metrics() -> MetricsResponse:
     )
 
 
+@app.get(
+    "/metrics/prom",
+    response_class=PlainTextResponse,
+    tags=["metrics"],
+    dependencies=[Depends(verify_bearer)],
+)
+def metrics_prom() -> str:
+    """Prometheus exposition format — latency percentiles + counters as
+    gauges. Not a full histogram (backing store is reservoir-sampled p50/
+    p95/p99, not bucketed), so this is a gauge-style expose — sufficient
+    for Grafana scrapers / dashboards that only need the percentile values.
+    Reusing the existing _metrics_buf snapshot, no extra bookkeeping.
+    """
+    buf = _metrics_buf.snapshot()
+    lines: list[str] = []
+
+    def _sanitize(label: str) -> str:
+        return (
+            label.replace("\\", "\\\\")
+            .replace('"', '\\"')
+            .replace("\n", " ")
+        )
+
+    lines.append("# HELP brain_route_latency_ms Route latency percentiles (from in-memory reservoir)")
+    lines.append("# TYPE brain_route_latency_ms gauge")
+    for path, stats in (buf.get("routes") or {}).items():
+        p = _sanitize(path)
+        for quantile in ("p50_ms", "p95_ms", "p99_ms"):
+            v = stats.get(quantile, 0) or 0
+            lines.append(f'brain_route_latency_ms{{path="{p}",quantile="{quantile[:-3]}"}} {float(v)}')
+        lines.append(f'brain_route_count{{path="{p}"}} {int(stats.get("count", 0) or 0)}')
+        lines.append(f'brain_route_errors{{path="{p}"}} {int(stats.get("errors", 0) or 0)}')
+
+    lines.append("# HELP brain_phase_latency_ms Phase-level latency percentiles")
+    lines.append("# TYPE brain_phase_latency_ms gauge")
+    for phase, stats in (buf.get("phase_latency") or {}).items():
+        p = _sanitize(phase)
+        for quantile in ("p50_ms", "p95_ms", "p99_ms"):
+            v = stats.get(quantile, 0) or 0
+            lines.append(f'brain_phase_latency_ms{{phase="{p}",quantile="{quantile[:-3]}"}} {float(v)}')
+
+    lines.append("# HELP brain_memory_writes_1h Count of memory writes in last hour")
+    lines.append("# TYPE brain_memory_writes_1h gauge")
+    lines.append(f'brain_memory_writes_1h {int(buf.get("memory_writes_1h", 0) or 0)}')
+
+    dispatch = buf.get("dispatch") or {}
+    lines.append("# HELP brain_dispatch Dispatch totals")
+    lines.append("# TYPE brain_dispatch counter")
+    for key in ("attempts", "successes", "failures", "rate_limited", "auth_failed"):
+        lines.append(f'brain_dispatch{{outcome="{key}"}} {int(dispatch.get(key, 0) or 0)}')
+
+    lines.append(f'brain_uptime_seconds {int(time.time() - SERVER_START)}')
+    return "\n".join(lines) + "\n"
+
+
 @app.get("/collections", tags=["metrics"], dependencies=[Depends(verify_bearer)])
 def collections() -> dict[str, int]:
     return _get_collection_counts()
 
 
-# ── Routes: profile ─────────────────────────────────────
-@app.get(
-    "/profile", response_class=PlainTextResponse, tags=["profile"], dependencies=[Depends(verify_bearer)]
-)
-def profile() -> str:
-    content = _profile_cache.get()
-    if content is None:
-        raise HTTPException(status_code=404, detail="profile not found")
-    return content
-
-
-@app.get(
-    "/profile/section/{name}",
-    response_class=PlainTextResponse,
-    tags=["profile"],
-    dependencies=[Depends(verify_bearer)],
-)
-def profile_section(name: Annotated[str, PathParam()]) -> str:
-    content = _profile_cache.section(name)
-    if content is None:
-        raise HTTPException(status_code=404, detail=f"section '{name}' not found")
-    return content
+# ── Routes: profile ── moved to brain_core/routes/profile.py
 
 
 # ── Routes: recall ──────────────────────────────────────
@@ -2518,13 +2400,25 @@ def recall_v2(
         try:
             from brain_core.atoms_store import insert_action_audit as _iaa
 
+            # Normalize ids to dashed UUID form so downstream readers
+            # (recall_judge, contradiction propagation, audit dashboards) can
+            # round-trip them back to Qdrant points. The recall result builder
+            # was emitting hex32 (UUID with dashes stripped); writing those
+            # raw left the audit rows opaque and unmappable.
+            def _to_dashed_uuid(raw: str) -> str:
+                if not raw:
+                    return raw
+                if len(raw) == 32 and "-" not in raw and all(c in "0123456789abcdef" for c in raw.lower()):
+                    return f"{raw[:8]}-{raw[8:12]}-{raw[12:16]}-{raw[16:20]}-{raw[20:]}"
+                return raw
+
             _iaa(
                 route="/recall/v2",
                 tool="brain_recall",
                 actor=agent,
                 query_text=q[:500],
                 retrieved_chroma_ids=[
-                    str(r.get("id") or r.get("chroma_id") or "")[:64]
+                    _to_dashed_uuid(str(r.get("id") or r.get("chroma_id") or ""))[:64]
                     for r in fused[:n]
                     if r.get("id") or r.get("chroma_id")
                 ][:20],
@@ -2691,59 +2585,6 @@ def recall_batch(request: Request, req: RecallBatchRequest) -> dict:
             except Exception as e:
                 out.append({"query": futures[fut], "error": str(e)[:200]})
     return {"results": out, "count": len(out)}
-
-
-class MemoryBatchRequest(BaseModel):
-    items: list[dict] = Field(..., max_length=50, min_length=1)
-
-
-@app.post("/memory/batch", tags=["memory"], dependencies=[Depends(verify_bearer)])
-@limiter.limit("60/minute")
-def memory_batch(request: Request, req: MemoryBatchRequest) -> dict:
-    """Batch memory store — up to 50 memories per request.
-
-    Each item must match the /memory shape: {content, category, agent, source}.
-    Returns a list of `{id, status}` mirroring the request order, with
-    any per-item errors reported inline rather than failing the batch.
-    Calls learn.embed_and_store with the list shape (memories, source, agent).
-    """
-    from learn import embed_and_store as _store  # type: ignore
-
-    # Group items by (agent, source) so each call matches the expected shape.
-    groups: dict[tuple[str, str], list[tuple[int, dict]]] = {}
-    results: list[dict] = [None] * len(req.items)  # type: ignore
-    for i, item in enumerate(req.items):
-        content = str(item.get("content", "")).strip()
-        if not content:
-            results[i] = {"index": i, "status": "error", "reason": "empty content"}
-            continue
-        agent = str(item.get("agent", "unknown"))[:64]
-        source = str(item.get("source", "batch"))[:64]
-        category = str(item.get("category", "fact"))[:32]
-        groups.setdefault((agent, source), []).append((i, {"content": content, "category": category}))
-
-    for (agent, source), batch in groups.items():
-        memories_payload = [b[1] for b in batch]
-        try:
-            stored = _store(memories=memories_payload, source=source, agent=agent) or []
-            for pos, (original_i, _) in enumerate(batch):
-                entry = stored[pos] if pos < len(stored) else None
-                if entry and isinstance(entry, dict):
-                    results[original_i] = {
-                        "index": original_i,
-                        "id": entry.get("id") or entry.get("memory_id"),
-                        "status": "stored",
-                    }
-                else:
-                    results[original_i] = {"index": original_i, "status": "stored"}
-        except Exception as e:
-            for original_i, _ in batch:
-                results[original_i] = {
-                    "index": original_i,
-                    "status": "error",
-                    "reason": str(e)[:200],
-                }
-    return {"results": results, "count": len(results)}
 
 
 @app.get("/agent/heartbeat", tags=["liveness"])
@@ -3110,37 +2951,7 @@ def recall_active(request: Request, req: RecallActiveRequest) -> dict:
     return result
 
 
-# ── Routes: /brain/reason/multihop — LangGraph-style multi-hop reasoning ──
-class MultiHopReasonRequest(BaseModel):
-    question: str = Field(..., min_length=5, max_length=1000)
-    max_hops: int = Field(default=5, ge=1, le=5)
-
-
-@app.post("/brain/reason/multihop", tags=["recall"], dependencies=[Depends(verify_bearer)])
-@limiter.limit("10/minute")  # M7-WS7 H2: LLM dispatch — token-cost guard
-def brain_reason_multihop(request: Request, req: MultiHopReasonRequest):
-    """Multi-hop reasoning with LangGraph-style checkpoints."""
-    try:
-        import reasoning_loop
-
-        result = reasoning_loop.run_reasoning(req.question, max_hops=req.max_hops)
-        return result
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=_safe_http_detail("reasoning", e))
-
-
-@app.post("/brain/reason/multihop/{thread_id}/resume", tags=["recall"], dependencies=[Depends(verify_bearer)])
-@limiter.limit("10/minute")  # M7-WS7 H2: LLM dispatch — token-cost guard
-def brain_reason_multihop_resume(request: Request, thread_id: Annotated[str, PathParam()]):
-    """Resume a reasoning thread from last checkpoint."""
-    try:
-        import reasoning_loop
-
-        return reasoning_loop.resume_reasoning(thread_id)
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=_safe_http_detail("resume", e))
+# ── Routes: /brain/reason/multihop ── moved to brain_core/routes/reasoning.py
 
 
 # ── Routes: /chris/think — decision endpoint in Chris's first-person voice ──
@@ -3337,74 +3148,9 @@ def chris_think(req: ThinkRequest, background: BackgroundTasks = None) -> ThinkR
     return response
 
 
-@app.get("/boot-context/{agent}", tags=["recall"], dependencies=[Depends(verify_bearer)])
-def boot_ctx(agent: Annotated[str, PathParam()], n: int = 3) -> dict:
-    sections = boot_context.build_boot_context(agent, n)
-    return {"agent": agent, "sections": sections}
+# boot-context routes moved to brain_core/routes/reasoning.py
 
-
-@app.post("/boot-context/flush", tags=["recall"], dependencies=[Depends(verify_bearer)])
-def boot_ctx_flush() -> dict:
-    boot_context.flush_cache()
-    return {"status": "ok", "message": "boot context cache flushed"}
-
-
-# ── Routes: synthesis read ──────────────────────────────
-# Validation patterns for synthesis target params. These prevent path
-# traversal: the target is interpolated into a file path, so any "..", "/",
-# or unexpected char could let an authenticated caller read files outside
-# the synthesis dir (e.g., canonical profile).
-_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-_WEEK_RE = re.compile(r"^\d{4}-W\d{2}$")
-_MONTH_RE = re.compile(r"^\d{4}-\d{2}$")
-
-
-@app.get(
-    "/synthesis/daily",
-    response_class=PlainTextResponse,
-    tags=["synthesis"],
-    dependencies=[Depends(verify_bearer)],
-)
-def synthesis_daily(date: str | None = None) -> str:
-    target = date or datetime.now().strftime("%Y-%m-%d")
-    if not _DATE_RE.match(target):
-        raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD")
-    f = DISTILLED_DAILY / f"{target}.md"
-    if not f.exists():
-        raise HTTPException(status_code=404, detail=f"no daily synthesis for {target}")
-    return f.read_text()
-
-
-@app.get(
-    "/synthesis/weekly",
-    response_class=PlainTextResponse,
-    tags=["synthesis"],
-    dependencies=[Depends(verify_bearer)],
-)
-def synthesis_weekly(week: str | None = None) -> str:
-    target = week or datetime.now().strftime("%G-W%V")
-    if not _WEEK_RE.match(target):
-        raise HTTPException(status_code=400, detail="week must be YYYY-Www")
-    f = WEEKLY_DIR / f"{target}.md"
-    if not f.exists():
-        raise HTTPException(status_code=404, detail=f"no weekly arc for {target}")
-    return f.read_text()
-
-
-@app.get(
-    "/synthesis/monthly",
-    response_class=PlainTextResponse,
-    tags=["synthesis"],
-    dependencies=[Depends(verify_bearer)],
-)
-def synthesis_monthly(month: str | None = None) -> str:
-    target = month or datetime.now().strftime("%Y-%m")
-    if not _MONTH_RE.match(target):
-        raise HTTPException(status_code=400, detail="month must be YYYY-MM")
-    f = MONTHLY_DIR / f"{target}.md"
-    if not f.exists():
-        raise HTTPException(status_code=404, detail=f"no monthly arc for {target}")
-    return f.read_text()
+# ── Routes: synthesis read ── moved to brain_core/routes/synthesis.py
 
 
 # ── Routes: capture (POST) ──────────────────────────────
@@ -3457,7 +3203,385 @@ def capture_generic(source_type: Annotated[str, PathParam()], payload: CaptureRe
     data = payload.model_dump(exclude_none=True)
     data["_received_at"] = datetime.now(UTC).isoformat()
     out = _write_inbox(source_type, data)
+
+    # coding_event: also push to raw_events immediately so it's retrievable
+    # via /recall within seconds instead of waiting for the 3x-daily
+    # canonical_pipeline run. Synthesizes a short human-readable text from
+    # the structured payload so raw_events_fts indexes meaningful tokens.
+    if source_type == "coding_event":
+        try:
+            from atoms_store import insert_raw_event as _insert_raw_event
+
+            tool = str(data.get("tool", ""))
+            fp = str(data.get("file_path", ""))
+            old_p = str(data.get("old_preview", ""))[:200]
+            new_p = str(data.get("new_preview", ""))[:200]
+            success = "ok" if data.get("success", True) else "failed"
+            fts_text = " ".join(filter(None, [
+                f"{tool} on {fp}",
+                f"session={data.get('session_id', '')}",
+                f"cwd={data.get('cwd', '')}",
+                f"status={success}",
+                f"old:{old_p}" if old_p else "",
+                f"new:{new_p}" if new_p else "",
+            ]))
+            _insert_raw_event(
+                event_id=out.stem,
+                content=fts_text,
+                timestamp=data.get("ts", datetime.now(UTC).isoformat()),
+                source_type="coding_event",
+                source_ref=f"claude:{tool}",
+                actor="claude",
+                visibility="private",
+                scrub_status="scrubbed",
+                json_path=str(out),
+            )
+            # Chain-based outcome classification: if a prior coding_event
+            # touched this same file in the last 2h and didn't have an
+            # outcome yet, decide whether this new edit means the prior was
+            # refined / reverted / superseded. Fire-and-forget; never blocks
+            # capture, never raises.
+            try:
+                from coding_events import classify_on_new_event
+
+                classify_on_new_event({
+                    "id": out.stem,
+                    "file_path": fp,
+                    "tool": tool,
+                    "old": old_p,
+                    "new": new_p,
+                    "timestamp": data.get("ts"),
+                })
+            except Exception as exc:
+                log.debug("coding_event outcome classify failed: %s", exc)
+        except Exception as exc:
+            log.debug("coding_event raw_events insert failed: %s", exc)
+
     return CaptureResponse(stored=out.name, kind=source_type)
+
+
+# ── Routes: /brain/speak — brain's outbound voice ────────
+@app.post(
+    "/brain/speak/run",
+    tags=["speak"],
+    dependencies=[Depends(verify_bearer)],
+)
+def speak_run(dry_run: bool = False, bypass_dedup: bool = False) -> dict:
+    """Run all drives, compose the digest, send via Telegram if non-empty.
+
+    The daily cron (brain_speak_digest, 14:55 UTC) uses the CLI form. This
+    endpoint lets us trigger on demand (/jobs/brain_speak_digest also works
+    but this returns the composed body directly for inspection).
+    """
+    try:
+        from speak import run_digest
+
+        return run_digest(dry_run=dry_run, bypass_dedup=bypass_dedup)
+    except Exception as exc:
+        log.warning("speak_run failed: %s", exc)
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", exc)) from exc
+
+
+@app.get(
+    "/brain/speak/history",
+    tags=["speak"],
+    dependencies=[Depends(verify_bearer)],
+)
+def speak_history(limit: int = 20) -> dict:
+    try:
+        from speak import recent_history
+
+        return {"items": recent_history(limit=limit)}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", exc)) from exc
+
+
+@app.post(
+    "/brain/speak/ack/{entry_id}",
+    tags=["speak"],
+    dependencies=[Depends(verify_bearer)],
+)
+def speak_ack(entry_id: Annotated[str, PathParam()], verdict: str) -> dict:
+    """Record Chris's feedback on a digest entry: useful / noise / ignore."""
+    try:
+        from speak import ack as _ack
+
+        ok = _ack(entry_id, verdict)
+        if not ok:
+            raise HTTPException(status_code=404, detail="entry not found or bad verdict")
+        return {"ok": True, "entry_id": entry_id, "verdict": verdict}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", exc)) from exc
+
+
+@app.post(
+    "/brain/speak/urgent",
+    tags=["speak"],
+    dependencies=[Depends(verify_bearer)],
+)
+def speak_urgent() -> dict:
+    """Fire the urgent doorbell path on demand.
+
+    Same code path as the 5-min cron job. Returns fired/skipped stats.
+    Useful for forcing brain to reevaluate + push urgent messages right
+    after major state changes (e.g. after a big ingest batch).
+    """
+    try:
+        from speak import urgent_scan
+
+        return urgent_scan()
+    except Exception as exc:
+        log.warning("urgent scan failed: %s", exc)
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", exc)) from exc
+
+
+@app.get(
+    "/brain/speak/drives",
+    tags=["speak"],
+    dependencies=[Depends(verify_bearer)],
+)
+def speak_drives() -> dict:
+    """Dry-inspect every drive's current observations. Doesn't send."""
+    try:
+        from speak import collect_observations
+
+        obs = collect_observations()
+        return {
+            "count": len(obs),
+            "observations": [
+                {
+                    "drive": o.drive,
+                    "category": o.category,
+                    "severity": o.severity,
+                    "message": o.message,
+                    "dedup_key": o.dedup_key,
+                }
+                for o in obs
+            ],
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", exc)) from exc
+
+
+# ── Routes: /brain/command — brain originates work items ────
+class BrainCommandRequest(BaseModel):
+    to_agent: str = Field(..., description="Target agent: jenna | liz | ellie | sage | market")
+    content: str = Field(..., description="The instruction/work item body")
+    message_type: str = Field("task", description="info | task | question | alert")
+    priority: int = Field(5, ge=1, le=10, description="1=urgent, 10=background")
+    reason: str | None = Field(None, description="Why brain decided this — for audit trail")
+
+
+_BRAIN_COMMAND_AGENTS = {"jenna", "liz", "ellie", "sage", "market"}
+
+
+@app.post(
+    "/brain/command",
+    tags=["agency"],
+    dependencies=[Depends(verify_bearer)],
+)
+def brain_command(payload: BrainCommandRequest) -> dict:
+    """Brain issues a work item to an OpenClaw agent.
+
+    Before today brain could only be queried. This is the outbound authority
+    channel — brain observes (via drives/synthesis_drive) a pattern that
+    warrants action, and enqueues the work item to Jenna (or whichever agent
+    owns the domain). Jenna's session picks it up via get_pending_messages
+    on next boot, executes or relays to Chris.
+
+    Audit: every command is atom-logged so we can later ask "what did brain
+    decide to do this week?".
+    """
+    if payload.to_agent not in _BRAIN_COMMAND_AGENTS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"to_agent must be one of {sorted(_BRAIN_COMMAND_AGENTS)}",
+        )
+    if not payload.content.strip():
+        raise HTTPException(status_code=400, detail="content required")
+
+    try:
+        from agent_messenger import send_message
+
+        body = payload.content.strip()
+        if payload.reason:
+            body += f"\n\n[brain reasoning]: {payload.reason}"
+        msg = send_message(
+            from_agent="brain",
+            to_agent=payload.to_agent,
+            content=body,
+            message_type=payload.message_type,
+            priority=payload.priority,
+            metadata={"origin": "brain/command", "reason": payload.reason or ""},
+        )
+        # Audit trail via atoms layer (best-effort, enabled flag checked inside)
+        try:
+            from atoms_store import insert_raw_event as _insert_raw_event
+
+            _insert_raw_event(
+                event_id=f"brain_command_{msg['id']}",
+                content=f"brain -> {payload.to_agent}: {body[:400]}",
+                timestamp=msg["created_at"],
+                source_type="brain_command",
+                source_ref=f"brain:{msg['id']}",
+                actor="brain",
+                visibility="private",
+                scrub_status="scrubbed",
+            )
+        except Exception as exc:
+            log.debug("brain_command atom write failed: %s", exc)
+
+        return {"ok": True, "message_id": msg["id"], "action": msg.get("_action", "stored")}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.warning("brain_command failed: %s", exc)
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", exc)) from exc
+
+
+@app.get(
+    "/brain/command/history",
+    tags=["agency"],
+    dependencies=[Depends(verify_bearer)],
+)
+def brain_command_history(limit: int = 30) -> dict:
+    """Recent brain-originated commands — what brain has decided to do."""
+    try:
+        import sqlite3 as _sqlite3
+
+        with _sqlite3.connect(str(BRAIN_DIR / "logs" / "autonomy.db")) as conn:
+            conn.row_factory = _sqlite3.Row
+            rows = conn.execute(
+                "SELECT id, to_agent, content, message_type, priority, status, created_at, delivered_at "
+                "FROM messages WHERE from_agent='brain' "
+                "ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return {"items": [dict(r) for r in rows]}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", exc)) from exc
+
+
+@app.get(
+    "/brain/command/pending",
+    tags=["agency"],
+    dependencies=[Depends(verify_bearer)],
+)
+def brain_command_pending(to_agent: str | None = None) -> dict:
+    """Unfinished brain-originated commands. Agents hitting this endpoint
+    see what brain has asked them to do. Used by OpenClaw session boot to
+    pull brain's work items."""
+    try:
+        import sqlite3 as _sqlite3
+
+        with _sqlite3.connect(str(BRAIN_DIR / "logs" / "autonomy.db")) as conn:
+            conn.row_factory = _sqlite3.Row
+            if to_agent:
+                rows = conn.execute(
+                    "SELECT id, to_agent, content, message_type, priority, status, created_at "
+                    "FROM messages WHERE from_agent='brain' AND to_agent=? "
+                    "  AND status IN ('pending', 'in_progress') "
+                    "ORDER BY priority ASC, created_at ASC",
+                    (to_agent,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT id, to_agent, content, message_type, priority, status, created_at "
+                    "FROM messages WHERE from_agent='brain' "
+                    "  AND status IN ('pending', 'in_progress') "
+                    "ORDER BY priority ASC, created_at ASC"
+                ).fetchall()
+        return {"count": len(rows), "items": [dict(r) for r in rows]}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", exc)) from exc
+
+
+class BrainCommandAck(BaseModel):
+    status: str = Field(..., description="received | in_progress | done | rejected")
+    note: str | None = Field(None, description="Agent's note / outcome summary")
+    agent: str = Field(..., description="Acking agent — must match to_agent on the message")
+
+
+@app.post(
+    "/brain/command/{message_id}/ack",
+    tags=["agency"],
+    dependencies=[Depends(verify_bearer)],
+)
+def brain_command_ack(
+    message_id: Annotated[str, PathParam()],
+    payload: BrainCommandAck,
+) -> dict:
+    """Agent acks a brain-originated command. Closes the loop so brain can
+    tell what was heard vs. completed. Writes into the existing messages
+    table (status column) and logs to action_audit for history."""
+    if payload.status not in ("received", "in_progress", "done", "rejected"):
+        raise HTTPException(
+            status_code=400,
+            detail="status must be one of: received | in_progress | done | rejected",
+        )
+    try:
+        import sqlite3 as _sqlite3
+
+        with _sqlite3.connect(str(BRAIN_DIR / "logs" / "autonomy.db")) as conn:
+            conn.row_factory = _sqlite3.Row
+            row = conn.execute(
+                "SELECT from_agent, to_agent FROM messages WHERE id=?",
+                (message_id,),
+            ).fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="message not found")
+            if row["from_agent"] != "brain":
+                raise HTTPException(status_code=400, detail="not a brain-originated command")
+            if row["to_agent"] != payload.agent:
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"only {row['to_agent']} can ack this message",
+                )
+            now_iso = datetime.now(UTC).isoformat(timespec="seconds")
+            new_status = {
+                "received": "delivered",
+                "in_progress": "in_progress",
+                "done": "completed",
+                "rejected": "rejected",
+            }[payload.status]
+            conn.execute(
+                "UPDATE messages SET status = ?, delivered_at = ? WHERE id = ?",
+                (new_status, now_iso, message_id),
+            )
+            conn.commit()
+
+        # Audit trail
+        try:
+            from atoms_store import insert_raw_event as _insert_raw_event
+
+            note = f" note: {payload.note}" if payload.note else ""
+            _insert_raw_event(
+                event_id=f"brain_command_ack_{message_id}_{payload.status}",
+                content=f"{payload.agent} acked brain cmd {message_id}: {payload.status}{note}",
+                timestamp=now_iso,
+                source_type="brain_command_ack",
+                source_ref=f"brain:{message_id}",
+                actor=payload.agent,
+                visibility="private",
+                scrub_status="scrubbed",
+            )
+        except Exception as exc:
+            log.debug("brain_command_ack audit failed: %s", exc)
+
+        return {"ok": True, "message_id": message_id, "new_status": new_status}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.warning("brain_command_ack failed: %s", exc)
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", exc)) from exc
+
+
+# ── Routes: /brain/canonical_staleness, /brain/self_eval ── moved to brain_core/routes/admin_ops.py
+
+
+# ── Routes: coding_events ── moved to brain_core/routes/coding.py
 
 
 # ── Jobs: shared dispatcher (used by POST /jobs/{name} and the scheduler) ──
@@ -4080,6 +4204,16 @@ def create_memory(request: Request, req: MemoryCreateRequest) -> MemoryEntry:
 
         if operation == "UPDATE" and supersede_target:
             mark_superseded(supersede_target, mem_id)
+        # Attribute the producing prompt — manual /memory POST calls don't
+        # use a distill prompt, so they get a synthetic "manual_v1" id.
+        # Lets prompt_attribution.survival_report distinguish manual writes
+        # (typically high-survival) from distilled-from-transcript atoms.
+        try:
+            from brain_core.prompt_attribution import record as _attr_record
+
+            _attr_record(mem_id, "manual", "manual_v1")
+        except Exception:
+            pass
     except Exception as _e:
         log.warning("atoms_mirror_outer_exception mem_id=%s error=%s", mem_id, str(_e)[:200])
 
@@ -4099,7 +4233,7 @@ def create_memory(request: Request, req: MemoryCreateRequest) -> MemoryEntry:
                 category=req.category,
                 confidence=req.confidence,
                 created_at=now_iso,
-                sem_col_id=col_id,
+                sem_col_id=collection,
             )
             if contradictions:
                 response_meta["contradictions"] = [
@@ -4364,6 +4498,12 @@ def create_memory_batch(request: Request, req: MemoryBatchRequest) -> dict:
                     mem_id_w,
                     _mr.error,
                 )
+            try:
+                from brain_core.prompt_attribution import record as _attr_record
+
+                _attr_record(mem_id_w, "manual", "manual_v1")
+            except Exception:
+                pass
     except Exception as _e:
         log.warning("atoms_mirror_batch_outer error=%s", str(_e)[:200])
 
@@ -4710,7 +4850,8 @@ def _persist_reasoning_result(title: str, content: str, domain: str, confidence:
 @app.post(
     "/brain/decide", response_model=DecideResponse, tags=["decide"], dependencies=[Depends(verify_bearer)]
 )
-def brain_decide(req: DecideRequest) -> DecideResponse:
+@limiter.limit("60/minute")
+def brain_decide(request: Request, req: DecideRequest) -> DecideResponse:
     """Agent asks brain for a structured decision recommendation."""
     start = time.time()
     try:
@@ -4751,13 +4892,14 @@ def brain_decide(req: DecideRequest) -> DecideResponse:
         return resp
     except Exception as e:
         _log_failure(str(e)[:500], route="/brain/decide")
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("decide", e, route="/brain/decide"))
 
 
 @app.post(
     "/brain/reason", response_model=ReasonResponse, tags=["decide"], dependencies=[Depends(verify_bearer)]
 )
-def brain_reason(req: ReasonRequest) -> ReasonResponse:
+@limiter.limit("60/minute")
+def brain_reason(request: Request, req: ReasonRequest) -> ReasonResponse:
     """Deeper multi-step reasoning for complex questions."""
     start = time.time()
     try:
@@ -4782,7 +4924,7 @@ def brain_reason(req: ReasonRequest) -> ReasonResponse:
         return resp
     except Exception as e:
         _log_failure(str(e)[:500], route="/brain/reason")
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("reason", e, route="/brain/reason"))
 
 
 @app.get("/brain/proactive", tags=["decide"], dependencies=[Depends(verify_bearer)])
@@ -4797,7 +4939,7 @@ def brain_proactive(severity: str | None = None, max_age_hours: int = 24) -> dic
             "total": len(insights),
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 @app.post("/brain/proactive/{insight_id}/dismiss", tags=["decide"], dependencies=[Depends(verify_bearer)])
@@ -4809,7 +4951,7 @@ def dismiss_proactive(insight_id: str) -> dict:
         ok = dismiss_insight(insight_id)
         return {"status": "dismissed" if ok else "not_found", "id": insight_id}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 @app.get("/brain/insights", tags=["decide"], dependencies=[Depends(verify_bearer)])
@@ -4911,7 +5053,7 @@ def get_autopilot() -> dict:
 
         return get_state()
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 @app.post("/brain/autopilot", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
@@ -4930,7 +5072,7 @@ def set_autopilot(req: AutopilotRequest) -> dict:
                 pass
         return state
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 @app.post("/brain/tasks", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
@@ -4960,7 +5102,7 @@ def create_task(req: TaskCreateRequest) -> dict:
             metadata=req.metadata,
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 @app.get("/brain/tasks", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
@@ -4973,7 +5115,7 @@ def list_tasks(
         tasks = task_queue.list_tasks(status=status, agent=agent, parent_goal_id=goal, limit=limit)
         return {"tasks": tasks, "total": len(tasks)}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 @app.post("/brain/tasks/process", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
@@ -5000,7 +5142,7 @@ def process_pending_tasks() -> dict:
             "confidence_threshold": state["confidence_threshold"],
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 @app.post("/brain/tasks/dispatch", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
@@ -5027,7 +5169,7 @@ def dispatch_ready_tasks() -> dict:
             "autopilot_enabled": True,
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 @app.get("/brain/tasks/{task_id}", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
@@ -5042,7 +5184,7 @@ def get_task(task_id: str) -> dict:
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 @app.post("/brain/tasks/{task_id}/approve", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
@@ -5052,9 +5194,9 @@ def approve_task(task_id: str) -> dict:
 
         return task_queue.approve_task(task_id)
     except ValueError as e:
-        raise HTTPException(status_code=409, detail=str(e))
+        raise HTTPException(status_code=409, detail=_safe_http_detail("internal", e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 @app.post("/brain/tasks/{task_id}/start", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
@@ -5064,9 +5206,9 @@ def start_task(task_id: str) -> dict:
 
         return task_queue.start_task(task_id)
     except ValueError as e:
-        raise HTTPException(status_code=409, detail=str(e))
+        raise HTTPException(status_code=409, detail=_safe_http_detail("internal", e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 class CompleteTaskRequest(BaseModel):
@@ -5074,7 +5216,12 @@ class CompleteTaskRequest(BaseModel):
 
 
 @app.post("/brain/tasks/{task_id}/complete", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
-def complete_task_route(task_id: str, result: str = "", body: CompleteTaskRequest | None = None) -> dict:
+def complete_task_route(
+    task_id: str,
+    result: str = "",
+    chris_acked: bool = False,
+    body: CompleteTaskRequest | None = None,
+) -> dict:
     # Accept result from query param OR JSON body. Sync def so FastAPI offloads
     # the blocking SQLite work to its thread pool instead of stalling the
     # event loop for every concurrent caller.
@@ -5085,22 +5232,29 @@ def complete_task_route(task_id: str, result: str = "", body: CompleteTaskReques
 
         task = task_queue.get_task(task_id)
         updated = task_queue.complete_task(task_id, result=result)
-        try:
-            domain = (task.get("metadata") or {}).get("domain", "general") if task else "general"
-            task_queue.record_outcome(
-                task_id=task_id,
-                domain=domain,
-                brain_recommendation=task.get("confidence_reasoning", "") if task else "",
-                actual_action=result[:500],
-                chris_override=False,
-            )
-        except Exception:
-            pass
+        # Outcome write is gated on `chris_acked=true`. Pre-fix the route
+        # auto-stamped chris_override=False on every completion, which the
+        # accuracy_tracker treated as a "Chris approved" signal — by
+        # 2026-04-23 the general domain showed 974/975 "correct" purely from
+        # agents finishing tasks no human ever reviewed. Now an explicit
+        # acknowledgement is required to record an outcome row.
+        if chris_acked:
+            try:
+                domain = (task.get("metadata") or {}).get("domain", "general") if task else "general"
+                task_queue.record_outcome(
+                    task_id=task_id,
+                    domain=domain,
+                    brain_recommendation=task.get("confidence_reasoning", "") if task else "",
+                    actual_action=result[:500],
+                    chris_override=False,
+                )
+            except Exception:
+                pass
         return updated
     except ValueError as e:
-        raise HTTPException(status_code=409, detail=str(e))
+        raise HTTPException(status_code=409, detail=_safe_http_detail("internal", e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 @app.post("/brain/tasks/{task_id}/reject", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
@@ -5111,6 +5265,10 @@ def reject_task(task_id: str) -> dict:
         task = task_queue.get_task(task_id)
         updated = task_queue.fail_task(task_id, error="rejected by Chris")
         try:
+            # Reject is an explicit human action — the rejection IS the ack
+            # signal, so the outcome row is always recorded (no chris_acked
+            # gate like complete_task_route). chris_override=True flags it as
+            # a negative outcome the calibration pipeline can train on.
             domain = (task.get("metadata") or {}).get("domain", "general") if task else "general"
             task_queue.record_outcome(
                 task_id=task_id,
@@ -5124,9 +5282,9 @@ def reject_task(task_id: str) -> dict:
             pass
         return updated
     except ValueError as e:
-        raise HTTPException(status_code=409, detail=str(e))
+        raise HTTPException(status_code=409, detail=_safe_http_detail("internal", e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 @app.post("/brain/goals", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
@@ -5148,7 +5306,7 @@ def create_goal(req: GoalCreateRequest) -> dict:
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 @app.get("/brain/goals", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
@@ -5159,7 +5317,7 @@ def list_goals(status: str | None = None) -> dict:
         goals = task_queue.list_goals(status=status)
         return {"goals": goals, "total": len(goals)}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 @app.post("/brain/goals/{goal_id}/complete", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
@@ -5169,9 +5327,9 @@ def complete_goal_route(goal_id: str) -> dict:
 
         return task_queue.complete_goal(goal_id, by="chris")
     except ValueError as e:
-        raise HTTPException(status_code=409, detail=str(e))
+        raise HTTPException(status_code=409, detail=_safe_http_detail("internal", e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 @app.get("/brain/goals/{goal_id}", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
@@ -5188,7 +5346,7 @@ def get_goal(goal_id: str) -> dict:
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 @app.post("/brain/goals/{goal_id}/decompose", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
@@ -5204,7 +5362,7 @@ def decompose_goal_endpoint(goal_id: str) -> dict:
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 class AgentMessageRequest(BaseModel):
@@ -5226,7 +5384,7 @@ def send_message(req: AgentMessageRequest) -> dict:
             req.from_agent, req.to_agent, req.content, req.message_type, req.priority, req.parent_task_id
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 @app.get("/brain/focus", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
@@ -5236,7 +5394,7 @@ def get_focus() -> dict:
 
         return get_working_context()
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 @app.post("/brain/focus", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
@@ -5246,7 +5404,7 @@ def add_focus(req: FocusRequest) -> dict:
 
         return add_focus(req.content, req.category, req.agent, req.expires_hours)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 @app.delete("/brain/focus/{focus_id}", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
@@ -5257,7 +5415,7 @@ def delete_focus(focus_id: str) -> dict:
         ok = remove_focus(focus_id)
         return {"status": "removed" if ok else "not_found", "id": focus_id}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 # ── Phase D1: Agent messaging endpoints ──
@@ -5277,7 +5435,7 @@ def send_agent_message(req: AgentMessageRequest) -> dict:
         )
         return msg
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 @app.get("/brain/messages/{agent}", tags=["coordination"], dependencies=[Depends(verify_bearer)])
@@ -5292,7 +5450,7 @@ def get_agent_messages(
         messages = get_pending_messages(agent, limit=limit)
         return {"agent": agent, "total": len(messages), "messages": messages}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 @app.post("/brain/messages/{msg_id}/ack", tags=["coordination"], dependencies=[Depends(verify_bearer)])
@@ -5308,7 +5466,7 @@ def ack_agent_message(msg_id: Annotated[str, PathParam()]) -> dict:
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 @app.post("/brain/messages/{agent}/dismiss_all", tags=["coordination"], dependencies=[Depends(verify_bearer)])
@@ -5320,7 +5478,7 @@ def dismiss_all_messages(agent: Annotated[str, PathParam()]) -> dict:
         count = dismiss_all(agent)
         return {"agent": agent, "dismissed": count}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 # ── Phase D3: Contradiction voting ──
@@ -5390,7 +5548,7 @@ def vote_on_contradiction(contra_id: Annotated[str, PathParam()], req: Contradic
             "consensus_reached": total >= 3 and max(tally.values()) >= 2,
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 @app.get(
@@ -5453,7 +5611,7 @@ def get_contradiction_votes(contra_id: Annotated[str, PathParam()]) -> dict:
             "votes": votes,
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 # ── Phase D4: Session active agents ──
@@ -5485,7 +5643,7 @@ def session_active_agents(session_id: Annotated[str, PathParam()]) -> dict:
             "contexts": by_agent,
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 @app.get("/brain/triggers", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
@@ -5498,7 +5656,7 @@ def list_triggers_endpoint() -> dict:
         # is retained for back-compat with brain-ui pre-2026-04-13 clients.
         return {"items": triggers, "total": len(triggers), "triggers": triggers}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 # ── Phase B1: Trigger CRUD ──────────────────────────────────────────────
@@ -5535,9 +5693,9 @@ def create_trigger_endpoint(req: TriggerCreateRequest) -> dict:
             cooldown_seconds=req.cooldown_seconds,
         )
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=_safe_http_detail("internal", e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 @app.patch("/brain/triggers/{trigger_id}", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
@@ -5559,7 +5717,7 @@ def update_trigger_endpoint(trigger_id: str, req: TriggerUpdateRequest) -> dict:
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 @app.delete("/brain/triggers/{trigger_id}", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
@@ -5574,7 +5732,7 @@ def delete_trigger_endpoint(trigger_id: str) -> dict:
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 # ── Phase B2: Quiet hours ───────────────────────────────────────────────
@@ -5642,7 +5800,7 @@ def set_quiet_hours(req: QuietHoursRequest) -> dict:
         invalidate_levels_cache()
         return {"status": "set", **_quiet_hours_from_config()}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 # ── Phase B3: Denylist ──────────────────────────────────────────────────
@@ -5680,7 +5838,7 @@ def add_denylist_entry(req: DenylistEntryRequest) -> dict:
         invalidate_levels_cache()
         return {"status": "added", "prefix": req.prefix}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 @app.post("/brain/denylist/remove", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
@@ -5697,7 +5855,7 @@ def remove_denylist_entry(req: DenylistEntryRequest) -> dict:
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 # ── Phase B4: Eval proposals CRUD ────────────────────────────────────────
@@ -5711,7 +5869,7 @@ def list_eval_proposals(status: str = "candidate", limit: int = 50) -> dict:
             "stats": stats(),
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 class EvalProposalCreateRequest(BaseModel):
@@ -5740,7 +5898,7 @@ def create_eval_proposal(req: EvalProposalCreateRequest) -> dict:
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 @app.post("/brain/eval-proposals/{proposal_id}/approve", tags=["eval"], dependencies=[Depends(verify_bearer)])
@@ -5755,7 +5913,7 @@ def approve_eval_proposal(proposal_id: str) -> dict:
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 @app.post("/brain/eval-proposals/{proposal_id}/reject", tags=["eval"], dependencies=[Depends(verify_bearer)])
@@ -5770,7 +5928,7 @@ def reject_eval_proposal(proposal_id: str) -> dict:
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 @app.get("/brain/eval-proposals/stats", tags=["eval"], dependencies=[Depends(verify_bearer)])
@@ -5780,54 +5938,10 @@ def eval_proposal_stats() -> dict:
 
         return stats()
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
-# ── Phase M6: SearXNG-backed web search with brain learning ──────────────
-class WebSearchRequest(BaseModel):
-    query: str = Field(..., min_length=1, max_length=500)
-    limit: int = Field(default=10, ge=1, le=50)
-    agent: str = Field(default="mcp", max_length=50)
-
-
-@app.post("/web/search", tags=["web"], dependencies=[Depends(verify_bearer)])
-@limiter.limit("60/minute")
-def web_search(request: Request, req: WebSearchRequest) -> dict:
-    """Hit SearXNG and return ranked results with per-domain trust scores.
-
-    Logs the attempt + per-result rows to brain.db so the
-    web_source_trust_recompute job can learn from outcomes via /recall/feedback.
-    """
-    try:
-        from brain_core.web_search import searxng_query
-
-        results = searxng_query(req.query, n=req.limit, agent=req.agent)
-        return {"items": results, "total": len(results), "query": req.query}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
-
-
-class WebSearchOutcomeRequest(BaseModel):
-    attempt_id: str = Field(..., min_length=1, max_length=50)
-    rank: int = Field(..., ge=1, le=100)
-    useful: bool
-
-
-@app.post("/web/search/outcome", tags=["web"], dependencies=[Depends(verify_bearer)])
-@limiter.limit("120/minute")
-def web_search_outcome(request: Request, req: WebSearchOutcomeRequest) -> dict:
-    """Mark a single search result as useful (True) or wrong (False)."""
-    try:
-        from brain_core.web_search import mark_result_outcome
-
-        ok = mark_result_outcome(req.attempt_id, req.rank, useful=req.useful)
-        if not ok:
-            raise HTTPException(status_code=404, detail="result not found")
-        return {"status": "recorded", "attempt_id": req.attempt_id, "rank": req.rank}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+# ── Phase M6: SearXNG web search ── moved to brain_core/routes/web.py
 
 
 # ── Phase B5: Atoms introspection ────────────────────────────────────────
@@ -5838,7 +5952,7 @@ def atoms_stats() -> dict:
 
         return count_atoms()
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 @app.get("/brain/atoms", tags=["atoms"], dependencies=[Depends(verify_bearer)])
@@ -5884,7 +5998,7 @@ def list_atoms(
             conn.close()
         return {"items": [dict(r) for r in rows], "total": len(rows), "enabled": True}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 # ── Phase E: SLO observability ──────────────────────────────────────────
@@ -5921,7 +6035,7 @@ def get_slos() -> dict:
             "results": items,  # legacy alias
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 @app.post("/brain/slos/check", tags=["observability"], dependencies=[Depends(verify_bearer)])
@@ -5939,7 +6053,7 @@ def trigger_slos_check() -> dict:
         summary["items"] = summary.get("results", [])
         return summary
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 @app.get("/brain/atoms/{atom_id}", tags=["atoms"], dependencies=[Depends(verify_bearer)])
@@ -5971,7 +6085,7 @@ def get_atom_detail(atom_id: str) -> dict:
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 @app.get(
@@ -6007,7 +6121,7 @@ def get_atom_confidence_history(atom_id: str, limit: int = 50) -> dict:
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 @app.get("/brain/trace/{note_id}", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
@@ -6022,7 +6136,7 @@ def trace_provenance(note_id: str, max_depth: int = 3) -> dict:
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 @app.post("/brain/ingest", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
@@ -6102,7 +6216,7 @@ def brain_ingest(request: Request, req: BrainIngestRequest) -> dict:
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 _INDEX_SKIP_NAMES = {"index.md", "_index.md", "_identity.md", "_state.md", "_profile.md"}
@@ -6256,7 +6370,7 @@ def rebuild_canonical_index() -> dict:
             "manual_block_preserved": manual_block is not None,
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 @app.get("/brain/canonical_lint", tags=["lint"], dependencies=[Depends(verify_bearer)])
@@ -6278,7 +6392,7 @@ def canonical_lint_latest() -> dict:
             "report": _json.loads(latest.read_text()),
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 class CanonicalizeRequest(BaseModel):
@@ -6312,7 +6426,7 @@ def brain_canonicalize(req: CanonicalizeRequest) -> dict:
             return {"status": "skipped", "reason": "answer too short or empty"}
         return {"status": "recorded", "candidate_id": row_id}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 @app.get("/brain/answer_candidates", tags=["decide"], dependencies=[Depends(verify_bearer)])
@@ -6337,20 +6451,10 @@ def answer_candidates_list(status: str = "pending", limit: int = 20) -> dict:
                 items = [dict(r) for r in rows]
         return {"status": "ok", "count": len(items), "items": items, "stats": _ac.stats()}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
-# ── Routes: audit log ──────────────────────────────────
-@app.get("/brain/audit", tags=["audit"], dependencies=[Depends(verify_bearer)])
-def audit_list(
-    type: str | None = None, since: str | None = None, pending: bool = False, limit: int = 50
-) -> dict:
-    try:
-        from audit_log import list_events
-
-        return {"events": list_events(event_type=type, since=since, pending_only=pending, limit=limit)}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+# ── Routes: audit log ── moved to brain_core/routes/admin_ops.py (see /brain/audit* endpoints)
 
 
 # ── Phase 5: L0–L3 autonomy gate ────────────────────────────────────────
@@ -6362,7 +6466,7 @@ def autonomy_list() -> dict:
 
         return {"levels": list_levels()}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 @app.get("/brain/autonomy/{kind:path}", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
@@ -6373,7 +6477,7 @@ def autonomy_get(kind: str) -> dict:
         levels = list_levels()
         return {"kind": kind, "level": levels.get(kind, "L1")}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 _AUTONOMY_KIND_RE = re.compile(r"^[a-z0-9._-]{1,64}$")
@@ -6400,7 +6504,7 @@ def autonomy_set(kind: str, payload: dict) -> dict:
         set_level(kind, level, updated_by=updated_by)
         return {"status": "set", "kind": kind, "level": level}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 @app.get("/brain/policy/preview", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
@@ -6420,7 +6524,7 @@ def autonomy_preview(kind: str, now: str | None = None) -> dict:
         decision = authorize(kind, now=when)
         return decision.to_dict()
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 @app.get("/brain/breakers", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
@@ -6447,7 +6551,7 @@ def breakers_list() -> dict:
         # retained for back-compat with brain-ui pre-2026-04-13 clients.
         return {"items": rows, "total": len(rows), "breakers": rows}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 @app.post("/brain/breakers/{kind:path}/reset", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
@@ -6458,7 +6562,7 @@ def breakers_reset(kind: str) -> dict:
         snap = reset(kind)
         return {"status": "reset", "kind": snap.kind, "state": snap.state}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 # ── Phase 4: SM-2 spaced repetition review ──────────────────────────────
@@ -6473,7 +6577,7 @@ def brain_review(limit: int = 20, tier: str | None = None) -> dict:
         # for back-compat with brain-ui pre-2026-04-13 clients.
         return {"items": items, "total": len(items), "count": len(items)}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 @app.post("/brain/review/{chroma_id:path}", tags=["atoms"], dependencies=[Depends(verify_bearer)])
@@ -6492,191 +6596,13 @@ def brain_review_grade(chroma_id: str, payload: dict) -> dict:
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
-@app.get("/brain/audit/stats", tags=["audit"], dependencies=[Depends(verify_bearer)])
-def audit_stats_endpoint() -> dict:
-    try:
-        from audit_log import stats
-
-        return stats()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+# /brain/audit/stats + /brain/audit/{event_id}/review moved to brain_core/routes/admin_ops.py
 
 
-@app.post("/brain/audit/{event_id}/review", tags=["audit"], dependencies=[Depends(verify_bearer)])
-def audit_review(event_id: str) -> dict:
-    try:
-        from audit_log import review_event
-
-        review_event(event_id)
-        return {"status": "reviewed", "id": event_id}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
-
-
-# ── Routes: fact store ─────────────────────────────────
-@app.get("/brain/facts", tags=["facts"], dependencies=[Depends(verify_bearer)])
-def facts_query(entity: str | None = None, attribute: str | None = None, limit: int = 50) -> dict:
-    try:
-        from fact_store import query_facts
-
-        return {"facts": query_facts(entity=entity, attribute=attribute, limit=limit)}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
-
-
-class FactStoreRequest(BaseModel):
-    entity: str = Field(..., min_length=1, max_length=200)
-    attribute: str = Field(..., min_length=1, max_length=200)
-    value: str = Field(..., min_length=1, max_length=2000)
-    source: str = ""
-    source_type: str = ""
-    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
-    valid_from: str = ""
-    valid_to: str = ""
-
-
-@app.post("/brain/facts", tags=["facts"], dependencies=[Depends(verify_bearer)])
-def facts_store(req: FactStoreRequest) -> dict:
-    try:
-        from fact_store import store_fact
-
-        return store_fact(
-            entity=req.entity,
-            attribute=req.attribute,
-            value=req.value,
-            source=req.source,
-            source_type=req.source_type,
-            confidence=req.confidence,
-            valid_from=req.valid_from,
-            valid_to=req.valid_to,
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
-
-
-@app.get("/brain/facts/entity/{entity_name}", tags=["facts"], dependencies=[Depends(verify_bearer)])
-def facts_by_entity(entity_name: str) -> dict:
-    try:
-        from fact_store import get_entity_facts
-
-        return {"entity": entity_name, "facts": get_entity_facts(entity_name)}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
-
-
-@app.get("/brain/facts/stats", tags=["facts"], dependencies=[Depends(verify_bearer)])
-def facts_stats() -> dict:
-    try:
-        from fact_store import stats
-
-        return stats()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
-
-
-@app.get("/brain/graph/stats", tags=["graph"], dependencies=[Depends(verify_bearer)])
-def graph_stats_endpoint() -> dict:
-    try:
-        from brain_core.entity_graph import get_graph_stats
-
-        return get_graph_stats()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
-
-
-@app.get("/brain/graph/nodes", tags=["graph"], dependencies=[Depends(verify_bearer)])
-def graph_nodes_endpoint(limit: int = 200, connected_only: bool = False) -> dict:
-    """Return entities + relations for 3D graph visualization.
-
-    Links are filtered to pairs whose BOTH endpoints made the top-limit
-    nodes list — prevents UI isolated-node artifacts where a node appears
-    but its relations reference off-canvas entities.
-
-    Args:
-      limit: max node count (sorted by mention_count desc).
-      connected_only: drop nodes that have no intra-view RELATES_TO link.
-          Use when Graph UI users don't want to see isolated nodes.
-    """
-    try:
-        from brain_core.neo4j_client import is_healthy, run_query
-
-        if not is_healthy():
-            return {"nodes": [], "links": [], "backend": "unavailable"}
-        nodes = run_query(
-            "MATCH (e:Entity) RETURN e.id AS id, e.name AS name, "
-            "coalesce(e.entity_type, 'concept') AS type, "
-            "coalesce(e.mention_count, 1) AS mention_count, "
-            "coalesce(e.memory_class, 'ephemeral') AS memory_class "
-            "ORDER BY e.mention_count DESC LIMIT $limit",
-            {"limit": limit},
-        )
-        node_ids = [n["id"] for n in nodes]
-        # Restrict links to both endpoints being in the returned node set —
-        # this keeps the graph visualization visually connected and removes
-        # the misleading "124/200 isolated" artifact from the prior impl
-        # where links were sorted by weight independently of which nodes
-        # were selected.
-        links = run_query(
-            "MATCH (s:Entity)-[r:RELATES_TO]->(t:Entity) "
-            "WHERE s.id IN $ids AND t.id IN $ids "
-            "RETURN s.id AS source, t.id AS target, "
-            "coalesce(r.relationship, 'related_to') AS relationship, "
-            "coalesce(r.weight, 0.5) AS weight "
-            "ORDER BY r.weight DESC",
-            {"ids": node_ids},
-        )
-        if connected_only:
-            linked = set()
-            for link in links:
-                linked.add(link["source"])
-                linked.add(link["target"])
-            nodes = [n for n in nodes if n["id"] in linked]
-        return {"nodes": nodes, "links": links, "backend": "neo4j"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
-
-
-@app.get("/brain/lessons", tags=["brain"], dependencies=[Depends(verify_bearer)])
-def get_lessons(agent: str = "system", limit: int = 20):
-    """Query failure lessons for an agent."""
-    try:
-        import failure_memory
-
-        lessons = failure_memory.get_similar_lessons("", agent_id=agent, limit=limit)
-        return {"agent": agent, "total": len(lessons), "lessons": lessons}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# ── Claude Code session marker + in-session LLM routing (2026-04-17) ────────
-@app.post("/brain/claude-session/start", tags=["brain"], dependencies=[Depends(verify_bearer)])
-def claude_session_start(session_id: str = ""):
-    """Mark a Claude Code session as active. Called by SessionStart hook.
-    Brain routes Jenna-backed advisory calls (self_rag.critique, hyde.expand)
-    to no-op while active, avoiding duplicate LLM work since Claude is
-    already reasoning. TTL 10 min, extended by heartbeat."""
-    from brain_core import claude_session
-
-    return claude_session.start_session(session_id)
-
-
-@app.post("/brain/claude-session/heartbeat", tags=["brain"], dependencies=[Depends(verify_bearer)])
-def claude_session_heartbeat():
-    """Extend the active session TTL. Call periodically during long sessions."""
-    from brain_core import claude_session
-
-    return claude_session.extend_session()
-
-
-@app.post("/brain/claude-session/end", tags=["brain"], dependencies=[Depends(verify_bearer)])
-def claude_session_end():
-    """Clear the session marker. Called by SessionEnd hook."""
-    from brain_core import claude_session
-
-    return claude_session.end_session()
+# ── facts, graph, lessons, claude-session ── moved to brain_core/routes/stores.py
 
 
 @app.get("/brain/claude-session", tags=["brain"], dependencies=[Depends(verify_bearer)])
@@ -6720,139 +6646,7 @@ def claude_queue_get(queue_id: int):
     return r
 
 
-# ── Emotional valence layer (biological: amygdala, 2026-04-17) ──────────────
-@app.post("/brain/valence/{atom_id}", tags=["brain"], dependencies=[Depends(verify_bearer)])
-def valence_record(atom_id: str, body: dict):
-    """Record a valence event for an atom. delta in [-1.0, +1.0].
-
-    +1.0 = strong positive (Chris praised), -1.0 = strong negative (Chris rejected).
-    Events average in with prior events, so noisy single signals smooth out.
-    """
-    from brain_core import valence as _val
-
-    delta = float(body.get("delta", 0.0))
-    reason = str(body.get("reason", ""))
-    source = str(body.get("source", "api"))
-    return _val.record_valence(atom_id, delta, reason=reason, source=source)
-
-
-@app.get("/brain/valence/{atom_id}", tags=["brain"], dependencies=[Depends(verify_bearer)])
-def valence_get(atom_id: str):
-    from brain_core import valence as _val
-
-    return {"atom_id": atom_id, "valence": _val.get_valence(atom_id)}
-
-
-@app.get("/brain/valence/top/list", tags=["brain"], dependencies=[Depends(verify_bearer)])
-def valence_top(direction: str = "both", limit: int = 20):
-    """Top-valence atoms for observability. direction: positive | negative | both."""
-    from brain_core import valence as _val
-
-    return {"items": _val.top_valence(limit=limit, direction=direction)}
-
-
-@app.get("/brain/valence", tags=["brain"], dependencies=[Depends(verify_bearer)])
-def valence_stats():
-    from brain_core import valence as _val
-
-    return _val.stats()
-
-
-# ── Attention priority queue (biological: thalamus, 2026-04-17) ─────────────
-@app.get("/brain/attention", tags=["brain"], dependencies=[Depends(verify_bearer)])
-def attention_top(limit: int = 1):
-    """Return top-N attention items by priority (urgency × novelty × valence).
-    Default limit=1 — the single most-worth-attention thing. Habituated
-    automatically — repeated exposure lowers priority."""
-    from brain_core import attention as _att
-
-    return {"items": _att.top_attention(limit=limit)}
-
-
-@app.post("/brain/attention/enqueue", tags=["brain"], dependencies=[Depends(verify_bearer)])
-def attention_enqueue(body: dict):
-    from brain_core import attention as _att
-
-    return _att.enqueue(
-        insight_id=str(body.get("id", "")),
-        category=str(body.get("category", "pattern")),
-        severity=str(body.get("severity", "info")),
-        summary=str(body.get("summary", "")),
-        detail=str(body.get("detail", "")),
-        related_atoms=body.get("related_atoms") or [],
-        ttl_hours=int(body.get("ttl_hours", 48)),
-    )
-
-
-@app.post("/brain/attention/{insight_id}/shown", tags=["brain"], dependencies=[Depends(verify_bearer)])
-def attention_shown(insight_id: str):
-    from brain_core import attention as _att
-
-    return _att.mark_shown(insight_id)
-
-
-@app.post("/brain/attention/{insight_id}/dismiss", tags=["brain"], dependencies=[Depends(verify_bearer)])
-def attention_dismiss(insight_id: str):
-    from brain_core import attention as _att
-
-    return _att.dismiss(insight_id)
-
-
-@app.get("/brain/attention/stats/summary", tags=["brain"], dependencies=[Depends(verify_bearer)])
-def attention_stats():
-    from brain_core import attention as _att
-
-    return _att.queue_stats()
-
-
-# ── Predictive Action Model (biological: cerebellum anticipation, 2026-04-17) ─
-@app.get("/brain/predictive", tags=["brain"], dependencies=[Depends(verify_bearer)])
-def predictive_top(limit: int = 3):
-    """Context-aware predictive prefetch based on current focus_items.
-    Complementary to boot_context._predictive_queries (temporal/calendar).
-    This one asks: what is Chris focused on RIGHT NOW, and what past atoms
-    match? Re-scored by valence × novelty × domain match."""
-    from brain_core import predictive as _p
-
-    return {"items": _p.predict_relevant_context(limit=limit)}
-
-
-@app.get("/brain/predictive/debug", tags=["brain"], dependencies=[Depends(verify_bearer)])
-def predictive_debug():
-    """Inspect the exact focus signal driving the prediction."""
-    from brain_core import predictive as _p
-
-    return _p.debug_signal()
-
-
-@app.get("/brain/usage", tags=["brain"], dependencies=[Depends(verify_bearer)])
-def brain_usage(days: int = Query(default=7, ge=1, le=365)):
-    """Usage stats — LLM dispatch budget + brain tool adoption.
-
-    Returns a dict with two sections:
-      llm:      cost + token budget stats from openclaw_dispatch (per Jenna/Liz/etc)
-      adoption: per-actor + per-tool counts from action_audit (M7-WS8 adoption counter)
-
-    Both sections use the same `days` window. Either can fail independently; the
-    response returns what's available and surfaces errors in-band.
-    """
-    out: dict = {"window_days": days}
-
-    try:
-        import openclaw_dispatch
-
-        out["llm"] = openclaw_dispatch.get_usage_stats(days=days)
-    except Exception as e:
-        out["llm"] = {"error": str(e)[:200]}
-
-    try:
-        from brain_core.atoms_store import action_audit_usage
-
-        out["adoption"] = action_audit_usage(since_days=days)
-    except Exception as e:
-        out["adoption"] = {"error": str(e)[:200]}
-
-    return out
+# ── Valence / attention / predictive / usage ── moved to brain_core/routes/brain_ops.py
 
 
 @app.get("/brain/timetravel", tags=["brain"], dependencies=[Depends(verify_bearer)])
@@ -6930,7 +6724,7 @@ def timetravel(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 @app.get("/brain/changes", tags=["brain"], dependencies=[Depends(verify_bearer)])
@@ -7013,7 +6807,7 @@ def get_session_context(session_id: Annotated[str, PathParam()], agent: str | No
             "items": [{"agent": r[0], "key": r[1], "value": r[2], "updated_at": r[3]} for r in rows],
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 @app.post("/brain/session/{session_id}/context", tags=["brain"], dependencies=[Depends(verify_bearer)])
@@ -7030,7 +6824,7 @@ def set_session_context(session_id: Annotated[str, PathParam()], req: SessionCon
             conn.commit()
         return {"status": "ok", "session_id": session_id, "key": req.key}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 # ── Round 9: code intelligence ──
@@ -7069,7 +6863,7 @@ def code_find(
             )
         return {"query": q, "total": len(results), "results": results}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 # ── Phase E2: TodoWrite sync ──
@@ -7109,7 +6903,7 @@ def sync_todos(req: TodoWriteRequest) -> dict:
             conn.commit()
         return {"status": "ok", "count": len(req.todos), "session": session}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 @app.get("/brain/todos", tags=["brain"], dependencies=[Depends(verify_bearer)])
@@ -7143,7 +6937,7 @@ def get_todos(session_id: str = "default", status: str | None = None) -> dict:
             ],
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 # ── Phase E4: Unified skill discovery ──
@@ -7203,7 +6997,7 @@ def search_quality() -> dict:
             "feedback": feedback_stats,
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 @app.get("/brain/tools", tags=["mcp"], dependencies=[Depends(verify_bearer)])
@@ -7269,7 +7063,7 @@ def brain_accuracy(domain: str | None = None) -> dict:
 
         return task_queue.get_domain_accuracy(domain=domain)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 @app.get("/brain/outcomes", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
@@ -7280,7 +7074,7 @@ def brain_outcomes(domain: str | None = None, limit: int = 50, offset: int = 0) 
         outcomes = task_queue.list_outcomes(domain=domain, limit=limit, offset=offset)
         return {"outcomes": outcomes, "total": len(outcomes)}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 @app.get("/brain/procedures", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
@@ -7545,7 +7339,7 @@ def admin_embed_adapter(req: EmbedAdapterRequest) -> dict:
             pass
         return result
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)[:300])
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
 @app.post("/admin/restart", tags=["admin"], dependencies=[Depends(verify_bearer)])
@@ -7558,6 +7352,28 @@ def admin_restart() -> dict:
     # policy will restart within ThrottleInterval.
     threading.Thread(target=lambda: (time.sleep(1), os._exit(1)), daemon=True).start()
     return {"status": "restarting"}
+
+
+# ── Mount extracted route modules ───────────────────────
+from routes.admin_ops import router as _admin_ops_router  # noqa: E402
+from routes.brain_ops import router as _brain_ops_router  # noqa: E402
+from routes.coding import router as _coding_router  # noqa: E402
+from routes.liveness import router as _liveness_router  # noqa: E402
+from routes.profile import router as _profile_router  # noqa: E402
+from routes.reasoning import router as _reasoning_router  # noqa: E402
+from routes.stores import router as _stores_router  # noqa: E402
+from routes.synthesis import router as _synthesis_router  # noqa: E402
+from routes.web import router as _web_router  # noqa: E402
+
+app.include_router(_liveness_router)
+app.include_router(_admin_ops_router)
+app.include_router(_profile_router)
+app.include_router(_web_router)
+app.include_router(_brain_ops_router)
+app.include_router(_stores_router)
+app.include_router(_reasoning_router)
+app.include_router(_synthesis_router)
+app.include_router(_coding_router)
 
 
 # ── Bootstrap ───────────────────────────────────────────

@@ -24,7 +24,11 @@ def client(monkeypatch):
     """
     monkeypatch.setenv("BRAIN_RATE_LIMIT_DISABLED", "0")
     # Force a clean import so module-level limiter() picks up env var
-    for mod in [m for m in list(sys.modules) if m.startswith("server")]:
+    for mod in [
+        m
+        for m in list(sys.modules)
+        if m.startswith("server") or m in {"rate_limit", "api_deps"} or m.startswith("routes.")
+    ]:
         del sys.modules[mod]
     from fastapi.testclient import TestClient
 
@@ -81,7 +85,11 @@ def test_limited_routes_registered(client):
 def test_disabled_env_var_skips_limiting(monkeypatch):
     """When BRAIN_RATE_LIMIT_DISABLED=1 the limiter is constructed in disabled mode."""
     monkeypatch.setenv("BRAIN_RATE_LIMIT_DISABLED", "1")
-    for mod in [m for m in list(sys.modules) if m.startswith("server")]:
+    for mod in [
+        m
+        for m in list(sys.modules)
+        if m.startswith("server") or m in {"rate_limit", "api_deps"} or m.startswith("routes.")
+    ]:
         del sys.modules[mod]
     import server
 

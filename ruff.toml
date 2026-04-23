@@ -1,4 +1,6 @@
 line-length = 110
+# pyproject pins python 3.14; ruff 0.8.x only knows up to py313. Upgrading ruff
+# is a separate decision (newer versions add rules that flag existing code).
 target-version = "py313"
 extend-exclude = [
   ".venv",
@@ -15,7 +17,6 @@ extend-exclude = [
   "brain_core/autopilot.py",
   "brain_core/batch_lock.py",
   "brain_core/boot_context.py",
-  "brain_core/config.py",
   "brain_core/cross_encoder_model.py",
   "brain_core/cross_encoder_rerank.py",
   "brain_core/embed_cache.py",
@@ -35,8 +36,6 @@ extend-exclude = [
   "brain_core/lora_embedder.py",
   "brain_core/maintenance.py",
   "brain_core/memory_lifecycle.py",
-  "brain_core/memory_operations.py",
-  "brain_core/metrics_buffer.py",
   "brain_core/neo4j_client.py",
   "brain_core/openclaw_dispatch.py",
   "brain_core/proactive.py",
@@ -57,7 +56,6 @@ extend-exclude = [
   "brain_core/temporal.py",
   "brain_core/temporal_reasoning.py",
   "brain_core/time_decay.py",
-  "brain_core/tokenizer.py",
   "brain_core/working_memory.py",
   "brain_core/pipeline/",
   "ingest/",
