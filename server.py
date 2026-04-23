@@ -687,42 +687,7 @@ class SearchFeedbackRequest(BaseModel):
 
 
 # ── Decision / reasoning models ─────────────────────────
-class DecideRequest(BaseModel):
-    situation: str = Field(..., min_length=10, max_length=2000)
-    options: list[dict] = Field(..., min_length=2, max_length=6)
-    agent: str = Field(default="claude", max_length=32)
-    domain: str | None = Field(default=None)
-    context: str | None = Field(default=None, max_length=2000)
-
-
-class DecideResponse(BaseModel):
-    situation: str
-    recommendation: str
-    reasoning: str
-    confidence: float
-    evidence: list[dict] = Field(default_factory=list)
-    exceptions: list[str] = Field(default_factory=list)
-    model: str = "sage"
-    latency_ms: int = 0
-    cached: bool = False
-    heuristic_fallback: bool = False
-
-
-class ReasonRequest(BaseModel):
-    question: str = Field(..., min_length=5, max_length=2000)
-    context: str | None = Field(default=None, max_length=3000)
-    agent: str = Field(default="claude", max_length=32)
-    domain: str | None = None
-
-
-class ReasonResponse(BaseModel):
-    question: str
-    analysis: str
-    reasoning_steps: list[str] = Field(default_factory=list)
-    confidence: float = 0.0
-    provenance: list[dict] = Field(default_factory=list)
-    model: str = "sage"
-    latency_ms: int = 0
+# Decide/Reason models moved to brain_core/routes/decide.py
 
 
 # ── Autonomy models ────────────────────────────────────
@@ -3624,121 +3589,7 @@ def resolve_contradiction(
     return {"status": "resolved", "id": contra_id, "action": req.action}
 
 
-# ── Routes: reasoning + decision ─────────────────────────
-
-
-def _persist_reasoning_result(title: str, content: str, domain: str, confidence: float) -> None:
-    """Karpathy principle: valuable analysis should accumulate, not evaporate into chat history."""
-    if confidence < 0.7:
-        return
-    try:
-        import hashlib
-
-        slug = hashlib.md5(title.encode()).hexdigest()[:12]
-        note_path = BRAIN_DIR.parent / "knowledge" / "distilled" / "decisions" / f"brain_analysis_{slug}.md"
-        if note_path.exists():
-            return  # already persisted
-        note_path.parent.mkdir(parents=True, exist_ok=True)
-        meta = {
-            "id": f"dist_brain_analysis_{slug}",
-            "type": "distilled",
-            "domain": domain or "decisions",
-            "subtype": "brain-analysis",
-            "title": title[:120],
-            "status": "active",
-            "confidence": round(confidence, 2),
-            "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
-            "sources": ["brain_reasoning_api"],
-        }
-        import json as _json
-
-        with note_path.open("w") as f:
-            f.write("---json\n")
-            f.write(_json.dumps(meta, indent=2, ensure_ascii=False))
-            f.write("\n---\n\n")
-            f.write(content[:2000])
-    except Exception:
-        pass  # never let persistence break the API response
-
-
-@app.post(
-    "/brain/decide", response_model=DecideResponse, tags=["decide"], dependencies=[Depends(verify_bearer)]
-)
-@limiter.limit("60/minute")
-def brain_decide(request: Request, req: DecideRequest) -> DecideResponse:
-    """Agent asks brain for a structured decision recommendation."""
-    start = time.time()
-    try:
-        from brain_core.reasoning import DecisionOption, evaluate_decision
-
-        options = [
-            DecisionOption(label=o.get("label", ""), description=o.get("description", ""))
-            for o in req.options
-        ]
-        result = evaluate_decision(req.situation, options, req.agent, req.domain)
-        evidence = [
-            {
-                "content": h.content[:200],
-                "category": h.category,
-                "confidence": h.confidence,
-                "source": h.source,
-            }
-            for h in result.preference_hits[:5]
-        ]
-        resp = DecideResponse(
-            situation=req.situation,
-            recommendation=result.recommendation,
-            reasoning=result.reasoning,
-            confidence=result.confidence,
-            evidence=evidence,
-            exceptions=result.exceptions,
-            model=result.model,
-            latency_ms=int((time.time() - start) * 1000),
-            cached=result.cached,
-            heuristic_fallback=result.heuristic_fallback,
-        )
-        _persist_reasoning_result(
-            f"Decision: {req.situation[:80]} → {result.recommendation}",
-            f"## Situation\n{req.situation}\n\n## Recommendation\n{result.recommendation}\n\n## Reasoning\n{result.reasoning}",
-            req.domain or "decisions",
-            result.confidence,
-        )
-        return resp
-    except Exception as e:
-        _log_failure(str(e)[:500], route="/brain/decide")
-        raise HTTPException(status_code=500, detail=_safe_http_detail("decide", e, route="/brain/decide"))
-
-
-@app.post(
-    "/brain/reason", response_model=ReasonResponse, tags=["decide"], dependencies=[Depends(verify_bearer)]
-)
-@limiter.limit("60/minute")
-def brain_reason(request: Request, req: ReasonRequest) -> ReasonResponse:
-    """Deeper multi-step reasoning for complex questions."""
-    start = time.time()
-    try:
-        from brain_core.reasoning import reason_deep
-
-        result = reason_deep(req.question, req.context, req.agent, req.domain)
-        resp = ReasonResponse(
-            question=req.question,
-            analysis=getattr(result, "answer", ""),
-            reasoning_steps=getattr(result, "reasoning_steps", []),
-            confidence=getattr(result, "confidence", 0.0),
-            provenance=[vars(p) if hasattr(p, "__dict__") else p for p in getattr(result, "provenance", [])],
-            model=getattr(result, "model", "sage"),
-            latency_ms=int((time.time() - start) * 1000),
-        )
-        _persist_reasoning_result(
-            f"Analysis: {req.question[:80]}",
-            f"## Question\n{req.question}\n\n## Analysis\n{getattr(result, 'answer', '')}",
-            req.domain or "analysis",
-            getattr(result, "confidence", 0.0),
-        )
-        return resp
-    except Exception as e:
-        _log_failure(str(e)[:500], route="/brain/reason")
-        raise HTTPException(status_code=500, detail=_safe_http_detail("reason", e, route="/brain/reason"))
+# ── Routes: reasoning + decision ── moved to brain_core/routes/decide.py
 
 
 # /brain/proactive + /brain/insights moved to brain_core/routes/insights.py
@@ -4007,6 +3858,7 @@ from routes.agency import router as _agency_router  # noqa: E402
 from routes.brain_ops import router as _brain_ops_router  # noqa: E402
 from routes.capture import router as _capture_router  # noqa: E402
 from routes.coding import router as _coding_router  # noqa: E402
+from routes.decide import router as _decide_router  # noqa: E402
 from routes.governance import router as _governance_router  # noqa: E402
 from routes.health import router as _health_router  # noqa: E402
 from routes.command import router as _command_router  # noqa: E402
@@ -4045,6 +3897,7 @@ app.include_router(_ops_router)
 app.include_router(_health_router)
 app.include_router(_metrics_router)
 app.include_router(_insights_router)
+app.include_router(_decide_router)
 app.include_router(_think_router)
 app.include_router(_agency_router)
 app.include_router(_speak_router)
