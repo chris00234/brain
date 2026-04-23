@@ -498,7 +498,8 @@ from routes.learn import router as _learn_router  # noqa: E402
 from routes.memory import router as _memory_router  # noqa: E402
 from routes.metrics import router as _metrics_router  # noqa: E402
 from routes.liveness import router as _liveness_router  # noqa: E402
-from routes.ops import router as _ops_router  # noqa: E402
+from routes.dashboard import router as _dashboard_router  # noqa: E402
+from routes.session import router as _session_router  # noqa: E402
 from routes.recall import router as _recall_router  # noqa: E402
 from routes.profile import router as _profile_router  # noqa: E402
 from routes.reasoning import router as _reasoning_router  # noqa: E402
@@ -524,7 +525,8 @@ app.include_router(_wm_router)
 app.include_router(_capture_router)
 app.include_router(_knowledge_router)
 app.include_router(_governance_router)
-app.include_router(_ops_router)
+app.include_router(_session_router)
+app.include_router(_dashboard_router)
 app.include_router(_health_router)
 app.include_router(_metrics_router)
 app.include_router(_insights_router)
