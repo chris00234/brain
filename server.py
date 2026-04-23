@@ -4212,146 +4212,7 @@ def session_active_agents(session_id: Annotated[str, PathParam()]) -> dict:
 # ── Routes: audit log ── moved to brain_core/routes/admin_ops.py (see /brain/audit* endpoints)
 
 
-# ── Phase 5: L0–L3 autonomy gate ────────────────────────────────────────
-@app.get("/brain/autonomy", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
-def autonomy_list() -> dict:
-    """Return the merged level table (defaults overlaid with brain_config overrides)."""
-    try:
-        from autonomy import list_levels
-
-        return {"levels": list_levels()}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
-
-
-@app.get("/brain/autonomy/{kind:path}", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
-def autonomy_get(kind: str) -> dict:
-    try:
-        from autonomy import list_levels
-
-        levels = list_levels()
-        return {"kind": kind, "level": levels.get(kind, "L1")}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
-
-
-_AUTONOMY_KIND_RE = re.compile(r"^[a-z0-9._-]{1,64}$")
-
-
-@app.post("/brain/autonomy/{kind:path}", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
-def autonomy_set(kind: str, payload: dict) -> dict:
-    """Override a level. payload = {"level": "L2", "updated_by": "chris"}."""
-    # 2026-04-16 R-6: reject arbitrary kind strings. Previously accepted
-    # anything through {kind:path} — including `../../etc` — which
-    # polluted brain_config_store with unbounded keys. Constrain to the
-    # DEFAULT_LEVELS kind namespace shape.
-    if not _AUTONOMY_KIND_RE.match(kind or ""):
-        raise HTTPException(status_code=400, detail="kind must match [a-z0-9._-]{1,64}")
-    if not isinstance(payload, dict):
-        raise HTTPException(status_code=400, detail="payload must be a JSON object")
-    level = payload.get("level")
-    if level not in ("L0", "L1", "L2", "L3"):
-        raise HTTPException(status_code=400, detail="level must be L0|L1|L2|L3")
-    updated_by = str(payload.get("updated_by", "api"))[:64]
-    try:
-        from autonomy import set_level
-
-        set_level(kind, level, updated_by=updated_by)
-        return {"status": "set", "kind": kind, "level": level}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
-
-
-@app.get("/brain/policy/preview", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
-def autonomy_preview(kind: str, now: str | None = None) -> dict:
-    """Dry-run the gate for a kind at a specific timestamp (ISO8601). For debugging."""
-    try:
-        from autonomy import authorize
-
-        when = None
-        if now:
-            from datetime import datetime as _dt
-            from zoneinfo import ZoneInfo as _zi
-
-            when = _dt.fromisoformat(now.replace("Z", "+00:00"))
-            if when.tzinfo is None:
-                when = when.replace(tzinfo=_zi("UTC"))
-        decision = authorize(kind, now=when)
-        return decision.to_dict()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
-
-
-@app.get("/brain/breakers", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
-def breakers_list() -> dict:
-    try:
-        from breakers import list_all
-
-        rows = [
-            {
-                "kind": b.kind,
-                "state": b.state,
-                "failures": b.failures,
-                "trip_count": b.trip_count,
-                "reset_after_s": b.reset_after_s,
-                "remaining_cooldown_s": round(b.remaining_cooldown_s, 1),
-                "reason": b.reason,
-                "opened_at": b.opened_at,
-                "last_failure_at": b.last_failure_at,
-                "last_action_at": b.last_action_at,
-            }
-            for b in list_all()
-        ]
-        # Standardized v2 envelope: {items, total}. Legacy `breakers` key
-        # retained for back-compat with brain-ui pre-2026-04-13 clients.
-        return {"items": rows, "total": len(rows), "breakers": rows}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
-
-
-@app.post("/brain/breakers/{kind:path}/reset", tags=["autonomy"], dependencies=[Depends(verify_bearer)])
-def breakers_reset(kind: str) -> dict:
-    try:
-        from breakers import reset
-
-        snap = reset(kind)
-        return {"status": "reset", "kind": snap.kind, "state": snap.state}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
-
-
-# ── Phase 4: SM-2 spaced repetition review ──────────────────────────────
-@app.get("/brain/review", tags=["atoms"], dependencies=[Depends(verify_bearer)])
-def brain_review(limit: int = 20, tier: str | None = None) -> dict:
-    """List atoms whose next_review_at has passed and need a quality grade."""
-    try:
-        from sm2 import review_due
-
-        items = review_due(limit=limit, tier=tier)
-        # Standardized v2 envelope: {items, total}. Legacy `count` retained
-        # for back-compat with brain-ui pre-2026-04-13 clients.
-        return {"items": items, "total": len(items), "count": len(items)}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
-
-
-@app.post("/brain/review/{chroma_id:path}", tags=["atoms"], dependencies=[Depends(verify_bearer)])
-def brain_review_grade(chroma_id: str, payload: dict) -> dict:
-    """Grade an atom 0..5 (SM-2 quality). Updates SM-2 state + may promote tier."""
-    quality = payload.get("quality")
-    if quality is None or not isinstance(quality, int) or not 0 <= quality <= 5:
-        raise HTTPException(status_code=400, detail="quality must be int 0..5")
-    try:
-        from sm2 import apply_quality
-
-        result = apply_quality(chroma_id, quality=quality)
-        if result is None:
-            raise HTTPException(status_code=404, detail="atom not found or atoms disabled")
-        return result
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
+# ── Phase 5 autonomy gate + Phase 4 SM-2 ── moved to brain_core/routes/governance.py
 
 
 # /brain/audit/stats + /brain/audit/{event_id}/review moved to brain_core/routes/admin_ops.py
@@ -4360,45 +4221,7 @@ def brain_review_grade(chroma_id: str, payload: dict) -> dict:
 # ── facts, graph, lessons, claude-session ── moved to brain_core/routes/stores.py
 
 
-@app.get("/brain/claude-session", tags=["brain"], dependencies=[Depends(verify_bearer)])
-def claude_session_info():
-    """Current session marker state for observability."""
-    from brain_core import claude_session
-
-    return claude_session.session_info()
-
-
-@app.get("/brain/claude-queue/pending", tags=["brain"], dependencies=[Depends(verify_bearer)])
-def claude_queue_pending(limit: int = 10, kinds: str = ""):
-    """Claude drains pending in-session LLM requests. Atomically claims them."""
-    from brain_core import claude_session
-
-    kinds_list = [k.strip() for k in kinds.split(",") if k.strip()] if kinds else None
-    return {"items": claude_session.drain_pending(limit=limit, kinds=kinds_list)}
-
-
-@app.post("/brain/claude-queue/{queue_id}/answer", tags=["brain"], dependencies=[Depends(verify_bearer)])
-def claude_queue_answer(queue_id: int, body: dict):
-    """Claude submits an answer for a queued request."""
-    from brain_core import claude_session
-
-    answer = str(body.get("answer", ""))
-    meta = body.get("meta") or {}
-    if not answer:
-        raise HTTPException(status_code=400, detail="empty answer")
-    ok = claude_session.answer_item(queue_id, answer, meta=meta)
-    return {"ok": ok, "queue_id": queue_id}
-
-
-@app.get("/brain/claude-queue/{queue_id}", tags=["brain"], dependencies=[Depends(verify_bearer)])
-def claude_queue_get(queue_id: int):
-    """Caller polls for answer status on a queued request."""
-    from brain_core import claude_session
-
-    r = claude_session.get_answer(queue_id)
-    if not r:
-        raise HTTPException(status_code=404, detail="not_found")
-    return r
+# claude-session info + claude-queue moved to brain_core/routes/governance.py
 
 
 # ── Valence / attention / predictive / usage ── moved to brain_core/routes/brain_ops.py
@@ -4482,33 +4305,7 @@ def timetravel(
         raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
-@app.get("/brain/changes", tags=["brain"], dependencies=[Depends(verify_bearer)])
-def knowledge_changes(
-    since: str = Query(default="7d", description="Start of range (e.g. '7d', 'last week', '2026-04-01')"),
-    until: str = Query(default="now", description="End of range"),
-) -> dict:
-    try:
-        import temporal_reasoning
-
-        return temporal_reasoning.knowledge_diff(since, until)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"temporal diff failed: {e}")
-
-
-@app.get("/brain/evolution", tags=["brain"], dependencies=[Depends(verify_bearer)])
-def preference_evolution(
-    topic: str = Query(
-        ..., min_length=2, max_length=200, description="Topic to trace (e.g. 'frontend framework')"
-    ),
-    limit: int = Query(default=20, ge=1, le=100),
-) -> dict:
-    try:
-        import temporal_reasoning
-
-        timeline = temporal_reasoning.preference_evolution(topic, limit=limit)
-        return {"topic": topic, "timeline": timeline, "count": len(timeline)}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"evolution query failed: {e}")
+# /brain/changes + /brain/evolution moved to brain_core/routes/governance.py
 
 
 # ── Phase E1: Session context API ──
@@ -5115,6 +4912,7 @@ from routes.agency import router as _agency_router  # noqa: E402
 from routes.brain_ops import router as _brain_ops_router  # noqa: E402
 from routes.capture import router as _capture_router  # noqa: E402
 from routes.coding import router as _coding_router  # noqa: E402
+from routes.governance import router as _governance_router  # noqa: E402
 from routes.command import router as _command_router  # noqa: E402
 from routes.ingest import router as _ingest_router  # noqa: E402
 from routes.knowledge import router as _knowledge_router  # noqa: E402
@@ -5143,6 +4941,7 @@ app.include_router(_ingest_router)
 app.include_router(_wm_router)
 app.include_router(_capture_router)
 app.include_router(_knowledge_router)
+app.include_router(_governance_router)
 app.include_router(_think_router)
 app.include_router(_agency_router)
 app.include_router(_speak_router)
