@@ -91,6 +91,7 @@ from api_deps import (  # noqa: E402
     _current_secret,
     _load_secret,
     _log_failure,
+    _request_id_ctx,
     _safe_http_detail,
     prime_secret_cache,
     verify_bearer,
@@ -391,12 +392,7 @@ app.add_middleware(
 import contextvars as _contextvars
 import secrets as _secrets
 
-_request_id_ctx: _contextvars.ContextVar[str] = _contextvars.ContextVar("brain_request_id", default="")
-
-
-def get_request_id() -> str:
-    """Return the current request's correlation ID (empty string outside a request)."""
-    return _request_id_ctx.get()
+# _request_id_ctx + get_request_id moved to brain_core/api_deps.py
 
 
 @app.middleware("http")

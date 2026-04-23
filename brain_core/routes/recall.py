@@ -9,38 +9,28 @@ original module surface.
 from __future__ import annotations
 
 import contextlib
-import hashlib
 import json
-import os
-import sqlite3
 import threading
 import time
-import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated, Any, Literal
-
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi import Path as PathParam
-from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
-
-from api_deps import _log_failure, _safe_http_detail, log, verify_bearer
-from config import BRAIN_DIR
-from rate_limit import limiter
+from typing import Any
 
 import active_recall
-import boot_context
 import hyde as _hyde
-import learn
 import rerank as _rerank
 import rrf as _rrf
 import search_unified
 import temporal
 import time_decay as _time_decay
+from api_deps import _safe_http_detail, get_request_id, log, verify_bearer
+from config import BRAIN_DIR
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
+from fastapi.responses import StreamingResponse
 from indexer import get_embedding as _get_embedding
 from metrics_buffer import metrics_buffer as _metrics_buf
-from openclaw_dispatch import dispatch as _openclaw_dispatch
+from pydantic import BaseModel, Field
+from rate_limit import limiter
 from vector_store import get_vector_store
 
 router = APIRouter(dependencies=[Depends(verify_bearer)])
@@ -500,9 +490,7 @@ def _record_auto_feedback(query: str, results: list[dict], agent: str) -> None:
     # Explicit reinforcement still happens in POST /recall/feedback.
 
 
-@router.get(
-    "/recall/v2", response_model=RecallV2Response, tags=["recall"]
-)
+@router.get("/recall/v2", response_model=RecallV2Response, tags=["recall"])
 @limiter.limit("3000/minute")  # M7-WS7 + M8 follow-up: read path is non-LLM-billable (Ollama only).
 # Bumped from 600 → 3000 because back-to-back eval (1212 calls/run) was burst-throttling.
 def recall_v2(
@@ -621,10 +609,8 @@ def recall_v2(
         )
 
     if len(variants) == 1:
-        try:
+        with contextlib.suppress(Exception):
             all_payloads.append(_run_variant(variants[0]))
-        except Exception:
-            pass
     else:
         with _VariantPool(max_workers=min(len(variants), 4)) as _vpool:
             futures = {_vpool.submit(_run_variant, v): v for v in variants}
@@ -833,7 +819,10 @@ def recall_v2(
             try:
                 from confidence_calibration import apply_calibration as _apply_cal
             except Exception:
-                _apply_cal = lambda x: x  # type: ignore
+
+                def _apply_cal(x):
+                    return x  # type: ignore
+
             conf_by_id = {
                 r["chroma_id"]: {
                     "confidence_raw": round(float(r["confidence"] or 0.5), 3),
@@ -1251,7 +1240,7 @@ def recall_stream(
         rid = get_request_id() or ""
         t_start = time.time()
 
-        def _run_source(name: str, fn):
+        def _run_source(name: str, fn) -> None:
             try:
                 result = fn()
                 q_out.put(
@@ -1272,7 +1261,7 @@ def recall_stream(
 
             from brain_core.search_unified import search_all as _search_all
 
-            def _full_search():
+            def _full_search() -> None:
                 try:
                     payload = _search_all(q, limit=n)
                     q_out.put(
@@ -1327,14 +1316,6 @@ def recall_stream(
 # round-trips add up fast — a single batch endpoint lets the agent
 # submit a list of queries and get a list of results back in one
 # HTTP call. 20-query cap per batch to keep per-call latency bounded.
-class RecallBatchRequest(BaseModel):
-    queries: list[str] = Field(..., max_length=20, min_length=1)
-    n: int = Field(default=5, ge=1, le=20)
-    rerank: bool = True
-    decay: bool = True
-    agent: str = Field(default="unknown", max_length=64)
-
-
 @router.post("/recall/batch", tags=["recall"])
 @limiter.limit("300/minute")
 def recall_batch(request: Request, req: RecallBatchRequest) -> dict:
@@ -1477,5 +1458,3 @@ def recall_active(request: Request, req: RecallActiveRequest) -> dict:
             log.warning("hook latency recording failed (suppressing further)", exc_info=True)
             _hook_metrics_warned = True
     return result
-
-

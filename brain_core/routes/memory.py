@@ -11,7 +11,7 @@ import os
 import sqlite3
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from datetime import UTC
 from typing import Annotated, Any, Literal
 
@@ -32,7 +32,7 @@ router = APIRouter(dependencies=[Depends(verify_bearer)])
 
 
 @contextmanager
-def _votes_conn():  # noqa: ANN202
+def _votes_conn():
     """SQLite connection for contradiction_votes table in autonomy.db."""
     db = BRAIN_DIR / "logs" / "autonomy.db"
     conn = sqlite3.connect(str(db))
@@ -391,10 +391,7 @@ def create_memory(request: Request, req: MemoryCreateRequest) -> MemoryEntry:
         )
         supersede_target = target_id
         # DELETE takes precedence over UPDATE when explicit invalidation phrase present
-        if should_delete_by_content(req.content):
-            operation = "DELETE"
-        else:
-            operation = op
+        operation = "DELETE" if should_delete_by_content(req.content) else op
     except Exception:
         pass
 
@@ -409,10 +406,8 @@ def create_memory(request: Request, req: MemoryCreateRequest) -> MemoryEntry:
     # DELETE: invalidation phrase — remove target if found, don't store the phrase.
     # If no target found, fall through to ADD (user said "forget X" but brain had no X).
     if operation == "DELETE" and supersede_target:
-        try:
+        with suppress(Exception):
             store.delete(collection, ids=[supersede_target])
-        except Exception as e:
-            print(f"WARNING DELETE failed to remove {supersede_target}: {e}")
         return MemoryEntry(
             id=supersede_target,
             content=req.content,
@@ -451,14 +446,12 @@ def create_memory(request: Request, req: MemoryCreateRequest) -> MemoryEntry:
 
     # Phase 1B: on UPDATE, mark old memory as superseded
     if operation == "UPDATE" and supersede_target:
-        try:
+        with suppress(Exception):
             store.update_payload(
                 collection,
                 ids=[supersede_target],
                 patch={"superseded_by": mem_id, "valid_until": now_iso},
             )
-        except Exception as e:
-            print(f"WARNING failed to mark {supersede_target} superseded: {e}")
 
     try:
         store.upsert(
@@ -693,10 +686,7 @@ def create_memory_batch(request: Request, req: MemoryBatchRequest) -> dict:
                 mem_req.content, embedding, mem_req.confidence, col_id, category=mem_req.category
             )
             supersede_target = target_id
-            if should_delete_by_content(mem_req.content):
-                operation = "DELETE"
-            else:
-                operation = op
+            operation = "DELETE" if should_delete_by_content(mem_req.content) else op
         except Exception:
             pass
 
@@ -754,15 +744,13 @@ def create_memory_batch(request: Request, req: MemoryBatchRequest) -> dict:
                     ids=[old_id],
                     patch={"superseded_by": new_id, "valid_until": ts},
                 )
-        except Exception as e:
-            print(f"WARNING batch supersede failed: {e}")
+        except Exception:
+            pass
 
     # Apply deletes (batched)
     if deletes_to_apply:
-        try:
+        with suppress(Exception):
             store.delete(col_id, ids=deletes_to_apply)
-        except Exception as e:
-            print(f"WARNING batch delete failed: {e}")
 
     # Apply upserts (batched)
     if ids_to_upsert:

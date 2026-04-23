@@ -8,6 +8,7 @@ __main__ when launched directly).
 from __future__ import annotations
 
 import contextlib
+import contextvars as _contextvars
 import hmac
 import json
 import os
@@ -110,6 +111,20 @@ def _log_failure(reason: str, route: str = "?") -> None:
                 )
                 + "\n"
             )
+
+
+# Request ID correlation — set by the `request_id_and_latency` middleware in
+# server.py, read by handlers (e.g. /recall/v2 for debug tracing).
+_request_id_ctx: _contextvars.ContextVar[str] = _contextvars.ContextVar("brain_request_id", default="")
+
+
+def set_request_id(rid: str) -> None:
+    _request_id_ctx.set(rid)
+
+
+def get_request_id() -> str:
+    """Return the current request's correlation ID (empty outside a request)."""
+    return _request_id_ctx.get()
 
 
 def verify_bearer(authorization: Annotated[str | None, Header()] = None) -> None:
