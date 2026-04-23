@@ -110,12 +110,7 @@ PROFILE_CACHE_TTL = 60
 # CaptureRequest/CaptureResponse moved to brain_core/routes/capture.py
 
 
-class JobResponse(BaseModel):
-    status: Literal["queued"] = "queued"
-    job: str
-    pid: int
-
-
+# JobResponse moved to brain_core/routes/jobs.py
 # RecallResult* + RecallActive* + InjectionBlockModel moved to brain_core/routes/recall.py
 
 
