@@ -568,25 +568,7 @@ _running_jobs_lock = threading.Lock()
 _CRITICAL_JOBS = {"personal_ingest", "backup", "canonical_pipeline", "reindex"}
 
 # ── Pydantic models ─────────────────────────────────────
-class MetricsResponse(BaseModel):
-    collection_counts: dict[str, int]
-    total_chunks: int
-    uptime_sec: int
-    profile_loaded: bool
-    routes: dict[str, Any] = Field(default_factory=dict)
-    phase_latency: dict[str, Any] = Field(default_factory=dict)
-    jobs: dict[str, Any] = Field(default_factory=dict)
-    dispatch: dict[str, Any] = Field(default_factory=dict)
-    memory_writes_1h: int = 0
-    scheduler_next_runs: dict[str, str] = Field(default_factory=dict)
-    contradiction_queue_depth: int = 0
-    last_learn_success_at: str = ""
-    last_backup_at: str = ""
-    last_backup_ok: bool = True
-    embed_cache: dict[str, Any] = Field(default_factory=dict)
-    ce_cache: dict[str, Any] = Field(default_factory=dict)
-    # 2026-04-17 hook adoption — per-hook per-agent call counts + p95 latency
-    hook_adoption: dict[str, Any] = Field(default_factory=dict)
+# MetricsResponse moved to brain_core/routes/metrics.py
 
 
 # CaptureRequest/CaptureResponse moved to brain_core/routes/capture.py
@@ -812,20 +794,7 @@ from profile_cache import profile_cache as _profile_cache  # noqa: E402
 
 
 # ── Helpers ─────────────────────────────────────────────
-def _get_collection_counts() -> dict[str, int]:
-    """Per-collection row counts via the VectorStore abstraction."""
-    try:
-        store = get_vector_store()
-        names = store.list_collections()
-    except Exception as e:
-        return {"_error": str(e)[:200]}
-    counts: dict[str, int] = {}
-    for name in names:
-        try:
-            counts[name] = store.count(name)
-        except Exception:
-            counts[name] = -1
-    return counts
+# _get_collection_counts moved to brain_core/routes/metrics.py
 
 
 # _build_raw_record + _write_inbox moved to brain_core/routes/capture.py
@@ -1110,121 +1079,7 @@ async def _request_id_and_metrics_middleware(request, call_next):
 
 # ── Routes: liveness ── moved to brain_core/routes/liveness.py (include_router below)
 
-# ── Routes: metrics ─────────────────────────────────────
-@app.get("/metrics", response_model=MetricsResponse, tags=["metrics"], dependencies=[Depends(verify_bearer)])
-def metrics() -> MetricsResponse:
-    counts = _get_collection_counts()
-    total = sum(c for c in counts.values() if isinstance(c, int) and c >= 0)
-    buf = _metrics_buf.snapshot()
-
-    # Next-run times from the scheduler
-    next_runs: dict[str, str] = {}
-    try:
-        for j in brain_scheduler.list_jobs():
-            if j.get("next_run"):
-                next_runs[j["name"]] = j["next_run"]
-    except Exception:
-        pass
-
-    contradiction_depth = counts.get("semantic_contradictions", 0)
-    if not isinstance(contradiction_depth, int) or contradiction_depth < 0:
-        contradiction_depth = 0
-
-    # Embedding cache stats
-    try:
-        from embed_cache import cache_stats as _embed_stats
-
-        embed_cache = _embed_stats()
-    except Exception:
-        embed_cache = {}
-
-    # Cross-encoder score cache stats
-    try:
-        from cross_encoder_model import cache_stats as _ce_stats
-
-        ce_cache = _ce_stats()
-    except Exception:
-        ce_cache = {}
-
-    return MetricsResponse(
-        collection_counts=counts,
-        total_chunks=total,
-        uptime_sec=int(time.time() - SERVER_START),
-        profile_loaded=_profile_cache.get() is not None,
-        routes=buf["routes"],
-        phase_latency=buf.get("phase_latency", {}),
-        jobs=buf["jobs"],
-        dispatch=buf["dispatch"],
-        memory_writes_1h=buf["memory_writes_1h"],
-        scheduler_next_runs=next_runs,
-        contradiction_queue_depth=contradiction_depth,
-        last_learn_success_at=buf.get("last_learn_success_at", ""),
-        last_backup_at=buf.get("last_backup_at", ""),
-        last_backup_ok=buf.get("last_backup_ok", True),
-        embed_cache=embed_cache,
-        ce_cache=ce_cache,
-        hook_adoption=buf.get("hook_adoption", {}),
-    )
-
-
-@app.get(
-    "/metrics/prom",
-    response_class=PlainTextResponse,
-    tags=["metrics"],
-    dependencies=[Depends(verify_bearer)],
-)
-def metrics_prom() -> str:
-    """Prometheus exposition format — latency percentiles + counters as
-    gauges. Not a full histogram (backing store is reservoir-sampled p50/
-    p95/p99, not bucketed), so this is a gauge-style expose — sufficient
-    for Grafana scrapers / dashboards that only need the percentile values.
-    Reusing the existing _metrics_buf snapshot, no extra bookkeeping.
-    """
-    buf = _metrics_buf.snapshot()
-    lines: list[str] = []
-
-    def _sanitize(label: str) -> str:
-        return (
-            label.replace("\\", "\\\\")
-            .replace('"', '\\"')
-            .replace("\n", " ")
-        )
-
-    lines.append("# HELP brain_route_latency_ms Route latency percentiles (from in-memory reservoir)")
-    lines.append("# TYPE brain_route_latency_ms gauge")
-    for path, stats in (buf.get("routes") or {}).items():
-        p = _sanitize(path)
-        for quantile in ("p50_ms", "p95_ms", "p99_ms"):
-            v = stats.get(quantile, 0) or 0
-            lines.append(f'brain_route_latency_ms{{path="{p}",quantile="{quantile[:-3]}"}} {float(v)}')
-        lines.append(f'brain_route_count{{path="{p}"}} {int(stats.get("count", 0) or 0)}')
-        lines.append(f'brain_route_errors{{path="{p}"}} {int(stats.get("errors", 0) or 0)}')
-
-    lines.append("# HELP brain_phase_latency_ms Phase-level latency percentiles")
-    lines.append("# TYPE brain_phase_latency_ms gauge")
-    for phase, stats in (buf.get("phase_latency") or {}).items():
-        p = _sanitize(phase)
-        for quantile in ("p50_ms", "p95_ms", "p99_ms"):
-            v = stats.get(quantile, 0) or 0
-            lines.append(f'brain_phase_latency_ms{{phase="{p}",quantile="{quantile[:-3]}"}} {float(v)}')
-
-    lines.append("# HELP brain_memory_writes_1h Count of memory writes in last hour")
-    lines.append("# TYPE brain_memory_writes_1h gauge")
-    lines.append(f'brain_memory_writes_1h {int(buf.get("memory_writes_1h", 0) or 0)}')
-
-    dispatch = buf.get("dispatch") or {}
-    lines.append("# HELP brain_dispatch Dispatch totals")
-    lines.append("# TYPE brain_dispatch counter")
-    for key in ("attempts", "successes", "failures", "rate_limited", "auth_failed"):
-        lines.append(f'brain_dispatch{{outcome="{key}"}} {int(dispatch.get(key, 0) or 0)}')
-
-    lines.append(f'brain_uptime_seconds {int(time.time() - SERVER_START)}')
-    return "\n".join(lines) + "\n"
-
-
-@app.get("/collections", tags=["metrics"], dependencies=[Depends(verify_bearer)])
-def collections() -> dict[str, int]:
-    return _get_collection_counts()
+# ── Routes: metrics ── moved to brain_core/routes/metrics.py
 
 
 # ── Routes: profile ── moved to brain_core/routes/profile.py
@@ -4298,6 +4153,7 @@ from routes.command import router as _command_router  # noqa: E402
 from routes.ingest import router as _ingest_router  # noqa: E402
 from routes.knowledge import router as _knowledge_router  # noqa: E402
 from routes.learn import router as _learn_router  # noqa: E402
+from routes.metrics import router as _metrics_router  # noqa: E402
 from routes.liveness import router as _liveness_router  # noqa: E402
 from routes.ops import router as _ops_router  # noqa: E402
 from routes.profile import router as _profile_router  # noqa: E402
@@ -4326,6 +4182,7 @@ app.include_router(_knowledge_router)
 app.include_router(_governance_router)
 app.include_router(_ops_router)
 app.include_router(_health_router)
+app.include_router(_metrics_router)
 app.include_router(_think_router)
 app.include_router(_agency_router)
 app.include_router(_speak_router)
