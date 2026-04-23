@@ -589,32 +589,7 @@ class MetricsResponse(BaseModel):
     hook_adoption: dict[str, Any] = Field(default_factory=dict)
 
 
-class CaptureRequest(BaseModel):
-    """Generic capture payload — wrapped into a schema-compliant raw record on write."""
-
-    event: str | None = None
-    place: str | None = None
-    lat: float | None = None
-    lon: float | None = None
-    accuracy: float | None = None
-    battery: float | None = None
-    # iOS HealthKit fields
-    sleep_hrs: float | None = None
-    sleep_quality: str | None = None
-    steps: int | None = None
-    hrv_avg: float | None = None
-    rest_hr: float | None = None
-    workouts_count: int | None = None
-    # Free-form passthrough so iOS Shortcuts can send arbitrary keys
-    extra: dict[str, Any] = Field(default_factory=dict)
-
-    model_config = {"extra": "allow"}
-
-
-class CaptureResponse(BaseModel):
-    status: Literal["ok"] = "ok"
-    stored: str
-    kind: str
+# CaptureRequest/CaptureResponse moved to brain_core/routes/capture.py
 
 
 class JobResponse(BaseModel):
@@ -706,31 +681,9 @@ class RecallActiveResponse(BaseModel):
     degraded: bool = False
 
 
-class ImageIngestRequest(BaseModel):
-    """Live image ingest payload. Either `path` (local file, preferred) or
-    `base64_data` + optional `mime_type`. Also supports `prompt` override
-    to steer the caption."""
+# ImageIngestRequest moved to brain_core/routes/ingest.py
 
-    path: str | None = Field(default=None, max_length=512)
-    base64_data: str | None = Field(default=None, max_length=30_000_000)  # ~22MB base64 = 16MB raw
-    mime_type: str = Field(default="image/png", max_length=32)
-    prompt: str | None = Field(default=None, max_length=500)
-    agent: str = Field(default="claude", max_length=32)
-
-
-class WorkingMemorySetRequest(BaseModel):
-    session_id: str = Field(..., max_length=128)
-    agent: str = Field(..., max_length=32)
-    key: str = Field(..., max_length=200)
-    value: str = Field(..., max_length=10000)
-    durable: bool = Field(default=False)
-
-
-class WorkingMemoryItem(BaseModel):
-    key: str
-    value: str
-    durable: bool = False
-    updated_at: str
+# WorkingMemorySetRequest/Item moved to brain_core/routes/wm.py
 
 
 class SearchFeedbackRequest(BaseModel):
@@ -843,16 +796,7 @@ class FocusRequest(BaseModel):
 
 
 # ── Self-learning + memory CRUD models ─────────────────
-class LearnRequest(BaseModel):
-    transcript: str = Field(..., min_length=10, max_length=50_000)
-    source: str = Field(default="session", max_length=64)
-    agent: str = Field(default="claude", max_length=32)
-
-
-class LearnResponse(BaseModel):
-    status: Literal["queued", "ok"] = "queued"
-    candidates: int = 0
-    message: str = "processing in background"
+# LearnRequest / LearnResponse moved to brain_core/routes/learn.py
 
 
 class MemoryEntry(BaseModel):
@@ -936,39 +880,7 @@ def _get_collection_counts() -> dict[str, int]:
     return counts
 
 
-def _build_raw_record(source_type: str, payload: dict) -> dict:
-    now = datetime.now(UTC).replace(microsecond=0)
-    iso = now.isoformat().replace("+00:00", "Z")
-    content_str = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
-    digest = hashlib.sha256(content_str.encode()).hexdigest()
-    date_part = iso[:10].replace("-", "_")
-    rec_id = f"raw_{source_type}_{date_part}_{digest[:8]}"
-
-    entities = ["Chris"]
-    if isinstance(payload.get("place"), str):
-        entities.append(payload["place"])
-
-    return {
-        "id": rec_id,
-        "timestamp": iso,
-        "source_type": source_type,
-        "source_ref": f"brain-api:{payload.get('event', source_type)}",
-        "actor": "chris",
-        "visibility": "private",
-        "scrub_status": "scrubbed",
-        "content": content_str,
-        "attachments": [],
-        "entities": entities,
-        "hash": f"sha256:{digest}",
-    }
-
-
-def _write_inbox(source_type: str, payload: dict) -> Path:
-    INBOX_DIR.mkdir(parents=True, exist_ok=True)
-    record = _build_raw_record(source_type, payload)
-    out = INBOX_DIR / f"{record['id']}.json"
-    out.write_text(json.dumps(record, ensure_ascii=False, indent=2))
-    return out
+# _build_raw_record + _write_inbox moved to brain_core/routes/capture.py
 
 
 # ── Auth dependency ── moved to brain_core/api_deps.py (verify_bearer imported above)
@@ -2669,237 +2581,10 @@ def search_feedback(req: SearchFeedbackRequest):
     return {"status": "recorded", "eval_proposal_id": proposal_id}
 
 
-# ── Routes: /brain/ingest/image — live image captioning (v3 vision) ─────
-@app.post("/brain/ingest/image", tags=["memory"], dependencies=[Depends(verify_bearer)])
-@limiter.limit("20/minute")
-def ingest_image_route(request: Request, req: ImageIngestRequest) -> dict:
-    """Live image ingest. Caller submits a file path OR base64 bytes; brain
-    sends the image to Gemini 2.5 Flash for captioning (via brain_core.vision_llm),
-    then indexes the caption + path in the knowledge Chroma collection for
-    text-query retrieval.
-
-    This is the path Chris asked about: "openclaw에서 사진 보내면 이해하는 것처럼
-    brain도 하게". Backed by vision_llm.describe_image() with a 50/day cap
-    and per-image content hash cache.
-
-    Fail modes:
-      - no GEMINI_API_KEY → 503
-      - neither path nor base64 → 400
-      - Gemini quota / network failure → 502 with degraded flag
-    """
-    import base64 as _b64
-
-    sys.path.insert(0, "/Users/chrischo/server/brain/brain_core")
-    try:
-        import vision_llm
-    except ImportError:
-        raise HTTPException(status_code=503, detail="vision_llm unavailable")
-
-    if not vision_llm.is_configured():
-        raise HTTPException(
-            status_code=503,
-            detail="vision_llm not configured (missing GEMINI_API_KEY)",
-        )
-
-    # Resolve image bytes. 2026-04-17 security fix: confine req.path reads to
-    # allowlisted directories + extension whitelist + symlink rejection so an
-    # authenticated bearer can't coerce Gemini captioning into exfiltrating
-    # ~/.ssh keys or the bearer secret file itself.
-    _IMAGE_ALLOWED_ROOTS = (
-        Path("/Users/chrischo/Pictures").resolve(),
-        Path("/Users/chrischo/Downloads").resolve(),
-        Path("/Users/chrischo/Desktop").resolve(),
-        (BRAIN_DIR / "inbox").resolve(),
-        Path("/tmp").resolve(),
-        Path("/private/tmp").resolve(),
-    )
-    _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic", ".bmp"}
-    image_bytes: bytes | None = None
-    image_path_str: str | None = None
-    if req.path:
-        try:
-            p = Path(req.path).expanduser().resolve(strict=False)
-        except Exception:
-            raise HTTPException(status_code=400, detail="invalid path")
-        if p.suffix.lower() not in _IMAGE_EXTS:
-            raise HTTPException(status_code=400, detail="unsupported extension")
-        if not any(
-            str(p).startswith(str(root) + os.sep) or str(p) == str(root) for root in _IMAGE_ALLOWED_ROOTS
-        ):
-            raise HTTPException(status_code=400, detail="path outside allowlisted roots")
-        if p.is_symlink():
-            raise HTTPException(status_code=400, detail="symlinks not allowed")
-        if not p.exists():
-            raise HTTPException(status_code=400, detail="path not found")
-        if not p.is_file():
-            raise HTTPException(status_code=400, detail="not a file")
-        try:
-            image_bytes = p.read_bytes()
-            image_path_str = str(p)
-        except OSError:
-            raise HTTPException(status_code=400, detail="read failed")
-    elif req.base64_data:
-        try:
-            image_bytes = _b64.b64decode(req.base64_data)
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=_safe_http_detail("base64 decode", e))
-        image_path_str = None
-    else:
-        raise HTTPException(status_code=400, detail="must provide either 'path' or 'base64_data'")
-
-    if not image_bytes:
-        raise HTTPException(status_code=400, detail="empty image")
-
-    # Caption via Gemini
-    try:
-        caption = vision_llm.describe_image(
-            Path(image_path_str) if image_path_str else image_bytes,
-            prompt=req.prompt,
-        )
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=_safe_http_detail("vision_llm", e))
-
-    if not caption:
-        raise HTTPException(
-            status_code=502,
-            detail="vision_llm returned empty caption (quota / model error)",
-        )
-
-    # Hash for dedup + metadata
-    import hashlib as _hashlib
-
-    image_hash = _hashlib.sha256(image_bytes).hexdigest()
-    doc_id = f"image/{image_hash[:16]}"
-    doc_text = f"[Image caption]\n{caption}"
-    if image_path_str:
-        doc_text += f"\n\nPath: {image_path_str}"
-
-    # Index into knowledge collection (consistent with batch ingest path)
-    try:
-        store = get_vector_store()
-        store.create_collection("knowledge")
-        embedding = _get_embedding(doc_text[:4000])
-        if not embedding:
-            raise HTTPException(status_code=502, detail="embedding failed")
-        store.upsert(
-            "knowledge",
-            ids=[doc_id],
-            vectors=[embedding],
-            documents=[doc_text],
-            payloads=[
-                {
-                    "type": "image_caption",
-                    "image_hash": image_hash,
-                    "path": image_path_str or "",
-                    "mime_type": req.mime_type,
-                    "agent": req.agent,
-                    "captioned_by": "gemini-2.5-flash",
-                    "captioned_at": datetime.now(UTC).isoformat(timespec="seconds"),
-                }
-            ],
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=_safe_http_detail("chroma upsert", e))
-
-    return {
-        "status": "ingested",
-        "id": doc_id,
-        "image_hash": image_hash,
-        "caption": caption,
-        "indexed_in": "knowledge",
-    }
+# ── Routes: /brain/ingest/image ── moved to brain_core/routes/ingest.py
 
 
-# ── Routes: /brain/wm/* — session working memory (v3 plan) ──────────────
-@app.post("/brain/wm", tags=["memory"], dependencies=[Depends(verify_bearer)])
-@limiter.limit("120/minute")
-def wm_set_route(request: Request, req: WorkingMemorySetRequest) -> dict:
-    """Set a session working-memory key. Backed by autonomy.db::session_context.
-
-    If durable=True, the key is preserved via wm_consolidate() on SessionEnd
-    and promoted to an atom (tier=episodic). Otherwise it expires with the session.
-    """
-    # Layer A — test data gate. Test sessions can still use session_context
-    # for their own scratch but durable=True is rejected so nothing leaks
-    # to the atom truth layer on consolidation.
-    from brain_core import test_gate
-
-    if req.durable:
-        is_test, reason = test_gate.is_test_context(
-            session_id=req.session_id,
-            content=req.value,
-            agent=req.agent,
-        )
-        if is_test:
-            raise HTTPException(
-                status_code=400,
-                detail=f"test_data_blocked (durable): {reason}. Use durable=False "
-                f"for test session writes.",
-            )
-
-    from brain_core import working_memory
-
-    return working_memory.wm_set(req.session_id, req.agent, req.key, req.value, durable=req.durable)
-
-
-@app.get("/brain/wm/{session_id}/{agent}/{key:path}", tags=["memory"], dependencies=[Depends(verify_bearer)])
-@limiter.limit("600/minute")
-def wm_get_route(
-    request: Request,
-    session_id: Annotated[str, PathParam()],
-    agent: Annotated[str, PathParam()],
-    key: Annotated[str, PathParam()],
-) -> dict:
-    from brain_core import working_memory
-
-    value = working_memory.wm_get(session_id, agent, key)
-    if value is None:
-        raise HTTPException(status_code=404, detail="wm key not found")
-    return {"session_id": session_id, "agent": agent, "key": key, "value": value}
-
-
-@app.get("/brain/wm/{session_id}/{agent}", tags=["memory"], dependencies=[Depends(verify_bearer)])
-@limiter.limit("600/minute")
-def wm_list_route(
-    request: Request,
-    session_id: Annotated[str, PathParam()],
-    agent: Annotated[str, PathParam()],
-) -> dict:
-    from brain_core import working_memory
-
-    return {
-        "session_id": session_id,
-        "agent": agent,
-        "keys": working_memory.wm_list(session_id, agent),
-    }
-
-
-@app.delete(
-    "/brain/wm/{session_id}/{agent}/{key:path}", tags=["memory"], dependencies=[Depends(verify_bearer)]
-)
-@limiter.limit("120/minute")
-def wm_delete_route(
-    request: Request,
-    session_id: Annotated[str, PathParam()],
-    agent: Annotated[str, PathParam()],
-    key: Annotated[str, PathParam()],
-) -> dict:
-    from brain_core import working_memory
-
-    ok = working_memory.wm_delete(session_id, agent, key)
-    return {"deleted": ok}
-
-
-@app.post("/brain/wm/{session_id}/consolidate", tags=["memory"], dependencies=[Depends(verify_bearer)])
-@limiter.limit("30/minute")
-def wm_consolidate_route(request: Request, session_id: Annotated[str, PathParam()]) -> dict:
-    """SessionEnd handler: promote durable:* keys to atoms + delete the rest."""
-    from brain_core import working_memory
-
-    promoted = working_memory.wm_consolidate(session_id)
-    return {"session_id": session_id, "promoted": promoted}
+# ── Routes: /brain/wm/* ── moved to brain_core/routes/wm.py
 
 
 # ── Routes: /recall/active — per-turn thalamus (v3 plan) ─────────────────
@@ -3153,429 +2838,10 @@ def chris_think(req: ThinkRequest, background: BackgroundTasks = None) -> ThinkR
 # ── Routes: synthesis read ── moved to brain_core/routes/synthesis.py
 
 
-# ── Routes: capture (POST) ──────────────────────────────
-@app.post(
-    "/location/ingest",
-    response_model=CaptureResponse,
-    tags=["capture"],
-    dependencies=[Depends(verify_bearer)],
-)
-@app.post(
-    "/location",
-    response_model=CaptureResponse,
-    tags=["capture"],
-    include_in_schema=False,
-    dependencies=[Depends(verify_bearer)],
-)
-def capture_location(payload: CaptureRequest) -> CaptureResponse:
-    data = payload.model_dump(exclude_none=True)
-    data["_received_at"] = datetime.now(UTC).isoformat()
-    out = _write_inbox("location", data)
-    return CaptureResponse(stored=out.name, kind="location")
+# ── Routes: capture (POST) ── moved to brain_core/routes/capture.py
 
 
-@app.post(
-    "/health/ingest", response_model=CaptureResponse, tags=["capture"], dependencies=[Depends(verify_bearer)]
-)
-@app.post(
-    "/health",
-    response_model=CaptureResponse,
-    tags=["capture"],
-    include_in_schema=False,
-    dependencies=[Depends(verify_bearer)],
-)
-def capture_health(payload: CaptureRequest) -> CaptureResponse:
-    data = payload.model_dump(exclude_none=True)
-    data["_received_at"] = datetime.now(UTC).isoformat()
-    out = _write_inbox("health", data)
-    return CaptureResponse(stored=out.name, kind="health")
-
-
-@app.post(
-    "/capture/{source_type}",
-    response_model=CaptureResponse,
-    tags=["capture"],
-    dependencies=[Depends(verify_bearer)],
-)
-def capture_generic(source_type: Annotated[str, PathParam()], payload: CaptureRequest) -> CaptureResponse:
-    if not source_type or not re.fullmatch(r"[a-z0-9_\-]{1,32}", source_type):
-        raise HTTPException(status_code=400, detail="source_type must be 1-32 chars of [a-z0-9_-]")
-    data = payload.model_dump(exclude_none=True)
-    data["_received_at"] = datetime.now(UTC).isoformat()
-    out = _write_inbox(source_type, data)
-
-    # coding_event: also push to raw_events immediately so it's retrievable
-    # via /recall within seconds instead of waiting for the 3x-daily
-    # canonical_pipeline run. Synthesizes a short human-readable text from
-    # the structured payload so raw_events_fts indexes meaningful tokens.
-    if source_type == "coding_event":
-        try:
-            from atoms_store import insert_raw_event as _insert_raw_event
-
-            tool = str(data.get("tool", ""))
-            fp = str(data.get("file_path", ""))
-            old_p = str(data.get("old_preview", ""))[:200]
-            new_p = str(data.get("new_preview", ""))[:200]
-            success = "ok" if data.get("success", True) else "failed"
-            fts_text = " ".join(filter(None, [
-                f"{tool} on {fp}",
-                f"session={data.get('session_id', '')}",
-                f"cwd={data.get('cwd', '')}",
-                f"status={success}",
-                f"old:{old_p}" if old_p else "",
-                f"new:{new_p}" if new_p else "",
-            ]))
-            _insert_raw_event(
-                event_id=out.stem,
-                content=fts_text,
-                timestamp=data.get("ts", datetime.now(UTC).isoformat()),
-                source_type="coding_event",
-                source_ref=f"claude:{tool}",
-                actor="claude",
-                visibility="private",
-                scrub_status="scrubbed",
-                json_path=str(out),
-            )
-            # Chain-based outcome classification: if a prior coding_event
-            # touched this same file in the last 2h and didn't have an
-            # outcome yet, decide whether this new edit means the prior was
-            # refined / reverted / superseded. Fire-and-forget; never blocks
-            # capture, never raises.
-            try:
-                from coding_events import classify_on_new_event
-
-                classify_on_new_event({
-                    "id": out.stem,
-                    "file_path": fp,
-                    "tool": tool,
-                    "old": old_p,
-                    "new": new_p,
-                    "timestamp": data.get("ts"),
-                })
-            except Exception as exc:
-                log.debug("coding_event outcome classify failed: %s", exc)
-        except Exception as exc:
-            log.debug("coding_event raw_events insert failed: %s", exc)
-
-    return CaptureResponse(stored=out.name, kind=source_type)
-
-
-# ── Routes: /brain/speak — brain's outbound voice ────────
-@app.post(
-    "/brain/speak/run",
-    tags=["speak"],
-    dependencies=[Depends(verify_bearer)],
-)
-def speak_run(dry_run: bool = False, bypass_dedup: bool = False) -> dict:
-    """Run all drives, compose the digest, send via Telegram if non-empty.
-
-    The daily cron (brain_speak_digest, 14:55 UTC) uses the CLI form. This
-    endpoint lets us trigger on demand (/jobs/brain_speak_digest also works
-    but this returns the composed body directly for inspection).
-    """
-    try:
-        from speak import run_digest
-
-        return run_digest(dry_run=dry_run, bypass_dedup=bypass_dedup)
-    except Exception as exc:
-        log.warning("speak_run failed: %s", exc)
-        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", exc)) from exc
-
-
-@app.get(
-    "/brain/speak/history",
-    tags=["speak"],
-    dependencies=[Depends(verify_bearer)],
-)
-def speak_history(limit: int = 20) -> dict:
-    try:
-        from speak import recent_history
-
-        return {"items": recent_history(limit=limit)}
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", exc)) from exc
-
-
-@app.post(
-    "/brain/speak/ack/{entry_id}",
-    tags=["speak"],
-    dependencies=[Depends(verify_bearer)],
-)
-def speak_ack(entry_id: Annotated[str, PathParam()], verdict: str) -> dict:
-    """Record Chris's feedback on a digest entry: useful / noise / ignore."""
-    try:
-        from speak import ack as _ack
-
-        ok = _ack(entry_id, verdict)
-        if not ok:
-            raise HTTPException(status_code=404, detail="entry not found or bad verdict")
-        return {"ok": True, "entry_id": entry_id, "verdict": verdict}
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", exc)) from exc
-
-
-@app.post(
-    "/brain/speak/urgent",
-    tags=["speak"],
-    dependencies=[Depends(verify_bearer)],
-)
-def speak_urgent() -> dict:
-    """Fire the urgent doorbell path on demand.
-
-    Same code path as the 5-min cron job. Returns fired/skipped stats.
-    Useful for forcing brain to reevaluate + push urgent messages right
-    after major state changes (e.g. after a big ingest batch).
-    """
-    try:
-        from speak import urgent_scan
-
-        return urgent_scan()
-    except Exception as exc:
-        log.warning("urgent scan failed: %s", exc)
-        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", exc)) from exc
-
-
-@app.get(
-    "/brain/speak/drives",
-    tags=["speak"],
-    dependencies=[Depends(verify_bearer)],
-)
-def speak_drives() -> dict:
-    """Dry-inspect every drive's current observations. Doesn't send."""
-    try:
-        from speak import collect_observations
-
-        obs = collect_observations()
-        return {
-            "count": len(obs),
-            "observations": [
-                {
-                    "drive": o.drive,
-                    "category": o.category,
-                    "severity": o.severity,
-                    "message": o.message,
-                    "dedup_key": o.dedup_key,
-                }
-                for o in obs
-            ],
-        }
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", exc)) from exc
-
-
-# ── Routes: /brain/command — brain originates work items ────
-class BrainCommandRequest(BaseModel):
-    to_agent: str = Field(..., description="Target agent: jenna | liz | ellie | sage | market")
-    content: str = Field(..., description="The instruction/work item body")
-    message_type: str = Field("task", description="info | task | question | alert")
-    priority: int = Field(5, ge=1, le=10, description="1=urgent, 10=background")
-    reason: str | None = Field(None, description="Why brain decided this — for audit trail")
-
-
-_BRAIN_COMMAND_AGENTS = {"jenna", "liz", "ellie", "sage", "market"}
-
-
-@app.post(
-    "/brain/command",
-    tags=["agency"],
-    dependencies=[Depends(verify_bearer)],
-)
-def brain_command(payload: BrainCommandRequest) -> dict:
-    """Brain issues a work item to an OpenClaw agent.
-
-    Before today brain could only be queried. This is the outbound authority
-    channel — brain observes (via drives/synthesis_drive) a pattern that
-    warrants action, and enqueues the work item to Jenna (or whichever agent
-    owns the domain). Jenna's session picks it up via get_pending_messages
-    on next boot, executes or relays to Chris.
-
-    Audit: every command is atom-logged so we can later ask "what did brain
-    decide to do this week?".
-    """
-    if payload.to_agent not in _BRAIN_COMMAND_AGENTS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"to_agent must be one of {sorted(_BRAIN_COMMAND_AGENTS)}",
-        )
-    if not payload.content.strip():
-        raise HTTPException(status_code=400, detail="content required")
-
-    try:
-        from agent_messenger import send_message
-
-        body = payload.content.strip()
-        if payload.reason:
-            body += f"\n\n[brain reasoning]: {payload.reason}"
-        msg = send_message(
-            from_agent="brain",
-            to_agent=payload.to_agent,
-            content=body,
-            message_type=payload.message_type,
-            priority=payload.priority,
-            metadata={"origin": "brain/command", "reason": payload.reason or ""},
-        )
-        # Audit trail via atoms layer (best-effort, enabled flag checked inside)
-        try:
-            from atoms_store import insert_raw_event as _insert_raw_event
-
-            _insert_raw_event(
-                event_id=f"brain_command_{msg['id']}",
-                content=f"brain -> {payload.to_agent}: {body[:400]}",
-                timestamp=msg["created_at"],
-                source_type="brain_command",
-                source_ref=f"brain:{msg['id']}",
-                actor="brain",
-                visibility="private",
-                scrub_status="scrubbed",
-            )
-        except Exception as exc:
-            log.debug("brain_command atom write failed: %s", exc)
-
-        return {"ok": True, "message_id": msg["id"], "action": msg.get("_action", "stored")}
-    except HTTPException:
-        raise
-    except Exception as exc:
-        log.warning("brain_command failed: %s", exc)
-        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", exc)) from exc
-
-
-@app.get(
-    "/brain/command/history",
-    tags=["agency"],
-    dependencies=[Depends(verify_bearer)],
-)
-def brain_command_history(limit: int = 30) -> dict:
-    """Recent brain-originated commands — what brain has decided to do."""
-    try:
-        import sqlite3 as _sqlite3
-
-        with _sqlite3.connect(str(BRAIN_DIR / "logs" / "autonomy.db")) as conn:
-            conn.row_factory = _sqlite3.Row
-            rows = conn.execute(
-                "SELECT id, to_agent, content, message_type, priority, status, created_at, delivered_at "
-                "FROM messages WHERE from_agent='brain' "
-                "ORDER BY created_at DESC LIMIT ?",
-                (limit,),
-            ).fetchall()
-        return {"items": [dict(r) for r in rows]}
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", exc)) from exc
-
-
-@app.get(
-    "/brain/command/pending",
-    tags=["agency"],
-    dependencies=[Depends(verify_bearer)],
-)
-def brain_command_pending(to_agent: str | None = None) -> dict:
-    """Unfinished brain-originated commands. Agents hitting this endpoint
-    see what brain has asked them to do. Used by OpenClaw session boot to
-    pull brain's work items."""
-    try:
-        import sqlite3 as _sqlite3
-
-        with _sqlite3.connect(str(BRAIN_DIR / "logs" / "autonomy.db")) as conn:
-            conn.row_factory = _sqlite3.Row
-            if to_agent:
-                rows = conn.execute(
-                    "SELECT id, to_agent, content, message_type, priority, status, created_at "
-                    "FROM messages WHERE from_agent='brain' AND to_agent=? "
-                    "  AND status IN ('pending', 'in_progress') "
-                    "ORDER BY priority ASC, created_at ASC",
-                    (to_agent,),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    "SELECT id, to_agent, content, message_type, priority, status, created_at "
-                    "FROM messages WHERE from_agent='brain' "
-                    "  AND status IN ('pending', 'in_progress') "
-                    "ORDER BY priority ASC, created_at ASC"
-                ).fetchall()
-        return {"count": len(rows), "items": [dict(r) for r in rows]}
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", exc)) from exc
-
-
-class BrainCommandAck(BaseModel):
-    status: str = Field(..., description="received | in_progress | done | rejected")
-    note: str | None = Field(None, description="Agent's note / outcome summary")
-    agent: str = Field(..., description="Acking agent — must match to_agent on the message")
-
-
-@app.post(
-    "/brain/command/{message_id}/ack",
-    tags=["agency"],
-    dependencies=[Depends(verify_bearer)],
-)
-def brain_command_ack(
-    message_id: Annotated[str, PathParam()],
-    payload: BrainCommandAck,
-) -> dict:
-    """Agent acks a brain-originated command. Closes the loop so brain can
-    tell what was heard vs. completed. Writes into the existing messages
-    table (status column) and logs to action_audit for history."""
-    if payload.status not in ("received", "in_progress", "done", "rejected"):
-        raise HTTPException(
-            status_code=400,
-            detail="status must be one of: received | in_progress | done | rejected",
-        )
-    try:
-        import sqlite3 as _sqlite3
-
-        with _sqlite3.connect(str(BRAIN_DIR / "logs" / "autonomy.db")) as conn:
-            conn.row_factory = _sqlite3.Row
-            row = conn.execute(
-                "SELECT from_agent, to_agent FROM messages WHERE id=?",
-                (message_id,),
-            ).fetchone()
-            if not row:
-                raise HTTPException(status_code=404, detail="message not found")
-            if row["from_agent"] != "brain":
-                raise HTTPException(status_code=400, detail="not a brain-originated command")
-            if row["to_agent"] != payload.agent:
-                raise HTTPException(
-                    status_code=403,
-                    detail=f"only {row['to_agent']} can ack this message",
-                )
-            now_iso = datetime.now(UTC).isoformat(timespec="seconds")
-            new_status = {
-                "received": "delivered",
-                "in_progress": "in_progress",
-                "done": "completed",
-                "rejected": "rejected",
-            }[payload.status]
-            conn.execute(
-                "UPDATE messages SET status = ?, delivered_at = ? WHERE id = ?",
-                (new_status, now_iso, message_id),
-            )
-            conn.commit()
-
-        # Audit trail
-        try:
-            from atoms_store import insert_raw_event as _insert_raw_event
-
-            note = f" note: {payload.note}" if payload.note else ""
-            _insert_raw_event(
-                event_id=f"brain_command_ack_{message_id}_{payload.status}",
-                content=f"{payload.agent} acked brain cmd {message_id}: {payload.status}{note}",
-                timestamp=now_iso,
-                source_type="brain_command_ack",
-                source_ref=f"brain:{message_id}",
-                actor=payload.agent,
-                visibility="private",
-                scrub_status="scrubbed",
-            )
-        except Exception as exc:
-            log.debug("brain_command_ack audit failed: %s", exc)
-
-        return {"ok": True, "message_id": message_id, "new_status": new_status}
-    except HTTPException:
-        raise
-    except Exception as exc:
-        log.warning("brain_command_ack failed: %s", exc)
-        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", exc)) from exc
+# ── Routes: /brain/speak, /brain/command ── moved to brain_core/routes/speak.py, command.py
 
 
 # ── Routes: /brain/canonical_staleness, /brain/self_eval ── moved to brain_core/routes/admin_ops.py
@@ -3750,47 +3016,7 @@ def trigger_job(job: Annotated[str, PathParam()]) -> JobResponse:
 # (scheduler lifespan is wired above where `app` is created)
 
 
-# ── Routes: self-learning ───────────────────────────────
-@app.post("/learn", response_model=LearnResponse, tags=["learn"], dependencies=[Depends(verify_bearer)])
-@limiter.limit("10/minute")  # Phase M5: hardest gap — /learn fires LLM dispatch
-def learn_route(request: Request, req: LearnRequest, background: BackgroundTasks) -> LearnResponse:
-    """Submit a session transcript for distillation. Runs in background — returns immediately.
-
-    The pipeline (extract → distill via Jenna → embed → contradiction-check) is fire-and-forget
-    so the caller (Claude Code SessionEnd hook, OpenClaw agent, iOS Shortcut) never blocks.
-    """
-    # MR2 fix (2026-04-14): test_gate check. Previously /learn had no
-    # test-data filter — test harnesses that submitted transcripts
-    # ended up with extracted candidates written to semantic_memory
-    # unguarded. Uses source + agent + transcript as signal.
-    try:
-        from brain_core import test_gate
-
-        is_test, reason = test_gate.is_test_context(
-            source=req.source,
-            content=req.transcript,
-            agent=req.agent,
-        )
-        if is_test:
-            raise HTTPException(status_code=400, detail=f"test_data_blocked:{reason}")
-    except HTTPException:
-        raise
-    except Exception:
-        pass  # test_gate import fail = don't block the path
-    candidates = learn.extract_candidates(req.transcript)
-    background.add_task(_run_learn_pipeline, req.transcript, req.source, req.agent)
-    return LearnResponse(candidates=len(candidates))
-
-
-def _run_learn_pipeline(transcript: str, source: str, agent: str) -> None:
-    try:
-        result = learn.process_session(transcript, source=source, agent=agent)
-        if result.get("errors"):
-            _log_failure(f"learn errors: {result['errors']}", route="/learn")
-        elif result.get("stored", 0) > 0:
-            _metrics_buf.record_learn_success()
-    except Exception as e:
-        _log_failure(f"learn pipeline crash: {e}", route="/learn")
+# ── Routes: self-learning ── moved to brain_core/routes/learn.py
 
 
 # ── Routes: memory CRUD ─────────────────────────────────
@@ -7357,13 +6583,19 @@ def admin_restart() -> dict:
 # ── Mount extracted route modules ───────────────────────
 from routes.admin_ops import router as _admin_ops_router  # noqa: E402
 from routes.brain_ops import router as _brain_ops_router  # noqa: E402
+from routes.capture import router as _capture_router  # noqa: E402
 from routes.coding import router as _coding_router  # noqa: E402
+from routes.command import router as _command_router  # noqa: E402
+from routes.ingest import router as _ingest_router  # noqa: E402
+from routes.learn import router as _learn_router  # noqa: E402
 from routes.liveness import router as _liveness_router  # noqa: E402
 from routes.profile import router as _profile_router  # noqa: E402
 from routes.reasoning import router as _reasoning_router  # noqa: E402
+from routes.speak import router as _speak_router  # noqa: E402
 from routes.stores import router as _stores_router  # noqa: E402
 from routes.synthesis import router as _synthesis_router  # noqa: E402
 from routes.web import router as _web_router  # noqa: E402
+from routes.wm import router as _wm_router  # noqa: E402
 
 app.include_router(_liveness_router)
 app.include_router(_admin_ops_router)
@@ -7374,6 +6606,12 @@ app.include_router(_stores_router)
 app.include_router(_reasoning_router)
 app.include_router(_synthesis_router)
 app.include_router(_coding_router)
+app.include_router(_learn_router)
+app.include_router(_ingest_router)
+app.include_router(_wm_router)
+app.include_router(_capture_router)
+app.include_router(_speak_router)
+app.include_router(_command_router)
 
 
 # ── Bootstrap ───────────────────────────────────────────
