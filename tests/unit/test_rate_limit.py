@@ -65,8 +65,8 @@ def test_limited_routes_registered(client):
     # under 600. Write paths stay tight at 10-30/min because they DO fire
     # billable LLM dispatches.
     expected = {
-        "server.recall": "3000 per 1 minute",
-        "server.recall_v2": "3000 per 1 minute",
+        "routes.recall.recall": "3000 per 1 minute",
+        "routes.recall.recall_v2": "3000 per 1 minute",
         "routes.learn.learn_route": "10 per 1 minute",
         "routes.memory.create_memory": "30 per 1 minute",
         "routes.memory.create_memory_batch": "10 per 1 minute",

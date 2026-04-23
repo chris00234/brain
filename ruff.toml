@@ -66,6 +66,7 @@ extend-exclude = [
   # Wholesale-extracted from server.py; pre-existing B904/S110/SIM108 patterns
   # stay lint-excluded until a follow-up pass cleans them up.
   "brain_core/routes/memory.py",
+  "brain_core/routes/recall.py",
   "cli/analyze_boot.py",
   "cli/backup_chroma.py",
   "cli/backup_neo4j.py",
