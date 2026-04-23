@@ -37,6 +37,7 @@ EXPECTED_TOOLS = {
     # 2026-04-16 Tier 3 #8: cognitive verbs
     "brain_forget",
     "brain_consolidate",
+    "brain_tick",
     "brain_doubt",
 }
 
@@ -226,6 +227,7 @@ def test_no_new_uncapped_tools_added():
         "brain_wm_get",
         "brain_wm_list",
         "brain_forget",
+        "brain_tick",
         "brain_doubt",
     }
     unclassified = branch_names - TIMEOUT_CAPPED_TOOLS - FAST_TOOLS

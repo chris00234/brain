@@ -25,16 +25,26 @@ def test_slo_count(slos_module):
     # + 1 calibration_brier_drift_7d (2026-04-17 W5 — silent miscalibration detector)
     # + 3 incident-response SLOs (2026-04-17: dispatch_failure_rate_1h,
     #   agent_session_max_mb, logs_dir_total_mb)
-    assert len(slos_module.SLOS) == 15
+    # + 1 qdrant_backup_age_hours (2026-04-21 Qdrant migration)
+    # + 1 neo4j_backup_age_hours (round-3 parity fix)
+    # + 2 additional watchers (2026-04-23: boot_context_degraded_1h,
+    #   self_eval_drift_7d)
+    assert len(slos_module.SLOS) == 19
     assert "atoms_write_throughput_1h" in slos_module.SLOS
     assert "calibration_brier_drift_7d" in slos_module.SLOS
     assert "dispatch_failure_rate_1h" in slos_module.SLOS
     assert "agent_session_max_mb" in slos_module.SLOS
+    assert "boot_context_degraded_1h" in slos_module.SLOS
+    assert "self_eval_drift_7d" in slos_module.SLOS
     assert "logs_dir_total_mb" in slos_module.SLOS
+    assert "qdrant_backup_age_hours" in slos_module.SLOS
+    assert "neo4j_backup_age_hours" in slos_module.SLOS
 
 
 def test_recall_v2_p95_lower_is_better(slos_module):
     slo = slos_module.SLOS["recall_v2_p95_ms"]
+    # Loosened 2026-04-22 to 500ms after profiling showed fan-out (375ms) +
+    # cross-encoder (308ms) are both accuracy-critical and sequential.
     assert slo.target == 500.0
     assert slo.severity == "warning"
     # 600ms > 500 target → breach (latency is lower-is-better)
@@ -44,8 +54,9 @@ def test_recall_v2_p95_lower_is_better(slos_module):
 
 def test_content_hit_higher_is_better(slos_module):
     slo = slos_module.SLOS["recall_v2_content_hit_pct"]
-    assert slo.target == 95.0
-    # 90% < 95% target → breach (recall is higher-is-better)
+    # Tightened 2026-04-21 Qdrant migration (was 95 on ChromaDB).
+    assert slo.target == 96.0
+    # 90% < 96% target → breach (recall is higher-is-better)
     assert slos_module._is_breach(slo, 90.0) is True
     assert slos_module._is_breach(slo, 96.5) is False
 
