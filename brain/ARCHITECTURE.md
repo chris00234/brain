@@ -91,6 +91,8 @@ FastAPI on `127.0.0.1:8791`. Bearer-token auth (`~/.openclaw/credentials/.person
 ### 3. Search pipeline (`brain_core/search_unified.py`)
 Parallel fan-out across 6 sources → RRF fuse with trust weights → cross-encoder rerank (BGE-reranker-base) → token-overlap rerank → time decay (category-aware) → preference recency boost → graph entity boost → spreading activation (HippoRAG PPR) → triple_link boost (HippoRAG2, M7-WS3) → MMR diversity → source diversity cap. Optional `?iterative=true` activates CRAG (M9) for low-confidence retry.
 
+`/recall/active` adds a lightweight judgment layer before per-turn hook injection. `brain_core/judgment_layer.py` classifies prompt shape, suppresses proceed-only/generic hook noise, sets semantic score and token budgets, and arbitrates canonical/doorbell/semantic/proactive blocks so the hook injects only evidence that is useful for the current turn. `brain_core/judgment_feedback.py` records those decisions beside `action_audit` and exposes `/brain/judgment-report` for tuning without adding a new daemon or LLM call.
+
 ### 4. Storage layer (3 native services + SQLite)
 - **Qdrant** 1.17 native at `127.0.0.1:6333` — 7 collections (13→7 collapse via payload discriminators), ~34K points, 1024-dim e5-large-instruct. int8 scalar quantization, HNSW m=16/ef_construct=128, named vectors `dense`+`contextual`+`raptor` on canonical, `sparse` (BM25 via IDF modifier) on every collection. Built from source; supervised by `ai.openclaw.qdrant-native`.
 - **Ollama** native at `127.0.0.1:11434` — embedder only. `multilingual-e5-large-instruct`. Asymmetric `passage:`/`query:` prefixes. Apple Silicon GPU/NE. Zero LLM duty.
@@ -153,6 +155,8 @@ operator → MCP brain_recall(q="how do we deploy ghost?")
 |---|---|
 | `server.py` | FastAPI gateway, ~130 routes, lifespan, scheduler boot |
 | `brain_mcp_server.py` | 20-tool MCP shim — proxies to HTTP |
+| `brain_core/judgment_layer.py` | Deterministic per-turn memory arbitration for `/recall/active` |
+| `brain_core/judgment_feedback.py` | Sidecar telemetry for active-recall judgment decisions |
 | `brain_core/search_unified.py` | The hot path — search_all() pipeline |
 | `brain_core/atoms_store.py` | SQLite truth layer + action_audit |
 | `brain_core/openclaw_dispatch.py` | All LLM calls go through here |

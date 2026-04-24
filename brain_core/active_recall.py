@@ -7,6 +7,8 @@ from a passive retrieval store into a per-turn proactive surface.
 
 Pipeline (fast path, <1200 ms hard budget):
 
+  0. Judgment layer           — prompt-shape classifier decides whether memory
+                                is useful at all, and sets per-intent budget.
   1. L0 canonical guarantees  — YAML-driven keyword match returns file paths
      that MUST surface regardless of vector scores. Prevents "design standard
      loses to noisy vector hits."
@@ -78,6 +80,18 @@ try:
     from atoms_store import insert_action_audit as _insert_action_audit
 except ImportError:
     _insert_action_audit = None  # type: ignore[assignment]
+
+try:
+    from judgment_layer import arbitrate_blocks as _arbitrate_blocks
+    from judgment_layer import classify_prompt as _classify_prompt
+except ImportError:
+    _arbitrate_blocks = None  # type: ignore[assignment]
+    _classify_prompt = None  # type: ignore[assignment]
+
+try:
+    from judgment_feedback import record as _record_judgment_feedback
+except ImportError:
+    _record_judgment_feedback = None  # type: ignore[assignment]
 
 log = logging.getLogger("brain.active_recall")
 
@@ -347,6 +361,7 @@ def _semantic_blocks(
     matches: list[IntentMatch],
     seen_hashes: set[str],
     limit: int = 5,
+    min_score: float | None = None,
 ) -> list[InjectionBlock]:
     """Fan out the prompt + matched intents' always_push_queries through
     search_unified.search_all. Returns up to `limit` dedup'd blocks.
@@ -434,8 +449,10 @@ def _semantic_blocks(
         if is_generic_summary and (DISABLE_GENERIC_SUMMARY_BLOCKS or generic_summary_seen):
             continue
         norm_score = min(1.0, max(0.0, score / 100.0))
-        min_score = SEMANTIC_MIN_SCORE_WITH_INTENT if matches else SEMANTIC_MIN_SCORE
-        if norm_score < min_score:
+        score_floor = min_score
+        if score_floor is None:
+            score_floor = SEMANTIC_MIN_SCORE_WITH_INTENT if matches else SEMANTIC_MIN_SCORE
+        if norm_score < score_floor:
             continue
         if not _semantic_result_matches_prompt(prompt, title, content):
             continue
@@ -804,12 +821,13 @@ def _audit(
     blocks: list[InjectionBlock],
     intents: list[str],
     latency_ms: int,
-) -> None:
+) -> int | None:
+    audit_id = None
     if _insert_action_audit is None:
-        return
+        return None
     try:
         atom_ids = [b.id for b in blocks]
-        _insert_action_audit(
+        audit_id = _insert_action_audit(
             route="/recall/active",
             query_text=(prompt or "")[:2000],
             tool="active_recall",
@@ -840,19 +858,30 @@ def _audit(
             search_unified._search_bg_pool.submit(reinforce_on_access, sem_ids)
     except Exception as _exc:
         log.debug("silenced exception in active_recall.py: %s", _exc)
+    return audit_id
 
 
-def _quality_report(blocks: list[InjectionBlock]) -> dict:
+def _quality_report(
+    blocks: list[InjectionBlock],
+    *,
+    judgment: object | None = None,
+    arbitration: object | None = None,
+) -> dict:
     generic_summary_count = sum(1 for b in blocks if _is_generic_summary_title(b.title))
     noisy_count = sum(1 for b in blocks if _is_noisy_semantic_result(b.title, b.content, b.path))
     semantic_count = sum(1 for b in blocks if b.source.startswith("semantic"))
-    return {
+    report = {
         "block_count": len(blocks),
         "semantic_count": semantic_count,
         "generic_summary_count": generic_summary_count,
         "noisy_count": noisy_count,
         "max_score": max((b.score for b in blocks), default=0.0),
     }
+    if judgment is not None and hasattr(judgment, "to_dict"):
+        report["judgment"] = judgment.to_dict()
+    if arbitration is not None and hasattr(arbitration, "to_quality_dict"):
+        report["arbitration"] = arbitration.to_quality_dict()
+    return report
 
 
 # ── Helpers ───────────────────────────────────────────────────────
@@ -887,19 +916,40 @@ def build_injection(
     """
     t0 = time.time()
     try:
-        matches = _match_canonical_routes(prompt)
+        judgment = _classify_prompt(prompt, cwd=cwd) if _classify_prompt is not None else None
+        memory_needed = bool(getattr(judgment, "needs_memory", True))
+        allow_semantic = bool(getattr(judgment, "allow_semantic", True))
+        allow_proactive = bool(getattr(judgment, "allow_proactive", True))
+
+        matches = _match_canonical_routes(prompt) if memory_needed else []
         intents = [m.intent for m in matches]
 
         seen_registry = _get_seen(session_id, agent) if session_id else {}
         seen_set = set(seen_hashes or []) | set(seen_registry.keys())
 
         canonical = _canonical_blocks_from_matches(matches, seen_set)
-        semantic = _semantic_blocks(prompt, matches, seen_set, limit=5)
-        proactive = _proactive_blocks(seen_set)
+        semantic_limit = int(getattr(judgment, "max_blocks", 5) or 5)
+        semantic_min_score = getattr(judgment, "min_semantic_score", None)
+        semantic = (
+            _semantic_blocks(
+                prompt,
+                matches,
+                seen_set,
+                limit=max(1, min(5, semantic_limit)),
+                min_score=semantic_min_score,
+            )
+            if allow_semantic
+            else []
+        )
+        proactive = _proactive_blocks(seen_set) if allow_proactive else []
         doorbell = _doorbell_blocks(session_id) if session_id else []
 
         all_blocks = canonical + doorbell + semantic + proactive
         filtered = _apply_decay_filter(all_blocks, seen_registry, turn_idx)
+        arbitration = None
+        if _arbitrate_blocks is not None and judgment is not None:
+            arbitration = _arbitrate_blocks(filtered, judgment)
+            filtered = list(arbitration.blocks)
 
         if (
             _confidence_sentinel_enabled()
@@ -908,11 +958,26 @@ def build_injection(
         ):
             filtered.insert(0, _confidence_sentinel())
 
-        budgeted = _enforce_budget(filtered, BUDGET_TOKEN_LIMIT)
+        budget_limit = int(getattr(judgment, "max_tokens", BUDGET_TOKEN_LIMIT) or BUDGET_TOKEN_LIMIT)
+        budgeted = _enforce_budget(filtered, min(BUDGET_TOKEN_LIMIT, budget_limit))
 
         latency_ms = int((time.time() - t0) * 1000)
 
-        _audit(prompt, session_id, agent, budgeted, intents, latency_ms)
+        audit_id = _audit(prompt, session_id, agent, budgeted, intents, latency_ms)
+        if _record_judgment_feedback is not None:
+            try:
+                _record_judgment_feedback(
+                    action_audit_id=audit_id,
+                    session_id=session_id,
+                    actor=agent,
+                    judgment=judgment,
+                    arbitration=arbitration,
+                    block_count=len(budgeted),
+                    semantic_count=sum(1 for b in budgeted if b.source.startswith("semantic")),
+                    latency_ms=latency_ms,
+                )
+            except Exception as exc:
+                log.debug("judgment feedback write failed: %s", exc)
         if session_id:
             _update_seen(session_id, agent, turn_idx, budgeted)
 
@@ -922,7 +987,7 @@ def build_injection(
             "total_tokens": sum(_rough_tokens(b.content) + _rough_tokens(b.title) for b in budgeted),
             "latency_ms": latency_ms,
             "new_since_last_turn": len(budgeted) > 0,
-            "quality": _quality_report(budgeted),
+            "quality": _quality_report(budgeted, judgment=judgment, arbitration=arbitration),
             "degraded": False,
         }
     except Exception as e:

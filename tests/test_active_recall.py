@@ -386,6 +386,42 @@ def test_build_injection_returns_latency_ms(monkeypatch):
     assert isinstance(result["latency_ms"], int)
 
 
+def test_build_injection_suppresses_short_proceed_prompt(monkeypatch):
+    called = False
+    recorded = {}
+
+    def _semantic(*args, **kwargs):
+        nonlocal called
+        called = True
+        return [
+            active_recall.InjectionBlock(
+                id="noise",
+                title="Noise",
+                content="This should not be injected for a proceed-only prompt.",
+                source="semantic",
+                score=0.99,
+                priority="high",
+            )
+        ]
+
+    monkeypatch.setattr(active_recall, "_semantic_blocks", _semantic)
+    monkeypatch.setattr(active_recall, "_record_judgment_feedback", lambda **kwargs: recorded.update(kwargs))
+    result = active_recall.build_injection(
+        prompt="좋다 진행하자",
+        session_id="t-proceed",
+        turn_idx=0,
+        agent="codex",
+    )
+
+    assert called is False
+    assert result["blocks"] == []
+    assert result["quality"]["judgment"]["intent"] == "execution_control"
+    assert result["quality"]["judgment"]["needs_memory"] is False
+    assert recorded["actor"] == "codex"
+    assert recorded["block_count"] == 0
+    assert recorded["judgment"].intent == "execution_control"
+
+
 def test_build_injection_can_include_opt_in_confidence_sentinel(monkeypatch):
     monkeypatch.setenv("BRAIN_ACTIVE_RECALL_CONFIDENCE_SENTINEL", "1")
     monkeypatch.setattr(active_recall, "_semantic_blocks", lambda *args, **kwargs: [])

@@ -120,6 +120,17 @@ def search_quality() -> dict:
         raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e)) from e
 
 
+@router.get("/brain/judgment-report", tags=["brain"])
+def judgment_report(hours: int = Query(default=24, ge=1, le=168)) -> dict:
+    """Active-recall judgment telemetry for hook-noise and context-budget tuning."""
+    try:
+        from judgment_feedback import report
+
+        return report(hours=hours)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e)) from e
+
+
 # ── MCP tool discovery ─────────────────────────────────
 @router.get("/brain/tools", tags=["mcp"])
 def brain_tools() -> dict:
