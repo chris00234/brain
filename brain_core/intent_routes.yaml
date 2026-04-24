@@ -116,6 +116,41 @@ intents:
     priority: high
     max_tokens: 600
 
+  llm_budget:
+    keywords_en:
+      - llm cost
+      - llm budget
+      - model cost
+      - extra cost
+      - no extra cost
+      - subscription
+      - api billing
+      - paid api
+      - local model
+      - local llm
+      - claude subscription
+      - gpt subscription
+      - codex subscription
+    keywords_ko:
+      - 비용
+      - 구독
+      - 추가 비용
+      - 과금
+      - 유료 api
+      - API 과금
+      - 로컬 모델
+      - 로컬 LLM
+      - 지피티 구독
+      - 클로드 구독
+    canonical_paths:
+      - ~/.codex/skills/brain-learned-llm-budget/SKILL.md
+    always_push_queries:
+      - Chris no additional LLM spending beyond subscription
+      - local models embeddings only no local LLM generation
+      - Claude GPT subscription CLI no paid API billing
+    priority: critical
+    max_tokens: 700
+
   openclaw:
     keywords_en:
       - openclaw

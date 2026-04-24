@@ -82,6 +82,13 @@ def test_intent_matches_brain_self():
     assert "brain_self" in intents
 
 
+def test_llm_budget_intent_suppresses_broad_brain_self():
+    matches = active_recall._match_canonical_routes("브레인 비용 정책 알려줘")
+    intents = [m.intent for m in matches]
+    assert "llm_budget" in intents
+    assert "brain_self" not in intents
+
+
 def test_intent_matches_visual():
     matches = active_recall._match_canonical_routes("내가 보낸 사진 뭐였지?")
     intents = [m.intent for m in matches]

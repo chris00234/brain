@@ -243,6 +243,9 @@ def _intent_blocked_by_context(intent_name: str, lowered_prompt: str) -> bool:
     image-processing pipeline ("Gemini API vs subscription CLI") should not
     fan out to remembered screenshots/photos.
     """
+    if intent_name == "brain_self" and _looks_like_llm_budget_prompt(lowered_prompt):
+        return True
+
     if intent_name != "visual":
         return False
     technical_markers = (
@@ -264,6 +267,34 @@ def _intent_blocked_by_context(intent_name: str, lowered_prompt: str) -> bool:
         "캡션",
     )
     return any(marker in lowered_prompt for marker in technical_markers)
+
+
+def _looks_like_llm_budget_prompt(lowered_prompt: str) -> bool:
+    """Keep broad brain_self routes out of LLM cost/subscription questions."""
+    budget_markers = (
+        "llm",
+        "model cost",
+        "extra cost",
+        "no extra cost",
+        "subscription",
+        "api billing",
+        "paid api",
+        "local model",
+        "local llm",
+        "gpt subscription",
+        "claude subscription",
+        "codex subscription",
+        "비용",
+        "구독",
+        "추가 비용",
+        "과금",
+        "유료 api",
+        "로컬 모델",
+        "로컬 llm",
+        "지피티 구독",
+        "클로드 구독",
+    )
+    return any(marker in lowered_prompt for marker in budget_markers)
 
 
 def _load_canonical_path(raw_path: str) -> tuple[str, str] | None:
