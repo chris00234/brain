@@ -242,6 +242,54 @@ def test_distilled_successor_needs_content_match_for_specific_source_credit() ->
     assert rank == 0
 
 
+def test_distilled_successor_can_get_source_credit_from_query_without_content_credit() -> None:
+    results = [
+        {
+            "collection": "distilled",
+            "source_type": "distilled",
+            "title": "Chris verifies automation proof before claims",
+            "path": "distilled/projects/dist_chris_requires_automation_proof.md",
+            "content": "Automation claims need verified evidence before being reported.",
+        }
+    ]
+
+    hit_source, hit_content, rank, hit_loose = _expected_hit(
+        results,
+        "canonical/archived/chris/chris-corrected-a-false-positive-automation-claim.md",
+        "requires proof before claiming automation success",
+        query="how should Chris verify automation proof claims",
+    )
+
+    assert hit_source is True
+    assert hit_content is False
+    assert hit_loose is False
+    assert rank == 1
+
+
+def test_distilled_successor_without_query_support_does_not_get_source_credit() -> None:
+    results = [
+        {
+            "collection": "distilled",
+            "source_type": "distilled",
+            "title": "Scheduling preference",
+            "path": "distilled/projects/dist_scheduling.md",
+            "content": "A different preference about scheduling.",
+        }
+    ]
+
+    hit_source, hit_content, rank, hit_loose = _expected_hit(
+        results,
+        "canonical/archived/chris/chris-corrected-a-false-positive-automation-claim.md",
+        "requires proof before claiming automation success",
+        query="how should Chris verify automation proof claims",
+    )
+
+    assert hit_source is False
+    assert hit_content is False
+    assert hit_loose is False
+    assert rank == 0
+
+
 def test_identity_page_matches_profile_source_label() -> None:
     results = [
         {

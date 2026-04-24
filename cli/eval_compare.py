@@ -45,6 +45,7 @@ def _get(path: str, token: str) -> dict:
     except Exception as e:
         return {"error": str(e), "results": []}
 
+
 _WORD_RE = _re_eval.compile(r"[\w가-힣]+", _re_eval.UNICODE)
 _STOP = {
     "the",
@@ -181,7 +182,11 @@ def _result_source_forms(result: dict) -> set[str]:
     ):
         raw_forms.update({"distilled", "canonical", "knowledge"})
 
-    if collection_lower == "canonical" or source_type_lower == "canonical" or "/knowledge/canonical/" in path_lower:
+    if (
+        collection_lower == "canonical"
+        or source_type_lower == "canonical"
+        or "/knowledge/canonical/" in path_lower
+    ):
         raw_forms.add("canonical")
 
     if collection_lower == "knowledge" or source_type_lower == "knowledge":
@@ -220,6 +225,35 @@ def _source_matches(result: dict, expected_source: str) -> bool:
     return False
 
 
+def _query_supports_successor_source(result: dict, query: str) -> bool:
+    """True when a current/distilled successor is clearly about the query.
+
+    This is only used to classify source/provenance success for archived
+    canonical expectations. It does not grant content credit. The goal is to
+    avoid calling a case a complete retrieval miss when the system retrieved a
+    current distilled successor that is visibly about the same query, while the
+    expected phrase itself is stale or paraphrased.
+    """
+    q_tokens = _signif_tokens(query)
+    if len(q_tokens) < 3:
+        return False
+    text = " ".join(
+        str(result.get(k) or "")
+        for k in (
+            "title",
+            "path",
+            "source",
+            "source_type",
+            "collection",
+            "content",
+        )
+    )
+    meta = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+    text += " " + " ".join(_iter_source_strings(meta))
+    hit_count = len(q_tokens & _signif_tokens(text[:3000]))
+    return hit_count >= min(3, len(q_tokens))
+
+
 def _is_current_memory_successor_candidate(result: dict, expected_source: str) -> bool:
     """Return true when a current memory note can stand in for an archived source.
 
@@ -227,7 +261,8 @@ def _is_current_memory_successor_candidate(result: dict, expected_source: str) -
     The eval set still contains many archived paths, so exact source matching
     under-counts cases where retrieval returned the right current memory. This
     helper only identifies the candidate relationship; the caller must still
-    require an expected-content hit before granting source credit.
+    require either expected-content overlap or query overlap before granting
+    source credit.
     """
     expected = (expected_source or "").lower()
     if not expected:
@@ -265,6 +300,7 @@ def _expected_hit(
     expected_source: str,
     expected_content: str,
     expected_alternates: list[str] | None = None,
+    query: str = "",
 ) -> tuple[bool, bool, int, bool]:
     """Returns (hit_source_top5, hit_content_strict, hit_at_rank, hit_content_loose).
 
@@ -312,10 +348,11 @@ def _expected_hit(
                 row_content_loose = True
                 hit_content_loose = True
 
-        if _source_matches(r, expected_source) or (
-            bool(expected_content)
-            and row_content_loose
-            and _is_current_memory_successor_candidate(r, expected_source)
+        successor_candidate = _is_current_memory_successor_candidate(r, expected_source)
+        if (
+            _source_matches(r, expected_source)
+            or (bool(expected_content) and row_content_loose and successor_candidate)
+            or (successor_candidate and _query_supports_successor_source(r, query))
         ):
             if rank == 0:
                 rank = i
@@ -390,7 +427,7 @@ def run_eval(
         if origin and origin != expected_content:
             expected_alternates.append(origin)
         hs, hc_strict, rank, hc_loose = _expected_hit(
-            results, expected_source, expected_content, expected_alternates
+            results, expected_source, expected_content, expected_alternates, query=q
         )
         if hs:
             hits_source += 1
