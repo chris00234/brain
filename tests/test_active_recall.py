@@ -254,6 +254,54 @@ def test_semantic_blocks_suppresses_generic_summary_titles(monkeypatch):
     assert blocks == []
 
 
+def test_semantic_blocks_suppresses_usage_snapshot_for_strategy_prompt(monkeypatch):
+    fake_search = types.SimpleNamespace(
+        search_all=lambda *args, **kwargs: {
+            "results": [
+                {
+                    "id": "usage-snapshot",
+                    "title": "지난 7일 브레인 LLM 사용량",
+                    "content": "총 비용 $811.75, prompt tokens 33.7M, response tokens 123,991",
+                    "score": 99,
+                    "collection": "canonical",
+                    "path": "/reports/llm-token-usage.md",
+                }
+            ]
+        }
+    )
+    monkeypatch.setitem(sys.modules, "search_unified", fake_search)
+
+    blocks = active_recall._semantic_blocks(
+        "이제 내가 원하는 레벨의 브레인 경지에 도달하기 위해 남은게 뭐야?",
+        [],
+        set(),
+        limit=5,
+    )
+    assert blocks == []
+
+
+def test_semantic_blocks_allows_usage_snapshot_for_usage_prompt(monkeypatch):
+    fake_search = types.SimpleNamespace(
+        search_all=lambda *args, **kwargs: {
+            "results": [
+                {
+                    "id": "usage-snapshot",
+                    "title": "지난 7일 브레인 LLM 사용량",
+                    "content": "총 비용 $811.75, prompt tokens 33.7M, response tokens 123,991",
+                    "score": 99,
+                    "collection": "canonical",
+                    "path": "/reports/llm-token-usage.md",
+                }
+            ]
+        }
+    )
+    monkeypatch.setitem(sys.modules, "search_unified", fake_search)
+
+    blocks = active_recall._semantic_blocks("브레인 LLM 사용량 토큰 집계 알려줘", [], set(), limit=5)
+    assert len(blocks) == 1
+    assert blocks[0].title == "지난 7일 브레인 LLM 사용량"
+
+
 def test_semantic_blocks_requires_prompt_overlap(monkeypatch):
     fake_search = types.SimpleNamespace(
         search_all=lambda *args, **kwargs: {

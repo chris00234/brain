@@ -138,6 +138,34 @@ def _parse(text: str) -> dict:
         return {}
 
 
+def _stable_topic_key(text: str) -> str | None:
+    normalized = _re.sub(r"\s+", " ", (text or "").lower())
+    if "openclaw" in normalized and any(
+        marker in normalized for marker in ("무응답", "응답 정지", "응답정지", "no-response", "no response")
+    ):
+        return "openclaw_no_response_regression"
+    if "지식 파이프라인" in normalized and any(
+        marker in normalized for marker in ("모순", "프로필", "보존 정책")
+    ):
+        return "knowledge_pipeline_profile_policy_conflict"
+    if "oc-lifehub" in normalized and any(
+        marker in normalized for marker in ("pending", "superseded", "reverted", "회귀", "통합 체크")
+    ):
+        return "oc_lifehub_edit_thrash"
+    return None
+
+
+def _dedup_hash(text: str) -> str:
+    topic = _stable_topic_key(text)
+    if topic:
+        return topic
+    compact = _re.sub(r"\b20\d{2}[-./]\d{1,2}[-./]\d{1,2}\b", " ", text.lower())
+    compact = _re.sub(r"\d+", " ", compact)
+    compact = _re.sub(r"[^a-z가-힣]+", " ", compact)
+    compact = _re.sub(r"\s+", " ", compact).strip()
+    return hashlib.sha256(compact.encode()).hexdigest()[:12]
+
+
 def _emit_observations(parsed: dict) -> list[Observation]:
     obs: list[Observation] = []
     for item in (parsed.get("observations") or [])[:2]:
@@ -147,7 +175,7 @@ def _emit_observations(parsed: dict) -> list[Observation]:
         sev = float(item.get("severity", 4.0))
         sev = max(3.0, min(8.0, sev))
         cat = str(item.get("category", "pattern"))[:32] or "pattern"
-        dk = hashlib.sha256(msg.lower().encode()).hexdigest()[:12]
+        dk = _dedup_hash(msg)
         obs.append(
             Observation(
                 drive="synthesis_drive",
@@ -174,7 +202,7 @@ def _emit_commands(parsed: dict) -> list[Observation]:
         priority = max(1, min(10, int(cmd.get("priority", 5))))
         if to_agent not in _VALID_AGENTS or len(content) < 15 or len(content) > 400:
             continue
-        cmd_hash = hashlib.sha256(f"{to_agent}|{content.lower()}".encode()).hexdigest()[:12]
+        cmd_hash = _dedup_hash(f"{to_agent}|{content}")
         if was_sent_recently(f"cmd:{cmd_hash}", within_h=168):
             continue
         auto_enabled = _synthesis_auto_dispatch_enabled()

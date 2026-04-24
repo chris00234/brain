@@ -476,6 +476,10 @@ def _semantic_blocks(
         collection = r.get("collection", "")
         if _is_noisy_semantic_result(title, content, r.get("path")):
             continue
+        if _looks_like_usage_snapshot(title, content, r.get("path")) and not _prompt_allows_usage_snapshot(
+            prompt
+        ):
+            continue
         is_generic_summary = _is_generic_summary_title(title)
         if is_generic_summary and (DISABLE_GENERIC_SUMMARY_BLOCKS or generic_summary_seen):
             continue
@@ -527,6 +531,68 @@ def _is_noisy_semantic_result(title: str, content: str, path: str | None) -> boo
     if title.lstrip().startswith("### Metadata"):
         return True
     return bool(re.match(r"(?is)^\s*(?:#\s*)?metadata\b", content or ""))
+
+
+def _looks_like_usage_snapshot(title: str, content: str, path: str | None) -> bool:
+    """Detect stale operational accounting snapshots.
+
+    These rows are useful when Chris asks for usage/accounting, but they are
+    harmful context on strategic prompts because an old dollar/token figure
+    reads like current state.
+    """
+    haystack = f"{title}\n{path or ''}\n{content[:500]}".lower()
+    has_usage = any(
+        marker in haystack
+        for marker in (
+            "llm 사용량",
+            "사용량",
+            "token usage",
+            "tokens",
+            "prompt tokens",
+            "response tokens",
+            "billing",
+            "spend",
+        )
+    )
+    has_snapshot = any(
+        marker in haystack
+        for marker in (
+            "지난 7일",
+            "최근 7일",
+            "last 7 days",
+            "이번 달",
+            "total cost",
+            "총 비용",
+            "$",
+        )
+    )
+    return has_usage and has_snapshot
+
+
+def _prompt_allows_usage_snapshot(prompt: str) -> bool:
+    p = (prompt or "").lower()
+    return any(
+        marker in p
+        for marker in (
+            "사용량",
+            "토큰",
+            "얼마나 썼",
+            "얼마 썼",
+            "지출",
+            "청구",
+            "집계",
+            "지난 7일",
+            "최근 7일",
+            "이번 달",
+            "usage",
+            "token",
+            "tokens",
+            "billing",
+            "spend",
+            "spent",
+            "accounting",
+        )
+    )
 
 
 _QUERY_STOPWORDS = {

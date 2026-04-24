@@ -268,7 +268,7 @@ class QdrantStore:
         from qdrant_client import QdrantClient
 
         self._url = url or _resolve_qdrant_url()
-        self._client = QdrantClient(url=self._url, timeout=30)
+        self._client = QdrantClient(url=self._url, timeout=30, check_compatibility=False)
         self._id_cache: OrderedDict[str, str] = OrderedDict()
         self._id_cache_lock = threading.Lock()
         self._sparse_cache: dict[str, bool] = {}

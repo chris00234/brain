@@ -25,7 +25,7 @@ JOB_REGISTRY: dict[str, list[str]] = {
     "brain_speak_digest": [_py, f"{_bd}/brain_core/speak.py", "run"],
     # Real-time urgent path: scan every 5 min for severity >= 7.5 observations
     # and write to /tmp/.brain_doorbell.<sid>.jsonl for each active Claude Code
-    # session. claude_boot.sh reads + consumes those on the next turn.
+    # or Codex session. Boot hooks read + consume those on the next turn.
     "brain_speak_urgent": [_py, f"{_bd}/brain_core/speak.py", "urgent_scan"],
     # Canonical staleness detector: daily scan of distilled/*.md for claims
     # invalidated by the current code. Retires stale files and deletes

@@ -1,7 +1,7 @@
 """brain_core/speak_urgent.py — brain's real-time interrupt path.
 
-Writes severity >= URGENT_SEVERITY_THRESHOLD observations to the active
-Claude Code session doorbells so claude_boot.sh picks them up next turn.
+Writes severity >= URGENT_SEVERITY_THRESHOLD observations to active
+Claude Code/Codex session doorbells so boot hooks pick them up next turn.
 
 Split from speak.py 2026-04-23.
 """
@@ -23,26 +23,27 @@ DOORBELL_DIR = Path("/tmp")
 
 
 def _active_session_ids() -> list[str]:
-    """Discover active Claude Code sessions by scanning /tmp/.claude_turn_*.
+    """Discover active Claude Code/Codex sessions from turn marker files.
 
-    claude_boot.sh writes one file per session on each turn. Any file
-    modified in the last hour is considered active.
+    claude_boot.sh and codex_boot.sh write one file per session on each turn.
+    Any file modified in the last hour is considered active.
     """
     now = datetime.now(UTC).timestamp()
-    active: list[str] = []
+    active: set[str] = set()
     try:
-        for f in DOORBELL_DIR.glob(".claude_turn_*"):
-            try:
-                if (now - f.stat().st_mtime) > 3600:
+        for prefix in (".claude_turn_", ".codex_turn_"):
+            for f in DOORBELL_DIR.glob(f"{prefix}*"):
+                try:
+                    if (now - f.stat().st_mtime) > 3600:
+                        continue
+                except OSError:
                     continue
-            except OSError:
-                continue
-            sid = f.name[len(".claude_turn_") :]
-            if sid and sid != "anon":
-                active.append(sid)
+                sid = f.name[len(prefix) :]
+                if sid and sid != "anon":
+                    active.add(sid)
     except Exception as exc:
         log.debug("active session scan failed: %s", exc)
-    return active
+    return sorted(active)
 
 
 def urgent_scan() -> dict:
@@ -50,7 +51,7 @@ def urgent_scan() -> dict:
 
     Runs drives, picks observations above the urgent bar not sent in the
     last 6h, and writes them to /tmp/.brain_doorbell.<sid>.jsonl for every
-    active Claude Code session. claude_boot.sh reads + consumes + deletes
+    active Claude Code/Codex session. Boot hooks read + consume + delete
     those files on the next turn so the agent sees the message in its
     system-reminder block.
 
@@ -65,32 +66,37 @@ def urgent_scan() -> dict:
 
     active = _active_session_ids()
     fired = 0
-    for sid in active:
-        doorbell_path = DOORBELL_DIR / f".brain_doorbell.{sid}.jsonl"
-        try:
-            with doorbell_path.open("a") as f:
-                for o in urgent_fresh:
-                    f.write(
-                        json.dumps(
-                            {
-                                "source": "brain_speak_urgent",
-                                "priority": "high" if o.severity >= 8 else "medium",
-                                "title": f"{o.drive} / {o.category}",
-                                "content": o.message,
-                                "severity": o.severity,
-                                "ts": now_iso(),
-                            },
-                            ensure_ascii=False,
+    fallback_via: str | None = None
+    if active:
+        for sid in active:
+            doorbell_path = DOORBELL_DIR / f".brain_doorbell.{sid}.jsonl"
+            try:
+                with doorbell_path.open("a") as f:
+                    for o in urgent_fresh:
+                        f.write(
+                            json.dumps(
+                                {
+                                    "source": "brain_speak_urgent",
+                                    "priority": "high" if o.severity >= 8 else "medium",
+                                    "title": f"{o.drive} / {o.category}",
+                                    "content": o.message,
+                                    "severity": o.severity,
+                                    "ts": now_iso(),
+                                },
+                                ensure_ascii=False,
+                            )
+                            + "\n"
                         )
-                        + "\n"
-                    )
-                    fired += 1
-        except OSError as exc:
-            log.warning("doorbell write failed for %s: %s", sid, exc)
-            continue
+                        fired += 1
+            except OSError as exc:
+                log.warning("doorbell write failed for %s: %s", sid, exc)
+                continue
+    else:
+        fallback_via = _telegram_fallback(urgent_fresh)
 
     for o in urgent_fresh:
         try:
+            sent_via = f"doorbell:{len(active)}sessions" if active else fallback_via
             log_emit(
                 Observation(
                     drive=o.drive,
@@ -98,9 +104,9 @@ def urgent_scan() -> dict:
                     severity=o.severity,
                     message=o.message,
                     dedup_key=f"doorbell:{o.dedup_key}",
-                    payload={**o.payload, "fired_to_sessions": len(active)},
+                    payload={**o.payload, "fired_to_sessions": len(active), "fallback_via": fallback_via},
                 ),
-                sent_via=f"doorbell:{len(active)}sessions",
+                sent_via=sent_via,
             )
         except Exception as exc:
             log.debug("urgent log failed: %s", exc)
@@ -109,4 +115,26 @@ def urgent_scan() -> dict:
         "urgent": len(urgent_fresh),
         "fired": fired,
         "active_sessions": len(active),
+        "fallback_via": fallback_via,
     }
+
+
+def _telegram_fallback(observations: list[Observation]) -> str:
+    """Fallback for moments with no active CLI session to receive doorbells."""
+    if not observations:
+        return "skipped:no_observations"
+    try:
+        from telegram_alert import send_chris_telegram
+    except Exception as exc:
+        log.warning("telegram fallback unavailable: %s", exc)
+        return "queued:telegram_unavailable"
+
+    lines = ["[brain_speak_urgent] no active CLI sessions; urgent observations:"]
+    for o in observations[:5]:
+        lines.append(f"- [{o.severity:.1f}] {o.drive}/{o.category}: {o.message[:500]}")
+    delivered = send_chris_telegram(
+        "\n".join(lines),
+        source="brain_speak_urgent:no_active_sessions",
+        severity="urgent",
+    )
+    return "telegram:fallback" if delivered else "queued:telegram_fallback"
