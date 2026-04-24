@@ -40,6 +40,14 @@ def test_ollama_is_embedder_only_not_local_llm_generation():
     assert "/api/chat" not in texts
 
 
+def test_health_exposes_local_model_policy_as_embedder_only():
+    text = (BRAIN_ROOT / "brain_core" / "routes" / "health.py").read_text()
+    assert '"llm": "disabled"' in text
+    assert '"ollama_role": "embedder_only"' in text
+    assert 'services["ollama_embedder"]' in text
+    assert 'services["ollama"]' not in text
+
+
 def test_scheduler_resource_budget_uses_embedder_label_not_ollama_llm_label():
     from scheduler import JOB_SCHEDULE
 

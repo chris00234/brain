@@ -53,6 +53,50 @@ def _content_metric_value(v2: dict, metric: str) -> float:
     return strict
 
 
+def _failure_breakdown(per_test: list[dict]) -> dict:
+    """Summarize eval failures into actionable buckets.
+
+    `content_only_failed` usually means the expected source/provenance is
+    found, but the eval phrase is stale or too literal. `both_failed` points
+    at real retrieval/source misses.
+    """
+    if not per_test:
+        return {}
+    content_failed = [r for r in per_test if not r.get("hit_content_loose")]
+    source_failed = [r for r in per_test if not r.get("hit_source")]
+    both_failed = [r for r in per_test if not r.get("hit_content_loose") and not r.get("hit_source")]
+    content_only_failed = [r for r in per_test if not r.get("hit_content_loose") and r.get("hit_source")]
+    source_only_failed = [r for r in per_test if r.get("hit_content_loose") and not r.get("hit_source")]
+
+    def sample(rows: list[dict], limit: int = 10) -> list[dict]:
+        out = []
+        for row in rows[:limit]:
+            out.append(
+                {
+                    "query": row.get("query", ""),
+                    "expected_source": row.get("expected_source", ""),
+                    "expected_content": row.get("expected_content", ""),
+                    "top_sources": row.get("top_sources", [])[:5],
+                    "rank": row.get("rank", 0),
+                }
+            )
+        return out
+
+    return {
+        "total": len(per_test),
+        "content_failed": len(content_failed),
+        "source_failed": len(source_failed),
+        "both_failed": len(both_failed),
+        "content_only_failed": len(content_only_failed),
+        "source_only_failed": len(source_only_failed),
+        "samples": {
+            "both_failed": sample(both_failed),
+            "content_only_failed": sample(content_only_failed),
+            "source_only_failed": sample(source_only_failed),
+        },
+    }
+
+
 def _persist_eval_report(report: dict, track: str = "default", content_metric: str = "strict") -> None:
     """Write eval-report.json + append eval-history.jsonl so Brain UI stays current.
 
@@ -70,6 +114,7 @@ def _persist_eval_report(report: dict, track: str = "default", content_metric: s
     source_pct = float(v2.get("hit_source_pct", 0))
     passed = round(total * content_pct / 100) if total else 0
     failed = total - passed
+    failure_breakdown = _failure_breakdown(list(v2.get("per_test") or []))
 
     if track == "default":
         report_path = logs / "eval-report.json"
@@ -90,6 +135,7 @@ def _persist_eval_report(report: dict, track: str = "default", content_metric: s
                 "source_accuracy": round(source_pct, 1),
                 "slow_count": 0,
                 "v2": v2,
+                "failure_breakdown": failure_breakdown,
             },
             indent=2,
             ensure_ascii=False,
@@ -280,7 +326,8 @@ def main() -> int:
     current_source = float(current.get("hit_source_pct", 0))
     metric_label = "hit_content_loose@5" if args.content_metric == "loose" else "hit_content@5"
     print(
-        f"[eval_gate] current /recall/v2: " f"{metric_label}={current_content}% hit_source@5={current_source}%"
+        f"[eval_gate] current /recall/v2: "
+        f"{metric_label}={current_content}% hit_source@5={current_source}%"
     )
 
     if args.update_baseline:

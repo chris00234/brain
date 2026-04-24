@@ -41,6 +41,23 @@ def _stub_report(content: float, source: float = 80.0, total: int = 100, loose: 
     }
 
 
+def test_failure_breakdown_splits_retrieval_and_eval_stale_cases(fake_eval_gate):
+    summary = fake_eval_gate._failure_breakdown(
+        [
+            {"query": "ok", "hit_content_loose": True, "hit_source": True},
+            {"query": "retrieval miss", "hit_content_loose": False, "hit_source": False},
+            {"query": "stale phrase", "hit_content_loose": False, "hit_source": True},
+            {"query": "source alias", "hit_content_loose": True, "hit_source": False},
+        ]
+    )
+
+    assert summary["content_failed"] == 2
+    assert summary["source_failed"] == 2
+    assert summary["both_failed"] == 1
+    assert summary["content_only_failed"] == 1
+    assert summary["source_only_failed"] == 1
+
+
 def test_persist_default_track_uses_legacy_paths(fake_eval_gate, tmp_path):
     fake_eval_gate._persist_eval_report(_stub_report(95.7), track="default")
     assert (tmp_path / "logs" / "eval-report.json").exists()
@@ -59,9 +76,19 @@ def test_persist_named_track_uses_suffixed_paths(fake_eval_gate, tmp_path):
 
 
 def test_persist_loose_metric_keeps_strict_and_selected_content(fake_eval_gate, tmp_path):
-    fake_eval_gate._persist_eval_report(
-        _stub_report(70.0, loose=88.0), track="extended", content_metric="loose"
-    )
+    report_in = _stub_report(70.0, loose=88.0)
+    report_in["v2"]["per_test"] = [
+        {
+            "query": "q",
+            "expected_source": "s",
+            "expected_content": "c",
+            "hit_content_loose": False,
+            "hit_source": True,
+            "top_sources": ["s"],
+            "rank": 1,
+        }
+    ]
+    fake_eval_gate._persist_eval_report(report_in, track="extended", content_metric="loose")
 
     report = json.loads((tmp_path / "logs" / "eval-report-extended.json").read_text())
     row = json.loads((tmp_path / "logs" / "eval-history-extended.jsonl").read_text().splitlines()[-1])
@@ -71,6 +98,7 @@ def test_persist_loose_metric_keeps_strict_and_selected_content(fake_eval_gate, 
     assert row["hit_content_pct"] == 70.0
     assert row["hit_content_loose_pct"] == 88.0
     assert row["selected_content_pct"] == 88.0
+    assert report["failure_breakdown"]["content_only_failed"] == 1
 
 
 def test_baseline_roundtrip(fake_eval_gate, tmp_path):

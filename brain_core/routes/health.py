@@ -20,6 +20,12 @@ from vector_store import get_vector_store
 
 router = APIRouter(dependencies=[Depends(verify_bearer)])
 
+LOCAL_MODEL_POLICY = {
+    "llm": "disabled",
+    "allowed": ["embeddings", "lightweight_rerankers"],
+    "ollama_role": "embedder_only",
+}
+
 
 def _parse_eval_timestamp(row: dict) -> datetime | None:
     ts = row.get("timestamp")
@@ -103,10 +109,10 @@ def brain_health() -> dict:
     try:
         with urllib.request.urlopen("http://127.0.0.1:11434/", timeout=3):
             pass
-        services["ollama"] = "up"
+        services["ollama_embedder"] = "up"
     except Exception:
-        services["ollama"] = "down"
-        alerts.append("Ollama unreachable")
+        services["ollama_embedder"] = "down"
+        alerts.append("Ollama embedder unreachable")
 
     try:
         from brain_core.neo4j_client import is_healthy as _neo4j_ok
@@ -149,7 +155,7 @@ def brain_health() -> dict:
     if pending_resource_retries:
         alerts.append(f"{len(pending_resource_retries)} scheduler job(s) deferred by resource budget")
 
-    if services.get(vector_key) == "down" or services.get("ollama") == "down":
+    if services.get(vector_key) == "down" or services.get("ollama_embedder") == "down":
         status = "unhealthy"
     elif alerts:
         status = "degraded"
@@ -162,6 +168,7 @@ def brain_health() -> dict:
         "collections": collections,
         "total_chunks": sum(collections.values()),
         "services": services,
+        "local_model_policy": LOCAL_MODEL_POLICY,
         "eval": eval_info,
         "eval_tracks": eval_tracks,
         "alerts": alerts,
