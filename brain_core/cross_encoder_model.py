@@ -52,6 +52,7 @@ _FORCE_MODEL = os.getenv("BRAIN_CROSS_ENCODER_MODEL", "").strip()
 _ADAPTIVE = os.getenv("BRAIN_CROSS_ENCODER_ADAPTIVE", "true").lower() in ("true", "1", "yes")
 _DEVICE_OVERRIDE = os.getenv("BRAIN_CROSS_ENCODER_DEVICE")  # "mps" | "cpu" | "cuda"
 _LOCAL_FILES_ONLY = os.getenv("BRAIN_CROSS_ENCODER_LOCAL_FILES_ONLY", "true").lower() in ("true", "1", "yes")
+_MPS_EMPTY_CACHE = os.getenv("BRAIN_CE_MPS_EMPTY_CACHE", "false").lower() in ("true", "1", "yes")
 
 _models: dict[str, object] = {}
 _model_last_used: dict[str, float] = {}
@@ -157,7 +158,9 @@ def _load_model(name: str) -> object:
         # upstream in score_pairs, so 512-token model windows waste ~25% of
         # every forward pass on padding. 384 covers the 1500-char ceiling
         # with 9 tokens of headroom. Saves ~15-30ms per CE batch on MPS.
-        _models[name] = CrossEncoder(model_ref, device=device, max_length=384, local_files_only=_LOCAL_FILES_ONLY)
+        _models[name] = CrossEncoder(
+            model_ref, device=device, max_length=384, local_files_only=_LOCAL_FILES_ONLY
+        )
         _model_last_used[name] = time.monotonic()
         log.info("cross-encoder %s loaded (max_length=384)", name)
     return _models[name]
@@ -185,10 +188,10 @@ def _evict_idle_models() -> list[str]:
         try:
             import torch
 
-            if hasattr(torch, "mps") and hasattr(torch.mps, "empty_cache"):
-                torch.mps.empty_cache()
-            elif torch.cuda.is_available():
+            if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+            elif _MPS_EMPTY_CACHE and hasattr(torch, "mps") and hasattr(torch.mps, "empty_cache"):
+                torch.mps.empty_cache()
         except Exception as exc:
             log.debug("cross-encoder cache cleanup failed: %s", exc)
         log.info("evicted idle cross-encoder models: %s", ", ".join(evicted))

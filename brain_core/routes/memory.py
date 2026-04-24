@@ -19,6 +19,7 @@ import learn
 import search_unified
 from api_deps import _safe_http_detail, log, verify_bearer
 from config import BRAIN_DIR
+from conflict_resolver import recommend_resolution
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi import Path as PathParam
 from indexer import get_embedding as _get_embedding
@@ -99,6 +100,7 @@ class ContradictionEntry(BaseModel):
     review_state: str
     created_at: str
     metadata: dict = Field(default_factory=dict)
+    recommendation: dict[str, Any] | None = None
 
 
 class ContradictionListResponse(BaseModel):
@@ -261,11 +263,33 @@ def list_contradictions(limit: int = 50) -> ContradictionListResponse:
     except Exception:
         return ContradictionListResponse(results=[], total=0)
 
+    semantic_ids: set[str] = set()
+    for p in points:
+        meta = p.payload or {}
+        if meta.get("old_id"):
+            semantic_ids.add(str(meta["old_id"]))
+        if meta.get("new_id"):
+            semantic_ids.add(str(meta["new_id"]))
+    semantic_meta: dict[str, dict[str, Any]] = {}
+    if semantic_ids:
+        try:
+            semantic_points = store.get(
+                _memory_collection_id(),
+                ids=list(semantic_ids),
+                with_payload=True,
+                with_documents=False,
+            )
+            semantic_meta = {sp.id: dict(sp.payload or {}) for sp in semantic_points}
+        except Exception:
+            semantic_meta = {}
+
     entries: list[ContradictionEntry] = []
     for p in points:
         i = p.id
         doc = p.document or ""
         meta = p.payload or {}
+        old_id = str(meta.get("old_id") or "")
+        new_id = str(meta.get("new_id") or "")
         new_content = ""
         old_content = ""
         if doc:
@@ -281,6 +305,15 @@ def list_contradictions(limit: int = 50) -> ContradictionListResponse:
                     new_content += "\n" + line
                 elif current_section == "old":
                     old_content += "\n" + line
+        recommendation = None
+        if old_id or new_id:
+            recommendation = recommend_resolution(
+                meta,
+                semantic_meta.get(old_id, {}),
+                semantic_meta.get(new_id, {}),
+                old_exists=old_id in semantic_meta,
+                new_exists=new_id in semantic_meta,
+            ).to_dict()
         entries.append(
             ContradictionEntry(
                 id=i,
@@ -292,6 +325,7 @@ def list_contradictions(limit: int = 50) -> ContradictionListResponse:
                 review_state=meta.get("review_state", "pending"),
                 created_at=meta.get("created_at", ""),
                 metadata=meta,
+                recommendation=recommendation,
             )
         )
     return ContradictionListResponse(results=entries, total=total)
@@ -1166,6 +1200,31 @@ def vote_on_contradiction(contra_id: Annotated[str, PathParam()], req: Contradic
 def list_contradictions_brain_alias(limit: int = 50) -> ContradictionListResponse:
     """Alias of GET /memory/contradictions for consistent /brain/* namespacing."""
     return list_contradictions(limit=limit)
+
+
+@router.get("/brain/conflict-resolution-report", tags=["memory"])
+def conflict_resolution_report(limit: int = 50) -> dict:
+    """Pending contradiction queue with deterministic policy recommendations."""
+    listed = list_contradictions(limit=limit)
+    by_action: dict[str, int] = {}
+    review_required = 0
+    auto_apply = 0
+    for item in listed.results:
+        rec = item.recommendation or {}
+        action = str(rec.get("action") or "unknown")
+        by_action[action] = by_action.get(action, 0) + 1
+        if rec.get("review_required"):
+            review_required += 1
+        if rec.get("auto_apply"):
+            auto_apply += 1
+    return {
+        "total": listed.total,
+        "returned": len(listed.results),
+        "by_recommended_action": by_action,
+        "auto_apply_candidates": auto_apply,
+        "review_required": review_required,
+        "items": [item.model_dump() for item in listed.results],
+    }
 
 
 @router.post("/brain/contradictions/{contra_id}/resolve", tags=["memory"])

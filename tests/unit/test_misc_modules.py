@@ -134,6 +134,33 @@ def test_cross_encoder_model_evicts_idle_non_base_models(monkeypatch):
     assert "bilingual" not in cross_encoder_model._models
 
 
+def test_cross_encoder_model_does_not_clear_mps_cache_by_default(monkeypatch):
+    import types
+
+    import cross_encoder_model
+
+    calls: list[str] = []
+
+    fake_cuda = types.SimpleNamespace(
+        is_available=lambda: False,
+        empty_cache=lambda: calls.append("cuda"),
+    )
+    fake_mps = types.SimpleNamespace(empty_cache=lambda: calls.append("mps"))
+    monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(cuda=fake_cuda, mps=fake_mps))
+    monkeypatch.setattr(cross_encoder_model, "_MPS_EMPTY_CACHE", False)
+    cross_encoder_model._models.clear()
+    cross_encoder_model._model_last_used.clear()
+    monkeypatch.setattr(cross_encoder_model, "_BASE_NAME", "base")
+    monkeypatch.setattr(cross_encoder_model, "_FORCE_MODEL", "")
+    monkeypatch.setattr(cross_encoder_model, "_IDLE_TTL_SEC", 10)
+    monkeypatch.setattr(cross_encoder_model.time, "monotonic", lambda: 100.0)
+    cross_encoder_model._models.update({"base": object(), "bilingual": object()})
+    cross_encoder_model._model_last_used.update({"base": 0.0, "bilingual": 80.0})
+
+    assert cross_encoder_model._evict_idle_models() == ["bilingual"]
+    assert calls == []
+
+
 def test_cross_encoder_model_disables_tqdm_multiprocessing_lock():
     from cross_encoder_model import _disable_tqdm_mp_lock
     from tqdm.std import TqdmDefaultWriteLock

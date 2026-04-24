@@ -453,12 +453,10 @@ def auto_resolve_stale_contradictions():
 
     Rules (checked in order):
     0. Agent vote consensus: >=3 votes with >=2 agreeing -> majority action
-    1. If confidence gap > 0.2 - keep the higher-confidence entry
-    2. If contradiction is > 14 days old and unreviewed - keep the newer entry
-    3. If one side is already deleted - dismiss the contradiction
+    1. Deterministic conflict policy handles missing, inactive, duplicate,
+       authority, confidence, and stale signals.
     """
-    from datetime import datetime, timedelta
-
+    from conflict_resolver import recommend_resolution
     from vector_store import get_vector_store
 
     store = get_vector_store()
@@ -477,14 +475,12 @@ def auto_resolve_stale_contradictions():
 
     resolved_count = 0
     kept_count = 0
-    cutoff_date = datetime.now(UTC) - timedelta(days=14)
 
     for p in pending:
         meta = p.payload or {}
         contra_id = p.id
         old_id = meta.get("old_id")
         new_id = meta.get("new_id")
-        created_at = meta.get("created_at", "")
 
         if not old_id or not new_id:
             continue
@@ -504,51 +500,27 @@ def auto_resolve_stale_contradictions():
         id_to_meta = {m.id: (m.payload or {}) for m in both}
 
         action = None
+        recommendation = None
+        resolution_reason = ""
 
         # Case 0: Agent vote consensus overrides heuristics
         vote_action = _get_vote_consensus(contra_id)
         if vote_action in ("keep_new", "keep_old", "merge", "dismiss"):
             action = vote_action
-        elif len(returned_ids) < 2:
-            # Case 1: One side already deleted
-            action = "dismiss"
+            resolution_reason = "agent vote consensus"
         else:
             old_meta = id_to_meta.get(old_id, {})
             new_meta = id_to_meta.get(new_id, {})
-            try:
-                old_conf = float(old_meta.get("confidence", 0.5))
-                new_conf = float(new_meta.get("confidence", 0.5))
-            except (ValueError, TypeError):
-                old_conf = new_conf = 0.5
-
-            # Case 2: Confidence gap > 0.2
-            if new_conf - old_conf > 0.2:
-                action = "keep_new"
-            elif old_conf - new_conf > 0.2:
-                action = "keep_old"
-            else:
-                # Case 2b: Near-duplicate rephrasing - distance<0.05 + token
-                # overlap>=0.70. Matches the ingest-time gate in learn.py so
-                # any near-duplicate that slipped past (e.g. added before the
-                # gate shipped) still gets cleaned up.
-                try:
-                    dist_val = float(meta.get("distance", 1.0))
-                    overlap_val = float(meta.get("token_overlap", 0.0))
-                except (ValueError, TypeError):
-                    dist_val = 1.0
-                    overlap_val = 0.0
-                if dist_val < 0.05 and overlap_val >= 0.70:
-                    action = "keep_new"
-                else:
-                    # Case 3: Age-based - contradictions older than 14 days, keep newer
-                    try:
-                        contra_dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
-                        if contra_dt.tzinfo is None:
-                            contra_dt = contra_dt.replace(tzinfo=UTC)
-                        if contra_dt < cutoff_date:
-                            action = "keep_new"
-                    except Exception:
-                        pass
+            recommendation = recommend_resolution(
+                meta,
+                old_meta,
+                new_meta,
+                old_exists=old_id in returned_ids,
+                new_exists=new_id in returned_ids,
+            )
+            if recommendation.auto_apply:
+                action = recommendation.action
+                resolution_reason = recommendation.reason
 
         if action is None:
             kept_count += 1
@@ -570,6 +542,25 @@ def auto_resolve_stale_contradictions():
             # "dismiss" and the keep_* branches both clear the contradiction
             # record after (optionally) deleting one side.
             store.delete("semantic_contradictions", [contra_id])
+            try:
+                from audit_log import log_event
+
+                log_event(
+                    event_type="resolve",
+                    entity_a=old_id,
+                    entity_b=new_id,
+                    match_score=float(meta.get("distance", 0.0) or 0.0),
+                    conflict_type="contradiction",
+                    resolution=action,
+                    reason=resolution_reason or "auto-resolved contradiction",
+                    source_evidence={
+                        "contradiction_id": contra_id,
+                        "vote_consensus": vote_action if vote_action else "",
+                        "recommendation": recommendation.to_dict() if recommendation else None,
+                    },
+                )
+            except Exception as e:
+                log.debug("auto_resolve audit log failed for %s: %s", contra_id, e)
             # Clean up any orphan votes for this contradiction so the
             # contradiction_votes table doesn't grow unbounded and so future
             # votes can't match a deleted contradiction_id.
@@ -584,10 +575,11 @@ def auto_resolve_stale_contradictions():
                         conn.commit()
                     finally:
                         conn.close()
-            except Exception:
-                pass
+            except Exception as e:
+                log.debug("auto_resolve vote cleanup failed for %s: %s", contra_id, e)
             resolved_count += 1
-        except Exception:
+        except Exception as e:
+            log.debug("auto_resolve apply failed for %s: %s", contra_id, e)
             continue
 
     return {"resolved": resolved_count, "kept_for_review": kept_count, "total": len(pending)}
