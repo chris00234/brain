@@ -213,10 +213,10 @@ if [ -n "$PROMPT" ]; then
         "${BRAIN_URL}/recall/active" 2>/dev/null || echo "")
       if [ -n "$ACTIVE_RESP" ]; then
         printf '%s' "$ACTIVE_RESP" | jq -r '
-          if (.blocks // []) | length == 0 then empty
+          if ([.blocks[]? | select(((.source // "") | startswith("doorbell")) | not)] | length) == 0 then empty
           else
             "### Brain Active Recall — per-turn injection",
-            (.blocks[]? | "- **\(.title // "untitled")** [\(.source // "?")] \(.content // "" | gsub("\n"; " ") | .[:300])"),
+            (.blocks[]? | select(((.source // "") | startswith("doorbell")) | not) | "- **\(.title // "untitled")** [\(.source // "?")] \(.content // "" | gsub("\n"; " ") | .[:300])"),
             ""
           end
         ' 2>/dev/null || true

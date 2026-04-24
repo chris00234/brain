@@ -4,9 +4,9 @@
 # Mirrors claude_boot.sh but trimmed: no first-turn heavy boot_context, no
 # 5-min payload cache. Codex sessions are often short-lived, and oh-my-codex
 # already ships its own orchestration layer; this hook's single job is to
-# inject brain's intent-routed recall (canonical + semantic + doorbell)
-# before each Codex turn so Codex sees Chris's preferences and recent
-# decisions the same way Claude Code does.
+# inject brain's intent-routed recall (canonical + semantic) plus direct
+# doorbell delivery before each Codex turn so Codex sees Chris's preferences
+# and recent decisions the same way Claude Code does.
 #
 # stdin: hook JSON envelope with session_id + prompt + cwd.
 # stdout: <system-reminder>…</system-reminder> block injected into context.
@@ -57,16 +57,19 @@ RESP=$(curl -sS --max-time 1.5 \
   -d "$REQ_BODY" \
   "${BRAIN_URL}/recall/active" 2>/dev/null || echo "")
 
-[ -z "$RESP" ] && exit 0
-BLOCK_COUNT=$(printf '%s' "$RESP" | jq '[.blocks[]?] | length' 2>/dev/null || echo 0)
+BLOCK_COUNT=0
+if [ -n "$RESP" ]; then
+  BLOCK_COUNT=$(printf '%s' "$RESP" | jq '[.blocks[]? | select(((.source // "") | startswith("doorbell")) | not)] | length' 2>/dev/null || echo 0)
+fi
 [[ "$BLOCK_COUNT" =~ ^[0-9]+$ ]] || BLOCK_COUNT=0
-[ "$BLOCK_COUNT" -gt 0 ] || exit 0
 
 # Format blocks into a <system-reminder> block. Codex treats
 # UserPromptSubmit stdout as trailing context on the current turn.
-printf '<system-reminder>\n### Brain Active Recall — per-turn injection\n'
-printf '%s' "$RESP" | jq -r '.blocks[]? | "- **\(.title)** [\(.source)] \(.content[:280])"' 2>/dev/null
-printf '</system-reminder>\n'
+if [ "$BLOCK_COUNT" -gt 0 ]; then
+  printf '<system-reminder>\n### Brain Active Recall — per-turn injection\n'
+  printf '%s' "$RESP" | jq -r '.blocks[]? | select(((.source // "") | startswith("doorbell")) | not) | "- **\(.title)** [\(.source)] \(.content[:280])"' 2>/dev/null
+  printf '</system-reminder>\n'
+fi
 
 # Doorbell: urgent brain_loop messages for this session.
 DOORBELL="/tmp/.brain_doorbell.${SESSION_ID}.jsonl"
