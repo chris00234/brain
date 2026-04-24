@@ -101,8 +101,13 @@ def ensure_schema() -> None:
         "CREATE CONSTRAINT entity_id IF NOT EXISTS FOR (e:Entity) REQUIRE e.id IS UNIQUE",
         "CREATE INDEX entity_name IF NOT EXISTS FOR (e:Entity) ON (e.name)",
         "CREATE INDEX entity_memory_class IF NOT EXISTS FOR (e:Entity) ON (e.memory_class)",
+        "CREATE INDEX entity_mention_count IF NOT EXISTS FOR (e:Entity) ON (e.mention_count)",
         "CREATE CONSTRAINT memory_access_id IF NOT EXISTS FOR (m:MemoryAccess) REQUIRE m.memory_id IS UNIQUE",
         "CREATE INDEX memory_access_ts IF NOT EXISTS FOR (m:MemoryAccess) ON (m.last_accessed_at)",
+        # Relationship indexes (Neo4j 5+): spreading-activation expand and
+        # triple_link both filter/order by r.weight. Without this every
+        # expand is a full relationship scan on a growing graph.
+        "CREATE INDEX relates_to_weight IF NOT EXISTS FOR ()-[r:RELATES_TO]-() ON (r.weight)",
     ]
     with get_driver().session() as session:
         for stmt in schema_statements:

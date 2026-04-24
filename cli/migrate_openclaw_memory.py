@@ -147,7 +147,7 @@ def main() -> int:
     parser.add_argument("--apply", action="store_true", help="Actually POST to /memory (default: dry run)")
     parser.add_argument(
         "--agent",
-        choices=KNOWN_AGENTS + ["all"],
+        choices=[*KNOWN_AGENTS, "all"],
         default="all",
         help="Restrict to a single agent (default: all)",
     )

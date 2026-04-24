@@ -353,7 +353,10 @@ def bg_extract_dropped_count() -> int:
 
 
 def _now() -> str:
-    return datetime.now(UTC).isoformat(timespec="seconds")
+    # Emit Z-suffix so lexicographic comparisons match the Z-normalized
+    # timestamps written by memory_lifecycle / entity_graph. Mixed
+    # +00:00 vs Z strings broke age ordering in prune / cleanup sweeps.
+    return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 def init_schema(db_path: Path | None = None) -> None:
@@ -386,6 +389,13 @@ def _conn(db_path: Path | None = None) -> Iterator[sqlite3.Connection]:
         init_schema(target)
     conn = sqlite3.connect(str(target))
     conn.execute("PRAGMA foreign_keys=ON")
+    # brain.db is the hottest SQLite write path. entity_graph._conn already
+    # uses the same tuning; matching here cuts typical POST /memory SQLite
+    # latency measurably on the busy hour. WAL + synchronous=NORMAL is
+    # durable against process crash (loses only the current transaction)
+    # and cache_size=-8000 ≈ 8 MB page cache per connection.
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA cache_size=-8000")
     conn.row_factory = sqlite3.Row
     try:
         yield conn
@@ -898,8 +908,20 @@ def rollback_confidence(
 
 
 # Kuhn cluster-size cache: (chroma_id) → (size, inserted_at). 5-min TTL.
+# Size-capped to prevent unbounded growth over months of writes (a fresh
+# chroma_id per POST /memory with no eviction would leak indefinitely).
 _CLUSTER_SIZE_CACHE: dict[str, tuple[int, float]] = {}
 _CLUSTER_SIZE_TTL = 300.0
+_CLUSTER_SIZE_MAX = 2048
+
+
+def _cluster_size_cache_put(key: str, value: tuple[int, float]) -> None:
+    if len(_CLUSTER_SIZE_CACHE) >= _CLUSTER_SIZE_MAX:
+        # Evict oldest 10% by insertion timestamp.
+        victims = sorted(_CLUSTER_SIZE_CACHE.items(), key=lambda kv: kv[1][1])
+        for k, _ in victims[: _CLUSTER_SIZE_MAX // 10]:
+            _CLUSTER_SIZE_CACHE.pop(k, None)
+    _CLUSTER_SIZE_CACHE[key] = value
 
 
 def cluster_size_for(
@@ -927,7 +949,7 @@ def cluster_size_for(
         return cached[0]
 
     if embedding is None:
-        _CLUSTER_SIZE_CACHE[chroma_id] = (1, now_ts)
+        _cluster_size_cache_put(chroma_id, (1, now_ts))
         return 1
 
     try:
@@ -941,15 +963,16 @@ def cluster_size_for(
             with_payload=False,
         )
         # VectorHit.score is normalized similarity (higher=better). The
-        # caller's `threshold` is expressed as a cosine-distance cap;
-        # `similarity >= 1 - distance_cap` is the matching predicate.
-        sim_floor = 1.0 - threshold
-        size = sum(1 for h in hits if h.score >= sim_floor)
+        # caller's `threshold` is a similarity LOWER BOUND (default 0.92 =
+        # "near-duplicate"). Previous code inverted this into a distance
+        # cap and counted every result — the semantic uncertainty
+        # normalizer effectively never discounted anything.
+        size = sum(1 for h in hits if h.score >= threshold)
         size = max(1, size)
-        _CLUSTER_SIZE_CACHE[chroma_id] = (size, now_ts)
+        _cluster_size_cache_put(chroma_id, (size, now_ts))
         return size
     except Exception:
-        _CLUSTER_SIZE_CACHE[chroma_id] = (1, now_ts)
+        _cluster_size_cache_put(chroma_id, (1, now_ts))
         return 1
 
 

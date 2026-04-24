@@ -1,5 +1,5 @@
 #!/opt/homebrew/bin/python3
-"""Ghost blog ingest — pulls Chris's Ghost posts into ChromaDB.
+"""Ghost blog ingest — pulls Chris's Ghost posts into the brain.
 
 Owner: Market agent.
 
@@ -12,6 +12,11 @@ authenticate requests (no library deps — pure stdlib + hmac).
 
 Writes to the `knowledge` collection with service=ghost metadata so search
 results are filterable via the existing /recall?service=ghost path.
+
+Incremental by updated_at: state stored in
+``logs/ghost-ingest-state.json`` as ``{last_updated_at: iso}``. Only posts
+changed since that watermark get re-embedded. Drops steady-state cost from
+N-posts × N-runs to O(delta).
 """
 
 from __future__ import annotations
@@ -39,6 +44,23 @@ SERVICE = "ghost"
 MAX_CHUNK_CHARS = 1800
 MIN_POST_LEN = 100
 FAILURE_LOG = Path("/Users/chrischo/server/brain/logs/ghost-ingest-failures.jsonl")
+STATE_FILE = Path("/Users/chrischo/server/brain/logs/ghost-ingest-state.json")
+
+
+def _load_watermark() -> str:
+    try:
+        with STATE_FILE.open() as f:
+            return json.load(f).get("last_updated_at", "") or ""
+    except (OSError, json.JSONDecodeError):
+        return ""
+
+
+def _save_watermark(updated_at: str) -> None:
+    try:
+        STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        STATE_FILE.write_text(json.dumps({"last_updated_at": updated_at}))
+    except OSError as exc:
+        _log_failure(f"watermark save failed: {exc}")
 
 
 def _log_failure(error: str) -> None:
@@ -248,9 +270,24 @@ def main() -> int:
         print("  No posts to ingest (or Admin API unreachable).")
         return 0 if not FAILURE_LOG.exists() or FAILURE_LOG.stat().st_size == 0 else 1
 
+    # Incremental: only posts whose updated_at exceeds the prior watermark
+    # need re-embedding. Empty watermark → treat every post as new (first
+    # run or state file lost).
+    watermark = _load_watermark()
+    if watermark:
+        delta_posts = [p for p in posts if (p.get("updated_at") or "") > watermark]
+        print(f"  {len(delta_posts)} changed since {watermark} (skipping {len(posts) - len(delta_posts)})")
+    else:
+        delta_posts = posts
+        print(f"  No watermark — treating all {len(posts)} as new")
+
+    if not delta_posts:
+        print("  Nothing to re-embed. Done.")
+        return 0
+
     print("[2/3] Chunking posts...")
     chunks: list[dict] = []
-    for post in posts:
+    for post in delta_posts:
         title = post.get("title") or "(untitled)"
         slug = post.get("slug") or post.get("id") or ""
         post_chunks = _chunk_post(title, post.get("html") or "")
@@ -268,11 +305,19 @@ def main() -> int:
                     "tags": [t.get("name", "") for t in (post.get("tags") or []) if isinstance(t, dict)],
                 }
             )
-    print(f"  Produced {len(chunks)} chunks")
+    print(f"  Produced {len(chunks)} chunks from {len(delta_posts)} changed posts")
 
-    print("[3/3] Embedding + upserting into ChromaDB...")
+    print("[3/3] Embedding + upserting...")
     count = _upsert(chunks)
     print(f"  Upserted {count} chunks into '{COLLECTION}' (service=ghost)")
+
+    # Advance the watermark to the newest updated_at we actually processed,
+    # not max(all posts), so a transient fetch failure that dropped a post
+    # doesn't permanently skip it.
+    processed_ts = max((p.get("updated_at") or "" for p in delta_posts), default="")
+    if processed_ts and count > 0:
+        _save_watermark(processed_ts)
+        print(f"  watermark → {processed_ts}")
 
     print("=" * 60)
     print(f"DONE — {count} chunks indexed")

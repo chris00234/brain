@@ -189,9 +189,15 @@ def _collect_pairs_from_outcomes(days_window: int = 90) -> list[tuple[float, int
             # f-string interpolation. int cast makes it safe today but the
             # pattern violates brain's parameterized-SQL convention and is
             # one bad refactor away from a real injection.
+            # acked=1 filter excludes the pre-2026-04-23 auto-complete
+            # pollution where general-domain outcomes were auto-stamped
+            # chris_override=0 without any real human ack. Training Platt
+            # scaling on those rows collapsed the positive class to 99.9%
+            # regardless of confidence.
             rows = conn.execute(
                 "SELECT confidence_was, chris_override FROM outcomes "
-                "WHERE confidence_was IS NOT NULL "
+                "WHERE acked = 1 "
+                "AND confidence_was IS NOT NULL "
                 "AND created_at > datetime('now', ? || ' days')",
                 (f"-{int(days_window)}",),
             ).fetchall()

@@ -27,6 +27,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
+# launchd strips /usr/sbin from PATH, which makes joblib/loky probe physical
+# CPU cores via a failing sysctl path and can leave noisy resource-tracker
+# state on shutdown. Set these before any model/sklearn imports.
+os.environ.setdefault("LOKY_MAX_CPU_COUNT", "8")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
 import structlog
 from fastapi import (
     BackgroundTasks,

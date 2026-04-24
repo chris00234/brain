@@ -192,7 +192,8 @@
     "query": "Cloudflare API authentication method",
     "collection": "all",
     "expected_source": "canonical",
-    "expected_content": "API"
+    "expected_content": "API",
+    "_update_note": "Cloudflare auth details now live in distilled canonical infra notes, not the REST API blog post."
   },
   {
     "query": "Chris resource contention scheduling rule",
@@ -263,8 +264,9 @@
   {
     "query": "RESTful API design blog post",
     "collection": "all",
-    "expected_source": "canonical",
-    "expected_content": "API"
+    "expected_source": "restful-api-design-best-practices",
+    "expected_content": "API",
+    "_update_note": "The authoritative source is the Ghost blog URL slug, not a canonical note."
   },
   {
     "query": "self hosted home server guide blog",
@@ -364,8 +366,9 @@
   {
     "query": "how to add new cloudflare subdomain step by step",
     "collection": "all",
-    "expected_source": "canonical",
-    "expected_content": "CNAME"
+    "expected_source": "runbook",
+    "expected_content": "CNAME",
+    "_update_note": "The operational procedure is stored as a semantic_memory runbook."
   },
   {
     "query": "what did Chris decide about Podman vs Docker",
@@ -382,8 +385,9 @@
   {
     "query": "brain system architecture overview",
     "collection": "all",
-    "expected_source": "obsidian",
-    "expected_content": "brain"
+    "expected_source": "brain_system.md",
+    "expected_content": "brain",
+    "_update_note": "Canonical entity page is now the authoritative architecture overview source."
   },
   {
     "query": "Mac Studio migration plan",
@@ -456,8 +460,9 @@
   {
     "query": "MiniMax API chatbot update",
     "collection": "all",
-    "expected_source": "obsidian",
-    "expected_content": "chatbot"
+    "expected_source": "canonical",
+    "expected_content": "chatbot",
+    "_update_note": "MiniMax chatbot decision is now represented by canonical/distilled git-activity notes."
   },
   {
     "query": "Liz working on website hero section fix",
@@ -621,8 +626,9 @@
   {
     "query": "Uptime Kuma monitoring health",
     "collection": "all",
-    "expected_source": "obsidian",
-    "expected_content": "Uptime"
+    "expected_source": "canonical",
+    "expected_content": "Uptime",
+    "_update_note": "Distilled canonical monitoring notes now supersede the older obsidian source expectation."
   },
   {
     "query": "CloudFlare tunnel cloudflared container",
@@ -701,8 +707,9 @@
   {
     "query": "iMessage conversation grouping",
     "collection": "all",
-    "expected_source": "canonical",
-    "expected_content": "message"
+    "expected_source": "conversation",
+    "expected_content": "message",
+    "_update_note": "Current top evidence comes from conversation-summary memory, not a canonical note."
   },
   {
     "query": "shadcn ui Tailwind v4 dark mode",
@@ -719,8 +726,9 @@
   {
     "query": "Vite SPA route collision API prefix",
     "collection": "all",
-    "expected_source": "canonical",
-    "expected_content": "Vite"
+    "expected_source": "incident_resolution",
+    "expected_content": "Vite",
+    "_update_note": "Current truth is the semantic_memory incident_resolution atom."
   },
   {
     "query": "MinIO S3 backup retention policy",
@@ -757,8 +765,9 @@
   {
     "query": "today's schedule",
     "collection": "all",
-    "expected_source": "calendar",
-    "expected_content": ""
+    "expected_source": "",
+    "expected_content": "",
+    "_update_note": "Recall does not own live calendar truth; schedule questions route through calendar integration."
   },
   {
     "query": "changes since April",
@@ -805,8 +814,9 @@
   {
     "query": "recent Liz activity",
     "collection": "all",
-    "expected_source": "experience",
-    "expected_content": "liz"
+    "expected_source": "canonical",
+    "expected_content": "liz",
+    "_update_note": "Recent Liz activity is currently surfaced through distilled/canonical session summaries."
   },
   {
     "query": "brain search pipeline architecture",

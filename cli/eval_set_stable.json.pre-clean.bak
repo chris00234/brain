@@ -1,0 +1,830 @@
+[
+  {
+    "query": "ghost container port",
+    "collection": "knowledge",
+    "expected_source": "ghost/docker-compose.yml",
+    "expected_content": "2368"
+  },
+  {
+    "query": "ghost nginx proxy",
+    "collection": "knowledge",
+    "expected_source": "nginx/conf.d/ghost.conf",
+    "expected_content": "blog.chrischodev.com"
+  },
+  {
+    "query": "vaultwarden docker compose",
+    "collection": "knowledge",
+    "expected_source": "vaultwarden/docker-compose.yml",
+    "expected_content": "vaultwarden"
+  },
+  {
+    "query": "searxng server block",
+    "collection": "all",
+    "expected_source": "searxng",
+    "expected_content": "searxng"
+  },
+  {
+    "query": "minio storage configuration",
+    "collection": "knowledge",
+    "expected_source": "minio/docker-compose.yml",
+    "expected_content": "minio"
+  },
+  {
+    "query": "cloudflare tunnel setup",
+    "collection": "all",
+    "expected_source": "cloudflare",
+    "expected_content": "Cloudflare"
+  },
+  {
+    "query": "Ellie role and responsibilities",
+    "collection": "all",
+    "expected_source": "ellie",
+    "expected_content": "Ellie"
+  },
+  {
+    "query": "Jenna responsibilities",
+    "collection": "all",
+    "expected_source": "jenna",
+    "expected_content": "Jenna"
+  },
+  {
+    "query": "nginx rate limiting configuration",
+    "collection": "knowledge",
+    "expected_source": "nginx",
+    "expected_content": "limit_req"
+  },
+  {
+    "query": "chromadb docker compose",
+    "collection": "all",
+    "expected_source": "chroma",
+    "expected_content": "chroma"
+  },
+  {
+    "query": "ollama model configuration",
+    "collection": "all",
+    "expected_source": "ollama",
+    "expected_content": "ollama"
+  },
+  {
+    "query": "couchdb port mapping",
+    "collection": "knowledge",
+    "expected_source": "docker-compose.yml",
+    "expected_content": "5984"
+  },
+  {
+    "query": "glance dashboard config",
+    "collection": "knowledge",
+    "expected_source": "glance",
+    "expected_content": "glance"
+  },
+  {
+    "query": "uptime kuma setup",
+    "collection": "all",
+    "expected_source": "uptime-kuma",
+    "expected_content": "uptime"
+  },
+  {
+    "query": "brain api nginx config",
+    "collection": "knowledge",
+    "expected_source": "brain-api.conf",
+    "expected_content": "brain"
+  },
+  {
+    "query": "watchtower auto update schedule",
+    "collection": "knowledge",
+    "expected_source": "docker-compose.yml",
+    "expected_content": "watchtower"
+  },
+  {
+    "query": "cloudflared container image",
+    "collection": "all",
+    "expected_source": "cloudflare",
+    "expected_content": "cloudflare"
+  },
+  {
+    "query": "what frontend stack does Chris prefer",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "React"
+  },
+  {
+    "query": "Chris preferred frontend framework",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "Vite"
+  },
+  {
+    "query": "contract first execution preference",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "contract"
+  },
+  {
+    "query": "canonical memory layer decision",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "canonical"
+  },
+  {
+    "query": "Claude Code reinstated decision",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "Claude Code"
+  },
+  {
+    "query": "RAG retrieval stack architecture",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "RAG"
+  },
+  {
+    "query": "personal intelligence system proposal",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "intelligence"
+  },
+  {
+    "query": "Chris preference for scheduling heavy jobs",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "prefer"
+  },
+  {
+    "query": "deployment rule for new services",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "Uptime Kuma"
+  },
+  {
+    "query": "no extra LLM spending",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "OpenAI"
+  },
+  {
+    "query": "Chris preference for React Vite shadcn",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "React"
+  },
+  {
+    "query": "brain API FastAPI consolidation",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "FastAPI"
+  },
+  {
+    "query": "Cloudflare DNS troubleshooting procedure",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "CNAME"
+  },
+  {
+    "query": "Cloudflare API authentication method",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "API"
+  },
+  {
+    "query": "Chris resource contention scheduling rule",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "Chris"
+  },
+  {
+    "query": "Cloudflare tunnel architecture",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "tunnel"
+  },
+  {
+    "query": "brain UI design preferences",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "brain"
+  },
+  {
+    "query": "parallel subagent execution preference",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "execution"
+  },
+  {
+    "query": "search RAG before grepping files",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "RAG"
+  },
+  {
+    "query": "brain dedup mechanism two layer",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "brain"
+  },
+  {
+    "query": "heartbeat protocol response",
+    "collection": "all",
+    "expected_source": "heartbeat",
+    "expected_content": "heartbeat"
+  },
+  {
+    "query": "영주권 갱신",
+    "collection": "calendar",
+    "expected_source": "personal",
+    "expected_content": "영주권"
+  },
+  {
+    "query": "dinner appointment 저녁 약속",
+    "collection": "calendar",
+    "expected_source": "personal",
+    "expected_content": "저녁"
+  },
+  {
+    "query": "Easter holiday",
+    "collection": "calendar",
+    "expected_source": "personal",
+    "expected_content": "Easter"
+  },
+  {
+    "query": "building personal AI assistant blog",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "intelligence"
+  },
+  {
+    "query": "RESTful API design blog post",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "API"
+  },
+  {
+    "query": "self hosted home server guide blog",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "server"
+  },
+  {
+    "query": "Tesla Fleet API controller blog",
+    "collection": "all",
+    "expected_source": "tesla",
+    "expected_content": "Tesla"
+  },
+  {
+    "query": "what is Chris email address",
+    "collection": "all",
+    "expected_source": "_profile",
+    "expected_content": "wheogus98"
+  },
+  {
+    "query": "Chris location timezone",
+    "collection": "all",
+    "expected_source": "_profile",
+    "expected_content": "Irvine"
+  },
+  {
+    "query": "Chris coding standards TypeScript",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "coding"
+  },
+  {
+    "query": "Liz agent role principal engineer",
+    "collection": "all",
+    "expected_source": "liz",
+    "expected_content": "Liz"
+  },
+  {
+    "query": "Sage research agent",
+    "collection": "all",
+    "expected_source": "sage",
+    "expected_content": "Sage"
+  },
+  {
+    "query": "Market agent growth content",
+    "collection": "all",
+    "expected_source": "market",
+    "expected_content": "Market"
+  },
+  {
+    "query": "OpenClaw gateway port number",
+    "collection": "all",
+    "expected_source": "openclaw",
+    "expected_content": "OpenClaw"
+  },
+  {
+    "query": "stale cloudflare cache after deploy",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "cache"
+  },
+  {
+    "query": "homelab CPU memory limits docker",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "docker"
+  },
+  {
+    "query": "MCC deployment procedure",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "deploy"
+  },
+  {
+    "query": "daily synthesis what does it do",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "daily"
+  },
+  {
+    "query": "Liz frontend redesign website",
+    "collection": "all",
+    "expected_source": "liz",
+    "expected_content": "liz"
+  },
+  {
+    "query": "website glassmorphism UI overhaul",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "UI"
+  },
+  {
+    "query": "how to add new cloudflare subdomain step by step",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "CNAME"
+  },
+  {
+    "query": "what did Chris decide about Podman vs Docker",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "Chris"
+  },
+  {
+    "query": "Chris wants brain to know him better than himself",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "brain"
+  },
+  {
+    "query": "brain system architecture overview",
+    "collection": "all",
+    "expected_source": "obsidian",
+    "expected_content": "brain"
+  },
+  {
+    "query": "Mac Studio migration plan",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "migration"
+  },
+  {
+    "query": "OpenClaw 에이전트 역할 정리",
+    "collection": "all",
+    "expected_source": "openclaw",
+    "expected_content": "OpenClaw"
+  },
+  {
+    "query": "OpenClaw 마스터 플랜 7일",
+    "collection": "all",
+    "expected_source": "openclaw",
+    "expected_content": "OpenClaw"
+  },
+  {
+    "query": "Claude Code 동영상 분석 PPT",
+    "collection": "all",
+    "expected_source": "obsidian",
+    "expected_content": "Claude"
+  },
+  {
+    "query": "필수 스킬 정리 skill selection",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "skill"
+  },
+  {
+    "query": "GITA credentials access",
+    "collection": "all",
+    "expected_source": "obsidian",
+    "expected_content": "GITA"
+  },
+  {
+    "query": "Ultimate Performance power plan Windows",
+    "collection": "all",
+    "expected_source": "obsidian",
+    "expected_content": "Performance"
+  },
+  {
+    "query": "capability-evolver security vulnerability",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "capability"
+  },
+  {
+    "query": "portfolio redesign authentication JWT",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "portfolio"
+  },
+  {
+    "query": "browser history Chrome usage patterns",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "browser"
+  },
+  {
+    "query": "git activity chrischodev portfolio refresh",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "chrischodev"
+  },
+  {
+    "query": "MiniMax API chatbot update",
+    "collection": "all",
+    "expected_source": "obsidian",
+    "expected_content": "chatbot"
+  },
+  {
+    "query": "Liz working on website hero section fix",
+    "collection": "all",
+    "expected_source": "liz",
+    "expected_content": "liz"
+  },
+  {
+    "query": "Ellie infrastructure Docker troubleshooting",
+    "collection": "all",
+    "expected_source": "ellie",
+    "expected_content": "ellie"
+  },
+  {
+    "query": "Jenna scheduling daily synthesis",
+    "collection": "all",
+    "expected_source": "jenna",
+    "expected_content": "Jenna"
+  },
+  {
+    "query": "screen time Chrome Terminal daily pattern",
+    "collection": "all",
+    "expected_source": "screen-time",
+    "expected_content": "screen"
+  },
+  {
+    "query": "Claude Code session action bias preference",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "Claude"
+  },
+  {
+    "query": "LibreUIUX Claude Code project commits",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "Claude"
+  },
+  {
+    "query": "filebrowser docker compose port",
+    "collection": "all",
+    "expected_source": "filebrowser/docker-compose.yml",
+    "expected_content": "filebrowser"
+  },
+  {
+    "query": "tesla app container setup",
+    "collection": "all",
+    "expected_source": "tesla",
+    "expected_content": "tesla"
+  },
+  {
+    "query": "claw3d container port",
+    "collection": "all",
+    "expected_source": "claw3d/docker-compose.yml",
+    "expected_content": "claw3d"
+  },
+  {
+    "query": "watchtower notification config",
+    "collection": "all",
+    "expected_source": "watchtower/docker-compose.yml",
+    "expected_content": "watchtower"
+  },
+  {
+    "query": "nginx default server block",
+    "collection": "all",
+    "expected_source": "default.conf",
+    "expected_content": "server"
+  },
+  {
+    "query": "couchdb admin password setup",
+    "collection": "all",
+    "expected_source": "couchdb/docker-compose.yml",
+    "expected_content": "couchdb"
+  },
+  {
+    "query": "Liz AGENTS.md primary role",
+    "collection": "all",
+    "expected_source": "AGENTS.md",
+    "expected_content": "Engineer"
+  },
+  {
+    "query": "Jenna AGENTS.md scheduling calendar",
+    "collection": "all",
+    "expected_source": "AGENTS.md",
+    "expected_content": "Scheduling"
+  },
+  {
+    "query": "Chris email address wheogus",
+    "collection": "all",
+    "expected_source": "_profile",
+    "expected_content": "wheogus"
+  },
+  {
+    "query": "Chris Korean name",
+    "collection": "all",
+    "expected_source": "_profile",
+    "expected_content": "Chris"
+  },
+  {
+    "query": "brain server FastAPI port 8791",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "brain"
+  },
+  {
+    "query": "chromadb native port 8000",
+    "collection": "all",
+    "expected_source": "obsidian",
+    "expected_content": "chroma"
+  },
+  {
+    "query": "ghost blog CMS docker image",
+    "collection": "all",
+    "expected_source": "ghost/docker-compose.yml",
+    "expected_content": "ghost"
+  },
+  {
+    "query": "obsidian sync CouchDB live",
+    "collection": "all",
+    "expected_source": "couchdb",
+    "expected_content": "couchdb"
+  },
+  {
+    "query": "brain API nginx reverse proxy",
+    "collection": "all",
+    "expected_source": "brain-api.conf",
+    "expected_content": "brain"
+  },
+  {
+    "query": "canonical pipeline nightly promote",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "canonical"
+  },
+  {
+    "query": "shell history ingest adapter",
+    "collection": "all",
+    "expected_source": "experience",
+    "expected_content": "shell"
+  },
+  {
+    "query": "RRF fusion trust weights search",
+    "collection": "all",
+    "expected_source": "semantic_memory",
+    "expected_content": "rrf"
+  },
+  {
+    "query": "brain UI React Vite shadcn",
+    "collection": "all",
+    "expected_source": "obsidian",
+    "expected_content": "React"
+  },
+  {
+    "query": "Uptime Kuma monitoring health",
+    "collection": "all",
+    "expected_source": "obsidian",
+    "expected_content": "Uptime"
+  },
+  {
+    "query": "CloudFlare tunnel cloudflared container",
+    "collection": "all",
+    "expected_source": "cloudflare",
+    "expected_content": "cloudflare"
+  },
+  {
+    "query": "Docker service network server-net",
+    "collection": "all",
+    "expected_source": "docker-compose",
+    "expected_content": "docker"
+  },
+  {
+    "query": "OpenClaw agent gateway port",
+    "collection": "all",
+    "expected_source": "openclaw",
+    "expected_content": "OpenClaw"
+  },
+  {
+    "query": "self learning memory extraction",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "learn"
+  },
+  {
+    "query": "embedding model multilingual e5",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "embedding"
+  },
+  {
+    "query": "conventional commits git workflow",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "commit"
+  },
+  {
+    "query": "proactive check schedule alert",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "proactive"
+  },
+  {
+    "query": "memory lifecycle archive 90 days",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "archive"
+  },
+  {
+    "query": "semantic memory dedup two layer",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "memory"
+  },
+  {
+    "query": "eval regression gate nightly",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "eval"
+  },
+  {
+    "query": "boot context agent startup",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "boot"
+  },
+  {
+    "query": "Apple Notes body extraction protobuf",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "Note"
+  },
+  {
+    "query": "iMessage conversation grouping",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "message"
+  },
+  {
+    "query": "shadcn ui Tailwind v4 dark mode",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "shadcn"
+  },
+  {
+    "query": "OrbStack disk IO write limit Docker",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "OrbStack"
+  },
+  {
+    "query": "Vite SPA route collision API prefix",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "Vite"
+  },
+  {
+    "query": "MinIO S3 backup retention policy",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "backup"
+  },
+  {
+    "query": "launchd plist keepalive brain service",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "launchd"
+  },
+  {
+    "query": "what happened yesterday",
+    "collection": "all",
+    "expected_source": "experience",
+    "expected_content": ""
+  },
+  {
+    "query": "recent changes this week",
+    "collection": "all",
+    "expected_source": "experience",
+    "expected_content": ""
+  },
+  {
+    "query": "last month incidents",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "incident"
+  },
+  {
+    "query": "today's schedule",
+    "collection": "all",
+    "expected_source": "calendar",
+    "expected_content": ""
+  },
+  {
+    "query": "changes since April",
+    "collection": "all",
+    "expected_source": "experience",
+    "expected_content": ""
+  },
+  {
+    "query": "nonexistent service foobar xyz",
+    "collection": "all",
+    "expected_source": "",
+    "expected_content": ""
+  },
+  {
+    "query": "agent named bartholomew",
+    "collection": "all",
+    "expected_source": "",
+    "expected_content": ""
+  },
+  {
+    "query": "recipe for chocolate cake",
+    "collection": "all",
+    "expected_source": "",
+    "expected_content": ""
+  },
+  {
+    "query": "Chris infrastructure overview",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "docker"
+  },
+  {
+    "query": "how agents communicate",
+    "collection": "all",
+    "expected_source": "knowledge",
+    "expected_content": "agent"
+  },
+  {
+    "query": "docker services health",
+    "collection": "all",
+    "expected_source": "knowledge",
+    "expected_content": "docker"
+  },
+  {
+    "query": "recent Liz activity",
+    "collection": "all",
+    "expected_source": "experience",
+    "expected_content": "liz"
+  },
+  {
+    "query": "brain search pipeline architecture",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "search"
+  },
+  {
+    "query": "크리스의 홈랩 서비스",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "docker"
+  },
+  {
+    "query": "에이전트 설정 방법",
+    "collection": "all",
+    "expected_source": "knowledge",
+    "expected_content": "agent"
+  },
+  {
+    "query": "검색 파이프라인 구조",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "search"
+  },
+  {
+    "query": "메모리 시스템 작동 방식",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "memory"
+  },
+  {
+    "query": "Chris preferences dark mode or light mode",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "light"
+  },
+  {
+    "query": "what does Chris think about abstractions",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "abstract"
+  },
+  {
+    "query": "memory dedup strategy",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "dedup"
+  }
+]

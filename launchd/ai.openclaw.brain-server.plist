@@ -13,7 +13,7 @@
 		<key>BRAIN_AUTO_HEAL_SOURCES</key>
 		<string>slo_monitor</string>
 		<key>BRAIN_CROSS_ENCODER_ADAPTIVE</key>
-		<string>false</string>
+		<string>true</string>
 		<key>BRAIN_CROSS_ENCODER_ENABLED</key>
 		<string>true</string>
 		<key>BRAIN_EMBED_MODEL</key>

@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Nightly Neo4j backup to MinIO.
 
-Dumps Neo4j database, compresses, uploads to rag-backups bucket.
-14-day retention (same as ChromaDB backup).
+Dumps Neo4j database, compresses, uploads to rag-backups bucket with
+companion SHA-256 checksum (parity with backup_qdrant.py so bit-rot or
+truncated uploads are detectable before a restore is attempted).
+14-day retention.
 """
 
+import hashlib
 import subprocess
 import sys
 import tarfile
@@ -19,6 +22,14 @@ MAX_BACKUPS = 14
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _minio import s3_client as _s3_client
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def backup():
@@ -64,19 +75,36 @@ def backup():
         size_mb = archive_path.stat().st_size / 1024 / 1024
         print(f"  Archive: {size_mb:.1f} MB")
 
-        print("[2/3] Uploading to MinIO...")
+        print("[2/3] Uploading to MinIO (+ checksum)...")
+        digest = _sha256_file(archive_path)
+        checksum_name = archive_name.replace(".tar.gz", ".sha256")
+        checksum_path = Path(tmp) / checksum_name
+        checksum_path.write_text(f"{digest}  {archive_name}\n")
         try:
             s3 = _s3_client()
             s3.upload_file(str(archive_path), BACKUP_BUCKET, archive_name)
-            print(f"  Uploaded: {BACKUP_BUCKET}/{archive_name}")
+            s3.upload_file(str(checksum_path), BACKUP_BUCKET, checksum_name)
+            print(f"  Uploaded: {BACKUP_BUCKET}/{archive_name} (sha256 {digest[:16]}...)")
         except Exception as e:
             print(f"ERROR: Upload failed: {e}")
             return 1
 
         print("[3/3] Pruning old backups...")
         try:
-            resp = s3.list_objects_v2(Bucket=BACKUP_BUCKET, Prefix="neo4j-backup-")
-            objects = sorted(resp.get("Contents", []), key=lambda o: o["Key"])
+            objects: list[dict] = []
+            continuation: str | None = None
+            while True:
+                kwargs = {"Bucket": BACKUP_BUCKET, "Prefix": "neo4j-backup-"}
+                if continuation:
+                    kwargs["ContinuationToken"] = continuation
+                resp = s3.list_objects_v2(**kwargs)
+                objects.extend(resp.get("Contents", []))
+                if not resp.get("IsTruncated"):
+                    break
+                continuation = resp.get("NextContinuationToken")
+                if not continuation:
+                    break
+            objects.sort(key=lambda o: o["Key"])
             if len(objects) > MAX_BACKUPS:
                 to_delete = objects[: len(objects) - MAX_BACKUPS]
                 for obj in to_delete:

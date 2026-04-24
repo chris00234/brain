@@ -46,8 +46,8 @@ _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic", ".bmp"}
 @limiter.limit("20/minute")
 def ingest_image_route(request: Request, req: ImageIngestRequest) -> dict:
     """Live image ingest. Caller submits a file path OR base64 bytes; brain
-    sends the image to Gemini 2.5 Flash for captioning, then indexes the
-    caption + path in the knowledge Chroma collection for text-query retrieval.
+    uses the configured vision_llm backend for captioning, then indexes the
+    caption + path in the knowledge collection for text-query retrieval.
     """
     try:
         import vision_llm
@@ -57,7 +57,7 @@ def ingest_image_route(request: Request, req: ImageIngestRequest) -> dict:
     if not vision_llm.is_configured():
         raise HTTPException(
             status_code=503,
-            detail="vision_llm not configured (missing GEMINI_API_KEY)",
+            detail="vision_llm not configured",
         )
 
     image_bytes: bytes | None = None
@@ -134,7 +134,7 @@ def ingest_image_route(request: Request, req: ImageIngestRequest) -> dict:
                     "path": image_path_str or "",
                     "mime_type": req.mime_type,
                     "agent": req.agent,
-                    "captioned_by": "gemini-2.5-flash",
+                    "captioned_by": vision_llm.backend_name(),
                     "captioned_at": datetime.now(UTC).isoformat(timespec="seconds"),
                 }
             ],

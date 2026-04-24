@@ -5,6 +5,10 @@ __pycache__/
 *.egg-info/
 # Runtime state — everything under logs/ is generated
 logs/
+qdrant-data/
+qdrant-backups/
+models/
+.qdrant-initialized
 brain-ui/node_modules/
 brain-ui/dist/
 .DS_Store

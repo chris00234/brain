@@ -1,8 +1,9 @@
 """brain_core/skill_materializer.py — Voyager/Hermes-style skill materialization.
 
 When a procedure in autonomy.db reaches a reuse threshold, write it out as a
-SKILL.md file that both Claude Code (~/.claude/skills/auto-<slug>/) and
-OpenClaw (~/.openclaw/skills/auto-<slug>/) can discover and invoke.
+SKILL.md file that Claude Code (~/.claude/skills/auto-<slug>/), Codex
+(~/.codex/skills/auto-<slug>/), and OpenClaw (~/.openclaw/skills/auto-<slug>/)
+can discover and invoke.
 
 Design principles:
   - Brain is source of truth. Files are materializations.
@@ -18,9 +19,10 @@ Trigger policy:
   - len(steps) >= 3 (multi-step, not a one-liner)
   - tier in {"extraction", "awm_session:*"} — extracted from real work
 
-Archival (future): a nightly job can walk ~/.claude/skills/auto-*/ and
-~/.openclaw/skills/auto-*/ and mark archived=true in their frontmatter when the
-backing procedure is deleted or has gone stale (last_used > 180 days).
+Archival (future): a nightly job can walk ~/.claude/skills/auto-*/,
+~/.codex/skills/auto-*/, and ~/.openclaw/skills/auto-*/ and mark archived=true
+in their frontmatter when the backing procedure is deleted or has gone stale
+(last_used > 180 days).
 """
 
 from __future__ import annotations
@@ -35,6 +37,7 @@ from typing import Any
 log = logging.getLogger("brain.skill_materializer")
 
 CLAUDE_SKILLS_DIR = Path.home() / ".claude" / "skills"
+CODEX_SKILLS_DIR = Path.home() / ".codex" / "skills"
 OPENCLAW_SKILLS_DIR = Path.home() / ".openclaw" / "skills"
 AUTO_PREFIX = "auto-"
 MIN_SUCCESS_COUNT = 2
@@ -172,7 +175,7 @@ def _render_openclaw_meta(proc: dict[str, Any]) -> str:
 
 
 def materialize(proc: dict[str, Any], *, min_success: int = MIN_SUCCESS_COUNT) -> dict[str, Any]:
-    """Write SKILL.md + _meta.json for both CC and OpenClaw if threshold met.
+    """Write SKILL.md + _meta.json for Claude, Codex, and OpenClaw if threshold met.
 
     Returns {materialized: bool, slug: str, paths: [...], reason: str}.
     Fail-open: any exception is logged and swallowed so brain writes don't
@@ -207,22 +210,25 @@ def materialize(proc: dict[str, Any], *, min_success: int = MIN_SUCCESS_COUNT) -
         skill_md = _render_claude_skill_md(proc, lessons)
         meta_json = _render_openclaw_meta(proc)
 
-        # Write to both CC and OpenClaw skill dirs
+        # Write to each runtime skill dir. OpenClaw additionally needs _meta.json.
         cc_dir = CLAUDE_SKILLS_DIR / slug
+        codex_dir = CODEX_SKILLS_DIR / slug
         oc_dir = OPENCLAW_SKILLS_DIR / slug
-        for d in (cc_dir, oc_dir):
+        for d in (cc_dir, codex_dir, oc_dir):
             d.mkdir(parents=True, exist_ok=True)
 
         cc_path = cc_dir / "SKILL.md"
+        codex_path = codex_dir / "SKILL.md"
         oc_path = oc_dir / "SKILL.md"
         oc_meta_path = oc_dir / "_meta.json"
 
         cc_path.write_text(skill_md)
+        codex_path.write_text(skill_md)
         oc_path.write_text(skill_md)
         oc_meta_path.write_text(meta_json)
 
         result["materialized"] = True
-        result["paths"] = [str(cc_path), str(oc_path), str(oc_meta_path)]
+        result["paths"] = [str(cc_path), str(codex_path), str(oc_path), str(oc_meta_path)]
         result["reason"] = "ok"
         log.info(
             "materialized skill %s (success_count=%d, steps=%d)",
@@ -304,9 +310,9 @@ def _parse_frontmatter(skill_md_path: Path) -> dict[str, Any]:
 
 
 def _list_auto_skill_dirs() -> list[Path]:
-    """Return all auto-* skill directories across CC + OpenClaw."""
+    """Return all auto-* skill directories across Claude, Codex, and OpenClaw."""
     dirs: list[Path] = []
-    for root in (CLAUDE_SKILLS_DIR, OPENCLAW_SKILLS_DIR):
+    for root in (CLAUDE_SKILLS_DIR, CODEX_SKILLS_DIR, OPENCLAW_SKILLS_DIR):
         if not root.exists():
             continue
         for p in root.iterdir():
@@ -426,13 +432,13 @@ def cleanup_stale_auto_skills(
             survivors_per_root[root] = surviving
 
         # Rule 3: overload cap per root
-        for root, items in survivors_per_root.items():
+        for _root, items in survivors_per_root.items():
             if len(items) <= max_skills:
                 summary["kept"] += len(items)
                 continue
 
             # Sort ascending by success_count (from procedure row), evict low first
-            def _sc(pair):
+            def _sc(pair: tuple[Path, dict[str, Any]]) -> int:
                 _, fm = pair
                 try:
                     return int(fm.get("success_count", 1))

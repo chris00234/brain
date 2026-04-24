@@ -24,6 +24,10 @@ from __future__ import annotations
 
 from typing import Any
 
+try:
+    from brain_core.source_quality import source_quality_multiplier
+except ImportError:  # pragma: no cover - top-level import in scripts/tests
+    from source_quality import source_quality_multiplier
 from tokenizer import tokenize as _tokenize
 
 
@@ -88,7 +92,7 @@ def score_result(query: str, result: dict[str, Any], debug: bool = False) -> flo
         relevance *= 0.75 if result.get("trust_tier", 0) >= 2 else 0.6
 
     trust_tier = result.get("trust_tier", 1)
-    if not isinstance(trust_tier, (int, float)):
+    if not isinstance(trust_tier, int | float):
         trust_tier = 1
     # Trust boost must be strong enough to counterbalance title-overlap wins.
     # A high-overlap experience hit gets relevance ~3.0x; canonical needs ~1.4x
@@ -96,7 +100,7 @@ def score_result(query: str, result: dict[str, Any], debug: bool = False) -> flo
     # showed 5 canonical hits getting pushed out of top-5 by experience notes.
     trust_boost = {3: 1.4, 2: 1.15}.get(trust_tier, 1.0)
 
-    # Use vector_score from ChromaDB when available as semantic relevance signal
+    # Use vector_score from Qdrant when available as semantic relevance signal
     vector_score = float(result.get("metadata", {}).get("vector_score", 0) or result.get("vector_score", 0))
     semantic_boost = 1.0 + (0.5 * vector_score) if vector_score > 0.65 else 1.0
 
@@ -104,22 +108,15 @@ def score_result(query: str, result: dict[str, Any], debug: bool = False) -> flo
     path = result.get("path", "")
     source_boost = 1.0
     if any(p in path for p in ("docker-compose.yml", "/conf.d/", "AGENTS.md", "TOOLS.md")):
-        source_boost = 1.2  # primary config files
+        # Primary source files should beat derivative notes when the query is
+        # explicitly asking about that service/agent/config file.
+        path_tokens = _tokenize(path)
+        source_boost = 1.6 if q_tokens & path_tokens else 1.2
 
-    # Session-dump penalty — raw openclaw/claude_code session distillations are
-    # captured verbatim from agent outputs and flood experience collection after
-    # ingest jobs run. They carry query-like language that matches vector search
-    # but are rarely the actual canonical answer to a retrieval query.
-    # Penalize them so canonical notes win on matched topics.
-    _doc_type = result.get("type") or (result.get("metadata") or {}).get("type") or ""
-    if _doc_type in (
-        "raw-openclaw_session",
-        "raw-claude_code_session",
-        "raw-screen_time",
-        "raw-browser",
-        "raw-git_activity",
-    ):
-        source_boost *= 0.4  # ~60% penalty
+    # Raw operational logs are fallback evidence, not primary answers. Keep the
+    # quality policy shared with cross_encoder_rerank so CE score overwrites do
+    # not erase the same source penalty later in the route.
+    source_boost *= source_quality_multiplier(result, stage="lexical")
     # Removed 2026-04-12: "## Statement" penalty was hitting EVERY canonical note
     # (standard heading) not just derivative proposals, causing 5 of 7 eval
     # regressions to be canonical misses. Canonical trust_boost now carries this.
@@ -181,6 +178,4 @@ if __name__ == "__main__":
         {"title": "Random notes", "content": "Something about docker and nginx setups", "score": 80},
         {"title": "Gateway docs", "content": "openclaw gateway openclaw openclaw", "score": 30},
     ]
-    for r in rerank("openclaw gateway", test_results, debug=True):
-        print(f"  [{r['rerank_score']:.1f}] {r['title']}")
-        print(f"    debug: {r.get('_debug')}")
+    rerank("openclaw gateway", test_results, debug=True)

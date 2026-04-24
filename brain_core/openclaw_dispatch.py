@@ -37,6 +37,7 @@ import sys
 import threading
 import time as _time
 from dataclasses import dataclass, field
+from datetime import UTC as _UTC
 from datetime import datetime, timedelta
 from datetime import datetime as _dt
 from pathlib import Path
@@ -145,7 +146,7 @@ def _record_usage(
                 "provider, model, cache_read_tokens, cache_write_tokens, cost_usd) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
-                    _dt.now().isoformat(),
+                    _dt.now(_UTC).isoformat(),
                     agent,
                     duration_ms,
                     1 if ok else 0,
@@ -515,6 +516,52 @@ def _estimate_cost_usd(provider: str, model: str, usage: dict[str, int]) -> floa
     return round(cost, 6)
 
 
+# Skill-usage telemetry dispatcher — fires off a thread (best-effort) to
+# bump openclaw.json skill entries on successful dispatch so attach-level
+# adoption numbers show up in future /metrics reporting. Silent on error.
+_skill_bg_pool = None
+
+
+def _stamp_skill_usage_bg(agent_name: str) -> None:
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+
+        global _skill_bg_pool
+        if _skill_bg_pool is None:
+            _skill_bg_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="skill_stamp")
+
+        def _run() -> None:
+            try:
+                import sys
+                from pathlib import Path as _P
+
+                sys.path.insert(0, str(_P(__file__).resolve().parent.parent / "cli"))
+                from skill_sync import bump_agent_usage
+
+                bump_agent_usage(agent_name)
+            except Exception as exc:  # noqa: BLE001 — telemetry, never raises
+                log.debug("skill_sync.bump_agent_usage failed: %s", exc)
+
+        _skill_bg_pool.submit(_run)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("_stamp_skill_usage_bg dispatch failed: %s", exc)
+
+
+# Delegation depth guard (hermes-agent `tools/delegate_tool.py` pattern).
+# Brain's dispatch chain can accidentally loop when an agent's response
+# triggers another dispatch inline: e.g. Sage's reflect output lands in
+# raw/inbox → pipeline_auto distills → triggers another Sage dispatch.
+# ``threading.local`` scopes depth per-thread so concurrent recall
+# requests don't interfere. MAX_DEPTH=2 permits one explicit
+# child dispatch (e.g. reason → decide) but nothing deeper.
+_DISPATCH_DEPTH = threading.local()
+_MAX_DISPATCH_DEPTH = 2
+
+
+def _current_depth() -> int:
+    return getattr(_DISPATCH_DEPTH, "value", 0)
+
+
 def dispatch(
     agent: str,
     message: str,
@@ -550,6 +597,57 @@ def dispatch(
     backlog_payload     : Payload dict stored with the backlog entry. Must
                           contain enough context for the kind's handler to
                           re-run the work (e.g. prompt, out_path, severity).
+    """
+    # Depth guard — refuse recursive dispatch past MAX. A child agent's
+    # response triggering another dispatch inline (reflect → distill →
+    # reflect) has no quality reason to exist and is the most common way
+    # an LLM spend loop materializes. Threading-local so concurrent
+    # recall threads don't interfere.
+    _depth = _current_depth()
+    if _depth >= _MAX_DISPATCH_DEPTH:
+        log.warning(
+            "dispatch refused: depth=%d >= MAX(%d) agent=%s — breaking recursion",
+            _depth,
+            _MAX_DISPATCH_DEPTH,
+            agent,
+        )
+        return DispatchResult(
+            ok=False,
+            text="",
+            error=f"dispatch depth {_depth} exceeds max {_MAX_DISPATCH_DEPTH}",
+            attempts=0,
+            duration_ms=0,
+            degraded="dispatch depth guard",
+        )
+    _DISPATCH_DEPTH.value = _depth + 1
+    try:
+        return _dispatch_inner(
+            agent,
+            message,
+            thinking=thinking,
+            timeout=timeout,
+            degraded_placeholder=degraded_placeholder,
+            session_id=session_id,
+            backlog_kind=backlog_kind,
+            backlog_payload=backlog_payload,
+        )
+    finally:
+        _DISPATCH_DEPTH.value = _depth
+
+
+def _dispatch_inner(
+    agent: str,
+    message: str,
+    *,
+    thinking: str = "low",
+    timeout: int = 60,
+    degraded_placeholder: str = "",
+    session_id: str | None = None,
+    backlog_kind: str | None = None,
+    backlog_payload: dict | None = None,
+) -> DispatchResult:
+    """Internal dispatch body. Wrapped by ``dispatch()`` for depth-guard
+    bookkeeping — no caller should invoke this directly.
     """
     global _cb_failures, _cb_open_until
     t_start = _time.time()
@@ -809,6 +907,12 @@ def dispatch(
                     _check_struggle(agent, message, result.duration_ms, True, result.attempts)
                     if BRAIN_DISPATCH_CACHE_ENABLED:
                         _dispatch_cache_put(message, result.text)
+                    # Attach-level telemetry: stamp last_used_at + use_count on
+                    # every brain-learned-* skill available to this agent.
+                    # Fire-and-forget in the scheduler thread pool so the
+                    # ~10-40ms of openclaw.json rewrite doesn't block the
+                    # dispatch return path.
+                    _stamp_skill_usage_bg(agent)
                     return result
                 # Empty text despite rc=0 — treat as transient error.
                 result.error = "empty text in envelope"

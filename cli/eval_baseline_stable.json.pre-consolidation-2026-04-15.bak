@@ -1,0 +1,21 @@
+{
+  "cases": 138,
+  "v2_mode": "basic",
+  "baseline": {
+    "total": 138,
+    "hit_source_pct": 89.1,
+    "hit_content_pct": 95.7,
+    "hit_content_loose_pct": 95.7,
+    "mean_rank": 1.69,
+    "mean_latency_ms": 181.0
+  },
+  "v2": {
+    "total": 138,
+    "hit_source_pct": 91.3,
+    "hit_content_pct": 95.7,
+    "hit_content_loose_pct": 95.7,
+    "mean_rank": 1.6,
+    "mean_latency_ms": 327.0
+  },
+  "baseline_written_at": "2026-04-13T13:50:52"
+}

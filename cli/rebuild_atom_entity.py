@@ -48,7 +48,7 @@ MAX_NAME_LEN = 50  # skip long-sentence entities
 
 
 # Case-insensitive, word-boundary substring match
-def _build_matcher(name: str):
+def _build_matcher(name: str) -> re.Pattern[str]:
     # Escape regex metachars in entity name, wrap in word boundaries.
     escaped = re.escape(name)
     # Korean names have no word boundary, so also allow direct substring
@@ -167,7 +167,7 @@ def main() -> int:
         text = atom["text"] or ""
         matches: set[tuple[str, str]] = set()  # (canonical_name, etype)
 
-        for match_name, canonical_name, etype, matcher in matchers:
+        for _match_name, canonical_name, etype, matcher in matchers:
             if matcher.search(text):
                 matches.add((canonical_name, etype))
 
@@ -184,9 +184,8 @@ def main() -> int:
                 if eid:
                     if link_atom_entity(atom_id, eid, role="mention"):
                         total_sqlite_links += 1
-                    if not args.skip_neo4j:
-                        if neo4j_link_mentions(chroma_id, canonical_name):
-                            total_neo4j_edges += 1
+                    if not args.skip_neo4j and neo4j_link_mentions(chroma_id, canonical_name):
+                        total_neo4j_edges += 1
             except Exception as e:
                 errors += 1
                 print(f"  error on atom {atom_id[:16]} / {canonical_name}: {e}", file=sys.stderr)

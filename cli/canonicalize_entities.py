@@ -222,7 +222,7 @@ def main() -> int:
     candidates: list[tuple[float, dict, dict]] = []
     rejected_by_safeguard: list[tuple[float, str, str, str]] = []
     compared = 0
-    for etype, ids in by_type.items():
+    for _etype, ids in by_type.items():
         for i, aid in enumerate(ids):
             if aid not in embeddings:
                 continue

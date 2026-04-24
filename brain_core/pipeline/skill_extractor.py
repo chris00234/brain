@@ -533,6 +533,9 @@ def propose_skills_from_recent_learnings() -> dict:
 
 
 def main():
+    from _watchdog import arm as _arm_watchdog
+
+    _arm_watchdog(900, tag="skill_extractor")
     print("=" * 60)
     print(f"skill_extractor — {datetime.now(UTC).isoformat()}")
     print("=" * 60)

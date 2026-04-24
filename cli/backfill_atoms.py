@@ -14,7 +14,7 @@ by the ingest classifier), and for each atom:
 Resumable: tracks progress in logs/backfill_atoms_state.json so a crash or
 interrupt doesn't re-spend LLM tokens on already-processed atoms.
 
-~2s per atom × ~613 atoms = ~20 minutes. Run in background.
+~2s per atom x ~613 atoms = ~20 minutes. Run in background.
 """
 
 from __future__ import annotations

@@ -91,12 +91,17 @@ def _load_triples_from_neo4j() -> list[tuple[str, str, str]]:
     try:
         from neo4j_client import run_query
 
+        # `a`/`b` get rebound as the RETURN aliases (strings), so referring to
+        # `a.mention_count` in ORDER BY after that silently reads property
+        # access on a String and Neo4j errors with
+        # "expected a map but was String(...)". Include the sum as a column.
         rows = run_query(
             "MATCH (a:Entity)-[r:RELATES_TO]->(b:Entity) "
             "WHERE a.mention_count > 1 AND b.mention_count > 1 "
             "RETURN a.name AS a, coalesce(r.relationship, 'related_to') AS rel, "
-            "  b.name AS b, r.weight AS w "
-            "ORDER BY r.weight DESC, a.mention_count + b.mention_count DESC "
+            "  b.name AS b, r.weight AS w, "
+            "  a.mention_count + b.mention_count AS mc "
+            "ORDER BY w DESC, mc DESC "
             "LIMIT $limit",
             {"limit": MAX_TRIPLES},
         )
@@ -121,18 +126,32 @@ def _refresh_cache_if_stale() -> None:
         _cache_loaded_at = now
         return
 
-    new_cache: _TripleCache = []
+    # Deduplicate + drop self-loops before embedding.
+    prepared: list[tuple[str, str, str]] = []
     for a, rel, b in triples:
         if not a or not b or a == b:
             continue
-        triple_str = f"{a} {rel} {b}"
-        emb = _embed_passage(triple_str)
+        prepared.append((a, rel, b))
+
+    # Batch-embed — serial per-triple Ollama round-trips were ~45s cold-start
+    # on 1500 triples; batched /api/embed with batch_size=50 drops to ~3-5s.
+    texts = [f"{a} {rel} {b}" for a, rel, b in prepared]
+    try:
+        from indexer import get_embeddings_batch
+
+        embeddings = get_embeddings_batch(texts, prefix="passage", batch_size=50)
+    except Exception as exc:
+        log.warning("triple_link batch embed failed, falling back to serial: %s", exc)
+        embeddings = [_embed_passage(t) or [] for t in texts]
+
+    new_cache: _TripleCache = []
+    for (a, _rel, b), triple_str, emb in zip(prepared, texts, embeddings, strict=False):
         if emb:
             new_cache.append((triple_str, emb, a, b))
 
     _cache = new_cache
     _cache_loaded_at = now
-    log.info("triple_link cache refreshed: %d triples embedded", len(new_cache))
+    log.info("triple_link cache refreshed: %d triples embedded (batched)", len(new_cache))
 
 
 def _cosine(a: list[float], b: list[float]) -> float:

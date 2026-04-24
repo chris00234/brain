@@ -171,7 +171,11 @@ def run(dry_run: bool = False) -> dict:
     if dry_run:
         return {"status": "dry_run", "chars": len(body)}
     CHRIS_DIR.mkdir(parents=True, exist_ok=True)
-    SELF_MODEL_PATH.write_text(body + "\n")
+    # Atomic write — bare write_text leaves a truncated file on crash, and
+    # _self_model.md is the DMN anchor boot_context loads at every cold start.
+    from safe_state import atomic_write_text
+
+    atomic_write_text(SELF_MODEL_PATH, body + "\n")
     return {
         "status": "ok",
         "path": str(SELF_MODEL_PATH),

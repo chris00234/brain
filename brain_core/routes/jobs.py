@@ -28,6 +28,7 @@ def list_jobs() -> dict:
     return {
         "registry": sorted(JOB_REGISTRY.keys()),
         "scheduler": brain_scheduler.list_jobs(),
+        "scheduler_resources": brain_scheduler.resource_status(),
     }
 
 

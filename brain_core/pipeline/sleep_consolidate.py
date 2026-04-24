@@ -498,6 +498,10 @@ def run() -> dict:
 
 
 if __name__ == "__main__":
+    from _watchdog import arm as _arm_watchdog
+
+    # Documented budget is <60s; give 5x headroom before the alarm fires.
+    _arm_watchdog(300, tag="sleep_consolidate")
     result = run()
     print(json.dumps(result, indent=2, default=str))
     sys.exit(0 if result.get("ok") else 1)

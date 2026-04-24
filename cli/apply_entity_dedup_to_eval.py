@@ -39,7 +39,7 @@ AUDIT_LOG = "/Users/chrischo/server/brain/logs/entity_canonicalize_audit.jsonl"
 def build_mapping() -> dict[str, str]:
     """Read audit log + add manual merges, then resolve transitive chains."""
     raw: dict[str, str] = {}
-    with open(AUDIT_LOG) as f:
+    with Path(AUDIT_LOG).open() as f:
         for line in f:
             if not line.strip():
                 continue

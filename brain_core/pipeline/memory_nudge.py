@@ -163,11 +163,9 @@ def main():
         print("No recent memories to review")
         return 0
 
-    cols = get_collections()
-    sem_id = cols.get("semantic_memory")
-    if not sem_id:
-        print("semantic_memory collection not found")
-        return 1
+    # Collection name is constant under QdrantStore; downstream callers
+    # (mark_obsolete / mark_promotion_candidate) accept but don't use it.
+    sem_id = "semantic_memory"
 
     # 2026-04-17 token-spike fix: cap per-memory content at 500 chars + cap
     # total memory count to 80. Prior unbounded concat of 7 days of memories

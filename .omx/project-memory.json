@@ -1,0 +1,9 @@
+{
+  "directives": [
+    {
+      "directive": "When improving the brain system, avoid duplicate same-purpose logic, jobs, hooks, or pipelines running concurrently. Reuse or centralize existing mechanisms first because duplication wastes resources and can destabilize the system.",
+      "priority": "high",
+      "timestamp": "2026-04-24T02:39:43.570Z"
+    }
+  ]
+}

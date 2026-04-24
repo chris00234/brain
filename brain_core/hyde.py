@@ -229,7 +229,10 @@ def _dispatch_to_jenna(prompt: str, thinking: str = "low", timeout: int = DISPAT
 
 # ── HyDE ─────────────────────────────────────────────────
 def _clean_reply(reply: str) -> str:
-    reply = re.sub(r"^```.*?\n", "", reply, flags=re.DOTALL)
+    # Strip a single opening ```lang\n fence without re.DOTALL — the prior
+    # DOTALL + lazy match collapsed to the last newline before the closing
+    # fence, erasing the entire body for wrapped replies.
+    reply = re.sub(r"^```[^\n]*\n", "", reply)
     reply = re.sub(r"\s*```$", "", reply)
     reply = re.sub(r"^\s*Answer\s*:\s*", "", reply, flags=re.IGNORECASE)
     return reply.strip()

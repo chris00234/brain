@@ -10,8 +10,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "brain_core"))
 
 
 def _slos():
-    import slos
     import importlib
+
+    import slos
+
     importlib.reload(slos)
     return slos
 
@@ -35,13 +37,17 @@ def test_dispatch_failure_rate_counts_recent_failures(tmp_path, monkeypatch):
 
     failures_path = tmp_path / "dispatch-failures.jsonl"
     failures_path.write_text(
-        json.dumps({"timestamp": recent, "agent": "jenna", "error": "empty"}) + "\n"
-        + json.dumps({"timestamp": recent, "agent": "jenna", "error": "empty"}) + "\n"
-        + json.dumps({"timestamp": old, "agent": "jenna", "error": "empty"}) + "\n"
+        json.dumps({"timestamp": recent, "agent": "jenna", "error": "empty"})
+        + "\n"
+        + json.dumps({"timestamp": recent, "agent": "jenna", "error": "empty"})
+        + "\n"
+        + json.dumps({"timestamp": old, "agent": "jenna", "error": "empty"})
+        + "\n"
     )
 
     # Insert 10 dispatches in llm_usage.db for last hour
     import sqlite3
+
     db_path = tmp_path / "llm_usage.db"
     conn = sqlite3.connect(db_path)
     conn.execute(
@@ -64,7 +70,6 @@ def test_dispatch_failure_rate_counts_recent_failures(tmp_path, monkeypatch):
 
 
 def test_agent_session_max_mb(tmp_path, monkeypatch):
-    import os
     slos = _slos()
     # Point Path.home() to tmp_path indirectly by monkeypatching
     agents = tmp_path / ".openclaw" / "agents" / "jenna" / "sessions"

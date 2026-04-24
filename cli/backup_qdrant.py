@@ -60,10 +60,25 @@ def mc_upload(host_path: Path, remote_name: str) -> bool:
 
 
 def mc_list_prefix(prefix: str) -> list[str]:
+    # list_objects_v2 returns max 1000 keys per call. Past 1000 objects
+    # under a prefix, old backups stop getting pruned and accumulate forever.
+    # Paginate via ContinuationToken.
     try:
         s3 = _s3_client()
-        resp = s3.list_objects_v2(Bucket=MINIO_BUCKET, Prefix=prefix)
-        return [obj["Key"] for obj in resp.get("Contents", [])]
+        keys: list[str] = []
+        continuation: str | None = None
+        while True:
+            kwargs = {"Bucket": MINIO_BUCKET, "Prefix": prefix}
+            if continuation:
+                kwargs["ContinuationToken"] = continuation
+            resp = s3.list_objects_v2(**kwargs)
+            keys.extend(obj["Key"] for obj in resp.get("Contents", []))
+            if not resp.get("IsTruncated"):
+                break
+            continuation = resp.get("NextContinuationToken")
+            if not continuation:
+                break
+        return keys
     except Exception:
         return []
 

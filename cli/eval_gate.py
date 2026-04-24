@@ -25,6 +25,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import subprocess
 import sys
@@ -45,7 +46,14 @@ TELEGRAM_CHAT_ID = "8484060831"
 TELEGRAM_ACCOUNT = "jenna-bot"
 
 
-def _persist_eval_report(report: dict, track: str = "default") -> None:
+def _content_metric_value(v2: dict, metric: str) -> float:
+    strict = float(v2.get("hit_content_pct", 0))
+    if metric == "loose":
+        return float(v2.get("hit_content_loose_pct", strict))
+    return strict
+
+
+def _persist_eval_report(report: dict, track: str = "default", content_metric: str = "strict") -> None:
     """Write eval-report.json + append eval-history.jsonl so Brain UI stays current.
 
     `track` lets the two-track gate persist separate per-track histories without
@@ -56,7 +64,10 @@ def _persist_eval_report(report: dict, track: str = "default") -> None:
     logs.mkdir(parents=True, exist_ok=True)
     v2 = report.get("v2", {})
     total = int(v2.get("total", report.get("cases", 0)))
-    content_pct = float(v2.get("hit_content_pct", 0))
+    strict_pct = float(v2.get("hit_content_pct", 0))
+    loose_pct = float(v2.get("hit_content_loose_pct", strict_pct))
+    content_pct = _content_metric_value(v2, content_metric)
+    source_pct = float(v2.get("hit_source_pct", 0))
     passed = round(total * content_pct / 100) if total else 0
     failed = total - passed
 
@@ -75,6 +86,8 @@ def _persist_eval_report(report: dict, track: str = "default") -> None:
                 "passed": passed,
                 "failed": failed,
                 "accuracy": round(content_pct, 1),
+                "content_metric": content_metric,
+                "source_accuracy": round(source_pct, 1),
                 "slow_count": 0,
                 "v2": v2,
             },
@@ -92,6 +105,13 @@ def _persist_eval_report(report: dict, track: str = "default") -> None:
                     "passed": passed,
                     "failed": failed,
                     "accuracy": round(content_pct, 1),
+                    "content_metric": content_metric,
+                    "hit_content_pct": round(strict_pct, 1),
+                    "hit_content_strict_pct": round(strict_pct, 1),
+                    "hit_content_loose_pct": round(loose_pct, 1),
+                    "selected_content_pct": round(content_pct, 1),
+                    "hit_source_pct": round(source_pct, 1),
+                    "source_accuracy": round(source_pct, 1),
                     "slow_count": 0,
                 },
                 ensure_ascii=False,
@@ -103,7 +123,7 @@ def _persist_eval_report(report: dict, track: str = "default") -> None:
 def run_current_eval(eval_set_path: Path) -> dict:
     """Run eval_compare.py --json --eval-set <path> and return the parsed report.
 
-    Timeout scales with eval set size: ~500ms per case × 2 endpoints + margin.
+    Timeout scales with eval set size: ~500ms per case x 2 endpoints + margin.
     """
     try:
         n_cases = len(json.loads(eval_set_path.read_text())) if eval_set_path.exists() else 500
@@ -151,7 +171,7 @@ def alert_chris(message: str) -> None:
     Uses `message send` with explicit channel/target (not `agent --deliver`,
     which was failing with 'requires target <chatId>'). Bug fix 2026-04-12.
     """
-    try:
+    with contextlib.suppress(Exception):
         subprocess.run(
             [
                 OPENCLAW_BIN,
@@ -170,8 +190,6 @@ def alert_chris(message: str) -> None:
             text=True,
             timeout=20,
         )
-    except Exception:
-        pass  # alerting must never block the gate
 
 
 def main() -> int:
@@ -207,6 +225,25 @@ def main() -> int:
         help="max allowed drop in hit_content_pct (default 5.0 percentage points)",
     )
     parser.add_argument(
+        "--source-threshold",
+        type=float,
+        default=10.0,
+        help="max allowed drop in hit_source_pct (default 10.0 percentage points)",
+    )
+    parser.add_argument(
+        "--content-metric",
+        choices=["strict", "loose"],
+        default="strict",
+        help="content metric used for regression gating and persisted accuracy "
+        "(strict = substring, loose = 75%% token overlap). Default: strict.",
+    )
+    parser.add_argument(
+        "--min-source",
+        type=float,
+        default=0.0,
+        help="absolute hit_source_pct floor (0 = disabled)",
+    )
+    parser.add_argument(
         "--max-baseline-age-days",
         type=int,
         default=30,
@@ -236,13 +273,14 @@ def main() -> int:
         print(f"[eval_gate] ERROR running eval: {e}", file=sys.stderr)
         return 2
 
-    _persist_eval_report(report, track=args.track)
+    _persist_eval_report(report, track=args.track, content_metric=args.content_metric)
 
     current = report.get("v2", {})
-    current_content = float(current.get("hit_content_pct", 0))
+    current_content = _content_metric_value(current, args.content_metric)
     current_source = float(current.get("hit_source_pct", 0))
+    metric_label = "hit_content_loose@5" if args.content_metric == "loose" else "hit_content@5"
     print(
-        f"[eval_gate] current /recall/v2: " f"hit_content@5={current_content}% hit_source@5={current_source}%"
+        f"[eval_gate] current /recall/v2: " f"{metric_label}={current_content}% hit_source@5={current_source}%"
     )
 
     if args.update_baseline:
@@ -257,25 +295,45 @@ def main() -> int:
         return 0
 
     baseline_current = baseline.get("v2", {})
-    baseline_content = float(baseline_current.get("hit_content_pct", 0))
+    baseline_content = _content_metric_value(baseline_current, args.content_metric)
     baseline_source = float(baseline_current.get("hit_source_pct", 0))
     print(
         f"[eval_gate] baseline /recall/v2: "
-        f"hit_content@5={baseline_content}% hit_source@5={baseline_source}%"
+        f"{metric_label}={baseline_content}% hit_source@5={baseline_source}%"
     )
 
     delta_content = current_content - baseline_content
     delta_source = current_source - baseline_source
-    print(f"[eval_gate] delta content@5: {delta_content:+.1f}pts, source@5: {delta_source:+.1f}pts")
+    print(f"[eval_gate] delta {metric_label}: {delta_content:+.1f}pts, source@5: {delta_source:+.1f}pts")
 
-    regression = delta_content < -args.threshold
-    above_floor = current_content >= args.alert_only_above
-    if regression and (args.alert_only_above == 0.0 or not above_floor):
-        msg = (
-            f"REGRESSION[{args.track}]: hit_content@5 dropped {-delta_content:.1f}pts "
-            f"(baseline={baseline_content}%, current={current_content}%, "
-            f"threshold={args.threshold}pts)"
+    content_regression = delta_content < -args.threshold
+    content_floor_allows_alert = args.alert_only_above == 0.0 or current_content < args.alert_only_above
+    source_regression = baseline_source > 0 and delta_source < -args.source_threshold
+    source_floor_breach = args.min_source > 0.0 and current_source < args.min_source
+    if (content_regression and content_floor_allows_alert) or source_regression or source_floor_breach:
+        failing_metric = (
+            "hit_source_pct"
+            if (source_regression or source_floor_breach)
+            else ("hit_content_loose_pct" if args.content_metric == "loose" else "hit_content_pct")
         )
+        current_value = current_source if failing_metric == "hit_source_pct" else current_content
+        baseline_value = baseline_source if failing_metric == "hit_source_pct" else baseline_content
+        delta_value = delta_source if failing_metric == "hit_source_pct" else delta_content
+        threshold = args.source_threshold if failing_metric == "hit_source_pct" else args.threshold
+        failing_label = "hit_source@5" if failing_metric == "hit_source_pct" else metric_label
+        if source_floor_breach and not source_regression:
+            msg = (
+                f"REGRESSION[{args.track}]: {failing_label} breached floor "
+                f"(current={current_value}%, min_source={args.min_source}%)"
+            )
+        else:
+            msg = (
+                f"REGRESSION[{args.track}]: {failing_label} dropped {-delta_value:.1f}pts "
+                f"(baseline={baseline_value}%, current={current_value}%, "
+                f"threshold={threshold}pts)"
+            )
+            if source_floor_breach:
+                msg += f"; source floor breached (min_source={args.min_source}%)"
         print(f"[eval_gate] {msg}", file=sys.stderr)
         alert_chris(msg)
 
@@ -288,14 +346,14 @@ def main() -> int:
                     HealingSignal(
                         source="eval_gate",
                         signal_type="eval_regression",
-                        severity="high" if delta_content <= -10 else "medium",
-                        metric="hit_content_pct",
-                        value=current_content,
-                        baseline=baseline_content,
+                        severity="high" if delta_value <= -10 else "medium",
+                        metric=failing_metric,
+                        value=current_value,
+                        baseline=baseline_value,
                         target="semantic_memory",
                         context={
-                            "delta": delta_content,
-                            "threshold": args.threshold,
+                            "delta": delta_value,
+                            "threshold": threshold,
                             "track": args.track,
                         },
                     )
@@ -373,14 +431,15 @@ def _score_holdout_candidates() -> None:
         if not cid or not q or not expected:
             continue
         path = "/recall/v2?" + urllib.parse.urlencode({"q": q, "n": "5"})
-        req = urllib.request.Request(
+        req = urllib.request.Request(  # noqa: S310
             BRAIN_URL + path,
             headers={"Authorization": f"Bearer {token}", "x-agent": "eval_gate"},
         )
         try:
             with urllib.request.urlopen(req, timeout=60) as resp:  # noqa: S310
                 payload = json.loads(resp.read().decode())
-        except Exception:
+        except Exception as exc:
+            print(f"[eval_gate] holdout candidate recall failed: {exc}", file=sys.stderr)
             continue
         results = payload.get("results", [])[:5]
         alternates = [

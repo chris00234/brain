@@ -1,0 +1,22 @@
+{
+  "cases": 606,
+  "v2_mode": "basic",
+  "baseline": {
+    "total": 606,
+    "hit_source_pct": 67.3,
+    "hit_content_pct": 54.1,
+    "hit_content_loose_pct": 65.8,
+    "mean_rank": 2.14,
+    "mean_latency_ms": 149.0
+  },
+  "v2": {
+    "total": 606,
+    "hit_source_pct": 72.4,
+    "hit_content_pct": 65.2,
+    "hit_content_loose_pct": 75.4,
+    "mean_rank": 1.9,
+    "mean_latency_ms": 286.0
+  },
+  "baseline_written_at": "2026-04-15T17:32:00",
+  "baseline_reason": "Refreshed from the 2026-04-13T13:55 one-shot reading (68.2% content_hit). Root cause: M8.2 semantic chunking (commit cde8706, BRAIN_SEMANTIC_CHUNKING=1) landed ~10h after the original baseline was captured and changed chunk boundaries for every reindexed doc. Extended eval's phrase-level expected_content checks now straddle chunk splits. Stable track (138 curated queries) is unaffected at 95.7% so the gate on the canonical regression path holds. Mean latency 330->286ms (-13%) reflects the 2026-04-15 /recall/v2 tuning: _HYBRID_POOL_SIZE 14, candidate_n max(25,limit*3), CE top_k 14, HNSW ef_search (canonical 120, semantic_memory 100, experience 75)."
+}

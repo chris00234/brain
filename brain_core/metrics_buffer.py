@@ -31,8 +31,10 @@ HISTOGRAM_WINDOW = 512
 # p95 to the outlier value for hours and firing stale SLO alerts.
 # 30 min bounds how long one bad sample can haunt the gauge.
 WINDOW_SECONDS = 1800
-# Min samples within WINDOW_SECONDS required to publish a percentile.
-# Below this, percentile returns 0.0 so cold/idle routes don't page.
+# Min samples within WINDOW_SECONDS required before alerting consumers should
+# treat a percentile as stable. /metrics still publishes real low-sample
+# percentiles; SLO alerting applies the floor separately so observability does
+# not lie with a synthetic 0ms.
 MIN_WINDOW_SAMPLES = 20
 
 
@@ -40,10 +42,14 @@ def _now_iso() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
-def _window_percentile(samples: deque, p: float) -> float:
+def _window_values(samples: deque) -> list[float]:
     cutoff = time.time() - WINDOW_SECONDS
-    recent = [lat for ts, lat in samples if ts >= cutoff]
-    if len(recent) < MIN_WINDOW_SAMPLES:
+    return [float(lat) for ts, lat in samples if ts >= cutoff]
+
+
+def _window_percentile(samples: deque, p: float) -> float:
+    recent = _window_values(samples)
+    if not recent:
         return 0.0
     recent.sort()
     idx = min(len(recent) - 1, int(len(recent) * p))
@@ -67,6 +73,9 @@ class RouteStats:
     def window_count(self) -> int:
         return _window_count(self.samples)
 
+    def sample_floor_met(self) -> bool:
+        return self.window_count() >= MIN_WINDOW_SAMPLES
+
 
 @dataclass
 class PhaseStats:
@@ -85,6 +94,9 @@ class PhaseStats:
 
     def window_count(self) -> int:
         return _window_count(self.samples)
+
+    def sample_floor_met(self) -> bool:
+        return self.window_count() >= MIN_WINDOW_SAMPLES
 
 
 @dataclass
@@ -187,6 +199,9 @@ class MetricsBuffer:
             return {
                 key: {
                     "count": stats.count,
+                    "window_count": stats.window_count(),
+                    "min_window_samples": MIN_WINDOW_SAMPLES,
+                    "sample_floor_met": stats.sample_floor_met(),
                     "p50_ms": stats.percentile(0.50),
                     "p95_ms": stats.percentile(0.95),
                     "p99_ms": stats.percentile(0.99),
@@ -282,6 +297,8 @@ class MetricsBuffer:
                 path: {
                     "count": s.count,
                     "window_count": s.window_count(),
+                    "min_window_samples": MIN_WINDOW_SAMPLES,
+                    "sample_floor_met": s.sample_floor_met(),
                     "errors": s.errors,
                     "p50_ms": s.percentile(0.50),
                     "p95_ms": s.percentile(0.95),
@@ -321,6 +338,8 @@ class MetricsBuffer:
                 key: {
                     "count": stats.count,
                     "window_count": stats.window_count(),
+                    "min_window_samples": MIN_WINDOW_SAMPLES,
+                    "sample_floor_met": stats.sample_floor_met(),
                     "p50_ms": stats.percentile(0.50),
                     "p95_ms": stats.percentile(0.95),
                     "p99_ms": stats.percentile(0.99),

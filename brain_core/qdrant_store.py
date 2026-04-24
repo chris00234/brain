@@ -178,6 +178,7 @@ def _search_params_for(collection: str) -> Any:
 
 
 _HNSW_SETTINGS_CACHE: dict[str, int] | None = None
+_HNSW_SETTINGS_LOCK = threading.Lock()
 
 
 def _hnsw_settings() -> dict[str, int]:
@@ -186,54 +187,61 @@ def _hnsw_settings() -> dict[str, int]:
     Previously re-imported on every query and leaked `sys.path` entries
     without bound on long-running processes. The import failure path
     returns an empty dict so callers silently skip ef_search override.
+
+    Lock-guarded first-init so two concurrent recall threads on a fresh
+    process don't both parse the tuning log.
     """
     global _HNSW_SETTINGS_CACHE
     if _HNSW_SETTINGS_CACHE is not None:
         return _HNSW_SETTINGS_CACHE
-    import json
-    import sys
-    from pathlib import Path
+    with _HNSW_SETTINGS_LOCK:
+        # Re-check under lock; a concurrent init may have already landed.
+        if _HNSW_SETTINGS_CACHE is not None:
+            return _HNSW_SETTINGS_CACHE
+        import json
+        import sys
+        from pathlib import Path
 
-    pipeline_dir = str(Path(__file__).resolve().parent / "pipeline")
-    if pipeline_dir not in sys.path:
-        sys.path.append(pipeline_dir)
+        pipeline_dir = str(Path(__file__).resolve().parent / "pipeline")
+        if pipeline_dir not in sys.path:
+            sys.path.append(pipeline_dir)
 
-    merged: dict[str, int] = {}
-    try:
-        from hnsw_tuner import SETTINGS  # type: ignore[import-not-found]
+        merged: dict[str, int] = {}
+        try:
+            from hnsw_tuner import SETTINGS  # type: ignore[import-not-found]
 
-        merged.update(SETTINGS)
-    except Exception as exc:
-        log.debug("hnsw_tuner SETTINGS import failed: %s", exc)
+            merged.update(SETTINGS)
+        except Exception as exc:
+            log.debug("hnsw_tuner SETTINGS import failed: %s", exc)
 
-    # Close the adaptive feedback loop: hnsw_tuner.adaptive_tune appends
-    # recommendation rows to logs/hnsw_tuning.jsonl but nothing ever read
-    # them back. Merge the latest recommendation per collection on top of
-    # the static defaults so live queries pick up the tuner's decisions.
-    try:
-        tuning_log = Path("/Users/chrischo/server/brain/logs/hnsw_tuning.jsonl")
-        if tuning_log.exists():
-            latest: dict[str, int] = {}
-            with tuning_log.open() as f:
-                for line in f:
-                    line = line.strip()
-                    if not line or not line.startswith("{"):
-                        continue
-                    try:
-                        rec = json.loads(line)
-                    except Exception as exc:
-                        log.debug("hnsw_tuning.jsonl parse error: %s", exc)
-                        continue
-                    col = rec.get("collection")
-                    rec_ef = rec.get("recommended_ef") or rec.get("new_ef")
-                    if col and isinstance(rec_ef, int) and rec_ef > 0:
-                        latest[col] = rec_ef  # last write wins (file is append-only)
-            merged.update(latest)
-    except Exception as exc:
-        log.debug("hnsw_tuning.jsonl read failed: %s", exc)
+        # Close the adaptive feedback loop: hnsw_tuner.adaptive_tune appends
+        # recommendation rows to logs/hnsw_tuning.jsonl but nothing ever read
+        # them back. Merge the latest recommendation per collection on top of
+        # the static defaults so live queries pick up the tuner's decisions.
+        try:
+            tuning_log = Path("/Users/chrischo/server/brain/logs/hnsw_tuning.jsonl")
+            if tuning_log.exists():
+                latest: dict[str, int] = {}
+                with tuning_log.open() as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line or not line.startswith("{"):
+                            continue
+                        try:
+                            rec = json.loads(line)
+                        except Exception as exc:
+                            log.debug("hnsw_tuning.jsonl parse error: %s", exc)
+                            continue
+                        col = rec.get("collection")
+                        rec_ef = rec.get("recommended_ef") or rec.get("new_ef")
+                        if col and isinstance(rec_ef, int) and rec_ef > 0:
+                            latest[col] = rec_ef  # last write wins (file is append-only)
+                merged.update(latest)
+        except Exception as exc:
+            log.debug("hnsw_tuning.jsonl read failed: %s", exc)
 
-    _HNSW_SETTINGS_CACHE = merged
-    return _HNSW_SETTINGS_CACHE
+        _HNSW_SETTINGS_CACHE = merged
+        return _HNSW_SETTINGS_CACHE
 
 
 class QdrantStore:
@@ -365,7 +373,10 @@ class QdrantStore:
             sparse_vectors = getattr(sparse_config, "sparse_vectors", None) or {}
             has = "sparse" in sparse_vectors
         except Exception:
-            has = False
+            # Transient RPC failures (Qdrant restart, blip) must not cache a
+            # permanent False — that would silently downgrade the collection
+            # to dense-only for the rest of the process lifetime.
+            return False
         with self._sparse_cache_lock:
             self._sparse_cache[collection] = has
         return has

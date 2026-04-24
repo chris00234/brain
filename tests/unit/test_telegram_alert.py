@@ -17,7 +17,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "brain_core"))
 
-import telegram_alert  # noqa: E402
+import telegram_alert
 
 
 def _reset_state():
@@ -120,9 +120,12 @@ def test_bypass_rate_limit_always_sends():
         patch("pathlib.Path.exists", return_value=True),
         patch("subprocess.run", return_value=_OK()),
     ):
-        assert telegram_alert.send_chris_telegram(
-            "probe", source="bypass_test", severity="warn", bypass_rate_limit=True
-        ) is True
+        assert (
+            telegram_alert.send_chris_telegram(
+                "probe", source="bypass_test", severity="warn", bypass_rate_limit=True
+            )
+            is True
+        )
 
 
 def test_missing_binary_queues_backlog():

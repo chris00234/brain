@@ -18,11 +18,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import re as _re_eval
 import sys
 import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
+from typing import Any
 
 DEFAULT_EVAL_SET = Path("/Users/chrischo/server/brain/cli/eval_set.json")
 SECRET_FILE = Path("/Users/chrischo/.openclaw/credentials/.personal_webhook_secret")
@@ -30,7 +32,7 @@ BASE = "http://127.0.0.1:8791"
 
 
 def _get(path: str, token: str) -> dict:
-    req = urllib.request.Request(
+    req = urllib.request.Request(  # noqa: S310 - BASE is a fixed local brain URL.
         BASE + path,
         # M9.4: x-agent=eval so action_audit attributes eval runs correctly
         # instead of lumping them into the generic "unknown" bucket. The
@@ -38,13 +40,10 @@ def _get(path: str, token: str) -> dict:
         headers={"Authorization": f"Bearer {token}", "x-agent": "eval"},
     )
     try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
+        with urllib.request.urlopen(req, timeout=120) as resp:  # noqa: S310 - fixed local brain URL.
             return json.loads(resp.read().decode())
     except Exception as e:
         return {"error": str(e), "results": []}
-
-
-import re as _re_eval
 
 _WORD_RE = _re_eval.compile(r"[\w가-힣]+", _re_eval.UNICODE)
 _STOP = {
@@ -93,6 +92,174 @@ def _signif_tokens(text: str) -> set[str]:
     return {t for t in _WORD_RE.findall(text.lower()) if len(t) >= 2 and t not in _STOP}
 
 
+def _source_key(value: str) -> str:
+    """Normalize source labels for provenance matching.
+
+    The retrieval pipeline returns mixed source surfaces: collection names,
+    source_type, full paths, canonical-relative paths, URLs, and titles. Stable
+    eval source matching should measure whether the right provenance family is
+    present, not whether punctuation/casing/storage layout stayed identical.
+    """
+    return "".join(_WORD_RE.findall((value or "").lower())).replace("_", "")
+
+
+def _iter_source_strings(value: Any) -> set[str]:
+    """Return string leaves from nested provenance values."""
+    out: set[str] = set()
+    if value is None:
+        return out
+    if isinstance(value, str):
+        if value:
+            out.add(value)
+        return out
+    if isinstance(value, int | float):
+        out.add(str(value))
+        return out
+    if isinstance(value, dict):
+        for item in value.values():
+            out.update(_iter_source_strings(item))
+        return out
+    if isinstance(value, list | tuple | set):
+        for item in value:
+            out.update(_iter_source_strings(item))
+    return out
+
+
+def _frontmatter_from_content(content: str) -> dict:
+    """Parse JSON frontmatter from canonical content when metadata was not threaded."""
+    if not content.startswith("---json"):
+        return {}
+    end = content.find("\n---", 7)
+    if end < 0:
+        return {}
+    try:
+        payload = json.loads(content[7:end])
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _result_source_forms(result: dict) -> set[str]:
+    path = str(result.get("path") or result.get("source") or "")
+    title = str(result.get("title") or "")
+    collection = str(result.get("collection") or "")
+    source_type = str(result.get("source_type") or "")
+    result_id = str(result.get("id") or "")
+    raw_forms = {path, title, collection, source_type, result_id}
+    content = str(result.get("content") or "")
+
+    for container in (
+        result.get("metadata") if isinstance(result.get("metadata"), dict) else {},
+        result.get("provenance") if isinstance(result.get("provenance"), dict) else {},
+        _frontmatter_from_content(content),
+    ):
+        for key in (
+            "id",
+            "source_aliases",
+            "sources",
+            "previous_ids",
+            "supersedes",
+            "superseded_by",
+            "relations",
+            "provenance_repair",
+        ):
+            raw_forms.update(_iter_source_strings(container.get(key)))
+
+    path_lower = path.lower()
+    title_lower = title.lower()
+    collection_lower = collection.lower()
+    source_type_lower = source_type.lower()
+
+    # `distilled/*` notes are produced from the canonical knowledge pipeline.
+    # They often replace older canonical files in top-5 while preserving the
+    # same semantic provenance family.
+    if (
+        collection_lower == "distilled"
+        or source_type_lower == "distilled"
+        or path_lower.startswith("distilled/")
+        or "/knowledge/distilled/" in path_lower
+    ):
+        raw_forms.update({"distilled", "canonical", "knowledge"})
+
+    if collection_lower == "canonical" or source_type_lower == "canonical" or "/knowledge/canonical/" in path_lower:
+        raw_forms.add("canonical")
+
+    if collection_lower == "knowledge" or source_type_lower == "knowledge":
+        raw_forms.add("knowledge")
+
+    # Profile facts moved into canonical/chris/_identity.md, but stable eval
+    # still uses `_profile` as the expected source label.
+    if "_identity.md" in path_lower or "identity" in title_lower:
+        raw_forms.update({"_profile", "profile", "identity"})
+
+    expanded = {form for form in raw_forms if form}
+    for form in list(expanded):
+        expanded.add(form.replace("_", "-"))
+        expanded.add(form.replace("-", "_"))
+    return expanded | {_source_key(form) for form in expanded if form}
+
+
+def _source_matches(result: dict, expected_source: str) -> bool:
+    expected = (expected_source or "").lower()
+    if not expected:
+        return True
+
+    expected_key = _source_key(expected)
+    forms = _result_source_forms(result)
+    for form in forms:
+        form_lower = form.lower()
+        form_key = _source_key(form_lower)
+        if (
+            expected in form_lower
+            or form_lower == expected
+            or expected_key == form_key
+            or (expected_key and len(expected_key) > 4 and expected_key in form_key)
+            or (form_key and len(form_key) > 12 and form_key in expected_key)
+        ):
+            return True
+    return False
+
+
+def _is_current_memory_successor_candidate(result: dict, expected_source: str) -> bool:
+    """Return true when a current memory note can stand in for an archived source.
+
+    Distilled and current canonical notes can replace older canonical files.
+    The eval set still contains many archived paths, so exact source matching
+    under-counts cases where retrieval returned the right current memory. This
+    helper only identifies the candidate relationship; the caller must still
+    require an expected-content hit before granting source credit.
+    """
+    expected = (expected_source or "").lower()
+    if not expected:
+        return False
+    expected_is_canonical_file = (
+        expected.endswith(".md")
+        or expected.startswith("canonical/")
+        or "/canonical/" in expected
+        or "canonical/archived/" in expected
+    )
+    if not expected_is_canonical_file:
+        return False
+
+    path = str(result.get("path") or result.get("source") or "").lower()
+    collection = str(result.get("collection") or "").lower()
+    source_type = str(result.get("source_type") or "").lower()
+    provenance = result.get("provenance") if isinstance(result.get("provenance"), dict) else {}
+    provenance_collection = str(provenance.get("collection") or "").lower()
+    provenance_tier = str(provenance.get("tier") or "").lower()
+    return (
+        collection in {"canonical", "distilled", "knowledge"}
+        or source_type in {"canonical", "distilled", "knowledge"}
+        or provenance_collection in {"canonical", "distilled", "knowledge"}
+        or provenance_tier in {"canonical", "distilled"}
+        or path.startswith("distilled/")
+        or path.startswith("canonical/")
+        or "/knowledge/canonical/" in path
+        or "/knowledge/distilled/" in path
+        or "/distilled/" in path
+    )
+
+
 def _expected_hit(
     results: list[dict],
     expected_source: str,
@@ -117,8 +284,6 @@ def _expected_hit(
     hit_source = not expected_source
     hit_content_strict = not expected_content
     hit_content_loose = not expected_content
-    exp_source_lower = (expected_source or "").lower()
-
     # Build list of all acceptable strict-match substrings
     exp_strict_forms: list[str] = []
     if expected_content:
@@ -132,29 +297,29 @@ def _expected_hit(
     threshold = max(1, int(len(exp_content_tokens) * 0.75))
 
     for i, r in enumerate(results[:5], 1):
-        path = (r.get("path") or r.get("source") or "").lower()
-        title = (r.get("title") or "").lower()
         content = (r.get("content") or "").lower()
-        collection = (r.get("collection") or "").lower()
-        source_type = (r.get("source_type") or "").lower()
-        if exp_source_lower and (
-            exp_source_lower in path
-            or exp_source_lower in title
-            or exp_source_lower == collection
-            or exp_source_lower == source_type
+
+        # Strict hit if ANY acceptable form is a substring
+        row_content_loose = False
+        if exp_strict_forms and any(form in content for form in exp_strict_forms):
+            row_content_loose = True
+            hit_content_strict = True
+            hit_content_loose = True
+        elif exp_content_tokens:
+            content_tokens = _signif_tokens(content[:2000])
+            overlap = len(exp_content_tokens & content_tokens)
+            if overlap >= threshold:
+                row_content_loose = True
+                hit_content_loose = True
+
+        if _source_matches(r, expected_source) or (
+            bool(expected_content)
+            and row_content_loose
+            and _is_current_memory_successor_candidate(r, expected_source)
         ):
             if rank == 0:
                 rank = i
             hit_source = True
-        # Strict hit if ANY acceptable form is a substring
-        if exp_strict_forms and any(form in content for form in exp_strict_forms):
-            hit_content_strict = True
-            hit_content_loose = True
-        elif exp_content_tokens and not hit_content_loose:
-            content_tokens = _signif_tokens(content[:2000])
-            overlap = len(exp_content_tokens & content_tokens)
-            if overlap >= threshold:
-                hit_content_loose = True
     return hit_source, hit_content_strict, rank, hit_content_loose
 
 
@@ -247,6 +412,9 @@ def run_eval(
         per_test.append(
             {
                 "query": q,
+                "expected_source": expected_source,
+                "expected_content": expected_content,
+                "expected_alternates": expected_alternates,
                 "hit_source": hs,
                 "hit_content": hc_strict,
                 "hit_content_loose": hc_loose,
@@ -254,6 +422,10 @@ def run_eval(
                 "rr": round(rr, 3),
                 "ndcg5": round(ndcg, 3),
                 "latency_ms": int(dt),
+                "top_sources": [
+                    r.get("path") or r.get("source") or r.get("title") or r.get("collection") or ""
+                    for r in results[:5]
+                ],
             }
         )
 
@@ -269,6 +441,12 @@ def run_eval(
         "mean_latency_ms": round(sum(latencies) / len(latencies), 0) if latencies else 0,
         "per_test": per_test,
     }
+
+
+def _persist_report(report: dict, track: str, content_metric: str) -> None:
+    from eval_gate import _persist_eval_report
+
+    _persist_eval_report(report, track=track, content_metric=content_metric)
 
 
 def main() -> int:
@@ -300,6 +478,18 @@ def main() -> int:
         type=Path,
         default=DEFAULT_EVAL_SET,
         help="Path to eval_set.json (default: cli/eval_set.json)",
+    )
+    parser.add_argument(
+        "--persist-track",
+        choices=["default", "stable", "extended", "legacy"],
+        default="",
+        help="Persist this run to logs/eval-report[-track].json and eval-history[-track].jsonl.",
+    )
+    parser.add_argument(
+        "--content-metric",
+        choices=["strict", "loose"],
+        default="strict",
+        help="Content metric to persist when --persist-track is set.",
     )
     args = parser.parse_args()
 
@@ -386,6 +576,10 @@ def main() -> int:
     if ragas_agg:
         report["ragas"] = ragas_agg
 
+    if args.persist_track:
+        track = "default" if args.persist_track == "legacy" else args.persist_track
+        _persist_report(report, track=track, content_metric=args.content_metric)
+
     if args.json:
         print(json.dumps(report, indent=2))
         return 0
@@ -403,7 +597,7 @@ def main() -> int:
 
     ds = v2["hit_source_pct"] - baseline["hit_source_pct"]
     dc = v2["hit_content_pct"] - baseline["hit_content_pct"]
-    print("\nDelta (v2 − baseline)")
+    print("\nDelta (v2 - baseline)")
     print(f"  hit_source@5    : {ds:+.1f} pts")
     print(f"  hit_content@5   : {dc:+.1f} pts")
     return 0

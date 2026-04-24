@@ -98,7 +98,7 @@ def critique(query: str, results: list[dict]) -> CritiqueReport:
             f"RESULTS:\n" + "\n\n".join(result_snippets) + "\n\n"
             "For each result, answer YES or NO to: 'Does this directly "
             "help answer the query?'\n"
-            "Then give an overall confidence 0.0–1.0 that the top results "
+            "Then give an overall confidence 0.0-1.0 that the top results "
             "can answer the query.\n\n"
             "Output ONLY JSON: "
             '{"per_result": ["YES" or "NO", ...], "overall": 0.0}'

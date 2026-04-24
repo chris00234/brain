@@ -8,6 +8,7 @@ import os
 import re
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 log = logging.getLogger("brain.indexer")
 
@@ -249,7 +250,11 @@ def get_embedding(text, _retries=5, use_cache=True, prefix="passage"):
                 truncated = text[:max_chars]
                 prompted = f"{prefix}: {truncated}" if prefix else truncated
                 if use_cache:
-                    text_hash = hashlib.md5(f"{EMBED_MODEL}:{prompted}".encode()).hexdigest()
+                    # Must include adapter_marker so LoRA retries don't collide
+                    # with base-model cache entries.
+                    text_hash = hashlib.md5(
+                        f"{EMBED_MODEL}{adapter_marker}:{prompted}".encode()
+                    ).hexdigest()
                 last_err = f"context overflow, retrying at {max_chars} chars"
                 continue
             emb = data.get("embedding", data.get("embeddings", [[]])[0])
@@ -266,7 +271,11 @@ def get_embedding(text, _retries=5, use_cache=True, prefix="passage"):
                 truncated = text[:max_chars]
                 prompted = f"{prefix}: {truncated}" if prefix else truncated
                 if use_cache:
-                    text_hash = hashlib.md5(f"{EMBED_MODEL}:{prompted}".encode()).hexdigest()
+                    # Must include adapter_marker so LoRA retries don't collide
+                    # with base-model cache entries.
+                    text_hash = hashlib.md5(
+                        f"{EMBED_MODEL}{adapter_marker}:{prompted}".encode()
+                    ).hexdigest()
                 last_err = f"context overflow (4xx), retrying at {max_chars} chars"
                 continue
             last_err = str(e)
@@ -853,6 +862,229 @@ def ensure_collection(name, _retries=5):
 
 
 INCREMENTAL_REINDEX_COLLECTIONS = frozenset({"knowledge"})
+PROVENANCE_META_KEYS = (
+    "note_id",
+    "note_title",
+    "domain",
+    "confidence",
+    "review_state",
+    "sources",
+    "supersedes",
+    "superseded_by",
+    "relations",
+    "source_aliases",
+    "status",
+    "subtype",
+)
+
+
+def _json_frontmatter(text: str) -> dict[str, Any]:
+    """Return JSON frontmatter metadata from a note, or {} when absent/bad."""
+    lines = text.splitlines()
+    if len(lines) < 3 or not lines[0].startswith(("---json", "---")):
+        return {}
+    end_index = None
+    for index in range(1, len(lines)):
+        if lines[index] == "---":
+            end_index = index
+            break
+    if end_index is None:
+        return {}
+    try:
+        data = json.loads("\n".join(lines[1:end_index]))
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _string_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    values = value if isinstance(value, list) else [value]
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in values:
+        if not isinstance(item, str):
+            continue
+        item = item.strip()
+        if item and item not in seen:
+            seen.add(item)
+            result.append(item)
+    return result
+
+
+def _note_source_aliases(metadata: dict[str, Any], source: str) -> list[str]:
+    aliases: list[str] = []
+    aliases.extend(_string_list(metadata.get("source_aliases")))
+    aliases.extend(_string_list(metadata.get("id")))
+    aliases.extend(_string_list(metadata.get("sources")))
+    aliases.extend(_string_list(metadata.get("supersedes")))
+    aliases.extend(_string_list(metadata.get("superseded_by")))
+    if source:
+        path = Path(source)
+        aliases.append(path.stem)
+        try:
+            knowledge_root = BRAIN_HOME / "knowledge"
+            aliases.append(path.relative_to(knowledge_root).as_posix())
+        except ValueError:
+            pass
+    for relation in metadata.get("relations") or []:
+        if not isinstance(relation, dict):
+            continue
+        if relation.get("type") in {"supersedes", "superseded_by", "derived_from", "source"}:
+            aliases.extend(_string_list(relation.get("target")))
+
+    expanded: list[str] = []
+    for alias in aliases:
+        expanded.append(alias)
+        if "-" in alias:
+            expanded.append(alias.replace("-", "_"))
+        if "_" in alias:
+            expanded.append(alias.replace("_", "-"))
+    return _string_list(expanded)
+
+
+def _canonical_doc_provenance_fields(metadata: dict[str, Any], source: str) -> dict[str, Any]:
+    if not metadata:
+        return {}
+    fields = {
+        "note_id": metadata.get("id", ""),
+        "note_title": metadata.get("title", ""),
+        "domain": metadata.get("domain", ""),
+        "confidence": metadata.get("confidence", ""),
+        "review_state": metadata.get("review_state", ""),
+        "sources": _string_list(metadata.get("sources")),
+        "supersedes": _string_list(metadata.get("supersedes")),
+        "superseded_by": _string_list(metadata.get("superseded_by")),
+        "relations": metadata.get("relations") if isinstance(metadata.get("relations"), list) else [],
+        "source_aliases": _note_source_aliases(metadata, source),
+        "status": metadata.get("status", ""),
+        "subtype": metadata.get("subtype", ""),
+    }
+    return {key: value for key, value in fields.items() if value not in ("", [], None)}
+
+
+def prepare_index_document(doc: dict[str, Any]) -> tuple[str, str, dict[str, Any], str] | None:
+    """Prepare one collector document for indexing without embedding it."""
+    content = filter_secrets(doc["content"])
+    stripped = content.strip()
+    if len(stripped) < 30:
+        return None
+    # Skip boilerplate canonical/distilled proposal stub chunks
+    if stripped.startswith("## Statement") and "Review this proposed" in stripped[:80]:
+        return None
+    if stripped.startswith("## Observations") and "Derived from raw evidence" in stripped[:80]:
+        return None
+    # Source Summary chunks duplicate raw event JSON already indexed elsewhere.
+    if stripped.startswith("## Source Summary"):
+        return None
+    # Skip JSON-only frontmatter chunks (no searchable content)
+    if stripped.startswith("---json") and len(stripped) < 200:
+        return None
+    # Chunks that start mid-JSON are debris from long Source Summary sections.
+    if stripped.startswith(('",\n', '", "', '":', '": "', '": 0.', '": null', '": true', '": false')):
+        return None
+
+    # Build semantic header for embedding — gives short/structured chunks
+    # natural-language anchor text so vector search can match intent.
+    source = str(doc.get("source", ""))
+    service = doc.get("service", "")
+    doc_type = doc.get("type", "")
+    section = doc.get("section", "")
+
+    header_parts = []
+    if doc_type == "docker-compose":
+        header_parts.append(f"Docker Compose configuration for service '{service}'")
+    elif doc_type == "nginx-conf":
+        header_parts.append(f"Nginx reverse proxy configuration for '{service}'")
+    elif doc_type == "agent-config":
+        header_parts.append(f"Agent {doc.get('agent', '')} configuration: {section}")
+    elif doc_type == "learning":
+        header_parts.append(f"Agent {doc.get('agent', '')} learning notes")
+    elif doc_type == "session-memory":
+        header_parts.append(f"Agent {doc.get('agent', '')} session memory")
+    elif doc_type == "obsidian-note":
+        header_parts.append(f"Personal note in Obsidian vault ({doc.get('vault_subdir', '')})")
+    elif doc_type in ("canonical-note", "distilled-note"):
+        source_stem = Path(source).stem.replace("-", " ").replace("_", " ")
+        label = "Canonical knowledge" if doc_type == "canonical-note" else "Distilled summary"
+        section_suffix = f" — {section}" if section else ""
+        header_parts.append(f"{label}: {source_stem}{section_suffix}")
+
+    embed_text = ("\n".join(header_parts) + "\n\n" + content) if header_parts else content
+    doc_id = hashlib.md5(f"{source}:{content}".encode()).hexdigest()
+    mtime_val = doc.get("mtime") or ""
+    if not mtime_val and source:
+        try:
+            src_path = Path(source)
+            if src_path.exists() and src_path.is_file():
+                mtime_val = f"{src_path.stat().st_mtime:.6f}"
+        except Exception:
+            mtime_val = ""
+    created_at = doc.get("event_time") or doc.get("timestamp")
+    if not created_at and mtime_val:
+        try:
+            created_at = datetime.fromtimestamp(float(mtime_val), UTC).isoformat().replace("+00:00", "Z")
+        except ValueError:
+            created_at = ""
+    if not created_at:
+        created_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    meta = {
+        "source": source,
+        "type": doc_type,
+        "service": service,
+        "agent": doc.get("agent", ""),
+        "section": section,
+        "vault_subdir": doc.get("vault_subdir", ""),
+        "created_at": created_at,
+        "mtime": mtime_val,
+        "embed_model": EMBED_MODEL,
+        "embed_model_version": EMBED_MODEL_VERSION,
+    }
+    for key in PROVENANCE_META_KEYS:
+        value = doc.get(key)
+        if value not in (None, "", []):
+            meta[key] = value
+    return doc_id, content, meta, embed_text
+
+
+def refresh_payloads(collection_name: str, docs: list[dict[str, Any]]) -> int:
+    """Patch metadata for existing points without recomputing embeddings."""
+    if not docs:
+        return 0
+
+    from vector_store import get_vector_store
+
+    store = get_vector_store()
+    prepared = [item for doc in docs if (item := prepare_index_document(doc)) is not None]
+    if not prepared:
+        return 0
+
+    patched = 0
+    BATCH = 100
+    for start in range(0, len(prepared), BATCH):
+        batch = prepared[start : start + BATCH]
+        ids = [item[0] for item in batch]
+        existing = {
+            point.id: point.payload or {}
+            for point in store.get(
+                collection_name,
+                ids=ids,
+                with_payload=True,
+                with_vectors=False,
+                with_documents=False,
+            )
+        }
+        for doc_id, _content, meta, _embed_text in batch:
+            current = existing.get(doc_id)
+            if current is None:
+                continue
+            if all(current.get(key) == value for key, value in meta.items()):
+                continue
+            store.update_payload(collection_name, ids=[doc_id], patch=meta)
+            patched += 1
+    print(f"    Payload-only refresh: patched {patched}/{len(prepared)} existing points")
+    return patched
 
 
 def add_documents(collection_name, docs, skip_stale_cleanup=False, force_incremental=False):
@@ -891,88 +1123,10 @@ def add_documents(collection_name, docs, skip_stale_cleanup=False, force_increme
 
     # Phase 1: Prepare all documents (metadata, content, embed text)
     prepared = []
-    for i, doc in enumerate(docs):
-        content = filter_secrets(doc["content"])
-        stripped = content.strip()
-        if len(stripped) < 30:
-            continue
-        # Skip boilerplate canonical/distilled proposal stub chunks
-        if stripped.startswith("## Statement") and "Review this proposed" in stripped[:80]:
-            continue
-        if stripped.startswith("## Observations") and "Derived from raw evidence" in stripped[:80]:
-            continue
-        # 2026-04-17: skip ALL `## Source Summary` chunks regardless of length.
-        # Previously only short ones were skipped, so long proposal notes leaked
-        # their raw_event JSON dumps into the embedding space — these surface as
-        # mid-JSON snippets in /recall/v2 content fields. The source events are
-        # already indexed as raw-* collection entries, so re-embedding the dump
-        # here is pure noise.
-        if stripped.startswith("## Source Summary"):
-            continue
-        # Skip JSON-only frontmatter chunks (no searchable content)
-        if stripped.startswith("---json") and len(stripped) < 200:
-            continue
-        # 2026-04-17: chunks that start mid-JSON are debris from long Source
-        # Summary sections split after the `## Source Summary` header was in
-        # a previous chunk. Target the obvious cases directly rather than a
-        # noisy punctuation-density heuristic.
-        if stripped.startswith(('",\n', '", "', '":', '": "', '": 0.', '": null', '": true', '": false')):
-            continue
-
-        # Build semantic header for embedding — gives short/structured chunks
-        # (YAML configs, nginx server blocks) natural-language anchor text so
-        # vector search can match them on intent, not just literal tokens.
-        source = str(doc.get("source", ""))
-        service = doc.get("service", "")
-        doc_type = doc.get("type", "")
-        section = doc.get("section", "")
-
-        header_parts = []
-        if doc_type == "docker-compose":
-            header_parts.append(f"Docker Compose configuration for service '{service}'")
-        elif doc_type == "nginx-conf":
-            header_parts.append(f"Nginx reverse proxy configuration for '{service}'")
-        elif doc_type == "agent-config":
-            header_parts.append(f"Agent {doc.get('agent', '')} configuration: {section}")
-        elif doc_type == "learning":
-            header_parts.append(f"Agent {doc.get('agent', '')} learning notes")
-        elif doc_type == "session-memory":
-            header_parts.append(f"Agent {doc.get('agent', '')} session memory")
-        elif doc_type == "obsidian-note":
-            header_parts.append(f"Personal note in Obsidian vault ({doc.get('vault_subdir', '')})")
-        elif doc_type in ("canonical-note", "distilled-note"):
-            source_stem = Path(source).stem.replace("-", " ").replace("_", " ")
-            label = "Canonical knowledge" if doc_type == "canonical-note" else "Distilled summary"
-            section_suffix = f" — {section}" if section else ""
-            header_parts.append(f"{label}: {source_stem}{section_suffix}")
-
-        embed_text = ("\n".join(header_parts) + "\n\n" + content) if header_parts else content
-        # ID = hash of (source + content) — avoids collisions from long path truncation
-        doc_id = hashlib.md5(f"{source}:{content}".encode()).hexdigest()
-        # mtime: prefer explicit, else stat source file, else empty string
-        mtime_val = doc.get("mtime") or ""
-        if not mtime_val and source:
-            try:
-                _src_path = Path(source)
-                if _src_path.exists() and _src_path.is_file():
-                    mtime_val = f"{_src_path.stat().st_mtime:.6f}"
-            except Exception:
-                mtime_val = ""
-        meta = {
-            "source": source,
-            "type": doc_type,
-            "service": service,
-            "agent": doc.get("agent", ""),
-            "section": section,
-            "vault_subdir": doc.get("vault_subdir", ""),
-            "created_at": doc.get("event_time")
-            or doc.get("timestamp")
-            or datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-            "mtime": mtime_val,
-            "embed_model": EMBED_MODEL,
-            "embed_model_version": EMBED_MODEL_VERSION,
-        }
-        prepared.append((doc_id, content, meta, embed_text))
+    for doc in docs:
+        item = prepare_index_document(doc)
+        if item is not None:
+            prepared.append(item)
 
     if not prepared:
         return 0
@@ -1293,6 +1447,7 @@ def collect_canonical():
                 continue
             if len(text.strip()) < 100:
                 continue
+            provenance = _canonical_doc_provenance_fields(_json_frontmatter(text), str(md_file))
             chunks = enforce_max_chunk_size(chunk_markdown(text, str(md_file)))
             for chunk in chunks:
                 docs.append(
@@ -1303,6 +1458,7 @@ def collect_canonical():
                         "service": "",
                         "agent": "",
                         "section": chunk.get("section", ""),
+                        **provenance,
                     }
                 )
             if subdir == "canonical":
@@ -1436,7 +1592,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--collection", help="Index only this collection")
     parser.add_argument("--fresh", action="store_true", help="Ignore checkpoint, re-index everything")
+    parser.add_argument("--payload-only", action="store_true", help="refresh existing payload metadata only")
     args = parser.parse_args()
+    if args.payload_only and not args.collection:
+        parser.error("--payload-only requires --collection")
 
     print("=" * 60)
     print("RAG Indexer — Phase 2")
@@ -1456,7 +1615,10 @@ if __name__ == "__main__":
     for col in ALL_COLLECTIONS:
         ensure_collection(col)
 
-    done = set() if args.fresh else _load_checkpoint()
+    # Payload refresh is metadata synchronization, not embedding/index progress.
+    # It must run even when the collection was already checkpointed by a prior
+    # full indexing pass.
+    done = set() if (args.fresh or args.payload_only) else _load_checkpoint()
     if done:
         print(f"  Resuming — already done: {', '.join(sorted(done))}")
 
@@ -1478,7 +1640,14 @@ if __name__ == "__main__":
 
         # Health check before each collection
         print(f"\n[index] {name} ({label})...")
-        if not _wait_for_services(30):
+        if args.payload_only:
+            from vector_store import get_vector_store
+
+            if not get_vector_store().heartbeat():
+                print("  ERROR: Qdrant not ready. Saving checkpoint.")
+                _save_checkpoint(done)
+                _sys.exit(1)
+        elif not _wait_for_services(30):
             print("  ERROR: Qdrant/Ollama not ready. Saving checkpoint.")
             _save_checkpoint(done)
             _sys.exit(1)
@@ -1486,10 +1655,13 @@ if __name__ == "__main__":
         docs = collector()
         print(f"  Found {len(docs)} chunks")
         partial = bool(args.collection)
-        counts[name] = add_documents(name, docs, skip_stale_cleanup=partial)
-        done.add(name)
-        _save_checkpoint(done)
-        print(f"  Checkpointed {name} ({counts[name]} chunks)")
+        if args.payload_only:
+            counts[name] = refresh_payloads(name, docs)
+        else:
+            counts[name] = add_documents(name, docs, skip_stale_cleanup=partial)
+            done.add(name)
+            _save_checkpoint(done)
+            print(f"  Checkpointed {name} ({counts[name]} chunks)")
 
     # semantic_memory is managed by memory_store.py
     if not args.collection or args.collection == "semantic_memory":
@@ -1503,5 +1675,6 @@ if __name__ == "__main__":
     parts = ", ".join(f"{k}: {v}" for k, v in counts.items())
     print(f"\n{'=' * 60}")
     print(f"DONE — {parts}")
-    print(f"Total: {total} chunks indexed")
+    unit = "payloads patched" if args.payload_only else "chunks indexed"
+    print(f"Total: {total} {unit}")
     print("=" * 60)

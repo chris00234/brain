@@ -259,6 +259,33 @@ def _strip_proposal_boilerplate(body: str) -> str:
     return cleaned if cleaned else body
 
 
+def _source_aliases_from_metadata(metadata: dict[str, Any], path: Path) -> list[str]:
+    """Expose canonical provenance aliases for downstream eval/audit tools."""
+    aliases: set[str] = {metadata.get("id") or "", path.stem}
+    for key in ("sources", "supersedes", "superseded_by"):
+        values = metadata.get(key) or []
+        if isinstance(values, str):
+            values = [values]
+        aliases.update(str(v) for v in values if v)
+
+    for relation in metadata.get("relations", []) or []:
+        if not isinstance(relation, dict):
+            continue
+        rel_type = str(relation.get("type") or "")
+        target = relation.get("target")
+        if target and rel_type in {"supersedes", "superseded_by", "derived_from", "source"}:
+            aliases.add(str(target))
+
+    expanded: set[str] = set()
+    for alias in aliases:
+        if not alias:
+            continue
+        expanded.add(alias)
+        expanded.add(alias.replace("_", "-"))
+        expanded.add(alias.replace("-", "_"))
+    return sorted(expanded)
+
+
 def build_note_hit(score: int, path: Path, metadata: dict[str, Any], body: str) -> dict[str, Any]:
     clean_body = _strip_proposal_boilerplate(body)
     return {
@@ -277,6 +304,11 @@ def build_note_hit(score: int, path: Path, metadata: dict[str, Any], body: str) 
             "review_state": metadata.get("review_state"),
             "status": metadata.get("status"),
             "change_policy": metadata.get("change_policy"),
+            "sources": metadata.get("sources") or [],
+            "supersedes": metadata.get("supersedes") or [],
+            "superseded_by": metadata.get("superseded_by") or [],
+            "relations": metadata.get("relations") or [],
+            "source_aliases": _source_aliases_from_metadata(metadata, path),
         },
         "evidence": [],
     }

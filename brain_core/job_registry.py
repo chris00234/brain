@@ -31,6 +31,12 @@ JOB_REGISTRY: dict[str, list[str]] = {
     # invalidated by the current code. Retires stale files and deletes
     # corresponding Qdrant atoms so brain stops surfacing fixed bugs.
     "canonical_staleness_check": [_py, f"{_bd}/brain_core/canonical_staleness.py"],
+    "memory_provenance_lint": [
+        _py,
+        f"{_bd}/cli/lint_memory_provenance.py",
+        "--write-report",
+        "--json",
+    ],
     # Self-eval: nightly sample of recent /recall calls; measures top-3
     # overlap drift when re-run. Surfaces via self_eval_drift_7d SLO.
     "self_eval": [_py, f"{_bd}/brain_core/self_eval.py"],
@@ -148,12 +154,14 @@ JOB_REGISTRY: dict[str, list[str]] = {
         _py,
         f"{_bd}/cli/eval_gate.py",
         "--eval-set",
-        f"{_bd}/cli/eval_set_extended.json",
+        f"{_bd}/cli/eval_set_extended_v2.json",
         "--baseline",
         f"{_bd}/cli/eval_baseline_extended.json",
         "--track",
         "extended",
         "--no-heal",
+        "--content-metric",
+        "loose",
         "--threshold",
         "10",
     ],

@@ -103,14 +103,12 @@ def collect_training_data(token: str) -> tuple[list[list[float]], list[int]]:
     query_results: dict[str, list[dict]] = {}
     with ThreadPoolExecutor(max_workers=WORKERS) as pool:
         fut_to_q = {pool.submit(_recall_v2, q, token): q for q in query_set}
-        done = 0
-        for fut in as_completed(fut_to_q):
+        for done, fut in enumerate(as_completed(fut_to_q), 1):
             q = fut_to_q[fut]
             try:
                 query_results[q] = fut.result()
             except Exception:
                 query_results[q] = []
-            done += 1
             if done % 50 == 0:
                 print(f"    recall {done}/{len(query_set)}")
 

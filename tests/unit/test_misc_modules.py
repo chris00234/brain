@@ -64,6 +64,88 @@ def test_cross_encoder_model_device_returns_string():
     assert d in ("mps", "cuda", "cpu")
 
 
+def test_cross_encoder_model_import_aliases_share_singleton():
+    import importlib
+    import sys
+
+    package_module = importlib.import_module("brain_core.cross_encoder_model")
+    top_level_module = importlib.import_module("cross_encoder_model")
+
+    assert package_module is top_level_module
+    assert sys.modules["brain_core.cross_encoder_model"] is sys.modules["cross_encoder_model"]
+
+
+def test_cross_encoder_model_loads_from_local_cache_by_default(monkeypatch):
+    import types
+
+    import cross_encoder_model
+
+    calls = []
+
+    class FakeCrossEncoder:
+        def __init__(self, name, **kwargs):
+            calls.append((name, kwargs))
+
+    def fake_snapshot_download(name, local_files_only):
+        assert local_files_only is True
+        return f"/cache/{name}"
+
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "huggingface_hub",
+        types.SimpleNamespace(snapshot_download=fake_snapshot_download),
+    )
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "sentence_transformers",
+        types.SimpleNamespace(CrossEncoder=FakeCrossEncoder),
+    )
+    cross_encoder_model._models.clear()
+    cross_encoder_model._load_locks.clear()
+    cross_encoder_model._model_last_used.clear()
+    monkeypatch.setattr(cross_encoder_model, "_LOCAL_FILES_ONLY", True)
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    monkeypatch.delenv("TRANSFORMERS_OFFLINE", raising=False)
+
+    cross_encoder_model._load_model("local/model")
+
+    assert calls[0][0] == "/cache/local/model"
+    assert calls[0][1]["local_files_only"] is True
+    assert __import__("os").environ["HF_HUB_OFFLINE"] == "1"
+    assert __import__("os").environ["TRANSFORMERS_OFFLINE"] == "1"
+
+
+def test_cross_encoder_model_evicts_idle_non_base_models(monkeypatch):
+    import cross_encoder_model
+
+    cross_encoder_model._models.clear()
+    cross_encoder_model._model_last_used.clear()
+    monkeypatch.setattr(cross_encoder_model, "_BASE_NAME", "base")
+    monkeypatch.setattr(cross_encoder_model, "_FORCE_MODEL", "")
+    monkeypatch.setattr(cross_encoder_model, "_IDLE_TTL_SEC", 10)
+    monkeypatch.setattr(cross_encoder_model.time, "monotonic", lambda: 100.0)
+    cross_encoder_model._models.update({"base": object(), "bilingual": object()})
+    cross_encoder_model._model_last_used.update({"base": 0.0, "bilingual": 80.0})
+
+    evicted = cross_encoder_model._evict_idle_models()
+
+    assert evicted == ["bilingual"]
+    assert "base" in cross_encoder_model._models
+    assert "bilingual" not in cross_encoder_model._models
+
+
+def test_cross_encoder_model_disables_tqdm_multiprocessing_lock():
+    from cross_encoder_model import _disable_tqdm_mp_lock
+    from tqdm.std import TqdmDefaultWriteLock
+
+    sentinel = object()
+    TqdmDefaultWriteLock.mp_lock = sentinel
+
+    _disable_tqdm_mp_lock()
+
+    assert TqdmDefaultWriteLock.mp_lock is None
+
+
 # ── retrieval_inhibition ────────────────────────────────────────
 def test_retrieval_inhibition_imports():
     import retrieval_inhibition

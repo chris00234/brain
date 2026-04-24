@@ -43,7 +43,7 @@ import sqlite3
 import subprocess
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -77,6 +77,126 @@ _QUOTA_PATTERNS = [
     re.compile(r"all profiles unavailable", re.IGNORECASE),
     re.compile(r"not logged in", re.IGNORECASE),
 ]
+
+
+# ── Failover classification (hermes-agent `agent/error_classifier.py`) ──
+#
+# Ad-hoc string matching worked while brain had one error class (rate
+# limit). As fallback chains grow, structured classification lets the
+# caller pick the *right* recovery: retry, rotate credential, compress
+# context, or give up — instead of blindly looping.
+_AUTH_PATTERNS = [
+    re.compile(r"(?i)unauthori[sz]ed"),
+    re.compile(r"(?i)authentication"),
+    re.compile(r"(?i)not logged in"),
+    re.compile(r"(?i)invalid.*api.?key"),
+    re.compile(r"(?i)\b401\b"),
+]
+_BILLING_PATTERNS = [
+    re.compile(r"(?i)billing"),
+    re.compile(r"(?i)insufficient.*balance"),
+    re.compile(r"(?i)payment required"),
+    re.compile(r"(?i)\b402\b"),
+]
+_OVERLOAD_PATTERNS = [
+    re.compile(r"(?i)overloaded"),
+    re.compile(r"(?i)service unavailable"),
+    re.compile(r"(?i)\b(502|503|504)\b"),
+    re.compile(r"(?i)gateway"),
+]
+_CONTEXT_PATTERNS = [
+    re.compile(r"(?i)context (length|window|overflow)"),
+    re.compile(r"(?i)input (too long|length)"),
+    re.compile(r"(?i)token.*limit"),
+    re.compile(r"(?i)maximum context"),
+]
+_MODEL_MISSING_PATTERNS = [
+    re.compile(r"(?i)model.*not found"),
+    re.compile(r"(?i)no such model"),
+    re.compile(r"(?i)unknown model"),
+]
+
+
+# Priority matters: a single blob can match multiple classes (e.g. auth
+# errors often mention "rate" too). First-match-wins ordered by recovery
+# impact — auth/billing require human action, context-overflow is caller-
+# recoverable, rate-limit is just a retry.
+FAILOVER_REASONS = (
+    "auth",
+    "billing",
+    "model_not_found",
+    "context_overflow",
+    "rate_limit",
+    "overloaded",
+    "unknown",
+)
+
+
+def classify_cli_error(stderr: str, stdout: str) -> dict:
+    """Return ``{"reason": str, "retryable": bool, "should_fallback": bool,
+    "should_compress": bool, "should_rotate_credential": bool}``.
+
+    Callers (``cli_dispatch`` and its schema wrapper) use this to decide
+    between retry, switch to next FALLBACK_CHAIN entry, or surface to the
+    user. All decisions are local — no remote state needed.
+    """
+    blob = f"{stderr}\n{stdout}"
+    if any(p.search(blob) for p in _AUTH_PATTERNS):
+        return {
+            "reason": "auth",
+            "retryable": False,
+            "should_fallback": True,
+            "should_compress": False,
+            "should_rotate_credential": True,
+        }
+    if any(p.search(blob) for p in _BILLING_PATTERNS):
+        return {
+            "reason": "billing",
+            "retryable": False,
+            "should_fallback": True,
+            "should_compress": False,
+            "should_rotate_credential": False,
+        }
+    if any(p.search(blob) for p in _MODEL_MISSING_PATTERNS):
+        return {
+            "reason": "model_not_found",
+            "retryable": False,
+            "should_fallback": True,
+            "should_compress": False,
+            "should_rotate_credential": False,
+        }
+    if any(p.search(blob) for p in _CONTEXT_PATTERNS):
+        return {
+            "reason": "context_overflow",
+            "retryable": True,
+            "should_fallback": False,
+            "should_compress": True,
+            "should_rotate_credential": False,
+        }
+    if any(p.search(blob) for p in _QUOTA_PATTERNS):
+        return {
+            "reason": "rate_limit",
+            "retryable": True,
+            "should_fallback": True,
+            "should_compress": False,
+            "should_rotate_credential": False,
+        }
+    if any(p.search(blob) for p in _OVERLOAD_PATTERNS):
+        return {
+            "reason": "overloaded",
+            "retryable": True,
+            "should_fallback": True,
+            "should_compress": False,
+            "should_rotate_credential": False,
+        }
+    return {
+        "reason": "unknown",
+        "retryable": False,
+        "should_fallback": True,
+        "should_compress": False,
+        "should_rotate_credential": False,
+    }
+
 
 # codex metadata parsing (non-TTY stderr format)
 _CODEX_TOKEN_RE = re.compile(r"tokens used\s*\n\s*([\d,]+)")
@@ -114,6 +234,7 @@ def _record_usage(
     the CLI dispatches alongside openclaw_dispatch calls. Cost is 0 because
     these are subscription-backed — token count is the real signal.
     """
+    conn = None
     try:
         conn = sqlite3.connect(str(LLM_USAGE_DB))
         # 2026-04-17 fix: audit showed that if openclaw_dispatch had never been
@@ -133,7 +254,7 @@ def _record_usage(
             "skipped_cb, provider, model, cache_read_tokens, cache_write_tokens, cost_usd) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0.0)",
             (
-                datetime.now().isoformat(),
+                datetime.now(UTC).isoformat(),
                 f"cli:{backend}",
                 duration_ms,
                 1 if ok else 0,
@@ -145,12 +266,15 @@ def _record_usage(
             ),
         )
         conn.commit()
-        conn.close()
     except sqlite3.Error as exc:
         global _usage_warned
         if not _usage_warned:
             log.warning("llm_usage write failed (suppressing further): %s", exc)
             _usage_warned = True
+    finally:
+        if conn is not None:
+            with contextlib.suppress(sqlite3.Error):
+                conn.close()
 
 
 def _is_quota_error(stderr: str, stdout: str) -> bool:
@@ -421,8 +545,50 @@ def dispatch_compat(
 # `from cli_llm import dispatch` with zero other changes. `agent=` and
 # `thinking=` are accepted but ignored (CLI doesn't need persona).
 dispatch = dispatch_compat
-dispatch_with_schema = cli_dispatch_with_schema
 DispatchResult = CliResult  # for call-sites that import the type
+
+
+def dispatch_with_schema_compat(
+    *args: Any,
+    **kwargs: Any,
+) -> dict | None:
+    """Back-compat shim for callers using the openclaw signature.
+
+    The original openclaw API was
+    ``dispatch_with_schema(agent, message, schema_description, thinking,
+    timeout, max_retries, backlog_kind, backlog_payload)``.
+    The CLI path doesn't need ``agent`` or ``thinking`` (no persona
+    routing), and renamed ``max_retries`` → ``max_parse_retries``. This
+    wrapper accepts both shapes so migrated call-sites in synthesis/*.py
+    and pipeline/*.py don't have to be touched individually.
+    """
+    # Extract prompt + schema_description from either positional or kwarg.
+    if len(args) >= 2 and not {"prompt", "message", "schema_description"} & set(kwargs):
+        # cli-native signature: (prompt, schema_description, ...)
+        prompt = args[0]
+        schema_description = args[1]
+        extra_args = args[2:]
+    else:
+        prompt = kwargs.pop("message", None) or kwargs.pop("prompt", None)
+        schema_description = kwargs.pop("schema_description", None)
+        extra_args = args
+
+    if prompt is None or schema_description is None:
+        raise TypeError("dispatch_with_schema requires prompt/message and schema_description")
+
+    # Silently drop openclaw-only kwargs.
+    kwargs.pop("agent", None)
+    kwargs.pop("thinking", None)
+    # Translate legacy retry name.
+    if "max_retries" in kwargs and "max_parse_retries" not in kwargs:
+        kwargs["max_parse_retries"] = kwargs.pop("max_retries")
+    else:
+        kwargs.pop("max_retries", None)
+
+    return cli_dispatch_with_schema(prompt, schema_description, *extra_args, **kwargs)
+
+
+dispatch_with_schema = dispatch_with_schema_compat
 
 
 if __name__ == "__main__":

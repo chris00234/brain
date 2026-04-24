@@ -1,4 +1,4 @@
-"""Phase N — "real brain upgrade" R1–R7 verification suite.
+"""Phase N — "real brain upgrade" R1-R7 verification suite.
 
 Integration tests that validate the measurable claims from
 /Users/chrischo/.claude/plans/eventual-wobbling-seahorse.md.

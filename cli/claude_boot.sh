@@ -43,9 +43,9 @@ SESSION_ID=""
 PROMPT=""
 CWD_RAW=""
 if [ -n "$PAYLOAD" ] && command -v jq >/dev/null 2>&1; then
-  SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // .sessionId // empty' 2>/dev/null || echo "")
-  PROMPT=$(printf '%s' "$PAYLOAD" | jq -r '.prompt // .user_message // empty' 2>/dev/null || echo "")
-  CWD_RAW=$(printf '%s' "$PAYLOAD" | jq -r '.cwd // empty' 2>/dev/null || echo "")
+  SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r '(.session_id // .sessionId // "") | tostring | .[0:128]' 2>/dev/null || echo "")
+  PROMPT=$(printf '%s' "$PAYLOAD" | jq -r '(.prompt // .user_message // "") | tostring | .[0:8000]' 2>/dev/null || echo "")
+  CWD_RAW=$(printf '%s' "$PAYLOAD" | jq -r '(.cwd // "") | tostring | .[0:512]' 2>/dev/null || echo "")
 fi
 
 # Fallback session id derived from the TTY so turn counting still works if hook
@@ -83,6 +83,17 @@ fi
 emit_sentinel() {
   local reason="$1"
   local age_s="${2:-}"
+  # Log EVERY degraded serve to a structured log — SLO job reads recent lines
+  # to alert on sustained degradation. Fails open; never blocks the hook.
+  local log_dir="/Users/chrischo/server/brain/logs"
+  local log_file="$log_dir/degraded_serves.log"
+  if [ -d "$log_dir" ]; then
+    local now_iso
+    now_iso=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    printf '%s\treason=%s\tage_s=%s\tsession=%s\tturn=%s\n' \
+      "$now_iso" "$reason" "${age_s:-0}" "${SESSION_ID:-?}" "${TURN_IDX:-?}" \
+      >> "$log_file" 2>/dev/null || true
+  fi
   if [ -n "$age_s" ]; then
     local age_min=$(( age_s / 60 ))
     printf '<system-reminder>\n[brain DEGRADED: serving cached boot context from %d minute(s) ago — %s]\n</system-reminder>\n' \
@@ -117,13 +128,25 @@ if [ "$BASELINE_NEEDED" = "1" ]; then
   # ~1.8 s on an M4 Max and per-turn active recall no longer depends on this
   # path — it only has to complete before the user's very first answer, not
   # every subsequent one.
+  #
+  # Pass the user's current prompt so RAG sections get reranked by intent.
+  # Only enabled on turn 0 (when BASELINE_NEEDED due to fresh session); on a
+  # cache-miss refresh we still pass it — it makes the new baseline match what
+  # Chris is actually working on right now.
+  PROMPT_ARGS=()
+  if [ -n "$PROMPT" ]; then
+    PROMPT_ARGS=(--prompt "$PROMPT")
+  fi
+  # Budget raised 4s→8s 2026-04-23 after boot_context_degraded_1h SLO
+  # breached at 27 serves/hr — subagent flood + brain-under-load pushed
+  # the 2-3s cold start over 4s. Measured cold-start is ~2.4s; 8s gives
+  # 3x headroom without blocking agents who truly need fresh context.
   if command -v timeout >/dev/null 2>&1; then
-    RESULT=$(timeout 4 "$BRAIN_PY" /Users/chrischo/server/brain/brain_core/boot_context.py claude --limit 2 2>/dev/null || true)
+    RESULT=$(timeout 8 "$BRAIN_PY" /Users/chrischo/server/brain/brain_core/boot_context.py claude --limit 2 "${PROMPT_ARGS[@]}" 2>/dev/null || true)
   else
-    # macOS lacks GNU timeout by default. Run in subshell and kill via background trap.
-    RESULT=$("$BRAIN_PY" /Users/chrischo/server/brain/brain_core/boot_context.py claude --limit 2 2>/dev/null &
+    RESULT=$("$BRAIN_PY" /Users/chrischo/server/brain/brain_core/boot_context.py claude --limit 2 "${PROMPT_ARGS[@]}" 2>/dev/null &
              BG=$!
-             ( sleep 4 && kill -9 $BG 2>/dev/null ) &
+             ( sleep 8 && kill -9 $BG 2>/dev/null ) &
              KILLER=$!
              wait $BG 2>/dev/null
              kill $KILLER 2>/dev/null

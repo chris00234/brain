@@ -31,6 +31,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -41,28 +42,32 @@ log = logging.getLogger("brain.parent_child_expand")
 ENABLED = os.environ.get("BRAIN_PARENT_CHILD_EXPAND", "").lower() in {"1", "true", "yes"}
 
 _CACHE: dict[str, tuple[str, float]] = {}
+_CACHE_LOCK = threading.Lock()
 _CACHE_TTL_S = 300
 _MAX_CACHE_SIZE = 1000
 
 
 def _cache_get(parent_id: str) -> str | None:
-    entry = _CACHE.get(parent_id)
-    if not entry:
-        return None
-    content, loaded_at = entry
-    if time.time() - loaded_at > _CACHE_TTL_S:
-        _CACHE.pop(parent_id, None)
-        return None
-    return content
+    with _CACHE_LOCK:
+        entry = _CACHE.get(parent_id)
+        if not entry:
+            return None
+        content, loaded_at = entry
+        if time.time() - loaded_at > _CACHE_TTL_S:
+            _CACHE.pop(parent_id, None)
+            return None
+        return content
 
 
 def _cache_put(parent_id: str, content: str) -> None:
-    if len(_CACHE) >= _MAX_CACHE_SIZE:
-        # Drop oldest ~10% entries
-        sorted_items = sorted(_CACHE.items(), key=lambda kv: kv[1][1])
-        for k, _ in sorted_items[: len(_CACHE) // 10]:
-            _CACHE.pop(k, None)
-    _CACHE[parent_id] = (content, time.time())
+    with _CACHE_LOCK:
+        if len(_CACHE) >= _MAX_CACHE_SIZE:
+            # Drop oldest ~10% entries — iterate snapshot to avoid mutating
+            # under concurrent readers that share this lock on get/put.
+            sorted_items = sorted(_CACHE.items(), key=lambda kv: kv[1][1])
+            for k, _ in sorted_items[: len(_CACHE) // 10]:
+                _CACHE.pop(k, None)
+        _CACHE[parent_id] = (content, time.time())
 
 
 def _fetch_parents_from_chroma(parent_ids: list[str]) -> dict[str, str]:

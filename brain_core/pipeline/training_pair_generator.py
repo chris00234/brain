@@ -187,6 +187,9 @@ def generate_pairs(since_days: int = 30) -> dict:
 if __name__ == "__main__":
     import argparse
 
+    from _watchdog import arm as _arm_watchdog
+
+    _arm_watchdog(900, tag="training_pair_generator")
     parser = argparse.ArgumentParser(description="Generate training pairs from feedback")
     parser.add_argument("--since-days", type=int, default=30)
     args = parser.parse_args()

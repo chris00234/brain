@@ -11,7 +11,7 @@ Brain's existing proactive.py emits N insights per 6h cycle with severity tags
 insight can fire week after week, drowning signal in noise.
 
 This module adds:
-  1. Priority scoring: urgency × novelty × valence-proximity
+  1. Priority scoring: urgency x novelty x valence-proximity
   2. Habituation: shown_count decays the score (3x shown → half weight)
   3. Top-1 surfacing: `/brain/attention` returns THE thing to look at now,
      not a dump of every pending insight
@@ -30,6 +30,7 @@ Scoring formula:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import sqlite3
@@ -128,6 +129,14 @@ def enqueue(
             ),
         )
         conn.commit()
+        # Signal-driven brain_loop wake: touch the file watcher so brain_loop
+        # reacts to new warning+ attention items within ~1s instead of waiting
+        # for the next 60s tick. Fire-and-forget; never fails the enqueue.
+        # Includes "urgent" — defined in SEVERITY_WEIGHT but was omitted from
+        # the wake trigger in the initial wire-up.
+        if severity in ("warning", "urgent", "critical"):
+            with contextlib.suppress(OSError):
+                Path("/tmp/.brain_loop_wake").touch()
         return {"ok": True, "id": insight_id}
     finally:
         conn.close()

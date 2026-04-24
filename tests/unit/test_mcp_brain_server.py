@@ -7,6 +7,7 @@ verifies all 11 brain_* tools are exposed with valid schemas.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -42,15 +43,19 @@ EXPECTED_TOOLS = {
 }
 
 
-def _send_jsonrpc(requests: list[dict]) -> list[dict]:
+def _send_jsonrpc(requests: list[dict], extra_env: dict[str, str] | None = None) -> list[dict]:
     """Spawn the MCP server, send a sequence of JSON-RPC frames, capture replies."""
     payload = "".join(json.dumps(r) + "\n" for r in requests)
+    env = os.environ.copy()
+    if extra_env:
+        env.update(extra_env)
     proc = subprocess.Popen(
         [str(VENV_PY), str(MCP_SERVER)],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        env=env,
     )
     try:
         out, _err = proc.communicate(payload, timeout=10)
@@ -144,6 +149,36 @@ def test_tools_have_valid_input_schema():
         assert "properties" in schema
 
 
+def test_expired_lifecycle_processes_one_pending_request_before_exit():
+    replies = _send_jsonrpc(
+        [{"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}],
+        extra_env={"BRAIN_MCP_MAX_LIFETIME_S": "0"},
+    )
+
+    list_reply = next((r for r in replies if r.get("id") == 1), None)
+    assert list_reply is not None, "expired MCP process dropped a pending request"
+    assert "tools" in list_reply["result"]
+
+
+def test_tool_handler_exception_returns_mcp_response():
+    replies = _send_jsonrpc(
+        [
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "brain_recall", "arguments": {}},
+            }
+        ]
+    )
+
+    reply = next((r for r in replies if r.get("id") == 1), None)
+    assert reply is not None, "handler exception killed MCP transport"
+    content = reply["result"]["content"][0]["text"]
+    assert '"status": "error"' in content
+    assert "KeyError" in content
+
+
 # ── Timeout cap coverage — ensures slow/LLM/network tools pass timeout_s=4 ──
 #
 # MCP transport (OpenClaw bundle-mcp) enforces a 5s operation timeout. Any
@@ -202,11 +237,11 @@ def test_slow_tools_return_structured_timeout_hint():
     for tool in TIMEOUT_CAPPED_TOOLS:
         body = _branch_body(tool)
         assert "try:" in body, f"{tool}: no try/except around _brain_request"
-        assert '"status": "timeout"' in body, (
+        assert '"status": "timeout"' in body or "_timeout_result(" in body, (
             f"{tool}: missing structured timeout response. Agents need "
             f'{{"status": "timeout", "hint": ...}} so they can retry intelligently.'
         )
-        assert '"hint":' in body, f"{tool}: missing hint field in timeout response"
+        assert '"hint":' in body or "timeout_hint" in body, f"{tool}: missing hint field in timeout response"
 
 
 def test_no_new_uncapped_tools_added():

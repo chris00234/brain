@@ -34,6 +34,9 @@ PLISTS = [
     "ai.openclaw.brain-server.plist",
     "ai.openclaw.ollama-native.plist",
     "ai.openclaw.neo4j-native.plist",
+    "ai.openclaw.qdrant-native.plist",
+    "ai.openclaw.qdrant-backup.plist",
+    "ai.openclaw.brain-ci.plist",
     "ai.openclaw.log-rotation.plist",
     "ai.openclaw.gateway.plist",
     "ai.openclaw.watchdog.plist",
@@ -43,6 +46,8 @@ PLISTS = [
 REQ_DIRS = [
     BRAIN_ROOT / "logs",
     BRAIN_ROOT / "logs/training",
+    BRAIN_ROOT / "logs/backups",
+    BRAIN_ROOT / "qdrant-backups",
     Path("~/.openclaw/logs").expanduser(),
     Path("~/.openclaw/credentials").expanduser(),
     OUTBOX_ROOT / "pending",

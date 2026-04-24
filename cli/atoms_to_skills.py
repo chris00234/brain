@@ -11,12 +11,15 @@ instead of polluting the global CLAUDE.md.
 Flow:
     atoms.db ─→ group by domain (keyword-based taxonomy)
              ─→ per-domain: rank by confidence + recency, cap at top N
-             ─→ emit ~/.claude/skills/brain-learned-<domain>/SKILL.md
+             ─→ emit runtime skill files:
+                 ~/.claude/skills/brain-learned-<domain>/SKILL.md
+                 ~/.codex/skills/brain-learned-<domain>/SKILL.md
+                 ~/.openclaw/skills/brain-learned-<domain>/SKILL.md
              ─→ each SKILL has frontmatter (name/description) + bullet rules
 
-Skills loaded by Claude Code at session start. `description` field determines
-when Claude auto-invokes it. Domain scoping prevents "every rule loaded every
-session" bloat that kills CLAUDE.md readability.
+Skills are loaded by the supported runtimes at session start. `description`
+field determines contextual invocation. Domain scoping prevents "every rule
+loaded every session" bloat that kills global guidance readability.
 
 Non-destructive: script only WRITES skill files. Source atoms stay in brain.db.
 Idempotent: deletes + rewrites per-domain skill each run (weekly scheduled).
@@ -28,6 +31,7 @@ import argparse
 import json
 import re
 import sqlite3
+import stat
 import sys
 from collections import defaultdict
 from datetime import UTC, datetime
@@ -36,17 +40,21 @@ from pathlib import Path
 BRAIN_DB = Path("/Users/chrischo/server/brain/logs/brain.db")
 SKILL_PREFIX = "brain-learned-"
 
-# 2026-04-17 multi-destination: generate skills for both Claude Code and
-# OpenClaw. Format (YAML frontmatter + markdown body) is identical — both
+# 2026-04-17 multi-destination: generate skills for Claude Code, Codex, and
+# OpenClaw. Format (YAML frontmatter + markdown body) is identical — the
 # runtimes scan their respective skill directories at session start.
 #
 # Claude Code:
 #   ~/.claude/skills/brain-learned-<domain>/SKILL.md
 #
+# Codex:
+#   ~/.codex/skills/brain-learned-<domain>/SKILL.md
+#
 # OpenClaw (global, all 5 agents can invoke):
 #   ~/.openclaw/skills/brain-learned-<domain>/SKILL.md
 SKILL_DESTINATIONS = [
     Path.home() / ".claude" / "skills",
+    Path.home() / ".codex" / "skills",
     Path.home() / ".openclaw" / "skills",
 ]
 
@@ -102,6 +110,9 @@ DOMAIN_TAXONOMY: list[tuple[str, list[str], str]] = [
             "canonical",
             "atoms",
             "semantic memory",
+            "qdrant",
+            "qdrant collection",
+            "vector store",
             "chromadb collection",
             "embedding",
             "retrieval",
@@ -174,7 +185,6 @@ DOMAIN_TAXONOMY: list[tuple[str, list[str], str]] = [
             "concise",
             "direct",
             "emoji",
-            "summary",
             "commit message",
             "report format",
             "korean",
@@ -210,11 +220,34 @@ DEFAULT_DOMAIN = (
 )
 
 
+_KEYWORD_CACHE: dict[str, re.Pattern] = {}
+
+
+def _kw_pattern(kw: str) -> re.Pattern:
+    """Compile + cache a word-boundary pattern for a keyword/phrase.
+
+    Plain substring matching caused false positives — e.g. 'react' matched
+    'reactivates', dragging an MCC-archive atom into coding-style. Word
+    boundaries fix that while still matching multi-word phrases like
+    'commit message' because re.escape + \\b works on spaces.
+    """
+    pat = _KEYWORD_CACHE.get(kw)
+    if pat is None:
+        pat = re.compile(r"\b" + re.escape(kw) + r"\b", re.I)
+        _KEYWORD_CACHE[kw] = pat
+    return pat
+
+
 def classify(atom_text: str, topic_key: str | None) -> str:
-    """Map atom → domain via keyword match against topic_key + text."""
-    haystack = f"{topic_key or ''} {atom_text[:500]}".lower()
+    """Map atom → domain via word-boundary keyword match against topic_key + text.
+
+    Strips canonical scaffolding from text before matching so preamble words
+    like 'Summary' or 'Signal' don't leak into classification.
+    """
+    text_clean = _CANONICAL_PREAMBLE.sub(" ", atom_text[:600])
+    haystack = f"{topic_key or ''} {text_clean}"
     for domain, keywords, _desc in DOMAIN_TAXONOMY:
-        if any(kw in haystack for kw in keywords):
+        if any(_kw_pattern(kw).search(haystack) for kw in keywords):
             return domain
     return DEFAULT_DOMAIN[0]
 
@@ -246,6 +279,69 @@ _CANONICAL_PREAMBLE = re.compile(
 # Also catch the "title" repetition pattern: atom text starts with the title
 # words, then the body starts with "# Summary ..." with the same title repeated.
 _DUP_TITLE_SEP = re.compile(r"^(.{30,}?)\s*#\s*Summary\s+", re.I)
+
+# Narrative/synthesis markers — if present, atom is a session summary or
+# consolidated note, not a durable rule. Hard reject.
+_NARRATIVE_REJECTS = (
+    "this consolidated page",
+    "consolidated page captures",
+    "chris screen time patterns",
+    "chris's screen time patterns",
+    "chris screen time",
+    "signal: preference (score",
+    "signal: decision (score",
+    "signal: correction (score",
+    "review this proposed canonical",
+    "## source summary",
+    "## observations",
+    "## distilled evidence",
+)
+
+# Rule must contain at least one durability signal (Chris-verb, imperative,
+# or ops-shaped directive). Broad enough to keep legitimate infra decisions.
+_RULE_SIGNAL = re.compile(
+    r"\bchris(?:'s|'s)?\s+(?:want|prefer|require|insist|expect|need|treat|value|hate|avoid|ask|request|use|maintain|keep|set|disable|enable|run|deploy|import|configure|reject|accept|allow)s?\b"
+    r"|\b(?:never|always|must|should|don'?t|doesn'?t|do(?:es)? not|only|avoid|require[ds]?)\b"
+    r"|\b(?:runs?|deployed|deployment|setup|rule|pattern)\s+(?:as|on|in|at|via|:|rule)\b"
+    r"|\bmust be\b"
+    r"|\bdeployment rule\b",
+    re.I,
+)
+
+
+def _strip_duplicated_prefix(rule: str) -> str:
+    """Cut the half-truncated title when atom shape is '[title-trunc] [body-with-same-start]'.
+
+    The preamble stripper leaves behind:
+      'Chris prefers X via subsc  Chris prefers X via subscription and ...'
+    We detect the second occurrence of the first ~6 words and keep from there.
+    """
+    words = rule.split()
+    if len(words) < 10:
+        return rule
+    sig = " ".join(words[:6])
+    if len(sig) < 20:
+        return rule
+    # Search for the signature reappearing after position 20 (past the truncated copy)
+    idx = rule.find(sig, 20)
+    if 0 < idx < 200:
+        return rule[idx:].strip()
+    return rule
+
+
+def _is_durable_rule(rule: str) -> bool:
+    """Filter out session-narrative and synthesis-note atoms.
+
+    Keeps rules that carry a durability signal (imperative verb, Chris-verb,
+    or ops directive). Rejects consolidated-page summaries, screen-time
+    narratives, and canonical-preamble leaks.
+    """
+    if len(rule) < 40:
+        return False
+    low = rule.lower()
+    if any(m in low for m in _NARRATIVE_REJECTS):
+        return False
+    return bool(_RULE_SIGNAL.search(rule))
 
 
 def _extract_rule(text: str) -> str:
@@ -297,6 +393,7 @@ def _extract_rule(text: str) -> str:
         joined = joined[cut_idx + len("# Summary") :].strip()
         joined = _CANONICAL_PREAMBLE.sub(" ", joined)
     joined = re.sub(r"\s+", " ", joined).strip()
+    joined = _strip_duplicated_prefix(joined)
     return joined[:300].strip()
 
 
@@ -304,16 +401,20 @@ def render_skill(domain: str, description: str, atoms: list[dict]) -> str:
     """Build SKILL.md content for a domain."""
     generated = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
     rule_lines: list[str] = []
-    seen_rules: set[str] = set()
+    seen_fps: set[str] = set()
     for a in atoms:
         rule = _extract_rule(a["text"])
-        if not rule or len(rule) < 30:
+        if not _is_durable_rule(rule):
             continue
-        # Dedupe by first 80 chars
-        fp = rule[:80].lower()
-        if fp in seen_rules:
+        # Dedupe by normalized first 120 chars (strip punctuation, collapse spaces).
+        # Previous 80-char prefix dedup left 4 near-identical Claude-subscription rules
+        # side by side because early words diverged but the underlying rule was identical.
+        norm = re.sub(r"[^a-z0-9 ]+", "", rule[:120].lower())
+        norm = re.sub(r"\s+", " ", norm).strip()
+        fp = norm[:100]
+        if fp in seen_fps:
             continue
-        seen_rules.add(fp)
+        seen_fps.add(fp)
         kind = a["kind"]
         conf = f"{a['confidence']:.2f}"
         rule_lines.append(f"- **[{kind} · {conf}]** {rule}")
@@ -355,6 +456,17 @@ If a rule here contradicts something Chris just said, **the new statement wins**
 """
 
 
+def _runtime_for_skill_path(path: Path) -> str:
+    parts = set(path.parts)
+    if ".claude" in parts:
+        return "claude"
+    if ".codex" in parts:
+        return "codex"
+    if ".openclaw" in parts:
+        return "openclaw"
+    return "unknown"
+
+
 def write_skills(by_domain: dict[str, list[dict]], dry_run: bool = False) -> dict:
     stats: dict = {"written": [], "skipped": [], "total_atoms": 0, "unchanged": []}
     for dest in SKILL_DESTINATIONS:
@@ -371,7 +483,7 @@ def write_skills(by_domain: dict[str, list[dict]], dry_run: bool = False) -> dic
             stats["skipped"].append({"domain": domain, "reason": "no_renderable_rules", "n": len(atoms)})
             continue
 
-        # Write to each destination (Claude Code + OpenClaw). Identical content.
+        # Write to each destination (Claude Code + Codex + OpenClaw). Identical content.
         for dest_root in SKILL_DESTINATIONS:
             skill_dir = dest_root / f"{SKILL_PREFIX}{domain}"
             skill_file = skill_dir / "SKILL.md"
@@ -390,10 +502,119 @@ def write_skills(by_domain: dict[str, list[dict]], dry_run: bool = False) -> dic
                 {
                     "domain": domain,
                     "path": str(skill_file),
-                    "runtime": "claude" if ".claude/" in str(skill_file) else "openclaw",
+                    "runtime": _runtime_for_skill_path(skill_file),
                     "n_atoms": len(atoms),
                 }
             )
+
+    return stats
+
+
+OPENCLAW_CONFIG = Path.home() / ".openclaw" / "openclaw.json"
+
+
+def prune_orphan_skills(available_domains: set[str], dry_run: bool = False) -> dict:
+    """Remove brain-learned-<domain> dirs whose domain no longer has atoms.
+
+    Safety guard: if fewer than 3 domains survived this run, skip pruning —
+    likely a filter regression or empty DB, not a legitimate domain collapse.
+    """
+    stats: dict = {"pruned": [], "kept": []}
+    if len(available_domains) < 3:
+        stats["skipped_reason"] = f"only {len(available_domains)} domains — refusing to prune"
+        return stats
+
+    for dest_root in SKILL_DESTINATIONS:
+        if not dest_root.exists():
+            continue
+        for child in dest_root.iterdir():
+            if not child.is_dir() or not child.name.startswith(SKILL_PREFIX):
+                continue
+            domain = child.name[len(SKILL_PREFIX) :]
+            if domain in available_domains:
+                stats["kept"].append(str(child))
+                continue
+            if dry_run:
+                stats["pruned"].append({"path": str(child), "dry_run": True})
+                continue
+            # Delete the orphan SKILL dir (SKILL.md + dir). Only inside our namespace.
+            for f in child.iterdir():
+                f.unlink()
+            child.rmdir()
+            stats["pruned"].append({"path": str(child)})
+    return stats
+
+
+def sync_openclaw_agents(written_domains: set[str], dry_run: bool = False) -> dict:
+    """Add brain-learned-<domain> to each OpenClaw agent's skills allowlist.
+
+    OpenClaw's per-agent `skills: [...]` array is an allowlist (src/agents/skills/
+    agent-filter.ts:28 — 'Explicit per-agent skills win when present'). Skills
+    discovered on disk but not listed per-agent never load. This function
+    ensures every agent gets every brain-learned-* skill, and prunes stale
+    entries for domains we no longer generate.
+
+    Returns stats with per-agent adds/prunes.
+    """
+    stats: dict = {"added": [], "pruned": [], "agents_touched": 0, "skipped_reason": None}
+
+    if not OPENCLAW_CONFIG.exists():
+        stats["skipped_reason"] = f"config_not_found: {OPENCLAW_CONFIG}"
+        return stats
+
+    try:
+        cfg = json.loads(OPENCLAW_CONFIG.read_text())
+    except (json.JSONDecodeError, OSError) as e:
+        stats["skipped_reason"] = f"parse_error: {e}"
+        return stats
+
+    agents_list = cfg.get("agents", {}).get("list", [])
+    if not isinstance(agents_list, list) or not agents_list:
+        stats["skipped_reason"] = "no_agents_list"
+        return stats
+
+    desired = {f"{SKILL_PREFIX}{d}" for d in written_domains}
+    changed = False
+
+    for agent in agents_list:
+        aid = agent.get("id", "?")
+        skills = agent.get("skills")
+        if not isinstance(skills, list):
+            continue
+        current_bl = {s for s in skills if s.startswith(SKILL_PREFIX)}
+
+        to_add = sorted(desired - current_bl)
+        to_prune = sorted(current_bl - desired)
+
+        if not to_add and not to_prune:
+            continue
+
+        new_skills = [s for s in skills if not s.startswith(SKILL_PREFIX)] + sorted(desired)
+        # Preserve original (non-brain) ordering; append brain-learned alphabetically.
+        # Use new_skills only if it differs meaningfully.
+        if new_skills != skills:
+            agent["skills"] = new_skills
+            stats["agents_touched"] += 1
+            changed = True
+            for s in to_add:
+                stats["added"].append({"agent": aid, "skill": s})
+            for s in to_prune:
+                stats["pruned"].append({"agent": aid, "skill": s})
+
+    if changed and not dry_run:
+        # Atomic write: tmp + rename. Preserve original permission bits —
+        # openclaw.json is chmod 0600 (credential refs); Path.write_text would
+        # default to 0644 which is a privacy regression.
+        original_mode = stat.S_IMODE(OPENCLAW_CONFIG.stat().st_mode)
+        tmp = OPENCLAW_CONFIG.with_suffix(".json.tmp")
+        try:
+            tmp.write_text(json.dumps(cfg, indent=2) + "\n")
+            tmp.chmod(original_mode)
+            tmp.replace(OPENCLAW_CONFIG)
+        except Exception:
+            if tmp.exists():
+                tmp.unlink()  # cleanup half-written tmp
+            raise
 
     return stats
 
@@ -426,6 +647,21 @@ def main() -> int:
 
     stats = write_skills(by_domain, dry_run=args.dry_run)
 
+    # Domains that successfully produced a skill file OR are unchanged (already on disk).
+    # Both count as "available" — we want all to be allowlisted per-agent.
+    # In dry-run mode, write_skills routes these to 'skipped' with reason=dry_run,
+    # so we also count dry_run skips as available so the sync preview is accurate.
+    available_domains = (
+        {e["domain"] for e in stats["written"]}
+        | {e["domain"] for e in stats["unchanged"]}
+        | {e["domain"] for e in stats["skipped"] if e.get("reason") == "dry_run"}
+    )
+    prune_stats = prune_orphan_skills(available_domains, dry_run=args.dry_run)
+    stats["orphan_prune"] = prune_stats
+
+    sync_stats = sync_openclaw_agents(available_domains, dry_run=args.dry_run)
+    stats["openclaw_sync"] = sync_stats
+
     if args.json:
         print(json.dumps(stats, indent=2, default=str))
     else:
@@ -441,6 +677,23 @@ def main() -> int:
             print(f"  WROTE {w['domain']} ({w['n_atoms']} atoms) → {w['path']}")
         for s in stats["skipped"]:
             print(f"  SKIP  {s['domain']}: {s['reason']}")
+        print()
+        pruned = prune_stats.get("pruned", [])
+        if prune_stats.get("skipped_reason"):
+            print(f"Orphan prune: SKIPPED ({prune_stats['skipped_reason']})")
+        elif pruned:
+            print(f"Orphan prune: {len(pruned)} dirs removed")
+            for p in pruned:
+                print(f"  - {p['path']}")
+        print()
+        if sync_stats.get("skipped_reason"):
+            print(f"OpenClaw sync: SKIPPED ({sync_stats['skipped_reason']})")
+        else:
+            print(f"OpenClaw sync: {sync_stats['agents_touched']} agents updated")
+            for a in sync_stats["added"]:
+                print(f"  + {a['agent']}: {a['skill']}")
+            for a in sync_stats["pruned"]:
+                print(f"  - {a['agent']}: {a['skill']} (pruned)")
     return 0
 
 

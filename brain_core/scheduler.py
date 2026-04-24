@@ -18,6 +18,7 @@ bridge. No business logic lives here.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import sqlite3
@@ -25,12 +26,11 @@ import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 log = logging.getLogger("brain.scheduler")
@@ -47,6 +47,15 @@ from job_definitions import JOB_SCHEDULE, ScheduledJob  # noqa: E402, F401
 # Historical inline entries removed (see job_definitions.py):
 # The inline list used to span ~874 lines here.
 
+JOB_BY_NAME = {job.name: job for job in JOB_SCHEDULE}
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return max(0, int(os.getenv(name, str(default))))
+    except ValueError:
+        return default
+
 
 class BrainScheduler:
     """Wraps APScheduler. Each job triggers a registered command in the brain.
@@ -55,7 +64,7 @@ class BrainScheduler:
     free of any server.py import (avoids circular dependency).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, db_path: Path | None = None) -> None:
         self._scheduler = AsyncIOScheduler(timezone="America/Los_Angeles")
         self._dispatcher: Callable[[str], int] | None = None
         self._history: dict[str, list[dict]] = {}
@@ -63,20 +72,24 @@ class BrainScheduler:
         self._MAX_HISTORY = 20
         self._alerted_jobs: set[str] = set()
         self._pending_completions: dict[str, tuple[float, int | None]] = {}  # job_name -> (start_ts, row_id)
-        # 2026-04-18: TOCTOU between APScheduler-thread _fire() and
-        # FastAPI-handler trigger_now(), plus reaper interval thread mutating
-        # the same dicts — all racing without synchronization. A lock around
-        # the shared state is cheap (microseconds) and eliminates duplicate
-        # dispatches that otherwise slip past the "already running" guard.
         self._state_lock = threading.RLock()
-        # 2026-04-20: task_executor tick offload. The tick's body can call
-        # task_queue.process_pending → cli_dispatch (up to 90s). Running that
-        # on the scheduler's own thread made every 30s fire during the stall
-        # drop as "max_instances reached". We now submit the work to a
-        # bounded thread pool and the APScheduler-side tick returns in <1 ms.
         self._tick_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="brain_tick")
         self._tick_future: Future | None = None
-        self._db_path = Path(__file__).resolve().parent.parent / "logs" / "scheduler_history.db"
+        self._resource_limits = {
+            "heavy": _env_int("BRAIN_SCHED_MAX_HEAVY_JOBS", 1),
+            "llm": _env_int("BRAIN_SCHED_MAX_LLM_JOBS", 1),
+            "embedder": _env_int(
+                "BRAIN_SCHED_MAX_EMBEDDER_JOBS",
+                _env_int("BRAIN_SCHED_MAX_OLLAMA_JOBS", 1),
+            ),
+            "index": _env_int("BRAIN_SCHED_MAX_INDEX_JOBS", 1),
+        }
+        self._resource_defer_s = _env_int("BRAIN_SCHED_RESOURCE_DEFER_S", 300)
+        self._resource_defers: dict[str, dict] = {}
+        # 2026-04-22: db_path injectable so tests don't leak test_job/stale_job
+        # rows into the prod scheduler_history.db (72 ghost rows found in 24h
+        # metrics before this change).
+        self._db_path = db_path or Path(__file__).resolve().parent.parent / "logs" / "scheduler_history.db"
         self._load_history_from_db()
 
     def _load_history_from_db(self) -> None:
@@ -92,10 +105,8 @@ class BrainScheduler:
                 ("finished_at", "TEXT DEFAULT NULL"),
                 ("duration_ms", "INTEGER DEFAULT NULL"),
             ]:
-                try:
+                with contextlib.suppress(sqlite3.OperationalError):
                     conn.execute(f"ALTER TABLE job_history ADD COLUMN {col} {typedef}")
-                except sqlite3.OperationalError:
-                    pass  # column already exists
             cur = conn.execute(
                 "SELECT job_name, started_at, pid, error, manual, finished_at, duration_ms "
                 "FROM job_history ORDER BY id DESC LIMIT 400"
@@ -115,8 +126,8 @@ class BrainScheduler:
             for name in self._history:
                 self._history[name] = self._history[name][: self._MAX_HISTORY]
             conn.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            log.debug("scheduler history load failed: %s", exc)
 
     def _persist_entry(self, job_name: str, entry: dict) -> int | None:
         """Insert a history row. Returns the row id (used to update on completion)."""
@@ -165,8 +176,8 @@ class BrainScheduler:
                 )
                 conn.commit()
                 conn.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                log.debug("scheduler completion persist failed for %s: %s", job_name, exc)
 
     def _reconcile_orphans(self) -> int:
         """2026-04-17 reindex-silent-death fix: on server startup, reconcile
@@ -397,6 +408,91 @@ class BrainScheduler:
             self._pending_completions.pop(name, None)
             self._running_jobs.pop(name, None)
 
+    def _pid_alive(self, pid: int) -> bool:
+        if pid <= 0:
+            return False
+        try:
+            os.kill(pid, 0)
+            return True
+        except (ProcessLookupError, PermissionError):
+            return False
+
+    def _cleanup_dead_running_locked(self) -> None:
+        for name, pid in list(self._running_jobs.items()):
+            if not self._pid_alive(pid):
+                self._running_jobs.pop(name, None)
+
+    def _resource_blocker_locked(self, job_name: str) -> str | None:
+        spec = JOB_BY_NAME.get(job_name)
+        if spec is None:
+            return None
+        self._cleanup_dead_running_locked()
+        running_specs = [
+            JOB_BY_NAME[name]
+            for name in self._running_jobs
+            if name != job_name and name in JOB_BY_NAME
+        ]
+        if spec.resource_class == "heavy":
+            limit = self._resource_limits.get("heavy", 0)
+            running = sum(1 for item in running_specs if item.resource_class == "heavy")
+            if limit and running >= limit:
+                return f"heavy:{running}/{limit}"
+        for tag in ("llm", "embedder", "index"):
+            if tag not in spec.resource_tags:
+                continue
+            limit = self._resource_limits.get(tag, 0)
+            running = sum(1 for item in running_specs if tag in item.resource_tags)
+            if limit and running >= limit:
+                return f"{tag}:{running}/{limit}"
+        return None
+
+    def _resource_usage_locked(self) -> dict[str, dict]:
+        self._cleanup_dead_running_locked()
+        usage = {
+            key: {"limit": limit, "running": 0, "running_jobs": []}
+            for key, limit in self._resource_limits.items()
+        }
+        for job_name in self._running_jobs:
+            spec = JOB_BY_NAME.get(job_name)
+            if spec is None:
+                continue
+            if spec.resource_class == "heavy" and "heavy" in usage:
+                usage["heavy"]["running"] += 1
+                usage["heavy"]["running_jobs"].append(job_name)
+            for tag in ("llm", "embedder", "index"):
+                if tag in spec.resource_tags and tag in usage:
+                    usage[tag]["running"] += 1
+                    usage[tag]["running_jobs"].append(job_name)
+        return usage
+
+    def _defer_job(self, job_name: str, reason: str) -> None:
+        now = datetime.now(UTC)
+        retry_at = now + timedelta(seconds=self._resource_defer_s)
+        self._scheduler.add_job(
+            self._fire,
+            trigger=DateTrigger(run_date=retry_at),
+            id=f"resource_retry:{job_name}",
+            args=[job_name],
+            name=f"Resource retry for {job_name}",
+            replace_existing=True,
+            misfire_grace_time=max(30, min(self._resource_defer_s, 300)),
+            coalesce=True,
+        )
+        previous = self._resource_defers.get(job_name, {})
+        self._resource_defers[job_name] = {
+            "reason": reason,
+            "deferred_at": now.isoformat(),
+            "retry_at": retry_at.isoformat(),
+            "defer_seconds": self._resource_defer_s,
+            "count": int(previous.get("count") or 0) + 1,
+        }
+        log.info(
+            "scheduler: defer %s for %ss due to resource budget %s",
+            job_name,
+            self._resource_defer_s,
+            reason,
+        )
+
     _ALERT_THRESHOLD = 3  # consecutive failures before alerting
 
     def _fire(self, job_name: str) -> None:
@@ -413,12 +509,15 @@ class BrainScheduler:
         with self._state_lock:
             if job_name in self._running_jobs:
                 old_pid = self._running_jobs[job_name]
-                try:
-                    os.kill(old_pid, 0)
+                if self._pid_alive(old_pid):
                     log.info("scheduler: skip %s — already running (pid=%d)", job_name, old_pid)
                     return
-                except (ProcessLookupError, PermissionError):
-                    self._running_jobs.pop(job_name, None)  # stale, fall through
+                self._running_jobs.pop(job_name, None)  # stale, fall through
+
+            blocker = self._resource_blocker_locked(job_name)
+            if blocker:
+                self._defer_job(job_name, blocker)
+                return
 
             start_ts = time.time()
             started = datetime.now().isoformat(timespec="seconds")
@@ -430,6 +529,7 @@ class BrainScheduler:
                 pid = self._dispatcher(job_name)
                 if pid > 0:
                     self._running_jobs[job_name] = pid
+                    self._resource_defers.pop(job_name, None)
             except Exception as e:
                 error = str(e)[:200]
                 log.warning("job %s dispatch failed: %s", job_name, error)
@@ -481,6 +581,9 @@ class BrainScheduler:
 
     def list_jobs(self) -> list[dict]:
         jobs = []
+        with self._state_lock:
+            running_jobs = dict(self._running_jobs)
+            defers = dict(self._resource_defers)
         for spec in JOB_SCHEDULE:
             aps_job = self._scheduler.get_job(spec.name) if self._scheduler.running else None
             next_run = aps_job.next_run_time.isoformat() if aps_job and aps_job.next_run_time else None
@@ -491,12 +594,36 @@ class BrainScheduler:
                     "name": spec.name,
                     "description": spec.description,
                     "agent": spec.agent,
+                    "resource_class": spec.resource_class,
+                    "resource_tags": list(spec.resource_tags),
                     "next_run": next_run,
+                    "running_pid": running_jobs.get(spec.name),
+                    "resource_defer": defers.get(spec.name),
                     "last_run": last,
                     "run_count": len(history),
                 }
             )
         return jobs
+
+    def resource_status(self) -> dict:
+        with self._state_lock:
+            usage = self._resource_usage_locked()
+            defers = dict(self._resource_defers)
+            running = dict(self._running_jobs)
+
+        pending_retries = {}
+        for job_name, meta in defers.items():
+            aps_job = self._scheduler.get_job(f"resource_retry:{job_name}") if self._scheduler.running else None
+            next_run = aps_job.next_run_time.isoformat() if aps_job and aps_job.next_run_time else meta.get("retry_at")
+            pending_retries[job_name] = {**meta, "next_run": next_run}
+
+        return {
+            "limits": dict(self._resource_limits),
+            "usage": usage,
+            "defer_seconds": self._resource_defer_s,
+            "running_jobs": running,
+            "pending_retries": pending_retries,
+        }
 
     def get_history(self, job_name: str) -> list[dict]:
         return list(self._history.get(job_name, []))
@@ -510,15 +637,17 @@ class BrainScheduler:
         with self._state_lock:
             if job_name in self._running_jobs:
                 old_pid = self._running_jobs[job_name]
-                try:
-                    os.kill(old_pid, 0)  # check if process exists
+                if self._pid_alive(old_pid):
                     raise ValueError(f"{job_name} already running (pid={old_pid})")
-                except (ProcessLookupError, PermissionError):
-                    del self._running_jobs[job_name]  # stale entry, clean up
+                del self._running_jobs[job_name]  # stale entry, clean up
+            blocker = self._resource_blocker_locked(job_name)
+            if blocker:
+                raise ValueError(f"{job_name} blocked by resource budget ({blocker})")
             start_ts = time.time()
             pid = self._dispatcher(job_name)
             if pid > 0:
                 self._running_jobs[job_name] = pid
+                self._resource_defers.pop(job_name, None)
         entry = {
             "started_at": datetime.now().isoformat(timespec="seconds"),
             "pid": pid,

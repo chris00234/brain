@@ -260,7 +260,35 @@ MAX_SESSION_SUMMARIES = 5
 
 
 def add_session_summary(content: str, agent: str = "claude", source: str = "session_auto") -> dict:
-    """Store a session summary and evict oldest if over MAX_SESSION_SUMMARIES."""
+    """Store a session summary and evict oldest if over MAX_SESSION_SUMMARIES.
+
+    Dedup: if the newest existing summary has identical (case-insensitive,
+    whitespace-normalised) content, skip the insert and bump its timestamp
+    instead. Prevents the recent-sessions list from filling with 5 copies of
+    the same prompt when the outbox replays or the distiller retries.
+    """
+    norm_new = " ".join((content or "").lower().split())
+    with _conn() as conn:
+        latest = conn.execute(
+            "SELECT id, content FROM focus_items "
+            "WHERE category = ? ORDER BY created_at DESC LIMIT 1",
+            (SESSION_SUMMARY_CATEGORY,),
+        ).fetchone()
+        if latest and " ".join((latest["content"] or "").lower().split()) == norm_new:
+            now_iso = datetime.now(UTC).isoformat(timespec="seconds")
+            conn.execute(
+                "UPDATE focus_items SET created_at = ? WHERE id = ?",
+                (now_iso, latest["id"]),
+            )
+            return {
+                "id": latest["id"],
+                "content": content,
+                "category": SESSION_SUMMARY_CATEGORY,
+                "agent": agent,
+                "created_at": now_iso,
+                "deduped": True,
+            }
+
     result = add_focus(
         content=content,
         category=SESSION_SUMMARY_CATEGORY,

@@ -5,7 +5,7 @@ Mirrors brain_loop._sense_stale_atoms() but in CLI form so Chris can walk
 through candidates outside the autonomy gate.
 
 Commands:
-  audit [--kind preference|fact|decision|any] [--min-age-days N] [--limit N]
+  audit [--kind preference|fact|decision|entity|conjecture|any] [--min-age-days N] [--limit N]
   obsolete <atom_id>               # mark a specific atom as tier='obsolete'
   bulk-obsolete [--kind ...] [--dry] # mark everything audit would flag
 
@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import sqlite3
 import sys
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -28,6 +29,7 @@ DECAY_DAYS_BY_KIND = {
     "fact": 180,
     "decision": 365,
     "entity": 180,
+    "conjecture": 30,
 }
 
 
@@ -47,7 +49,7 @@ def _parse_iso(ts: str) -> datetime | None:
         return None
 
 
-def _iter_candidates(kind_filter: str, min_age_days: int | None):
+def _iter_candidates(kind_filter: str, min_age_days: int | None) -> Iterator[sqlite3.Row]:
     with sqlite3.connect(str(BRAIN_DB), timeout=5) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
@@ -142,7 +144,7 @@ def cmd_bulk_obsolete(args: argparse.Namespace) -> int:
         placeholders = ",".join("?" for _ in ids)
         conn.execute(
             f"UPDATE atoms SET tier='obsolete', updated_at=? WHERE id IN ({placeholders})",
-            [now] + ids,
+            [now, *ids],
         )
         conn.commit()
     print(f"Marked {len(candidates)} atom(s) as obsolete")
@@ -152,9 +154,10 @@ def cmd_bulk_obsolete(args: argparse.Namespace) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Stale atom audit + cleanup CLI.")
     sub = parser.add_subparsers(dest="command", required=True)
+    kind_choices = ["any", "preference", "fact", "decision", "entity", "conjecture"]
 
     p_audit = sub.add_parser("audit", help="List stale atom candidates")
-    p_audit.add_argument("--kind", default="any", choices=["any", "preference", "fact", "decision", "entity"])
+    p_audit.add_argument("--kind", default="any", choices=kind_choices)
     p_audit.add_argument("--min-age-days", type=int, default=None, help="Override per-kind decay threshold")
     p_audit.add_argument("--limit", type=int, default=30)
     p_audit.set_defaults(func=cmd_audit)
@@ -164,7 +167,7 @@ def main() -> int:
     p_obs.set_defaults(func=cmd_obsolete)
 
     p_bulk = sub.add_parser("bulk-obsolete", help="Mark all audit candidates obsolete")
-    p_bulk.add_argument("--kind", default="any", choices=["any", "preference", "fact", "decision", "entity"])
+    p_bulk.add_argument("--kind", default="any", choices=kind_choices)
     p_bulk.add_argument("--min-age-days", type=int, default=None)
     p_bulk.add_argument("--dry", action="store_true", help="Preview only")
     p_bulk.set_defaults(func=cmd_bulk_obsolete)

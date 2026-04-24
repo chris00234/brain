@@ -50,6 +50,9 @@ def _save_state(state: dict) -> None:
 
 
 def main() -> int:
+    from _watchdog import arm as _arm_watchdog
+
+    _arm_watchdog(300, tag="gap_detector")
     if not GAP_LOG.exists():
         print(json.dumps({"status": "no_gap_log", "tasks_created": 0}))
         return 0

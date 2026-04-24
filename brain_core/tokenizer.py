@@ -52,6 +52,16 @@ _STOPWORDS = frozenset(
         "might",
         "shall",
         "can",
+        "what",
+        "who",
+        "whom",
+        "whose",
+        "where",
+        "when",
+        "why",
+        "how",
+        "which",
+        "about",
     }
 )
 

@@ -9,7 +9,7 @@ regressions.
 from __future__ import annotations
 
 import sys
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "brain_core"))
@@ -79,6 +79,48 @@ def test_rerank_empty_list():
     assert out == []
 
 
+def test_source_quality_penalizes_aggregate_learning_logs():
+    from source_quality import is_aggregate_learning_log, source_quality_multiplier
+
+    result = {
+        "path": "/Users/chrischo/.openclaw/workspace-liz/.learnings/LEARNINGS.md",
+        "type": "learning",
+    }
+
+    assert is_aggregate_learning_log(result) is True
+    assert source_quality_multiplier(result, stage="lexical") == 0.7
+    assert source_quality_multiplier(result, stage="cross_encoder") == 0.72
+
+
+def test_source_quality_penalizes_derived_self_learning_memory():
+    from source_quality import source_quality_multiplier
+
+    result = {"collection": "semantic_memory", "metadata": {"type": "self_learning"}}
+
+    assert source_quality_multiplier(result, stage="lexical") == 0.85
+    assert source_quality_multiplier(result, stage="cross_encoder") == 0.72
+
+
+def test_rerank_boosts_matching_primary_source_files():
+    from rerank import score_result
+
+    query = "watchtower notification config"
+    primary = {
+        "path": "/Users/chrischo/server/watchtower/docker-compose.yml",
+        "title": "watchtower config",
+        "content": "watchtower notification config",
+        "score": 50,
+    }
+    derivative = {
+        "path": "/Users/chrischo/server/knowledge/distilled/infra/watchtower.md",
+        "title": "watchtower config",
+        "content": "watchtower notification config",
+        "score": 50,
+    }
+
+    assert score_result(query, primary) > score_result(query, derivative) * 1.4
+
+
 # ── temporal ────────────────────────────────────────────────────
 def test_temporal_parse_today():
     from temporal import parse
@@ -146,9 +188,8 @@ def test_autopilot_state_has_enabled_flag():
 
 
 def test_autopilot_should_auto_approve_threshold():
-    from autopilot import get_state, should_auto_approve
+    from autopilot import should_auto_approve
 
-    state = get_state()
     # Very high confidence either auto-approves (if enabled) or returns False
     assert should_auto_approve(0.99) in (True, False)
     # Below threshold reliably fails
@@ -200,10 +241,146 @@ def test_tokenizer_empty_returns_empty_set():
     assert tokenize("") == set()
 
 
+def test_tokenizer_drops_question_filler_words():
+    from tokenizer import tokenize
+
+    tokens = tokenize("what does Chris think about abstractions")
+    assert "what" not in tokens
+    assert "about" not in tokens
+    assert "chris" in tokens
+    assert "abstractions" in tokens
+
+
+# ── search_unified primary document lookup ─────────────────────
+def test_search_unified_injects_current_state_primary_doc():
+    from search_unified import _primary_doc_hits
+
+    hits = _primary_doc_hits("Chris 지금 active project 뭐 있어?")
+    paths = {h["path"] for h in hits}
+    state_path = "/Users/chrischo/server/knowledge/canonical/chris/_state.md"
+
+    assert state_path in paths
+    state_hit = next(h for h in hits if h["path"] == state_path)
+    assert "Active projects" in state_hit["content"]
+    assert state_hit["metadata"]["canonical_lookup"] is True
+    assert state_hit["title"] == "Chris Cho — current state (regenerated weekly)"
+
+
+def test_search_unified_injects_korean_frontend_stack_docs():
+    from search_unified import _primary_doc_hits
+
+    hits = _primary_doc_hits("Chris는 프론트엔드 스택으로 뭘 선호해?")
+    paths = {h["path"] for h in hits}
+
+    assert "/Users/chrischo/server/knowledge/canonical/chris/preferred-frontend-stack.md" in paths
+    assert "/Users/chrischo/server/knowledge/canonical/chris/frontend-stack-preference.md" in paths
+
+
+def test_search_unified_injects_contract_first_primary_doc():
+    from search_unified import _primary_doc_hits
+
+    hits = _primary_doc_hits("What planning order does Chris want before coding?")
+    paths = {h["path"] for h in hits}
+
+    assert "/Users/chrischo/server/knowledge/canonical/chris/contract-first-execution-preference.md" in paths
+
+
+def test_search_unified_injects_rag_role_primary_docs_with_korean_suffixes():
+    from search_unified import _primary_doc_hits
+
+    hits = _primary_doc_hits("RAG와 canonical notes 역할을 Chris 시스템에서 어떻게 나눠?")
+    paths = {h["path"] for h in hits}
+
+    assert "/Users/chrischo/server/knowledge/canonical/infra/infra_rag_retrieval_stack.md" in paths
+    assert "/Users/chrischo/server/knowledge/canonical/infra/rag-stack-role.md" in paths
+
+
+def test_search_unified_injects_business_opportunity_primary_doc():
+    from search_unified import _primary_doc_hits
+
+    hits = _primary_doc_hits("What business opportunities does Chris think are worth pursuing?")
+    paths = {h["path"] for h in hits}
+
+    assert (
+        "/Users/chrischo/server/knowledge/canonical/archived/chris/"
+        "chris-corrected-the-agent-for-anchoring-too-hard-on-obvious-already-dom.md" in paths
+    )
+
+
+def test_search_unified_injects_email_retention_primary_docs_for_korean_query():
+    from search_unified import _primary_doc_hits
+
+    hits = _primary_doc_hits("Chris는 어떤 이메일만 오래 보관하길 원해?")
+    paths = {h["path"] for h in hits}
+
+    assert (
+        "/Users/chrischo/server/knowledge/canonical/archived/chris/"
+        "chris-uses-a-conservative-six-month-email-retention-rule-that-keeps-pers.md" in paths
+    )
+    assert "/Users/chrischo/server/knowledge/canonical/archived/chris/openclaw-jenna-session.md" in paths
+
+
+def test_search_unified_injects_operational_primary_docs():
+    from search_unified import _primary_doc_hits
+
+    cases = {
+        "What did Chris want about PlayStation Plus cancellation?": (
+            "/Users/chrischo/server/knowledge/canonical/archived/chris/"
+            "from-playstation-sony-txn-email03-playstation-com.md"
+        ),
+        "What is the gstack /browse command for?": (
+            "/Users/chrischo/server/knowledge/canonical/archived/decisions/"
+            "chris-decided-to-install-gstack-under-claude-skills-gstack-and-to-m.md"
+        ),
+        "What is Chris's healthcheck standard for model registration?": (
+            "/Users/chrischo/server/knowledge/canonical/archived/decisions/"
+            "chris-established-a-practical-diagnostic-rule-that-model-registration-al.md"
+        ),
+        "What should happen to browser instances opened for Playwright after work is done?": (
+            "/Users/chrischo/server/knowledge/canonical/archived/decisions/"
+            "chris-expects-browser-instances-opened-for-playwright-or-browser-based-v.md"
+        ),
+        "What did Chris say about gateway restart or reinstall attempts?": (
+            "/Users/chrischo/server/knowledge/canonical/archived/chris/"
+            "chris-did-not-want-gateway-reinstall-attempts-from-the-active-assistant.md"
+        ),
+    }
+
+    for query, expected_path in cases.items():
+        paths = {h["path"] for h in _primary_doc_hits(query)}
+        assert expected_path in paths
+
+
+def test_search_unified_injects_sensitive_key_and_identity_primary_docs():
+    from search_unified import _primary_doc_hits
+
+    sensitive_paths = {
+        h["path"] for h in _primary_doc_hits("How should sensitive keys and Ghost Admin keys be handled?")
+    }
+    identity_paths = {h["path"] for h in _primary_doc_hits("Has Chris lived in Irvine since August 2024?")}
+
+    assert (
+        "/Users/chrischo/server/knowledge/canonical/archived/chris/openclaw-jenna-session-2026-04-01.md"
+        in sensitive_paths
+    )
+    assert (
+        "/Users/chrischo/server/knowledge/canonical/archived/chris/openclaw-jenna-session-2026-04-10.md"
+        in identity_paths
+    )
+
+
+def test_search_unified_detects_superseded_canonical_results():
+    from search_unified import _is_superseded_canonical_result
+
+    result = {"collection": "canonical", "content": '---json\n{"status": "superseded"}\n---\nold fact'}
+
+    assert _is_superseded_canonical_result(result) is True
+
+
 # ── batch_lock ──────────────────────────────────────────────────
 def test_batch_lock_is_context_manager(tmp_path, monkeypatch):
-    from batch_lock import batch_lock
     import batch_lock as _bl
+    from batch_lock import batch_lock
 
     # Redirect lock file to tmp
     monkeypatch.setattr(_bl, "LOCK_FILE", tmp_path / "batch.lock")
@@ -238,6 +415,57 @@ def test_cross_encoder_rerank_sigmoid_bounds():
     assert _sigmoid(0) == 0.5  # sigmoid(0) = 0.5
     assert _sigmoid(10) > 0.99
     assert _sigmoid(-10) < 0.01
+
+
+def test_cross_encoder_rerank_normalizes_probability_scores_without_sigmoid_collapse():
+    from cross_encoder_rerank import _normalize_model_scores
+
+    out = _normalize_model_scores([0.81, 0.04, 0.0])
+
+    assert out == [0.9, 0.2, 0.0]
+
+
+def test_cross_encoder_rerank_normalizes_logit_scores_with_sigmoid():
+    from cross_encoder_rerank import _normalize_model_scores
+
+    out = _normalize_model_scores([10.0, 0.0, -10.0])
+
+    assert out[0] > 0.99
+    assert out[1] == 0.5
+    assert out[2] < 0.01
+
+
+def test_cross_encoder_rerank_preserves_source_quality_penalty(monkeypatch):
+    import sys
+    import types
+
+    import cross_encoder_rerank
+
+    fake_model = types.ModuleType("brain_core.cross_encoder_model")
+    fake_model.score_pairs = lambda query, docs: [10.0, 10.0]
+    monkeypatch.setitem(sys.modules, "brain_core.cross_encoder_model", fake_model)
+    monkeypatch.setattr(cross_encoder_rerank, "BRAIN_CROSS_ENCODER_ENABLED", True)
+
+    raw_learning = {
+        "score": 50.0,
+        "path": "/Users/chrischo/.openclaw/workspace-liz/.learnings/LEARNINGS.md",
+        "type": "learning",
+        "title": "Details",
+        "content": "business opportunities",
+    }
+    canonical = {
+        "score": 50.0,
+        "path": "/Users/chrischo/server/knowledge/canonical/chris/business.md",
+        "type": "canonical-note",
+        "title": "Business preference",
+        "content": "business opportunities",
+    }
+
+    out = cross_encoder_rerank.rerank_with_cross_encoder("business opportunities", [raw_learning, canonical])
+
+    assert out[0] is canonical
+    assert out[1] is raw_learning
+    assert out[1]["_debug"]["source_quality_multiplier_cross_encoder"] == 0.72
 
 
 # ── feedback_aggregator ─────────────────────────────────────────

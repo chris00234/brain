@@ -13,11 +13,14 @@ Usage:
 import argparse
 import hashlib
 import json
+import logging
 import re
 import shutil
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+
+log = logging.getLogger("brain.memory_lifecycle")
 
 try:
     from config import INBOX_DIR, OPENCLAW_BIN
@@ -299,14 +302,14 @@ def dedup_semantic_near_duplicates() -> dict:
 
     store = get_vector_store()
 
-    # Get docs with embeddings — capped at 300 to keep O(n^2) pairwise
-    # comparison tractable without numpy. 300 entries ≈ 45k comparisons
-    # in pure Python ≈ 10s. Order by created_at DESC is implicit in
-    # store.get insertion order for recent writes.
+    # Get docs with embeddings — capped at 2000 now that this runs daily.
+    # 2000^2 / 2 = 2M pairwise comparisons; with length + cosine prefilters
+    # the hot loop finishes in ~30-40s on the M4 Max. Previously capped at
+    # 300 (weekly) which let near-duplicates accumulate past the window.
     try:
         points = store.get(
             "semantic_memory",
-            limit=300,
+            limit=2000,
             with_payload=True,
             with_documents=True,
             with_vectors=True,
@@ -359,7 +362,11 @@ def dedup_semantic_near_duplicates() -> dict:
                 continue
 
             dist = cosine_dist(embs[i], embs[j])
-            if dist >= 0.08:
+            # Raised 2026-04-23 from 0.08 to 0.10 to close the gap with the
+            # contradiction detector (fires at distance < 0.10). Previously
+            # atoms in [0.08, 0.10] got flagged as contradictions but never
+            # auto-resolved — they lived in attention_queue indefinitely.
+            if dist >= 0.10:
                 continue
 
             tokens_j = tokenize(docs[j])
@@ -400,7 +407,7 @@ def dedup_semantic_near_duplicates() -> dict:
             entity_a="semantic_memory",
             entity_b=f"{len(delete_list)} entries",
             resolution="near_duplicate_cleanup",
-            reason=f"Weekly retroactive scan: cosine<0.08 + Jaccard>0.5, {merge_count} pairs found",
+            reason=f"Daily retroactive scan: cosine<0.10 + Jaccard>0.5, {merge_count} pairs found",
         )
     except Exception:
         pass

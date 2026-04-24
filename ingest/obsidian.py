@@ -114,8 +114,11 @@ def couch_request(path, method="GET", data=None):
     else:
         req = urllib.request.Request(url, headers=headers, method=method)
 
+    # 30s timeout — matches the other external ingest calls. Without this a
+    # stalled CouchDB (partition, paused container) wedges the sync job
+    # forever and holds the scheduler slot.
     try:
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, timeout=30) as resp:
             return json.loads(resp.read())
     except urllib.error.HTTPError as e:
         log_failure("couch_request", f"{method} {path} HTTP {e.code}")
@@ -187,18 +190,36 @@ def atomic_write_text(file_path, content):
 
 
 def _sync_md_doc(doc: dict) -> str:
-    """Sync a single markdown doc to the vault. Returns status: synced/unchanged/skipped."""
+    """Sync a single markdown doc to the vault. Returns status: synced/unchanged/skipped/deleted."""
     doc_id = doc.get("_id", "")
-    if doc.get("deleted"):
-        return "skipped"
     if not doc_id.endswith(".md"):
         return "skipped"
+    vault_root = os.path.realpath(VAULT_DIR)
+    rel = doc.get("path", doc_id)
+    file_path = os.path.realpath(os.path.join(VAULT_DIR, rel))
+    if not file_path.startswith(vault_root):
+        log_failure("path_traversal", f"Blocked path outside vault: {rel}")
+        return "skipped"
+    # CouchDB _changes tombstone: `_deleted` on the doc (plus `deleted` fallback
+    # for legacy shapes). Unlink the mirror so deletes in Obsidian propagate.
+    if doc.get("_deleted") or doc.get("deleted"):
+        if not os.path.exists(file_path):
+            return "skipped"
+        try:
+            os.remove(file_path)
+        except Exception as e:
+            log_failure("vault_unlink", f"{file_path}: {e}")
+            return "skipped"
+        parent = os.path.dirname(file_path)
+        while parent != vault_root and parent.startswith(vault_root):
+            try:
+                os.rmdir(parent)
+            except OSError:
+                break
+            parent = os.path.dirname(parent)
+        return "deleted"
     content = reconstruct_note(doc)
     if content is None:
-        return "skipped"
-    file_path = os.path.realpath(os.path.join(VAULT_DIR, doc.get("path", doc_id)))
-    if not file_path.startswith(os.path.realpath(VAULT_DIR)):
-        log_failure("path_traversal", f"Blocked path outside vault: {doc.get('path', doc_id)}")
         return "skipped"
     os.makedirs(os.path.dirname(file_path), exist_ok=True)
     if os.path.exists(file_path):
@@ -233,17 +254,24 @@ def pull_notes_incremental():
     synced = 0
     skipped = 0
     unchanged = 0
+    deleted = 0
 
     for change in changes:
         doc = change.get("doc", {}) or {}
         doc_id = doc.get("_id", "")
         if not doc_id or doc_id.startswith("_") or doc_id.startswith("h:"):
             continue
+        # CouchDB exposes the tombstone flag at the change level; mirror it onto
+        # the doc so _sync_md_doc sees it even when the body is a bare stub.
+        if change.get("deleted"):
+            doc["_deleted"] = True
         status = _sync_md_doc(doc)
         if status == "synced":
             synced += 1
         elif status == "unchanged":
             unchanged += 1
+        elif status == "deleted":
+            deleted += 1
         else:
             skipped += 1
 
@@ -251,7 +279,7 @@ def pull_notes_incremental():
     save_state(state)
 
     print(f"Incremental sync ({len(changes)} changes processed)")
-    print(f"  Synced {synced} | Unchanged {unchanged} | Skipped {skipped}")
+    print(f"  Synced {synced} | Unchanged {unchanged} | Deleted {deleted} | Skipped {skipped}")
     print(f"  last_seq: {str(new_seq)[:40]}")
 
 

@@ -10,6 +10,7 @@ searched across ChromaDB, canonical knowledge, and Obsidian vault.
 
 import argparse
 import json
+import re
 import sys
 import time
 from datetime import UTC, datetime, timedelta
@@ -338,12 +339,13 @@ def get_agent_memories(agent_name, limit=5):
 
         entries = []
         for p in points:
+            payload = p.payload or {}
             entries.append(
                 {
                     "id": p.id,
                     "doc": p.document or "",
-                    "meta": p.payload or {},
-                    "created_at": meta.get("created_at", ""),
+                    "meta": payload,
+                    "created_at": payload.get("created_at", ""),
                 }
             )
 
@@ -400,8 +402,15 @@ def get_recent_openclaw_distillations(hours: int = 24, limit: int = 5) -> list[d
     return records[:limit]
 
 
-def build_boot_context(agent_name, limit=3):
+def build_boot_context(agent_name, limit=3, prompt: str | None = None):
     queries = list(AGENT_QUERIES.get(agent_name, DEFAULT_QUERIES))
+    # When the hook passes the user's first prompt, prepend it to the query
+    # list so RAG retrieval actually sees current intent instead of only the
+    # agent's static baseline queries. This is the turn-0 intent injection.
+    if prompt:
+        prompt_clean = prompt.strip()
+        if 10 <= len(prompt_clean) <= 400:
+            queries.insert(0, prompt_clean)
     try:
         queries.extend(_predictive_queries(agent_name))
     except Exception:
@@ -732,7 +741,55 @@ def build_boot_context(agent_name, limit=3):
             _cache_set(search_key, json.dumps(search_sections, ensure_ascii=False))
         sections.extend(search_sections)
 
+    # Intent-aware rerank: when the hook passed the user's prompt, reorder
+    # the RAG-derived sections (the ones carrying a 'score') by cheap token
+    # overlap with the prompt. Structural sections (Identity, Current Focus,
+    # Recent Sessions, Attention, Predictive, Messages) keep their slot —
+    # they're stable context blocks, not query-dependent retrieval hits.
+    if prompt and sections:
+        sections = _rerank_by_intent(sections, prompt)
+
     return sections[:15]
+
+
+_INTENT_TOKEN_RE = re.compile(r"[a-z0-9가-힣]{2,}")
+
+
+def _rerank_by_intent(sections: list[dict], prompt: str) -> list[dict]:
+    """Reorder search-derived sections by token overlap with the prompt.
+
+    Keeps the first N "structural" sections in place (Current Focus, Recent
+    Sessions, Chris Identity/State, Active Task, Agent Memories, Atoms due,
+    Predictive, Attention, Pending Messages — everything ahead of the RAG
+    search expansion). Only the retrieval-result sections (those with a
+    'score' key) get reranked against the prompt.
+    """
+    tokens_p = set(_INTENT_TOKEN_RE.findall((prompt or "").lower()))
+    if not tokens_p:
+        return sections
+
+    structural: list[dict] = []
+    scored: list[tuple[float, int, dict]] = []
+    for i, s in enumerate(sections):
+        if "score" in s:
+            body = (s.get("content") or "")[:800].lower() + " " + (s.get("source") or "").lower()
+            tokens_s = set(_INTENT_TOKEN_RE.findall(body))
+            overlap = len(tokens_p & tokens_s) / max(len(tokens_p | tokens_s), 1)
+            # Blend prior score with overlap so strong RAG hits aren't
+            # ignored when the prompt doesn't overlap vocabulary exactly.
+            prior = float(s.get("score", 0) or 0) / 100.0
+            intent_score = overlap * 0.7 + min(prior, 1.0) * 0.3
+            scored.append((intent_score, i, s))
+        else:
+            structural.append(s)
+    scored.sort(key=lambda t: (-t[0], t[1]))
+    # Drop retrieval hits with near-zero intent overlap when we have enough
+    # signal from structural + top-ranked hits. Prevents old employment
+    # records and predictive fragments from filling slots 13-15.
+    kept_scored = [s for (score, _, s) in scored if score > 0.02]
+    if len(structural) + len(kept_scored) < 6:
+        kept_scored = [s for (_, _, s) in scored]
+    return structural + kept_scored
 
 
 def log_boot(agent_name, queries, sections):
@@ -780,11 +837,16 @@ def main():
     parser.add_argument("agent", help="Agent name (ellie, jenna, liz, sage, market)")
     parser.add_argument("-n", "--limit", type=int, default=3, help="Results per query")
     parser.add_argument("--json", action="store_true", help="JSON output")
+    parser.add_argument(
+        "--prompt",
+        default=None,
+        help="Current user prompt — used to rerank RAG sections by intent",
+    )
     args = parser.parse_args()
 
     agent = args.agent.lower()
     queries = AGENT_QUERIES.get(agent, DEFAULT_QUERIES)
-    sections = build_boot_context(agent, args.limit)
+    sections = build_boot_context(agent, args.limit, prompt=args.prompt)
 
     log_boot(agent, queries, sections)
 

@@ -404,50 +404,46 @@ def check_recall_vector_temporal() -> list[str]:
 def check_content_integrity() -> list[str]:
     """Random-sample a few docs from each critical collection. Assert non-empty
     document, non-empty source, and recognizable embed_model_version.
-    """
-    import urllib.request
 
+    Rewritten 2026-04-21 to use the VectorStore abstraction — the prior
+    implementation referenced an undefined ``CHROMA_API`` constant and had
+    been silently ``NameError``-ing for every run since the Qdrant cutover
+    (swallowed by the outer except, so the probe stayed green while it was
+    actually not checking anything).
+    """
     issues = []
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "brain_core"))
+        from vector_store import get_vector_store  # noqa: E402
+
+        store = get_vector_store()
+    except Exception as e:
+        return [f"⚠️ content integrity: vector_store unavailable: {e}"]
+
     for coll in SAMPLED_COLLECTIONS:
-        col_id = get_collection_id(coll)
-        if not col_id:
-            continue
         try:
-            with urllib.request.urlopen(f"{CHROMA_API}/{col_id}/count", timeout=5) as count_resp:
-                total = int(count_resp.read().strip())
+            total = store.count(coll)
             if total == 0:
                 continue
-            # Fetch a page to sample from. We avoid query_embeddings because that
-            # requires a live embedding call; get() with a random offset works.
             limit = min(SAMPLE_SIZE * 5, total)
-            offset = random.randint(0, max(0, total - limit))
-            req = urllib.request.Request(
-                f"{CHROMA_API}/{col_id}/get",
-                data=json.dumps(
-                    {
-                        "limit": limit,
-                        "offset": offset,
-                        "include": ["documents", "metadatas"],
-                    }
-                ).encode(),
-                headers={"Content-Type": "application/json"},
-                method="POST",
+            points = store.get(
+                coll,
+                limit=limit,
+                with_payload=True,
+                with_documents=True,
             )
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                body = json.loads(resp.read())
-            docs = body.get("documents") or []
-            metas = body.get("metadatas") or []
-            sample = list(zip(docs, metas, strict=False))
-            random.shuffle(sample)
-            sample = sample[:SAMPLE_SIZE]
-            empty_docs = sum(1 for d, _ in sample if not d or not str(d).strip())
+            if not points:
+                continue
+            random.shuffle(points)
+            sample = points[:SAMPLE_SIZE]
+            empty_docs = sum(1 for p in sample if not (p.document or "").strip())
             if empty_docs:
                 issues.append(f"⚠️ {coll}: {empty_docs}/{SAMPLE_SIZE} sampled docs have empty content")
-            missing_source = sum(1 for _, m in sample if not (m or {}).get("source"))
+            missing_source = sum(1 for p in sample if not (p.payload or {}).get("source"))
             if missing_source > SAMPLE_SIZE // 2:
                 # Some collections (semantic_memory) don't use 'source'; tolerate up to 50%.
                 issues.append(
-                    f"⚠️ {coll}: {missing_source}/{SAMPLE_SIZE} sampled docs missing metadata.source"
+                    f"⚠️ {coll}: {missing_source}/{SAMPLE_SIZE} sampled docs missing payload.source"
                 )
         except Exception as e:
             issues.append(f"⚠️ content integrity probe failed for {coll}: {e}")

@@ -31,7 +31,7 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
-    pre_count = list(run_query("MATCH ()-[r:RELATES_TO]-() RETURN count(DISTINCT r) AS c"))[0]["c"]
+    pre_count = next(iter(run_query("MATCH ()-[r:RELATES_TO]-() RETURN count(DISTINCT r) AS c")))["c"]
 
     if args.dry_run:
         candidate_cypher = """
@@ -74,13 +74,13 @@ def main() -> int:
     """
     r = list(run_query(cypher, {"min_co": args.min_co}))
     created = r[0]["created"]
-    post_count = list(run_query("MATCH ()-[r:RELATES_TO]-() RETURN count(DISTINCT r) AS c"))[0]["c"]
+    post_count = next(iter(run_query("MATCH ()-[r:RELATES_TO]-() RETURN count(DISTINCT r) AS c")))["c"]
 
     # Also reseal the orphan count for reporting
-    orphan = list(run_query("MATCH (e:Entity) WHERE NOT (e)-[]-() RETURN count(e) AS c"))[0]["c"]
-    no_relates = list(run_query("MATCH (e:Entity) WHERE NOT (e)-[:RELATES_TO]-() RETURN count(e) AS c"))[0][
-        "c"
-    ]
+    orphan = next(iter(run_query("MATCH (e:Entity) WHERE NOT (e)-[]-() RETURN count(e) AS c")))["c"]
+    no_relates = next(
+        iter(run_query("MATCH (e:Entity) WHERE NOT (e)-[:RELATES_TO]-() RETURN count(e) AS c"))
+    )["c"]
 
     print(
         json.dumps(

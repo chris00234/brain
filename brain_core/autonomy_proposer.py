@@ -81,7 +81,7 @@ def _fetch_kind_outcomes() -> list[dict]:
     """Aggregate action_audit by tool over the last WINDOW_DAYS.
 
     Returns [{"kind": tool, "total": N, "success": S, "failure": F}, ...]
-    Only rows whose outcome is in SUCCESS_OUTCOMES ∪ FAILURE_OUTCOMES are
+    Only rows whose outcome is in SUCCESS_OUTCOMES U FAILURE_OUTCOMES are
     counted. Rows with NULL outcome (still pending) are skipped.
     """
     if not BRAIN_DB.exists():

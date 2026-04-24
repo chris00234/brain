@@ -8,7 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "cli"))
 
-import session_rotate  # noqa: E402
+import session_rotate
 
 
 def _make_agents_tree(root: Path) -> None:
@@ -22,6 +22,7 @@ def _make_agents_tree(root: Path) -> None:
     old_cp.write_text("X" * 10_000)
     old_ts = time.time() - (20 * 86400)
     import os
+
     os.utime(old_cp, (old_ts, old_ts))
     # Recent checkpoint (< 14 days) — should be kept
     fresh_cp = jenna / "def.checkpoint.y.jsonl"

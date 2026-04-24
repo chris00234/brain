@@ -36,6 +36,86 @@ SOFT_CAP_WORDS = 30
 HARD_CAP_WORDS = 50
 
 
+# ── Prompt-injection / content-safety scanner ──────────────────────────
+#
+# Adopted from hermes-agent's `agent/prompt_builder.py` threat patterns.
+# A poisoned atom in Qdrant persists forever and gets re-injected into
+# every future LLM prompt — one successful injection could re-program
+# Sage/Jenna's behavior on every subsequent dispatch. Gate every write
+# (POST /memory, learn.embed_and_store, brain_ingest) through scan_content
+# so obvious payloads don't land in the truth layer.
+
+_THREAT_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    # Direct prompt-injection / role hijacking
+    (
+        "prompt_injection",
+        re.compile(
+            r"(?i)\b(ignore|disregard|forget)\s+(all|any|the|previous|prior|above)\s+"
+            r"(instructions?|prompts?|rules?|constraints?)\b"
+        ),
+    ),
+    (
+        "role_hijack",
+        re.compile(
+            r"(?i)\b(you\s+are\s+now|act\s+as|pretend\s+(?:to\s+be|you'?re)|"
+            r"from\s+now\s+on\s+you|new\s+system\s+prompt)\b"
+        ),
+    ),
+    (
+        "system_prompt_override",
+        re.compile(r"(?i)<\s*/?\s*(system|instructions?|sysprompt)\s*>"),
+    ),
+    # Secret exfiltration — classic "print your system prompt" patterns
+    (
+        "secret_exfil",
+        re.compile(
+            r"(?i)\b(print|reveal|show|output|dump|echo)\s+"
+            r"(your|the)\s+(system\s+prompt|instructions?|api[\s_-]?key|secret|credentials?)\b"
+        ),
+    ),
+    # Fence bypass — attempts to close our <memory-context> wrapper
+    (
+        "fence_bypass",
+        re.compile(r"(?i)</\s*memory[-_]?context\s*>"),
+    ),
+    # Hidden characters — zero-width + bidi overrides that hide instructions
+    (
+        "hidden_unicode",
+        re.compile(r"[​‌‍‪‫‬‭‮⁦-⁩]"),
+    ),
+]
+
+# Known-safe phrases that would otherwise trip the pattern list (e.g. Chris
+# writing a canonical note _about_ prompt injection). Exact-substring opt-out.
+_ALLOWLIST_FRAGMENTS: tuple[str, ...] = (
+    "prompt injection",  # discussing the concept
+    "prompt-injection",
+)
+
+
+def scan_content(text: str) -> dict:
+    """Scan a prospective atom/ingest payload for prompt-injection patterns.
+
+    Returns ``{"safe": bool, "findings": [(name, match_snippet), ...]}``.
+    The caller decides whether to block (hard-gate) or warn+log (soft-gate)
+    based on the number and category of findings.
+    """
+    if not text:
+        return {"safe": True, "findings": []}
+    findings: list[tuple[str, str]] = []
+    lowered = text.lower()
+    allowlisted = any(frag in lowered for frag in _ALLOWLIST_FRAGMENTS)
+    for name, pat in _THREAT_PATTERNS:
+        m = pat.search(text)
+        if not m:
+            continue
+        # Hidden unicode + fence_bypass are always fatal, can't be allowlisted.
+        if allowlisted and name not in {"hidden_unicode", "fence_bypass"}:
+            continue
+        findings.append((name, m.group(0)[:80]))
+    return {"safe": not findings, "findings": findings}
+
+
 def count_words(text: str) -> int:
     """Count words, treating each Hangul block as ~1 word.
 

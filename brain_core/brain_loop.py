@@ -37,6 +37,7 @@ Effect: goals advance without Chris asking, stalled tasks get interventions,
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -828,8 +829,7 @@ def _is_backlog_drain_stuck() -> bool:
             return False
         last_three = parsed[-3:]
         zero_drain_streak = sum(
-            1 for r in last_three
-            if r.get("drained", 0) == 0 and r.get("pending_after", 0) > 0
+            1 for r in last_three if r.get("drained", 0) == 0 and r.get("pending_after", 0) > 0
         )
         return zero_drain_streak == 3
     except Exception as exc:
@@ -1563,6 +1563,18 @@ class BrainLoop:
             else:
                 log.warning("brain_loop tick %d budget exceeded pre-act, skipping actions", self.tick_n)
 
+            # 4b. Fire speak.urgent_scan inside the tick so the two systems
+            # share rate-limiting and budget. urgent_scan writes to the
+            # per-session doorbell when severity >= 7.5; it's idempotent via
+            # its own 6h dedup so running it every 60s is safe.
+            if time.time() - t0 < TICK_BUDGET_S * 0.9:
+                try:
+                    from speak import urgent_scan as _urgent_scan
+
+                    _urgent_scan()
+                except Exception as exc:
+                    log.debug("brain_loop urgent_scan failed: %s", exc)
+
             # 5. JOURNAL
             _journal(self.tick_n, observations, decisions, approved, results, t0)
 
@@ -1582,25 +1594,154 @@ class BrainLoop:
             self._running = False
             self._tick_lock.release()
 
-    # MR8 fix (2026-04-14): check_wake was dead code. No caller anywhere
-    # in the codebase invoked it, so the /tmp/.brain_loop_wake file that
-    # claude_boot.sh dutifully touches every turn was never read. Event-
-    # driven catch-up for LLM backlog is now handled by the
-    # _sense_llm_breaker_closed observation sensor inside the 60-second
-    # tick loop — which is sufficient latency for all current needs.
-    # If a sub-60s wake mechanism is needed later, add it via watchdog
-    # inotify or a dedicated async task rather than polling file mtime.
+    # 2026-04-23 (NSprint #3): the wake-file watcher is back.
+    # Sub-60s response is now valuable because attention.enqueue touches
+    # /tmp/.brain_loop_wake on every new warning+ contradiction and
+    # coding_events.upsert_outcome touches it on revert/reject. Without a
+    # watcher those signals would sit up to 60s before the tick processes
+    # them. The watcher calls tick() when mtime advances; tick's reentrancy
+    # guard + rate limits + TICK_BUDGET_S bound the blast radius.
+    pass
+
+
+_WAKE_FILE = Path("/tmp/.brain_loop_wake")
+_WAKE_POLL_INTERVAL_S = 2.0  # fallback only, used when kqueue unavailable
+_WAKE_MIN_INTERVAL_S = 3.0  # debounce — no more than 1 wake-tick every 3s
+_wake_last_tick_ts: float = 0.0
+
+
+def _wake_debounced_tick(loop: BrainLoop) -> None:
+    """Wake-triggered tick with a 3s debounce. Spawns the tick as a
+    subprocess so it matches the isolation pattern of the scheduler's
+    brain_loop_tick job (prevents server event loop contention). Debounce
+    prevents a burst of enqueue+outcome touches from hammering brain_loop."""
+    global _wake_last_tick_ts
+    now = time.time()
+    if now - _wake_last_tick_ts < _WAKE_MIN_INTERVAL_S:
+        return
+    _wake_last_tick_ts = now
+    try:
+        import subprocess
+
+        subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import sys; sys.path.insert(0, "
+                    "'/Users/chrischo/server/brain/brain_core'); "
+                    "from brain_loop import run; run()"
+                ),
+            ],
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception as exc:
+        log.warning("wake-triggered tick spawn failed: %s", exc)
+
+
+def _wake_watcher_loop() -> None:
+    """Daemon thread: fire tick() when wake file is touched.
+
+    On Darwin + Linux (kqueue / inotify-compatible select), reacts in
+    ~10-50ms. On platforms without kqueue (Linux pure-Python), falls back
+    to 2s mtime polling.
+    """
+    loop = get_brain_loop()
+    import select
+
+    if hasattr(select, "kqueue"):
+        _wake_watcher_kqueue(loop)
+    else:
+        _wake_watcher_poll(loop)
+
+
+def _wake_watcher_kqueue(loop: BrainLoop) -> None:
+    """macOS path — kqueue watches the file for write/delete events. Near
+    real-time reactivity with zero CPU when idle."""
+    import select
+
+    kq = select.kqueue()
+    while True:
+        try:
+            if not _WAKE_FILE.exists():
+                # Create the file so we have something to watch. Touch is idempotent.
+                try:
+                    _WAKE_FILE.touch()
+                except OSError:
+                    time.sleep(_WAKE_POLL_INTERVAL_S)
+                    continue
+            fd = os.open(str(_WAKE_FILE), os.O_RDONLY)
+            try:
+                kev = select.kevent(
+                    fd,
+                    filter=select.KQ_FILTER_VNODE,
+                    flags=select.KQ_EV_ADD | select.KQ_EV_CLEAR,
+                    fflags=select.KQ_NOTE_WRITE | select.KQ_NOTE_ATTRIB | select.KQ_NOTE_DELETE,
+                )
+                # Blocking wait with 60s timeout so we loop around and
+                # re-register if the file is rotated.
+                events = kq.control([kev], 1, 60.0)
+                if events:
+                    _wake_debounced_tick(loop)
+            finally:
+                with contextlib.suppress(OSError):
+                    os.close(fd)
+        except OSError as exc:
+            log.debug("kqueue watcher hiccup: %s", exc)
+            time.sleep(_WAKE_POLL_INTERVAL_S)
+
+
+def _wake_watcher_poll(loop: BrainLoop) -> None:
+    """Fallback polling path for platforms without kqueue."""
+    try:
+        last_mtime = _WAKE_FILE.stat().st_mtime if _WAKE_FILE.exists() else 0.0
+    except OSError:
+        last_mtime = 0.0
+    while True:
+        time.sleep(_WAKE_POLL_INTERVAL_S)
+        try:
+            if not _WAKE_FILE.exists():
+                continue
+            m = _WAKE_FILE.stat().st_mtime
+            if m <= last_mtime:
+                continue
+            last_mtime = m
+            _wake_debounced_tick(loop)
+        except OSError:
+            continue
+
+
+_wake_thread_started = False
+
+
+def _ensure_wake_watcher() -> None:
+    global _wake_thread_started
+    if _wake_thread_started:
+        return
+    if os.environ.get("BRAIN_WAKE_WATCHER_DISABLED", "").strip().lower() in ("1", "true", "yes", "on"):
+        return
+    t = threading.Thread(target=_wake_watcher_loop, daemon=True, name="brain_wake_watcher")
+    t.start()
+    _wake_thread_started = True
 
 
 # Module-level singleton — scheduler reuses one instance across ticks.
 _brain_loop: BrainLoop | None = None
+_brain_loop_lock = threading.Lock()
 
 
 def get_brain_loop() -> BrainLoop:
+    """Thread-safe singleton. Relevant now that the wake-watcher daemon
+    calls this from a background thread; the FastAPI startup path also
+    touches it, so we need a lock around the check-and-assign."""
     global _brain_loop
-    if _brain_loop is None:
-        _brain_loop = BrainLoop()
-    return _brain_loop
+    with _brain_loop_lock:
+        if _brain_loop is None:
+            _brain_loop = BrainLoop()
+            _ensure_wake_watcher()
+        return _brain_loop
 
 
 def run() -> dict:

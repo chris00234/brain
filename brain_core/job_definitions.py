@@ -1,7 +1,7 @@
 """brain_core/job_definitions.py - the full cron JOB_SCHEDULE.
 
 Split off from `brain_core/scheduler.py` on 2026-04-17: the schedule
-grew to 108 jobs / ~880 lines of pure data in a 1400-line file, making
+grew past 100 jobs / ~880 lines of pure data in a 1400-line file, making
 the actual scheduler logic hard to find. Scheduler code now lives in
 `scheduler.py`; the job table lives here.
 
@@ -18,7 +18,7 @@ JOB_SCHEDULE so callers can do either:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -39,11 +39,13 @@ class ScheduledJob:
     # 2026-04-16 fix: default dropped 3600->300 to prevent thundering-herd
     # after brain-server restart. Previously a 50-min downtime would
     # re-fire ~22 jobs simultaneously (every default-grace job) when the
-    # server came back up, saturating Ollama+Neo4j. 5 min is enough slack
+    # server came back up, saturating local embedder+Neo4j. 5 min is enough slack
     # for a graceful restart; jobs that genuinely benefit from a longer
     # replay window (weekly Sage syntheses, monthly backups) set their
     # own misfire_grace explicitly (900, 1800).
     misfire_grace: int = 300
+    resource_class: str = "standard"  # light|standard|heavy
+    resource_tags: tuple[str, ...] = field(default_factory=tuple)
 
     def next_run_str(self, scheduler: AsyncIOScheduler) -> str:
         job = scheduler.get_job(self.name)
@@ -53,12 +55,12 @@ class ScheduledJob:
 
 
 JOB_SCHEDULE: list[ScheduledJob] = [
-    # Ingest - fixed off-hours schedule to avoid Ollama contention during work hours.
+    # Ingest - fixed off-hours schedule to avoid local embedder contention during work hours.
     # Was every 4h (interval); now 3x daily at 6am, 2pm, 10pm PST.
     # 2pm is borderline but personal data changes during the day need <8h lag.
     ScheduledJob(
         name="personal_ingest",
-        description="Apple Notes + iMessage + Calendar + Reminders -> ChromaDB (3x daily off-peak)",
+        description="Apple Notes + iMessage + Calendar + Reminders -> Qdrant personal (3x daily off-peak)",
         trigger=CronTrigger(hour="6,14,22", minute=0),
         agent="jenna",
     ),
@@ -121,6 +123,22 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         trigger=CronTrigger(hour=5, minute=45),
         agent="system",
         misfire_grace=1800,
+    ),
+    # Kuma heartbeat incident log — pulls state-change events daily
+    ScheduledJob(
+        name="kuma_heartbeats_ingest",
+        description="Uptime Kuma incident state-changes -> raw/inbox (daily 6:00am, 24h window)",
+        trigger=CronTrigger(hour=6, minute=0),
+        agent="system",
+        misfire_grace=900,
+    ),
+    # Apple Health daily summary — tails iCloud Drive export from iOS Shortcut
+    ScheduledJob(
+        name="apple_health_ingest",
+        description="Apple Health daily recovery signal (sleep/HRV/RHR/kcal) -> raw/inbox (8:00am, after iPhone 7:30 Shortcut + iCloud sync)",
+        trigger=CronTrigger(hour=8, minute=0),
+        agent="system",
+        misfire_grace=900,
     ),
     # Synthesis (daily/weekly/monthly)
     ScheduledJob(
@@ -237,7 +255,7 @@ JOB_SCHEDULE: list[ScheduledJob] = [
     ),
     # Eval - two-track gate (incident 2026-04-13)
     # stable  -> 138 timeless queries, strict 5pt gate + heal dispatch (legacy alias eval_run)
-    # extended -> 606 timestamp/temporal queries, trend tracking only (no heal, 10pt threshold)
+    # extended -> archived/current-truth trend set, loose-content tracking only (no heal, 10pt threshold)
     # full    -> 744-query union, trend tracking only
     ScheduledJob(
         name="eval_run",
@@ -248,7 +266,7 @@ JOB_SCHEDULE: list[ScheduledJob] = [
     ),
     ScheduledJob(
         name="eval_run_extended",
-        description="Extended-track eval (daily 3:50am) - trend only, no heal, 10pt threshold",
+        description="Extended-track eval (daily 3:50am) - loose-content trend only, no heal, 10pt threshold",
         trigger=CronTrigger(hour=3, minute=50),
         agent="system",
         misfire_grace=900,
@@ -283,8 +301,8 @@ JOB_SCHEDULE: list[ScheduledJob] = [
     # Rate-limited 3x/hour per (kind, subject) pair.
     ScheduledJob(
         name="brain_loop_tick",
-        description="v3: brain_loop executive cortex tick (every 60s)",
-        trigger=IntervalTrigger(seconds=60),
+        description="v3: brain_loop executive cortex tick (every 90s — relaxed from 60s 2026-04-22 to cut 33% of ticks)",
+        trigger=IntervalTrigger(seconds=90),
         agent="system",
         misfire_grace=30,
     ),
@@ -300,7 +318,7 @@ JOB_SCHEDULE: list[ScheduledJob] = [
     ),
     # v3 F41: nightly entity extraction reconciliation. The hot-path bg
     # pool (atoms_store._submit_bg_extract) drops extractions when the 64-
-    # inflight cap is hit to protect Neo4j+Ollama under burst. This job
+    # inflight cap is hit to protect Neo4j+local embedder under burst. This job
     # catches those drops by finding fresh atoms with no atom_entity rows
     # and re-running extraction serially.
     ScheduledJob(
@@ -401,7 +419,7 @@ JOB_SCHEDULE: list[ScheduledJob] = [
     # Phase J2: HNSW ef_search adaptive tuning (weekly Sunday 4:15am, off-hours)
     # Removed 2026-04-17: duplicate of `hnsw_adaptive` (Sun 4:50am), both
     # called the same adaptive_tune() function 35 minutes apart on the
-    # same Ollama/ChromaDB. Keeping hnsw_adaptive since it uses the CLI
+    # same local embedder/Qdrant. Keeping hnsw_adaptive since it uses the CLI
     # entry point (--adaptive flag) consistent with the tuner's module.
     # Phase 2D: SessionEnd outbox replay - every 5 min, drains any envelopes
     # the inline post_session.sh hook missed. CRON_MAP and RUNBOOK already
@@ -477,9 +495,38 @@ JOB_SCHEDULE: list[ScheduledJob] = [
     ),
     ScheduledJob(
         name="near_dedup",
-        description="Weekly retroactive near-duplicate scan of semantic_memory (Sun 3:20am)",
-        trigger=CronTrigger(day_of_week="sun", hour=3, minute=20),
+        description="Daily retroactive near-duplicate scan of semantic_memory (3:22am). "
+        "Bumped weekly->daily 2026-04-23 after bilingual preference atoms "
+        "accumulated past the weekly gate. Moved off 3:20 to avoid collision "
+        "with habituation_prune and off 3:25 to avoid sm2_nightly brain.db/Qdrant contention.",
+        trigger=CronTrigger(hour=3, minute=22),
         agent="system",
+    ),
+    ScheduledJob(
+        name="brain_speak_digest",
+        description="Brain's morning digest to Chris — drives observe, composer ranks, top 3 via Telegram (07:55 PT, scheduler runs in local tz).",
+        trigger=CronTrigger(hour=7, minute=55),
+        agent="system",
+    ),
+    ScheduledJob(
+        name="brain_speak_urgent",
+        description="Every 5 min: scan drives for severity>=7.5 observations, write to active Claude Code session doorbells. This is brain's interrupt channel.",
+        trigger=CronTrigger(minute="*/5"),
+        agent="system",
+    ),
+    ScheduledJob(
+        name="canonical_staleness_check",
+        description="Daily 04:30 PT: scan distilled/*.md for invalidated claims (missing imports / NameErrors that the code has since fixed). Retire stale files and delete their Qdrant atoms so brain stops surfacing already-fixed bugs.",
+        trigger=CronTrigger(hour=4, minute=30),
+        agent="system",
+        misfire_grace=900,
+    ),
+    ScheduledJob(
+        name="self_eval",
+        description="Nightly 03:37 PT: sample recent /recall queries, re-run, measure top-3 overlap drift. Populates self_eval_drift_7d SLO.",
+        trigger=CronTrigger(hour=3, minute=37),
+        agent="system",
+        misfire_grace=900,
     ),
     ScheduledJob(
         name="auto_resolve_contradictions",
@@ -497,11 +544,43 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         agent="system",
     ),
     ScheduledJob(
+        name="memory_provenance_lint",
+        description="Daily read-only lint of canonical/distilled provenance and supersession metadata (06:25 PT)",
+        trigger=CronTrigger(hour=6, minute=25),
+        agent="system",
+        misfire_grace=900,
+    ),
+    ScheduledJob(
         name="feedback_aggregate",
         description="Weekly search feedback aggregation (Sun 6:30am)",
         trigger=CronTrigger(day_of_week="sun", hour=6, minute=30),
         agent="system",
         misfire_grace=900,
+    ),
+    ScheduledJob(
+        name="recall_outcome_label",
+        description="Hourly — mark action_audit recalls 'restated' when same session re-asks within 120s (cosine ≥0.85). Converts the ~24k/week pending recall signal into training data.",
+        trigger=CronTrigger(minute=17),
+        agent="system",
+    ),
+    ScheduledJob(
+        name="recall_judge",
+        description="Daily 4:27am — sample 30 recent recalls, LLM-judges relevance/groundedness via live re-recall, writes recall_judgments + back-fills action_audit.outcome (judged_good/judged_wrong).",
+        trigger=CronTrigger(hour=4, minute=27),
+        agent="jenna",
+        misfire_grace=900,
+    ),
+    ScheduledJob(
+        name="cross_agent_lessons",
+        description="Daily 5:10am — scan atoms from last 48h for cross-agent lesson signals (failure/correction keywords + named agents). Flags atoms.lesson_candidate=1 + lesson_agents list so skill_materializer can seed procedural skills from them.",
+        trigger=CronTrigger(hour=5, minute=10),
+        agent="system",
+    ),
+    ScheduledJob(
+        name="prompt_survival_report",
+        description="Weekly Sun 5:38am — per-prompt 7-day atom survival rate. Substrate for prompt A/B: produce two prompt_versions in parallel, this report shows which one's atoms the system kept. Slot picked to dodge db_vacuum_weekly (Sun 5:30am exclusive lock on brain.db).",
+        trigger=CronTrigger(day_of_week="sun", hour=5, minute=38),
+        agent="system",
     ),
     ScheduledJob(
         name="neo4j_backup",
@@ -511,8 +590,8 @@ JOB_SCHEDULE: list[ScheduledJob] = [
     ),
     ScheduledJob(
         name="backup_verify",
-        description="Monthly backup restore smoke test (1st of month, 4:30am)",
-        trigger=CronTrigger(day=1, hour=4, minute=30),
+        description="Monthly backup restore smoke test (1st of month, 4:45am - staggered off llm_usage_retention @04:30 which also touches SQLite / MinIO)",
+        trigger=CronTrigger(day=1, hour=4, minute=45),
         agent="system",
         misfire_grace=900,
     ),
@@ -524,7 +603,7 @@ JOB_SCHEDULE: list[ScheduledJob] = [
     #   02:00  - nightly catchup (existing)
     #   07:00  - morning digest (gmail/calendar overnight ingest)
     #   22:00  - evening rollup (session/activity during the day)
-    # All three outside the 9am-6pm Ollama/ChromaDB hot-work block.
+    # All three outside the 9am-6pm local embedder/Qdrant hot-work block.
     ScheduledJob(
         name="canonical_pipeline",
         description="Automated canonical promotion (3x daily: 02:00 / 07:00 / 22:00 PT)",
@@ -532,11 +611,12 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         agent="system",
         misfire_grace=900,
     ),
-    # Proactive reasoning (4x daily)
+    # Proactive reasoning (3x daily, off 9-18 PT work-hours block so the
+    # Sage LLM call doesn't contend with Chris's hands-on Claude sessions).
     ScheduledJob(
         name="proactive_check",
-        description="Proactive insights - schedule gaps, contradictions, trends (4x daily)",
-        trigger=CronTrigger(hour="7,13,19,1", minute=30),
+        description="Proactive insights - schedule gaps, contradictions, trends (3x daily, off work hours)",
+        trigger=CronTrigger(hour="7,20,1", minute=30),
         agent="sage",
     ),
     ScheduledJob(
@@ -608,15 +688,15 @@ JOB_SCHEDULE: list[ScheduledJob] = [
     ),
     ScheduledJob(
         name="entity_pages",
-        description="Weekly entity page generator - Sage synthesizes one hot entity per run (Sunday 4:30am)",
-        trigger=CronTrigger(day_of_week="sun", hour=4, minute=30),
+        description="Weekly entity page generator - Sage synthesizes one hot entity per run (Sunday 4:33am - staggered off session_rotate @04:30)",
+        trigger=CronTrigger(day_of_week="sun", hour=4, minute=33),
         agent="sage",
         misfire_grace=1800,
     ),
     ScheduledJob(
         name="answer_canonicalize",
-        description="Nightly query->canonical promoter (03:55am - off eval_run_extended @3:50 so canonical writes don't pollute eval scoring)",
-        trigger=CronTrigger(hour=3, minute=55),
+        description="Nightly query->canonical promoter (04:02am - staggered off sleep_consolidate @03:55 which contends for local embedder/LLM)",
+        trigger=CronTrigger(hour=4, minute=2),
         agent="system",
         misfire_grace=900,
     ),
@@ -662,11 +742,11 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         agent="system",
         misfire_grace=900,
     ),
-    # Reindex - off-hours only to avoid competing with Ollama/ChromaDB during work hours.
+    # Reindex - off-hours only to avoid competing with local embedder/Qdrant during work hours.
     # Was 5x daily (3,9,13,18,22); moved to 2x daily at 3:17 AM and 11:17 PM PST.
     ScheduledJob(
         name="reindex",
-        description="Full ChromaDB reindex (2x daily, off-hours)",
+        description="Full Qdrant reindex (2x daily, off-hours)",
         trigger=CronTrigger(hour="3,23", minute=17),
         agent="system",
         misfire_grace=900,
@@ -674,7 +754,7 @@ JOB_SCHEDULE: list[ScheduledJob] = [
     # ── New data source ingest (agent-distilled) ──────────
     ScheduledJob(
         name="openclaw_sessions_ingest",
-        description="OpenClaw agent session distillation via Jenna -> raw/inbox (6x/day off-peak, respects 9am-6pm no-Ollama rule)",
+        description="OpenClaw agent session distillation via Jenna -> raw/inbox (6x/day off-peak, respects 9am-6pm no-local-embedder rule)",
         trigger=CronTrigger(hour="0,3,6,19,21,23", minute=35),
         agent="jenna",
     ),
@@ -718,6 +798,16 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         name="skill_extract",
         description="Weekly skill graph indexing (Sunday 7:45am)",
         trigger=CronTrigger(day_of_week="sun", hour=7, minute=45),
+        agent="system",
+        misfire_grace=900,
+    ),
+    # Registry reconciliation + auto-attach — runs 5min after skill_extract
+    # so any new brain-learned-* skills get registered in skills.entries and
+    # attached to every agent without a manual `openclaw skills install`.
+    ScheduledJob(
+        name="skill_sync",
+        description="Reconcile ~/.openclaw/skills disk ↔ openclaw.json entries + agent attach (Sunday 7:50am, after skill_extract)",
+        trigger=CronTrigger(day_of_week="sun", hour=7, minute=50),
         agent="system",
         misfire_grace=900,
     ),
@@ -834,7 +924,7 @@ JOB_SCHEDULE: list[ScheduledJob] = [
     # 2026-04-16 Tier 2: quarterly prune_raw_orphaned - deletes entries in
     # raw/orphaned older than 180 days. Runs on 1st of Jan/Apr/Jul/Oct at
     # 04:25 local (well off the nightly window so it can't contend for
-    # ChromaDB or Ollama).
+    # Qdrant or local embedder).
     ScheduledJob(
         name="prune_raw_orphaned",
         description="Quarterly raw/orphaned prune (180d retention; 1st of Jan/Apr/Jul/Oct @ 04:25)",
@@ -859,7 +949,7 @@ JOB_SCHEDULE: list[ScheduledJob] = [
     # lose top-rank competitions on the same query cue. Runs 3:55am -
     # between answer_canonicalize (03:50) and focus_aggregate (04:35).
     # 2026-04-17: shifted 03:55 -> 03:58 to deconflict with sleep_consolidate
-    # (also at 03:55) - both are Ollama-heavy and were contending for GPU.
+    # (also at 03:55) - both are local-embedder-heavy and were contending for GPU.
     ScheduledJob(
         name="retrieval_inhibition",
         description="Nightly Bjork-style inhibition of consistent retrieval losers (03:58am)",
@@ -895,8 +985,8 @@ JOB_SCHEDULE: list[ScheduledJob] = [
     # brain keeps every dream, never deletes, ranks low by default.
     ScheduledJob(
         name="dream_replay",
-        description="Nightly REM-like generative conjecture synthesis (03:45 PT)",
-        trigger=CronTrigger(hour=3, minute=45),
+        description="Nightly REM-like generative conjecture synthesis (03:48 PT - staggered off memory_consolidation @03:45 which contends for local embedder/Qdrant)",
+        trigger=CronTrigger(hour=3, minute=48),
         agent="sage",
         misfire_grace=1800,
     ),
@@ -929,3 +1019,80 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         misfire_grace=900,
     ),
 ]
+
+
+RESOURCE_BUDGET_OVERRIDES: dict[str, tuple[str, tuple[str, ...]]] = {
+    # LLM/subscription CLI budget: serialize these so subscription sessions
+    # stay stable and no API-billed fallback is encouraged.
+    "daily_synthesis": ("standard", ("llm",)),
+    "weekly_synthesis": ("heavy", ("llm",)),
+    "monthly_synthesis": ("heavy", ("llm",)),
+    "brain_reflect": ("heavy", ("llm", "qdrant")),
+    "community_summaries": ("heavy", ("llm", "neo4j")),
+    "eval_proposal_triage": ("standard", ("llm", "sqlite")),
+    "canonical_quality_triage": ("heavy", ("llm", "sqlite")),
+    "llm_backlog_drain": ("standard", ("llm",)),
+    "profile_regen": ("heavy", ("llm", "qdrant")),
+    "recall_judge": ("heavy", ("llm", "qdrant", "sqlite")),
+    "proactive_check": ("standard", ("llm",)),
+    "entity_pages": ("heavy", ("llm", "neo4j")),
+    "answer_canonicalize": ("heavy", ("llm", "qdrant")),
+    "canonical_merge_draft": ("heavy", ("llm", "qdrant")),
+    "openclaw_sessions_ingest": ("heavy", ("llm", "qdrant")),
+    "claude_code_sessions_ingest": ("heavy", ("llm", "qdrant")),
+    "skill_extract": ("heavy", ("llm", "sqlite")),
+    "atoms_to_skills": ("heavy", ("llm", "sqlite")),
+    "schema_learner": ("heavy", ("llm", "sqlite")),
+    "dream_replay": ("heavy", ("llm", "qdrant")),
+    "schema_revision": ("heavy", ("llm", "sqlite")),
+    # Embedding / vector search budget: one-time heavy is fine, but routine
+    # background jobs should not overlap against the local embedder/Qdrant.
+    "personal_ingest": ("heavy", ("embedder", "qdrant")),
+    "pdf_ingest": ("heavy", ("embedder", "qdrant")),
+    "image_ingest": ("heavy", ("embedder", "qdrant")),
+    "contextual_embed_weekly": ("heavy", ("embedder", "qdrant", "index")),
+    "eval_run": ("heavy", ("embedder", "qdrant", "eval")),
+    "eval_run_extended": ("heavy", ("embedder", "qdrant", "eval")),
+    "entity_reconcile": ("heavy", ("embedder", "neo4j", "sqlite")),
+    "canonicalize_entities_dryrun": ("heavy", ("embedder", "neo4j")),
+    "lora_ab_gate": ("heavy", ("embedder", "qdrant", "eval")),
+    "embed_finetune": ("heavy", ("embedder", "training")),
+    "entity_resolution": ("heavy", ("embedder", "neo4j")),
+    "near_dedup": ("heavy", ("embedder", "qdrant", "sqlite")),
+    "self_eval": ("heavy", ("embedder", "qdrant", "eval")),
+    "reindex": ("heavy", ("embedder", "qdrant", "index")),
+    "code_index_refresh": ("heavy", ("embedder", "qdrant", "index")),
+    "hnsw_adaptive": ("heavy", ("qdrant", "eval")),
+    "training_pairs_generate": ("standard", ("qdrant", "training")),
+    "trust_recompute": ("heavy", ("embedder", "qdrant")),
+    "ltr_train": ("heavy", ("qdrant", "training")),
+    "raptor_build": ("heavy", ("embedder", "qdrant", "index")),
+    "episode_binder": ("heavy", ("embedder", "qdrant", "sqlite")),
+    "confidence_calibration": ("heavy", ("eval", "sqlite")),
+    # Exclusive-ish local maintenance budget.
+    "db_vacuum_weekly": ("heavy", ("sqlite",)),
+    "memory_lifecycle": ("heavy", ("sqlite", "qdrant")),
+    "canonical_pipeline": ("heavy", ("sqlite", "qdrant")),
+    "sleep_consolidate": ("heavy", ("sqlite", "qdrant")),
+    "canonical_compaction": ("heavy", ("sqlite", "qdrant")),
+    "graph_rebuild_mentions": ("heavy", ("neo4j", "sqlite")),
+    "graph_backfill_co_mention": ("heavy", ("neo4j", "sqlite")),
+    "neo4j_backup": ("heavy", ("neo4j", "backup")),
+    "backup_verify": ("heavy", ("backup", "sqlite")),
+    "memory_pruning": ("heavy", ("sqlite", "qdrant")),
+    "memory_pruning_active": ("heavy", ("sqlite", "qdrant")),
+    "re_examine_rejected": ("heavy", ("sqlite", "qdrant")),
+    "retrieval_inhibition": ("standard", ("sqlite", "qdrant")),
+}
+
+
+def _apply_resource_budgets() -> None:
+    for job in JOB_SCHEDULE:
+        resource_class, tags = RESOURCE_BUDGET_OVERRIDES.get(
+            job.name, (job.resource_class, job.resource_tags)
+        )
+        job.resource_class = resource_class
+        job.resource_tags = tuple(sorted(set(tags)))
+
+
+_apply_resource_budgets()

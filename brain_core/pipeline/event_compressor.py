@@ -70,6 +70,9 @@ def compress_month(month: str, events: list[dict]) -> str | None:
 
 
 def main() -> int:
+    from _watchdog import arm as _arm_watchdog
+
+    _arm_watchdog(600, tag="event_compressor")
     store = get_vector_store()
     cutoff_date = (datetime.now(UTC) - timedelta(days=CUTOFF_DAYS)).isoformat()
 

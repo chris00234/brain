@@ -27,6 +27,11 @@ try:
 except ImportError:
     BRAIN_CROSS_ENCODER_ENABLED = False
 
+try:
+    from brain_core.source_quality import source_quality_multiplier
+except ImportError:  # pragma: no cover - top-level import in scripts/tests
+    from source_quality import source_quality_multiplier
+
 
 def _sigmoid(x: float) -> float:
     """Clamp logits to [0, 1]. BGE-reranker-base outputs span ~[-10, 10]."""
@@ -34,6 +39,24 @@ def _sigmoid(x: float) -> float:
         return 1.0 / (1.0 + math.exp(-x))
     except OverflowError:
         return 0.0 if x < 0 else 1.0
+
+
+def _normalize_model_scores(scores: list[float]) -> list[float]:
+    """Normalize cross-encoder outputs to [0, 1].
+
+    Some local BGE snapshots return probability-like scores in [0, 1], while
+    older docs/examples describe logit-like outputs. Applying sigmoid to
+    probability-like scores collapses the whole batch around 0.5 and erases the
+    reranker signal. For [0, 1] outputs, use sqrt(score): it preserves ordering,
+    keeps true zero at zero, and spreads low-but-meaningful positive relevance.
+    """
+
+    if not scores:
+        return []
+    finite_scores = [s for s in scores if math.isfinite(s)]
+    if finite_scores and min(finite_scores) >= 0.0 and max(finite_scores) <= 1.0:
+        return [math.sqrt(max(0.0, min(1.0, s))) if math.isfinite(s) else 0.0 for s in scores]
+    return [_sigmoid(s) for s in scores]
 
 
 def rerank_with_cross_encoder(query: str, results: list[dict], top_k: int = 20) -> list[dict]:
@@ -45,7 +68,7 @@ def rerank_with_cross_encoder(query: str, results: list[dict], top_k: int = 20) 
 
     Every reranked row gets:
       - `cross_encoder_score` (sigmoid-normalized to [0, 1])
-      - `ce_blended_score` (20/80 blend of original score × CE, in the same
+      - `ce_blended_score` (20/80 blend of original score x CE, in the same
                             scale as upstream RRF/hybrid scores)
       - `score` overwritten with ce_blended_score so downstream sorts work
     """
@@ -54,10 +77,13 @@ def rerank_with_cross_encoder(query: str, results: list[dict], top_k: int = 20) 
 
     # Lazy-import the model so tests / non-/recall paths don't pay the load cost.
     try:
-        from cross_encoder_model import score_pairs
+        from brain_core.cross_encoder_model import score_pairs
     except Exception as e:
-        log.warning("cross_encoder_model unavailable, skipping rerank: %s", e)
-        return results
+        try:
+            from cross_encoder_model import score_pairs
+        except Exception:
+            log.warning("cross_encoder_model unavailable, skipping rerank: %s", e)
+            return results
 
     subset = results[:top_k]
     tail = results[top_k:]
@@ -77,13 +103,19 @@ def rerank_with_cross_encoder(query: str, results: list[dict], top_k: int = 20) 
     median = sorted(valid)[len(valid) // 2] if valid else 0.0
     filled_scores = [s if s != 0.0 else median for s in raw_scores]
 
-    # Normalize to [0, 1] via sigmoid
-    ce_normalized = [_sigmoid(s) for s in filled_scores]
+    # Normalize to [0, 1] while preserving probability-like model outputs.
+    ce_normalized = _normalize_model_scores(filled_scores)
 
-    # Blend 20% original × 80% CE (CE × 100 to match RRF score scale)
+    # Blend 20% original x 80% CE (CE x 100 to match RRF score scale)
     for r, ce_norm in zip(subset, ce_normalized, strict=False):
         original = float(r.get("score", 0))
         blended = original * 0.2 + ce_norm * 100 * 0.8
+        quality_mult = source_quality_multiplier(r, stage="cross_encoder")
+        if quality_mult != 1.0:
+            blended *= quality_mult
+            debug = dict(r.get("_debug") or {})
+            debug["source_quality_multiplier_cross_encoder"] = quality_mult
+            r["_debug"] = debug
         r["cross_encoder_score"] = round(ce_norm, 4)
         r["ce_blended_score"] = round(blended, 2)
         r["score"] = r["ce_blended_score"]

@@ -168,6 +168,9 @@ def _apply_updates(collection: str, updates: list[tuple[str, dict]]):
 
 
 if __name__ == "__main__":
+    from _watchdog import arm as _arm_watchdog
+
+    _arm_watchdog(600, tag="memory_consolidation")
     result = consolidate()
     print(json.dumps(result, indent=2))
     sys.exit(0 if result.get("status") == "ok" else 1)

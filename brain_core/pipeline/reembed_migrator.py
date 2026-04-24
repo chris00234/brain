@@ -88,6 +88,10 @@ def _derive_shadow_name(collection: str, model: str) -> str:
 def main():
     import argparse
 
+    from _watchdog import arm as _arm_watchdog
+
+    # Re-embeds can genuinely take a long time on large collections; 30min cap.
+    _arm_watchdog(1800, tag="reembed_migrator")
     parser = argparse.ArgumentParser(description="Re-embed a collection with current model")
     parser.add_argument("collection", help="Source collection name")
     parser.add_argument("--dry-run", action="store_true")

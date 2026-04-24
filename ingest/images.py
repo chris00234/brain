@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
-"""ingest/images.py — image OCR + optional OpenClaw vision captioning (M7-WS2b).
+"""ingest/images.py — image OCR + subscription-backed vision captioning.
 
 Walks ~/Pictures/brain-ingest/ (configurable), hashes each image, runs Docling's
 built-in OCR (Apple Vision via ocrmac on macOS) for text extraction. If OCR
 yields >=20 chars of clean text, that text is indexed as the image's caption
-in ChromaDB. Otherwise the image is logged but skipped — no expensive LLM
-fallback by default.
+in the vector store. Otherwise it tries brain_core.vision_llm, which defaults
+to `codex exec --image` through Chris's existing GPT/Codex subscription path.
 
-The OpenClaw vision dispatch path is wired but gated behind
-`BRAIN_IMAGE_VISION_DISPATCH=1`. When enabled (and a Sage MODEL.json with
-vision support exists), text-empty images get captioned via openclaw_dispatch
-to Sage with a vision-capable model. Defaults OFF to honor the
-"no extra cost / resource" constraint.
+Gemini REST remains explicit opt-in via `BRAIN_VISION_BACKEND=gemini`; the
+default path avoids separate API billing. The vision layer enforces a persistent
+breaker, content-hash cache, per-process CLI concurrency, and daily cap so image
+captioning does not monopolize the server.
 
 Hash-based dedupe: every image is keyed by its content SHA-256. State at
 logs/image-ingest-state.json. Cost tracker at logs/image-ingest-cost.jsonl.
@@ -22,15 +21,16 @@ Daily limit:
 Env vars:
   BRAIN_IMAGE_INGEST_DIR        — root dir (default ~/Pictures/brain-ingest)
   BRAIN_IMAGE_INGEST_DISABLED   — kill switch
-  BRAIN_IMAGE_VISION_DISPATCH   — opt-in to vision LLM fallback
   BRAIN_IMAGE_DAILY_CAP         — override daily cap
+  BRAIN_VISION_BACKEND          — codex_cli (default), gemini, or off
+  BRAIN_VISION_CLI_CONCURRENCY  — default 1
 
 CLI:
   ingest/images.py                       # scan default dir
   ingest/images.py --dir /path           # arbitrary dir
   ingest/images.py --file /path/img.png  # single file
   ingest/images.py --reingest            # ignore dedupe
-  ingest/images.py --dry-run             # OCR but don't write to Chroma
+  ingest/images.py --dry-run             # OCR/caption but don't write to vector store
 """
 
 from __future__ import annotations
@@ -83,7 +83,7 @@ def _log_failure(image_path: str, error: str) -> None:
                 )
                 + "\n"
             )
-    except Exception:
+    except Exception:  # noqa: S110 — failure logging is best-effort
         pass
 
 
@@ -104,7 +104,7 @@ def _record_cost(image_hash: str, method: str, cost_cents: float) -> None:
                 )
                 + "\n"
             )
-    except Exception:
+    except Exception:  # noqa: S110 — cost accounting is best-effort
         pass
 
 
@@ -185,13 +185,14 @@ def _ocr_image(image_path: Path) -> str:
 
 
 def _vision_dispatch(image_path: Path) -> str | None:
-    """Generate a rich caption via brain_core.vision_llm (Gemini 2.5 Flash).
+    """Generate a rich caption via brain_core.vision_llm.
 
     v3 (2026-04-14): previously gated by BRAIN_IMAGE_VISION_DISPATCH and
     returned None because openclaw_dispatch couldn't carry image bytes.
-    Now uses vision_llm.describe_image() which calls Gemini REST directly
-    (no SDK, no dependency bloat). Daily cap + content-hash cache enforced
-    inside vision_llm.
+    vision_llm now defaults to subscription CLI vision (`codex exec --image`)
+    and keeps Gemini REST behind explicit BRAIN_VISION_BACKEND=gemini opt-in.
+    Daily cap, persistent breaker, usage accounting, and content-hash cache
+    are enforced inside vision_llm.
 
     Returns the caption text or None on failure. Callers should fall back
     to OCR-only when None.
@@ -204,7 +205,7 @@ def _vision_dispatch(image_path: Path) -> str | None:
         return None
 
     if not vision_llm.is_configured():
-        log.debug("vision_llm not configured (no GEMINI_API_KEY)")
+        log.debug("vision_llm not configured")
         return None
 
     try:
@@ -248,7 +249,8 @@ def ingest_image(
         caption = ocr_text
         cost_cents = 0.0
     else:
-        # Try vision dispatch (gated by env var; off by default)
+        # Try subscription-backed vision dispatch, bounded by the daily cap
+        # here and the breaker/concurrency/cache inside vision_llm.
         if _vision_dispatches_today() >= daily_cap:
             return {
                 "path": str(image_path),
@@ -260,7 +262,7 @@ def ingest_image(
         if vision_caption:
             caption = vision_caption
             method = "vision"
-            cost_cents = 0.0  # Gemini 2.5 Flash free tier (separate quota from OpenAI)
+            cost_cents = 0.0  # subscription CLI/OCR path; no separate API billing
         else:
             cost_cents = 0.0
 
@@ -415,7 +417,7 @@ def main() -> int:
         )
         if not args.dry_run:
             _save_state(state)
-        print(json.dumps(result, indent=2, ensure_ascii=False))
+        print(json.dumps(result, indent=2, ensure_ascii=False))  # noqa: T201
         return 0 if result.get("status") in {"ingested", "skipped_dedupe", "dry_run"} else 1
 
     image_dir = args.dir or Path(os.environ.get("BRAIN_IMAGE_INGEST_DIR") or DEFAULT_IMAGE_DIR)
@@ -429,7 +431,7 @@ def main() -> int:
     if not args.dry_run:
         _save_state(state)
 
-    print(json.dumps({"image_dir": str(image_dir), "total_files": len(results)}, indent=2))
+    print(json.dumps({"image_dir": str(image_dir), "total_files": len(results)}, indent=2))  # noqa: T201
     return 0
 
 

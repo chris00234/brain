@@ -51,7 +51,7 @@ import logging
 import sqlite3
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -144,9 +144,18 @@ def _ensure_schema() -> None:
 
 
 @contextmanager
-def _connect():
+def _connect(autocommit: bool = True) -> Iterator[sqlite3.Connection]:
+    """Open an autonomy.db connection.
+
+    ``autocommit=True`` (legacy default) keeps every statement in its own
+    transaction — fine for enqueue / stats / simple reads. The drain loop
+    passes ``autocommit=False`` so per-row UPDATEs commit explicitly via
+    `_drain_conn_commit`; that prevents a handler-succeeded + update-failed
+    race from losing idempotency and re-running side-effects on next drain.
+    """
     _ensure_schema()
-    conn = sqlite3.connect(str(AUTONOMY_DB), timeout=10.0, isolation_level=None)
+    isolation = None if autocommit else "DEFERRED"
+    conn = sqlite3.connect(str(AUTONOMY_DB), timeout=10.0, isolation_level=isolation)
     conn.row_factory = sqlite3.Row
     try:
         yield conn
@@ -282,9 +291,7 @@ def _wire_default_handlers() -> None:
                 payload.get("text", "")[:1500],
                 payload.get("chroma_id", ""),
             )
-            if n < 0:
-                return False  # LLM down, keep pending
-            return True
+            return n >= 0  # negative means LLM down; keep pending
         except Exception as e:
             log.debug("handle_entities failed: %s", e)
             return False
@@ -374,13 +381,10 @@ def _wire_default_handlers() -> None:
             severity = (payload.get("severity", "info") or "info").lower()
             # Normalize severity aliases
             if severity in ("critical", "urgent"):
-                normalized = "urgent"
                 prefix = "[DELAYED URGENT] "
             elif severity in ("warning", "warn", "error"):
-                normalized = "warn"
                 prefix = "[DELAYED WARN] "
             else:
-                normalized = "info"
                 prefix = "[DELAYED] "
             result = dispatch(
                 agent="jenna",
@@ -461,7 +465,7 @@ def drain(limit: int = DEFAULT_DRAIN_LIMIT, abort_on_breaker: bool = True) -> di
     abandoned = 0
 
     try:
-        with _connect() as conn:
+        with _connect(autocommit=False) as conn:
             # Abandon entries past TTL first
             for kind in VALID_KINDS:
                 cutoff = _ttl_cutoff(kind)
@@ -471,6 +475,7 @@ def drain(limit: int = DEFAULT_DRAIN_LIMIT, abort_on_breaker: bool = True) -> di
                     (kind, cutoff),
                 )
                 abandoned += abandon_rows.rowcount or 0
+            conn.commit()
 
             # Pull pending entries — order by created_at ASC so oldest wins
             rows = conn.execute(
@@ -540,6 +545,12 @@ def drain(limit: int = DEFAULT_DRAIN_LIMIT, abort_on_breaker: bool = True) -> di
                             "last_attempt_at=?, retry_count=?, last_error=? WHERE id=?",
                             (_now_iso(), new_retry, err_text, rid),
                         )
+                # Commit per-row so a subsequent handler crash can't undo the
+                # status update of a successfully-drained row.
+                try:
+                    conn.commit()
+                except sqlite3.Error as _commit_exc:
+                    log.warning("llm_backlog.drain commit failed rid=%s: %s", rid, _commit_exc)
     except sqlite3.Error as e:
         log.warning("llm_backlog.drain sqlite error: %s", e)
 

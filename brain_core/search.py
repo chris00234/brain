@@ -64,7 +64,10 @@ def _cache_key(text: str) -> str:
     except ImportError:
         _model = "blaifa/multilingual-e5-large-instruct"
     # Scope by model so stale vectors from a prior model can't hit.
-    return hashlib.md5(f"{_model}:{text[:1200]}".encode()).hexdigest()
+    # Must match the 1000-char truncation applied to ``prompted`` below —
+    # otherwise two texts that only differ past char 1000 get distinct
+    # cache keys but identical embeddings and waste an Ollama round-trip.
+    return hashlib.md5(f"{_model}:{text[:1000]}".encode()).hexdigest()
 
 
 def get_embedding(text, prefix="query"):

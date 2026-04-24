@@ -648,7 +648,7 @@ def _neo4j_track_access(memory_ids: list[str], now: str) -> None:
 def reinforce_memory(memory_id: str, success: bool) -> None:
     """MemRL pattern: bump utility_score when a memory proves useful, decrement when not.
 
-    Also updates ChromaDB metadata trust_score on the semantic_memory record so the
+    Also updates Qdrant payload trust_score on the semantic_memory record so the
     search ranker (Phase 1E) can use it.
     """
     # Phase 3+4 atoms truth layer + SM-2 spaced repetition.

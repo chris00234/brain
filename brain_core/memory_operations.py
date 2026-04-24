@@ -132,7 +132,10 @@ def classify_operation(
         # For preferences: structurally identical sentences with DIFFERENT subjects
         # ("prefers React" vs "prefers Vue") have near-zero cosine distance but
         # represent a preference CHANGE, not a duplicate. Check subject overlap.
-        if cand_dist < DUPLICATE_COSINE and cand_conf >= new_confidence:
+        # Confidence gate is `cand_conf >= new_confidence - 0.1` so a tied or
+        # near-tied incoming atom (synthesis often emits 0.92 against an existing
+        # 0.92) still routes to NOOP instead of becoming a fresh ADD/UPDATE.
+        if cand_dist < DUPLICATE_COSINE and cand_conf >= new_confidence - 0.1:
             if is_pref:
                 new_subj = _extract_preference_subject(new_content)
                 old_subj = _extract_preference_subject(cand_doc)
@@ -151,6 +154,15 @@ def classify_operation(
             old_tokens = _tokenize(cand_doc)
             overlap = _jaccard(new_tokens, old_tokens)
             diagnostics["top_overlap"] = round(overlap, 3)
+
+            # Synonym refresh gate: same embedding neighborhood + meaningful
+            # token overlap + roughly equal confidence = additive paraphrase
+            # ("personal knowledge pipeline" vs "personal brain pipeline").
+            # Without this gate every synthesis pass produced a fresh UPDATE,
+            # extending a supersession chain that contradiction detection then
+            # flagged 100+ times for the same fact.
+            if not is_pref and overlap >= 0.4 and abs(new_confidence - cand_conf) <= 0.1:
+                return ("NOOP", None, {**diagnostics, "reason": "paraphrase refresh"})
 
             # Semantically similar but lexically different = refinement/update
             if overlap < TOKEN_OVERLAP_MAX and new_confidence >= (cand_conf - 0.1):

@@ -2,7 +2,7 @@
 """Archive old OpenClaw agent session checkpoints.
 
 Context: On 2026-04-17 the jenna agent session accumulated 499MB — a
-103MB live jsonl + 4× ~90-100MB checkpoint files from prior compactions.
+103MB live jsonl + 4x ~90-100MB checkpoint files from prior compactions.
 Checkpoints are historical snapshots OpenClaw wrote during auto-compaction;
 it doesn't actively read them, so they accumulate indefinitely.
 

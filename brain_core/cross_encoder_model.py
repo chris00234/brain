@@ -11,28 +11,53 @@ Korean queries the accuracy of the multilingual model.
 Both models are lazily loaded so cold-start stays light. Override via env:
   BRAIN_CROSS_ENCODER_MODEL=BAAI/bge-reranker-v2-m3   (forces single model)
   BRAIN_CROSS_ENCODER_ADAPTIVE=false                   (disables dispatcher)
+  BRAIN_CROSS_ENCODER_LOCAL_FILES_ONLY=false           (allow first download)
 """
 
 from __future__ import annotations
 
+import gc
 import hashlib
 import logging
 import os
 import re
+import sys
 import threading
+import time
 from collections import OrderedDict
 
 log = logging.getLogger("brain.cross_encoder_model")
 
+# Direct imports of this module can happen outside server.py, so keep the
+# low-noise runtime defaults here too before sentence_transformers/joblib load.
+os.environ.setdefault("LOKY_MAX_CPU_COUNT", "8")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
+# This module is imported both as `brain_core.cross_encoder_model` and, from
+# older brain_core scripts that put brain_core/ on sys.path, as
+# `cross_encoder_model`. Keep both names bound to the same module object so the
+# model singleton and score cache cannot split into two independent copies.
+_THIS_MODULE = sys.modules[__name__]
+if __name__ == "brain_core.cross_encoder_model":
+    sys.modules.setdefault("cross_encoder_model", _THIS_MODULE)
+elif __name__ == "cross_encoder_model":
+    sys.modules.setdefault("brain_core.cross_encoder_model", _THIS_MODULE)
+
 _BASE_NAME = os.getenv("BRAIN_CROSS_ENCODER_BASE", "BAAI/bge-reranker-base")
 _BI_NAME = os.getenv("BRAIN_CROSS_ENCODER_BILINGUAL", "BAAI/bge-reranker-v2-m3")
 _FORCE_MODEL = os.getenv("BRAIN_CROSS_ENCODER_MODEL", "").strip()
-_ADAPTIVE = os.getenv("BRAIN_CROSS_ENCODER_ADAPTIVE", "false").lower() in ("true", "1", "yes")
+# Default on — brain operates bilingual (Korean + English). With this off
+# every Korean query goes through the English-only base model which has
+# measurably worse Korean relevance. Kill switch via BRAIN_CROSS_ENCODER_ADAPTIVE=false.
+_ADAPTIVE = os.getenv("BRAIN_CROSS_ENCODER_ADAPTIVE", "true").lower() in ("true", "1", "yes")
 _DEVICE_OVERRIDE = os.getenv("BRAIN_CROSS_ENCODER_DEVICE")  # "mps" | "cpu" | "cuda"
+_LOCAL_FILES_ONLY = os.getenv("BRAIN_CROSS_ENCODER_LOCAL_FILES_ONLY", "true").lower() in ("true", "1", "yes")
 
 _models: dict[str, object] = {}
+_model_last_used: dict[str, float] = {}
 _load_locks: dict[str, threading.Lock] = {}
 _global_lock = threading.Lock()
+_IDLE_TTL_SEC = int(os.getenv("BRAIN_CE_MODEL_IDLE_TTL_SEC", "900"))
 
 _KOREAN_RE = re.compile(r"[\uac00-\ud7a3]")  # Hangul syllables
 
@@ -50,11 +75,11 @@ _cache_misses = 0
 
 
 def _doc_hash(text: str) -> str:
-    return hashlib.sha1((text or "")[:1500].encode("utf-8", "replace")).hexdigest()[:16]
+    return hashlib.sha1((text or "")[:1500].encode("utf-8", "replace")).hexdigest()[:16]  # noqa: S324
 
 
 def _query_hash(text: str) -> str:
-    return hashlib.sha1((text or "").encode("utf-8", "replace")).hexdigest()[:16]
+    return hashlib.sha1((text or "").encode("utf-8", "replace")).hexdigest()[:16]  # noqa: S324
 
 
 def cache_stats() -> dict:
@@ -83,12 +108,29 @@ def _device() -> str:
             return "mps"
         if torch.cuda.is_available():
             return "cuda"
-    except Exception:
-        pass
+    except Exception as exc:
+        log.debug("device detection failed: %s", exc)
     return "cpu"
 
 
-def _load_model(name: str):
+def _disable_tqdm_mp_lock() -> None:
+    """Avoid a tqdm multiprocessing write lock during model-load progress bars.
+
+    sentence-transformers/transformers use tqdm while loading model weights.
+    tqdm's default multiprocessing RLock creates a named `/loky-*` semaphore;
+    under the launchd-hosted FastAPI process it survives until Python shutdown
+    and pollutes server.err.log with resource_tracker warnings. A thread-only
+    tqdm lock is enough here because model warmup does not fork workers.
+    """
+    try:
+        from tqdm.std import TqdmDefaultWriteLock
+
+        TqdmDefaultWriteLock.mp_lock = None
+    except Exception as exc:
+        log.debug("could not disable tqdm multiprocessing lock: %s", exc)
+
+
+def _load_model(name: str) -> object:
     """Lazy singleton per model name. Safe under thread contention."""
     if name in _models:
         return _models[name]
@@ -98,6 +140,15 @@ def _load_model(name: str):
     with _load_locks[name]:
         if name in _models:
             return _models[name]
+        if _LOCAL_FILES_ONLY:
+            os.environ.setdefault("HF_HUB_OFFLINE", "1")
+            os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+            from huggingface_hub import snapshot_download
+
+            model_ref = snapshot_download(name, local_files_only=True)
+        else:
+            model_ref = name
+        _disable_tqdm_mp_lock()
         from sentence_transformers import CrossEncoder
 
         device = _device()
@@ -105,10 +156,43 @@ def _load_model(name: str):
         # max_length=384: docs are truncated to 1500 chars (~375 BGE tokens)
         # upstream in score_pairs, so 512-token model windows waste ~25% of
         # every forward pass on padding. 384 covers the 1500-char ceiling
-        # with 9 tokens of headroom. Saves ~15–30ms per CE batch on MPS.
-        _models[name] = CrossEncoder(name, device=device, max_length=384)
+        # with 9 tokens of headroom. Saves ~15-30ms per CE batch on MPS.
+        _models[name] = CrossEncoder(model_ref, device=device, max_length=384, local_files_only=_LOCAL_FILES_ONLY)
+        _model_last_used[name] = time.monotonic()
         log.info("cross-encoder %s loaded (max_length=384)", name)
     return _models[name]
+
+
+def _evict_idle_models() -> list[str]:
+    """Unload non-base CE models after an idle window to preserve RAM."""
+
+    if _IDLE_TTL_SEC <= 0:
+        return []
+    now = time.monotonic()
+    evicted: list[str] = []
+    with _global_lock:
+        for name in list(_models):
+            if name == _BASE_NAME or (_FORCE_MODEL and name == _FORCE_MODEL):
+                continue
+            last_used = _model_last_used.get(name, now)
+            if now - last_used < _IDLE_TTL_SEC:
+                continue
+            _models.pop(name, None)
+            _model_last_used.pop(name, None)
+            evicted.append(name)
+    if evicted:
+        gc.collect()
+        try:
+            import torch
+
+            if hasattr(torch, "mps") and hasattr(torch.mps, "empty_cache"):
+                torch.mps.empty_cache()
+            elif torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception as exc:
+            log.debug("cross-encoder cache cleanup failed: %s", exc)
+        log.info("evicted idle cross-encoder models: %s", ", ".join(evicted))
+    return evicted
 
 
 def _select_name(query: str) -> str:
@@ -135,6 +219,7 @@ def score_pairs(query: str, docs: list[str]) -> list[float]:
     if not docs:
         return []
     try:
+        _evict_idle_models()
         name = _select_name(query)
         qh = _query_hash(query)
 
@@ -160,6 +245,7 @@ def score_pairs(query: str, docs: list[str]) -> list[float]:
             model = _load_model(name)
             pairs = [(query, (d or "")[:1500]) for d in miss_docs]
             raw = model.predict(pairs, show_progress_bar=False, convert_to_numpy=True)
+            _model_last_used[name] = time.monotonic()
             fresh = [float(s) for s in raw]
             with _cache_lock:
                 for i, score in zip(miss_indices, fresh, strict=False):
@@ -177,10 +263,14 @@ def score_pairs(query: str, docs: list[str]) -> list[float]:
 
 
 def warmup() -> bool:
-    """Force-load both models at startup so first-request latency is clean.
+    """Preload the English base cross-encoder at startup.
 
-    Returns True on full success, False if either model failed (the dispatcher
-    still falls back to whichever model is available at query time).
+    2026-04-22: bilingual v2-m3 model (~568 MB) is NOT preloaded. It lazy-
+    loads on the first Korean query via `_load_model` in the score path.
+    Trade-off: ~500 MB RAM saved vs +1-2s cold start on the first Korean
+    query per process. Korean hit rate is ~20-30% of queries so the savings
+    dominate. Override with BRAIN_CE_EAGER_WARMUP=true to restore old
+    behaviour.
     """
     ok = True
     try:
@@ -189,7 +279,8 @@ def warmup() -> bool:
     except Exception as e:
         log.warning("base cross-encoder warmup failed: %s", e)
         ok = False
-    if _ADAPTIVE and not _FORCE_MODEL:
+    eager = os.getenv("BRAIN_CE_EAGER_WARMUP", "").strip().lower() in ("true", "1", "yes")
+    if eager and _ADAPTIVE and not _FORCE_MODEL:
         try:
             _load_model(_BI_NAME)
             score_pairs("워밍업 테스트", ["이 문서는 한국어 교차 인코더 워밍업용입니다"])

@@ -86,7 +86,11 @@ def populate(client: QdrantClient, collection: str, *, dry_run: bool) -> dict:
                 stats["updated"] += len(chunk)
             else:
                 try:
-                    client.update_vectors(collection_name=collection, points=chunk, wait=False)
+                    # wait=True on the vector write — if the sparse upsert is
+                    # dropped (WAL flush race, Qdrant restart) but the version
+                    # stamp lands, future smart-skip runs would permanently
+                    # skip the row with an empty sparse slot.
+                    client.update_vectors(collection_name=collection, points=chunk, wait=True)
                     # Stamp version so future runs can smart-skip these rows.
                     for pid, patch in patches_chunk:
                         client.set_payload(

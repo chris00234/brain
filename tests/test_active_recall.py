@@ -1,6 +1,6 @@
 """tests/test_active_recall.py — unit tests for the per-turn thalamus.
 
-Verifies intent routing, canonical guarantees, dedup, confidence sentinel,
+Verifies intent routing, canonical guarantees, dedup, optional confidence sentinel,
 budget enforcement, and fail-open behavior. Uses in-memory sqlite for the
 session_context reads so tests don't touch production autonomy.db.
 
@@ -11,6 +11,7 @@ Run:
 from __future__ import annotations
 
 import sys
+import types
 from pathlib import Path
 from unittest.mock import patch
 
@@ -85,6 +86,14 @@ def test_intent_matches_visual():
     matches = active_recall._match_canonical_routes("내가 보낸 사진 뭐였지?")
     intents = [m.intent for m in matches]
     assert "visual" in intents
+
+
+def test_visual_intent_does_not_match_image_backend_discussion():
+    matches = active_recall._match_canonical_routes(
+        "Gemini API 말고 GPT subscription CLI로 이미지 캡션 처리 가능해?"
+    )
+    intents = [m.intent for m in matches]
+    assert "visual" not in intents
 
 
 def test_no_intent_for_generic_query():
@@ -170,6 +179,95 @@ def test_apply_decay_filter_unseen_block_passes():
     assert survivors == [block]
 
 
+def test_semantic_blocks_filters_low_score_and_near_duplicates(monkeypatch):
+    fake_search = types.SimpleNamespace(
+        search_all=lambda *args, **kwargs: {
+            "results": [
+                {
+                    "id": "a",
+                    "title": "Claude subscription policy",
+                    "content": (
+                        "OpenClaw jenna session (2026-04-01)\n"
+                        "Signal: preference\n"
+                        "Chris wants Claude through OpenClaw subscription and avoid extra API usage."
+                    ),
+                    "score": 95,
+                    "collection": "canonical",
+                    "path": "/a.md",
+                },
+                {
+                    "id": "b",
+                    "title": "Claude subscription policy duplicate",
+                    "content": (
+                        "OpenClaw jenna session (2026-04-01)\n"
+                        "Signal: decision\n"
+                        "Chris wants Claude through OpenClaw subscription and avoid extra paid API usage."
+                    ),
+                    "score": 94,
+                    "collection": "canonical",
+                    "path": "/b.md",
+                },
+                {
+                    "id": "c",
+                    "title": "Weak",
+                    "content": "weak optional context",
+                    "score": 50,
+                    "collection": "canonical",
+                    "path": "/c.md",
+                },
+            ]
+        }
+    )
+    monkeypatch.setitem(sys.modules, "search_unified", fake_search)
+
+    blocks = active_recall._semantic_blocks("subscription api cost", [], set(), limit=5)
+    assert len(blocks) == 1
+    assert blocks[0].title == "Claude subscription policy"
+    assert blocks[0].score == 0.95
+
+
+def test_semantic_blocks_suppresses_generic_summary_titles(monkeypatch):
+    fake_search = types.SimpleNamespace(
+        search_all=lambda *args, **kwargs: {
+            "results": [
+                {
+                    "id": "summary-noise",
+                    "title": "Summary (part 2)",
+                    "content": "hook supplied strings agent name session id",
+                    "score": 99,
+                    "collection": "canonical",
+                    "path": "/summary.md",
+                }
+            ]
+        }
+    )
+    monkeypatch.setitem(sys.modules, "search_unified", fake_search)
+
+    blocks = active_recall._semantic_blocks("UserPromptSubmit hook 여기서 나오는거", [], set(), limit=5)
+    assert blocks == []
+
+
+def test_semantic_blocks_requires_prompt_overlap(monkeypatch):
+    fake_search = types.SimpleNamespace(
+        search_all=lambda *args, **kwargs: {
+            "results": [
+                {
+                    "id": "cloudflare",
+                    "title": "Cloudflare token format",
+                    "content": "Cloudflare API token length and auth header mapping",
+                    "score": 99,
+                    "collection": "experience",
+                    "path": "/cloudflare.md",
+                }
+            ]
+        }
+    )
+    monkeypatch.setitem(sys.modules, "search_unified", fake_search)
+
+    blocks = active_recall._semantic_blocks("UserPromptSubmit hook 여기서 나오는거", [], set(), limit=5)
+    assert blocks == []
+
+
 # ── Budget enforcement ───────────────────────────────────
 
 
@@ -241,6 +339,15 @@ def test_confidence_sentinel_has_source_tag():
     assert "no canonical" in sentinel.content.lower()
 
 
+def test_confidence_sentinel_disabled_by_default():
+    assert active_recall._confidence_sentinel_enabled() is False
+
+
+def test_confidence_sentinel_can_be_opted_in(monkeypatch):
+    monkeypatch.setenv("BRAIN_ACTIVE_RECALL_CONFIDENCE_SENTINEL", "1")
+    assert active_recall._confidence_sentinel_enabled() is True
+
+
 # ── build_injection end-to-end ──────────────────────────
 
 
@@ -264,7 +371,8 @@ def test_build_injection_fails_open_on_search_error(monkeypatch):
     assert "blocks" in result
 
 
-def test_build_injection_returns_latency_ms():
+def test_build_injection_returns_latency_ms(monkeypatch):
+    monkeypatch.setattr(active_recall, "_semantic_blocks", lambda *args, **kwargs: [])
     result = active_recall.build_injection(
         prompt="random fallback query",
         session_id="t-lat",
@@ -272,11 +380,27 @@ def test_build_injection_returns_latency_ms():
         agent="claude",
     )
     assert "latency_ms" in result
+    assert "quality" in result
+    assert result["quality"]["block_count"] == len(result["blocks"])
+    assert not any(b.get("source") == "confidence_sentinel" for b in result["blocks"])
     assert isinstance(result["latency_ms"], int)
 
 
-def test_build_injection_design_query_returns_canonical():
+def test_build_injection_can_include_opt_in_confidence_sentinel(monkeypatch):
+    monkeypatch.setenv("BRAIN_ACTIVE_RECALL_CONFIDENCE_SENTINEL", "1")
+    monkeypatch.setattr(active_recall, "_semantic_blocks", lambda *args, **kwargs: [])
+    result = active_recall.build_injection(
+        prompt="random fallback query",
+        session_id="t-lat-sentinel",
+        turn_idx=0,
+        agent="codex",
+    )
+    assert any(b.get("source") == "confidence_sentinel" for b in result["blocks"])
+
+
+def test_build_injection_design_query_returns_canonical(monkeypatch):
     """Real end-to-end smoke test: design question returns canonical blocks."""
+    monkeypatch.setattr(active_recall, "_semantic_blocks", lambda *args, **kwargs: [])
     result = active_recall.build_injection(
         prompt="프론트엔드 디자인 어떻게 해?",
         session_id="t-e2e",
@@ -289,8 +413,7 @@ def test_build_injection_design_query_returns_canonical():
     # If canonical DESIGN.md exists on disk, it should surface
     blocks = result.get("blocks", [])
     has_canonical = any(b.get("source") == "canonical" for b in blocks)
-    # Either canonical hits OR confidence sentinel if paths missing
-    assert has_canonical or any(b.get("source") == "confidence_sentinel" for b in blocks)
+    assert has_canonical or blocks == []
 
 
 # ── Seen registry round-trip ────────────────────────────

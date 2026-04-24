@@ -28,6 +28,13 @@ Dependencies: scipy + scikit-learn (already in brain venv via .venv).
 
 from __future__ import annotations
 
+import os
+
+# joblib/loky spam the stderr with a sysctl-not-found traceback on every task
+# because launchd strips /usr/sbin from PATH. Set the CPU count explicitly so
+# joblib skips the probe entirely and keeps err logs readable.
+os.environ.setdefault("LOKY_MAX_CPU_COUNT", "8")
+
 import json
 import logging
 import sqlite3
@@ -190,6 +197,7 @@ def cluster() -> dict:
         c["preview"] = [{"id": a, "text": previews.get(a, "")} for a in c["atoms"][:5]]
 
     # Persist to brain_config so canonical_compaction (Sun 06:00) can consume
+    conn = None
     try:
         conn = sqlite3.connect(str(AUTONOMY_DB))
         conn.execute(
@@ -211,9 +219,11 @@ def cluster() -> dict:
             ),
         )
         conn.commit()
-        conn.close()
     except Exception as exc:
         log.warning("candidate write failed: %s", exc)
+    finally:
+        if conn is not None:
+            conn.close()
 
     return {
         "status": "ok",
@@ -226,5 +236,11 @@ def cluster() -> dict:
 
 
 if __name__ == "__main__":
+    from _watchdog import arm as _arm_watchdog
+
+    # Spectral clustering on up to 2000-node graphs plus sklearn k-means —
+    # bounded-risk but adding a cap so a degenerate eigendecomposition
+    # can't wedge the scheduler subprocess reaper.
+    _arm_watchdog(600, tag="schema_learner")
     result = cluster()
     print(json.dumps(result, indent=2, ensure_ascii=False))

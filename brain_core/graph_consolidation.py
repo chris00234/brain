@@ -132,12 +132,15 @@ def run_consolidation() -> dict:
 
     # Phase 4: Cluster detection (find strongly connected subgraphs)
     try:
+        # elementId() replaces deprecated id() in Neo4j 5; the ordering
+        # is lexicographic on the stable element id string, which is good
+        # enough to dedupe each unordered triangle {a,b,c} to a single row.
         triangles = run_query(
             "MATCH (a:Entity)-[r1:RELATES_TO]-(b:Entity)-[r2:RELATES_TO]-(c:Entity)-[r3:RELATES_TO]-(a) "
             "WHERE coalesce(r1.weight, 0.5) > 0.2 "
             "  AND coalesce(r2.weight, 0.5) > 0.2 "
             "  AND coalesce(r3.weight, 0.5) > 0.2 "
-            "  AND id(a) < id(b) AND id(b) < id(c) "
+            "  AND elementId(a) < elementId(b) AND elementId(b) < elementId(c) "
             "RETURN [a.name, b.name, c.name] AS cluster, "
             "  (coalesce(r1.weight,0.5) + coalesce(r2.weight,0.5) + coalesce(r3.weight,0.5)) / 3.0 AS strength "
             "ORDER BY strength DESC LIMIT 10"

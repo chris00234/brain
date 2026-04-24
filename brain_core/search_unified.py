@@ -1,13 +1,13 @@
 #!/opt/homebrew/bin/python3
-"""Unified search gateway — fans out to ChromaDB, canonical knowledge, and Obsidian vault.
+"""Unified search gateway — fans out to Qdrant, canonical knowledge, and Obsidian vault.
 
 Usage:
   search_unified.py <query> [-n 5] [--source rag,canonical,obsidian] [--json] [--domain <domain>]
 
 Sources:
-  rag       — ChromaDB collections (knowledge, experience, context, semantic_memory)
+  rag       — Qdrant collections (knowledge, experience, semantic_memory, personal, code)
   canonical — Canonical + distilled notes in ~/server/knowledge/
-  obsidian  — Local Obsidian vault mirror
+  obsidian  — Qdrant `obsidian` collection (local vault mirror, reindexed nightly)
 
 Results are deduplicated and ranked by normalized score with source trust weighting.
 """
@@ -15,12 +15,16 @@ Results are deduplicated and ranked by normalized score with source trust weight
 import argparse
 import atexit
 import json
+import logging
 import re
 import sqlite3
 import subprocess
 import sys
 import threading
+from functools import lru_cache
 from concurrent.futures import ThreadPoolExecutor as _TPE
+
+log = logging.getLogger("brain.search_unified")
 
 _search_bg_pool = _TPE(max_workers=2, thread_name_prefix="search_bg")
 _search_fanout_pool = _TPE(max_workers=6, thread_name_prefix="search_fanout")
@@ -202,7 +206,7 @@ _ALL_COLLECTIONS = [
 
 
 def search_rag(query, limit, where=None, collections=None):
-    """Run hybrid ChromaDB search. Prefers in-process (no Python cold start)
+    """Run hybrid Qdrant search. Prefers in-process (no Python cold start)
     when the search module imported successfully; falls back to subprocess
     otherwise so the CLI path stays portable.
     """
@@ -218,7 +222,10 @@ def search_rag(query, limit, where=None, collections=None):
             return _rag_search.hybrid_search(
                 query, cols, limit, use_keyword=True, where=where, deduplicate=False
             )
-        except Exception:
+        except Exception as exc:
+            # Surface backend failures so monitoring distinguishes "no match"
+            # from "Qdrant is down" instead of silently returning empty.
+            log.warning("search_rag in-process hybrid_search failed: %s", exc)
             return []
 
     # Fallback: subprocess (legacy path). Use the running Python (sys.executable)
@@ -248,7 +255,8 @@ def search_canonical(query, limit, domain=None):
                 for score, path, metadata, body in note_hits
             ]
             return results[:limit]
-        except Exception:
+        except Exception as exc:
+            log.warning("search_canonical in-process failed: %s", exc)
             return []
 
     # Fallback: subprocess (legacy path). Use sys.executable to match parent venv.
@@ -278,12 +286,12 @@ def search_canonical(query, limit, domain=None):
 
 
 def search_obsidian(query, limit):
-    """Search Obsidian content via the ChromaDB 'obsidian' collection.
+    """Search Obsidian content via the Qdrant 'obsidian' collection.
 
     Previously did a full rglob("*.md") disk scan — O(n) per query, unbounded
     at scale. The obsidian collection is already populated by the scheduled
-    reindex job, so searching through ChromaDB is both faster and consistent
-    with how every other collection is searched.
+    reindex job, so searching through the vector store is both faster and
+    consistent with how every other collection is searched.
     """
     return search_rag(query, limit, collections=["obsidian"])
 
@@ -294,7 +302,7 @@ def normalize_rag_result(r):
     trust = 1.0 if is_canonical else SOURCE_TRUST.get(collection, 0.7)
     tier = 3 if is_canonical else (2 if r.get("type", "") == "distilled-note" else 1)
     return {
-        "id": r.get("id", ""),  # ChromaDB doc id — needed for reinforce-on-access (R10 C1)
+        "id": r.get("id", ""),  # Qdrant point id — needed for reinforce-on-access (R10 C1)
         "score": round(r.get("score", 0) * 100 * trust, 2),
         "source_type": "rag",
         "collection": collection,
@@ -324,6 +332,7 @@ def normalize_canonical_result(r, query=""):
     trust = SOURCE_TRUST.get(source_type, 0.9)
     raw_score = r.get("rank_score", 0)
     normalized = min(raw_score, 200) / 200 * 100
+    raw_metadata = r.get("metadata", {}) or {}
 
     # Penalize canonical results that don't share tokens with the query.
     # Without this, recent high-confidence canonical notes dominate every search
@@ -352,9 +361,14 @@ def normalize_canonical_result(r, query=""):
         "trust_tier": 3 if source_type == "canonical" else 2,
         "metadata": {
             "id": r.get("id"),
-            "domain": r.get("metadata", {}).get("domain"),
-            "confidence": r.get("metadata", {}).get("confidence"),
-            "review_state": r.get("metadata", {}).get("review_state"),
+            "domain": raw_metadata.get("domain"),
+            "confidence": raw_metadata.get("confidence"),
+            "review_state": raw_metadata.get("review_state"),
+            "sources": raw_metadata.get("sources") or [],
+            "supersedes": raw_metadata.get("supersedes") or [],
+            "superseded_by": raw_metadata.get("superseded_by") or [],
+            "relations": raw_metadata.get("relations") or [],
+            "source_aliases": raw_metadata.get("source_aliases") or [],
         },
     }
 
@@ -513,8 +527,13 @@ _TEMPORAL_PATTERNS = re.compile(
     r"(?:when\s+did|last\s+(?:week|month|year)|yesterday|this\s+(?:week|month)|days?\s+ago|\bhow\s+recent)",
     re.I,
 )
+_HISTORY_LOOKUP_PATTERNS = re.compile(r"\b(?:historical|history|decommissioned|superseded|previous|old|former)\b", re.I)
 _PREFERENCE_PATTERNS = re.compile(
-    r"(?:(?:does|what)\s+(?:chris\s+)?prefer|convention|coding\s+standard|(?:chris|he)\s+(?:likes?|always|never))",
+    r"(?:(?:does|what)\s+(?:chris\s+)?prefer|"
+    r"what\s+does\s+chris\s+think\s+about|"
+    r"(?:chris|he)\s+thinks?\s+about|"
+    r"chris(?:'s)?\s+(?:opinion|thoughts?)\s+(?:on|about)|"
+    r"convention|coding\s+standard|(?:chris|he)\s+(?:likes?|always|never))",
     re.I,
 )
 # 2026-04-17: concrete infra lookup patterns — query is asking for a literal
@@ -526,9 +545,373 @@ _CONCRETE_INFRA_PATTERNS = re.compile(
     r"\b(?:port|container|reverse\s*prox(?:y|ies)|rate\s+limit|limit_req|"
     r"nginx\s+(?:config|conf|block|rule)|docker\s+compose|server\s+block|"
     r"credentials?\s+(?:file|path|location)|env(?:ironment)?\s+var|"
-    r"upstream|listen\s+\d|proxy_pass)\b",
+    r"upstream|listen\s+\d|proxy_pass|"
+    r"backup\s+retention|retention\s+policy|s3\s+backup|"
+    r"notification\s+config|auto[-\s]?update|update\s+schedule)\b",
     re.I,
 )
+
+_PRIMARY_DOC_LOOKUP_PATTERNS = re.compile(
+    r"\b(?:AGENTS?\.md|TOOLS?\.md|docker-compose(?:\.ya?ml)?|"
+    r"watchtower|minio|s3|backup|retention|notification|auto[-\s]?update)\b",
+    re.I,
+)
+
+_PREFERENCE_TOPIC_PATTERNS = re.compile(
+    r"\b(?:abstractions?|single[-\s]?use|flexibility|convention|standard)\b",
+    re.I,
+)
+
+_CANONICAL_LOOKUP_PATTERNS = re.compile(
+    r"(?:"
+    r"\bactive\s+(?:project|sprint|focus)\b|"
+    r"\bcurrent\s+(?:project|sprint|state|focus)\b|"
+    r"\b(?:frontend|default|basic)\s+stack\b|\bstack\b.*\bfrontend\b|\bfrontend\b.*\bstack\b|"
+    r"프론트엔드\s*(?:기본\s*)?스택|"
+    r"\bReact\b.*\bVite\b|\bVite\b.*\bTypeScript\b|"
+    r"\bmarriage\s+certificate\b|\bpersonal\s+documents?\b|"
+    r"\bNext\.?js\b.*\b(?:acceptable|instead|server|router)\b|"
+    r"\b(?:planning\s+order|before\s+coding|contract[-\s]?first)\b|"
+    r"RAG.*(?:substrate|stack|canonical|truth|governance)|"
+    r"canonical\s+(?:notes?|memory).*?(?:RAG|truth|governance)|"
+    r"memory\s+retrieval\s+substrate|"
+    r"\b(?:business\s+opportunities|startup\s+ideas|idea\s+analysis|underserved\s+pains|"
+    r"generic\s+large\s+categories|painful\s+problems)\b|"
+    r"(?:이메일|email).*(?:보관|retention|noise|six[-\s]?month|6\s*개월)|"
+    r"(?:보관|retention|noise|six[-\s]?month|6\s*개월).*(?:이메일|email)|"
+    r"\bPlayStation(?:\s+Plus)?\b|"
+    r"\bgstack\b|/browse\b|"
+    r"\b(?:healthcheck|health\s+check|healthz|model\s+registration|picker|allowlist)\b|"
+    r"\bPlaywright\b.*\b(?:close|closed|cleanup|browser|instance)\b|"
+    r"\bbrowser\s+instances?\b.*\bPlaywright\b|"
+    r"\bbrowser\s+instances?\b.*\b(?:close|closed|cleanup)\b|"
+    r"\b(?:sensitive\s+keys|admin\s+keys|Ghost\s+Admin|rotatable|secret\s+stores?|hardcoded)\b|"
+    r"\bgateway\b.*\b(?:restart|reinstall)\b|"
+    r"\bIrvine\b.*\b(?:August\s+2024|since|residen)"
+    r")",
+    re.I,
+)
+
+_CANONICAL_PRIMARY_DOCS = [
+    (
+        re.compile(r"\b(?:active|current)\s+(?:project|sprint|state|focus)\b", re.I),
+        [("/Users/chrischo/server/knowledge/canonical/chris/_state.md", 7000)],
+    ),
+    (
+        re.compile(
+            r"\b(?:frontend|default|basic)\s+stack\b|\bstack\b.*\bfrontend\b|\bfrontend\b.*\bstack\b|"
+            r"프론트엔드\s*(?:기본\s*)?스택|\bReact\b.*\bVite\b|\bVite\b.*\bTypeScript\b|"
+            r"\bNext\.?js\b.*\b(?:acceptable|instead|server|router)\b",
+            re.I,
+        ),
+        [
+            ("/Users/chrischo/server/knowledge/canonical/chris/preferred-frontend-stack.md", 3000),
+            ("/Users/chrischo/server/knowledge/canonical/chris/frontend-stack-preference.md", 3000),
+            ("/Users/chrischo/server/knowledge/canonical/chris/_state.md", 3500),
+        ],
+    ),
+    (
+        re.compile(r"\bmarriage\s+certificate\b|\bpersonal\s+documents?\b", re.I),
+        [("/Users/chrischo/server/knowledge/canonical/chris/chris-cho-personal-documents-index.md", 5000)],
+    ),
+    (
+        re.compile(r"\b(?:planning\s+order|before\s+coding|contract[-\s]?first)\b", re.I),
+        [("/Users/chrischo/server/knowledge/canonical/chris/contract-first-execution-preference.md", 5000)],
+    ),
+    (
+        re.compile(
+            r"RAG.*(?:substrate|stack|canonical|truth|governance)|"
+            r"canonical\s+(?:notes?|memory).*?(?:RAG|truth|governance)|"
+            r"memory\s+retrieval\s+substrate",
+            re.I,
+        ),
+        [
+            ("/Users/chrischo/server/knowledge/canonical/infra/infra_rag_retrieval_stack.md", 5000),
+            ("/Users/chrischo/server/knowledge/canonical/infra/rag-stack-role.md", 5000),
+        ],
+    ),
+    (
+        re.compile(
+            r"\b(?:business\s+opportunities|startup\s+ideas|idea\s+analysis|underserved\s+pains|"
+            r"generic\s+large\s+categories|painful\s+problems)\b",
+            re.I,
+        ),
+        [
+            (
+                "/Users/chrischo/server/knowledge/canonical/archived/chris/"
+                "chris-corrected-the-agent-for-anchoring-too-hard-on-obvious-already-dom.md",
+                5000,
+            ),
+        ],
+    ),
+    (
+        re.compile(
+            r"(?:이메일|email).*(?:보관|retention|noise|six[-\s]?month|6\s*개월)|"
+            r"(?:보관|retention|noise|six[-\s]?month|6\s*개월).*(?:이메일|email)",
+            re.I,
+        ),
+        [
+            (
+                "/Users/chrischo/server/knowledge/canonical/archived/chris/"
+                "chris-uses-a-conservative-six-month-email-retention-rule-that-keeps-pers.md",
+                5000,
+            ),
+            ("/Users/chrischo/server/knowledge/canonical/archived/chris/openclaw-jenna-session.md", 5000),
+        ],
+    ),
+    (
+        re.compile(r"\bPlayStation(?:\s+Plus)?\b", re.I),
+        [
+            (
+                "/Users/chrischo/server/knowledge/canonical/archived/chris/"
+                "from-playstation-sony-txn-email03-playstation-com.md",
+                5000,
+            ),
+        ],
+    ),
+    (
+        re.compile(r"\bgstack\b|/browse\b", re.I),
+        [
+            (
+                "/Users/chrischo/server/knowledge/canonical/archived/decisions/"
+                "chris-decided-to-install-gstack-under-claude-skills-gstack-and-to-m.md",
+                5000,
+            ),
+        ],
+    ),
+    (
+        re.compile(r"\b(?:healthcheck|health\s+check|healthz|model\s+registration|picker|allowlist)\b", re.I),
+        [
+            (
+                "/Users/chrischo/server/knowledge/canonical/archived/decisions/"
+                "chris-established-a-practical-diagnostic-rule-that-model-registration-al.md",
+                5000,
+            ),
+        ],
+    ),
+    (
+        re.compile(
+            r"\bPlaywright\b.*\b(?:close|closed|cleanup|browser|instance)\b|"
+            r"\bbrowser\s+instances?\b.*\bPlaywright\b|"
+            r"\bbrowser\s+instances?\b.*\b(?:close|closed|cleanup)\b",
+            re.I,
+        ),
+        [
+            (
+                "/Users/chrischo/server/knowledge/canonical/archived/decisions/"
+                "chris-expects-browser-instances-opened-for-playwright-or-browser-based-v.md",
+                5000,
+            ),
+        ],
+    ),
+    (
+        re.compile(
+            r"\b(?:sensitive\s+keys|admin\s+keys|Ghost\s+Admin|rotatable|secret\s+stores?|hardcoded)\b",
+            re.I,
+        ),
+        [("/Users/chrischo/server/knowledge/canonical/archived/chris/openclaw-jenna-session-2026-04-01.md", 5000)],
+    ),
+    (
+        re.compile(r"\bgateway\b.*\b(?:restart|reinstall)\b|\b(?:restart|reinstall)\b.*\bgateway\b", re.I),
+        [
+            (
+                "/Users/chrischo/server/knowledge/canonical/archived/chris/"
+                "chris-did-not-want-gateway-reinstall-attempts-from-the-active-assistant.md",
+                5000,
+            ),
+        ],
+    ),
+    (
+        re.compile(r"\bIrvine\b.*\b(?:August\s+2024|since|residen)", re.I),
+        [("/Users/chrischo/server/knowledge/canonical/archived/chris/openclaw-jenna-session-2026-04-10.md", 5000)],
+    ),
+]
+
+_AGENT_PRIMARY_DOCS = {
+    "jenna": "/Users/chrischo/.openclaw/workspace-jenna/AGENTS.md",
+    "liz": "/Users/chrischo/.openclaw/workspace-liz/AGENTS.md",
+    "ellie": "/Users/chrischo/.openclaw/workspace-ellie/AGENTS.md",
+    "sage": "/Users/chrischo/.openclaw/workspace-sage/AGENTS.md",
+    "market": "/Users/chrischo/.openclaw/workspace-market/AGENTS.md",
+}
+
+_SERVICE_PRIMARY_DOCS = {
+    "watchtower": ["/Users/chrischo/server/watchtower/docker-compose.yml"],
+    "minio": [
+        "/Users/chrischo/server/minio/docker-compose.yml",
+        "/Users/chrischo/server/nginx/conf.d/minio.conf",
+    ],
+}
+
+_QUERY_PRIMARY_DOCS = [
+    (
+        re.compile(r"(?:\bbrain\s+api\b.*\bnginx\b|\bnginx\b.*\bbrain\s+api\b)", re.I),
+        ["/Users/chrischo/server/nginx/conf.d/brain-api.conf"],
+    ),
+    (
+        re.compile(r"(?:\bdefault\s+server\s+block\b|\bnginx\b.*\bdefault\b)", re.I),
+        ["/Users/chrischo/server/nginx/conf.d/default.conf"],
+    ),
+    (
+        re.compile(r"\bserver-net\b", re.I),
+        ["/Users/chrischo/server/docker-compose.yml"],
+    ),
+]
+
+_OBSIDIAN_ROOTS = [
+    Path("/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault"),
+    Path("/Users/chrischo/.openclaw/workspace/obsidian-vault"),
+]
+
+_PREFERENCE_PRIMARY_DOCS = {
+    "abstractions": [
+        "/Users/chrischo/server/knowledge/canonical/chris/_identity.md",
+        "/Users/chrischo/server/knowledge/canonical/chris/_self_model.md",
+    ],
+}
+
+
+def _rag_fanout_limit(query: str, limit: int) -> int:
+    """Use a wider candidate window only for exact lookup-shaped queries.
+
+    The default ``limit * 2`` fanout is cheap but too narrow for primary files
+    whose embedding is less prose-like than derivative notes. Keep the wider
+    window gated to agent-role/config/preference lookups so normal recall
+    latency and local server resources stay bounded.
+    """
+    base = limit * 2
+    if _AGENT_ROLE_PATTERNS.search(query):
+        return max(base, 50)
+    if _CONCRETE_INFRA_PATTERNS.search(query) or _PRIMARY_DOC_LOOKUP_PATTERNS.search(query):
+        return max(base, 40)
+    if _CANONICAL_LOOKUP_PATTERNS.search(query):
+        return max(base, 30)
+    if _PREFERENCE_PATTERNS.search(query) and _PREFERENCE_TOPIC_PATTERNS.search(query):
+        return max(base, 25)
+    return base
+
+
+def _primary_doc_hit(
+    path: str, *, collection: str = "knowledge", trust_tier: int = 2, max_chars: int = 2500
+) -> dict | None:
+    p = Path(path)
+    try:
+        if not p.is_file():
+            return None
+        body = p.read_text(errors="ignore")[:max_chars]
+    except OSError:
+        return None
+    title = p.name
+    if body.startswith("---json"):
+        end = body.find("\n---", 7)
+        if end != -1:
+            try:
+                meta = json.loads(body[7:end])
+                if isinstance(meta, dict) and meta.get("title"):
+                    title = str(meta["title"])[:160]
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pass
+    for line in body.splitlines():
+        stripped = line.strip().lstrip("#").strip()
+        if stripped and stripped not in {"---", "---json"}:
+            if title != p.name:
+                break
+            title = stripped[:160]
+            break
+    return {
+        "id": f"primary-doc:{path}",
+        "source_type": "canonical" if collection == "canonical" else "rag",
+        "collection": collection,
+        "title": title,
+        "content": body,
+        "path": path,
+        "score": 98.0,
+        "trust_tier": trust_tier,
+        "metadata": {"primary_doc_lookup": True},
+    }
+
+
+def _is_superseded_canonical_result(result: dict) -> bool:
+    metadata = result.get("metadata") or {}
+    status = str(metadata.get("status") or "").lower()
+    if status in {"superseded", "obsolete"}:
+        return True
+    if metadata.get("superseded_by"):
+        return True
+    content_head = str(result.get("content") or "")[:1600].lower()
+    return (
+        '"status": "superseded"' in content_head
+        or '"status":"superseded"' in content_head
+        or '"status": "obsolete"' in content_head
+        or '"status":"obsolete"' in content_head
+    )
+
+
+@lru_cache(maxsize=16)
+def _find_obsidian_doc_by_name(required_terms: tuple[str, ...]) -> str | None:
+    terms = tuple(term.casefold() for term in required_terms if term)
+    if not terms:
+        return None
+    for root in _OBSIDIAN_ROOTS:
+        if not root.is_dir():
+            continue
+        try:
+            for path in root.rglob("*.md"):
+                name = path.name.casefold()
+                if all(term in name for term in terms):
+                    return str(path)
+        except OSError:
+            continue
+    return None
+
+
+def _primary_doc_hits(query: str) -> list[dict]:
+    """Inject exact local source files for file-shaped recall questions."""
+    q = (query or "").lower()
+    hits: list[dict] = []
+    if _AGENT_ROLE_PATTERNS.search(query):
+        for name, path in _AGENT_PRIMARY_DOCS.items():
+            if name in q:
+                hit = _primary_doc_hit(path, collection="knowledge", trust_tier=2)
+                if hit:
+                    hit["metadata"]["agent"] = name
+                    hits.append(hit)
+    if _PRIMARY_DOC_LOOKUP_PATTERNS.search(query):
+        for service, paths in _SERVICE_PRIMARY_DOCS.items():
+            if service in q:
+                for path in paths:
+                    hit = _primary_doc_hit(path, collection="knowledge", trust_tier=2)
+                    if hit:
+                        hit["metadata"]["service"] = service
+                        hits.append(hit)
+    for pattern, paths in _QUERY_PRIMARY_DOCS:
+        if pattern.search(query):
+            for path in paths:
+                hit = _primary_doc_hit(path, collection="knowledge", trust_tier=2)
+                if hit:
+                    hits.append(hit)
+    for pattern, docs in _CANONICAL_PRIMARY_DOCS:
+        if pattern.search(query):
+            for path, max_chars in docs:
+                hit = _primary_doc_hit(path, collection="canonical", trust_tier=3, max_chars=max_chars)
+                if hit:
+                    hit["metadata"]["canonical_lookup"] = True
+                    hits.append(hit)
+    if "claude code" in q and "ppt" in q:
+        path = _find_obsidian_doc_by_name(("Claude Code", "PPT"))
+        if path:
+            hit = _primary_doc_hit(path, collection="obsidian", trust_tier=2)
+            if hit:
+                hits.append(hit)
+    if _PREFERENCE_PATTERNS.search(query):
+        for topic, paths in _PREFERENCE_PRIMARY_DOCS.items():
+            if topic in q:
+                for path in paths:
+                    hit = _primary_doc_hit(path, collection="canonical", trust_tier=3)
+                    if hit:
+                        hit["metadata"]["topic"] = topic
+                        hits.append(hit)
+    return hits
 
 # 2026-04-17 Phase 10 modality expansion (7 buckets) — inspired by friend's
 # SECONDBRAIN_MODALITY_WEIGHTS pattern. Each bucket shifts trust weights to
@@ -737,7 +1120,9 @@ def _dedup_by_content_hash(results: list[dict]) -> list[dict]:
         title = r.get("title") or ""
         key = hashlib.md5(f"{title}|{content}".encode()).hexdigest()[:16]
         existing = seen.get(key)
-        if existing is None or r.get("score", 0) > existing.get("score", 0):
+        current_primary = bool((r.get("metadata") or {}).get("primary_doc_lookup"))
+        existing_primary = bool(((existing or {}).get("metadata") or {}).get("primary_doc_lookup"))
+        if existing is None or (current_primary and not existing_primary) or r.get("score", 0) > existing.get("score", 0):
             seen[key] = r
     return list(seen.values())
 
@@ -950,19 +1335,21 @@ def search_all(
         # already parallelizes across its own collections.
         _pool = _search_rag_split_pool
         _futs = []
+        rag_limit = _rag_fanout_limit(relevance_query, limit)
         if filtered_cols:
-            _futs.append(_pool.submit(search_rag, query, limit * 2, local_where or None, filtered_cols))
+            _futs.append(_pool.submit(search_rag, query, rag_limit, local_where or None, filtered_cols))
         if plain_cols:
-            _futs.append(_pool.submit(search_rag, query, limit * 2, plain_where or None, plain_cols))
+            _futs.append(_pool.submit(search_rag, query, rag_limit, plain_where or None, plain_cols))
         # 2026-04-16 R-3: bilingual-variant expansion in parallel with the
         # primary fan-outs — variants are independent queries so we can run
         # them concurrently instead of after the fact.
         try:
             for _alt in (bilingual_variants or [])[:1]:
+                alt_limit = max(limit, rag_limit // 2)
                 if filtered_cols:
-                    _futs.append(_pool.submit(search_rag, _alt, limit, local_where or None, filtered_cols))
+                    _futs.append(_pool.submit(search_rag, _alt, alt_limit, local_where or None, filtered_cols))
                 if plain_cols:
-                    _futs.append(_pool.submit(search_rag, _alt, limit, plain_where or None, plain_cols))
+                    _futs.append(_pool.submit(search_rag, _alt, alt_limit, plain_where or None, plain_cols))
         except Exception:
             pass
 
@@ -1017,6 +1404,13 @@ def search_all(
                 continue
             r_coll = r.get("collection", "")
             r_meta = r.get("metadata") or {}
+            if (
+                r_coll == "canonical"
+                and not include_history
+                and not _HISTORY_LOOKUP_PATTERNS.search(relevance_query)
+                and _is_superseded_canonical_result(r)
+            ):
+                continue
             # Only gate semantic_memory results with lifecycle filters
             if r_coll == "semantic_memory":
                 # Phase 6: prefer atoms truth layer for tier/supersession when
@@ -1086,7 +1480,10 @@ def search_all(
         source_timing["rag_ms"] = int((time.time() - t0) * 1000)
         return res
 
-    def _search_canonical():
+    # Local name differs from module-level ``search_canonical`` to avoid
+    # the fragile closure-over-outer-scope pattern (a rename of either
+    # would silently infinite-recurse or NameError).
+    def _run_canonical_fanout():
         if "canonical" not in sources:
             return []
         if collections:
@@ -1096,6 +1493,8 @@ def search_all(
             normalize_canonical_result(r, query=relevance_query)
             for r in search_canonical(query, limit, domain=domain)
         ]
+        if not include_history and not _HISTORY_LOOKUP_PATTERNS.search(relevance_query):
+            res = [r for r in res if not _is_superseded_canonical_result(r)]
         source_timing["canonical_ms"] = int((time.time() - t0) * 1000)
         return res
 
@@ -1217,7 +1616,7 @@ def search_all(
             if not col_id:
                 return []
             try:
-                emb = get_embedding(query, use_cache=True, prefix="query")
+                emb = get_embedding(query, prefix="query")
             except Exception:
                 return []
             data = vector_search(col_id, emb, n=min(limit, 5), query_text=query)
@@ -1271,7 +1670,7 @@ def search_all(
     raptor_results: list[dict] = []
     search_fns = [
         (_search_rag, "rag"),
-        (_search_canonical, "canonical"),
+        (_run_canonical_fanout, "canonical"),
         (_search_obsidian, "obsidian"),
     ]
     if not _canonical_only:
@@ -1311,6 +1710,13 @@ def search_all(
                     result_lists[name].extend(fut.result(timeout=0.1))
                 except Exception:
                     pass
+
+    primary_doc_hits = _primary_doc_hits(relevance_query)
+    if primary_doc_hits:
+        for hit in reversed(primary_doc_hits):
+            bucket = "canonical" if hit.get("collection") == "canonical" else "rag"
+            result_lists[bucket].insert(0, hit)
+        source_timing["primary_doc_count"] = len(primary_doc_hits)
 
     # Entity filter
     if entity:
@@ -1698,6 +2104,12 @@ def search_all(
             r["score"] = float(r.get("score", 0)) + CANON_BONUS
             _dbg = dict(r.get("_debug") or {})
             _dbg["canonical_trust_bonus"] = CANON_BONUS
+            r["_debug"] = _dbg
+        if (r.get("metadata") or {}).get("primary_doc_lookup"):
+            primary_bonus = 24.0
+            r["score"] = float(r.get("score", 0)) + primary_bonus
+            _dbg = dict(r.get("_debug") or {})
+            _dbg["primary_doc_bonus"] = primary_bonus
             r["_debug"] = _dbg
     unique.sort(key=lambda x: x.get("score", 0), reverse=True)
 

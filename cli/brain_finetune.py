@@ -255,7 +255,7 @@ def main():
     parser = argparse.ArgumentParser(description="Fine-tune e5 with LoRA on feedback data")
     parser.add_argument("--pairs", default="/Users/chrischo/server/brain/logs/training/pairs_*.jsonl")
     parser.add_argument(
-        "--output", type=Path, default=Path("/Users/chrischo/server/brain/logs/training/lora_v1/")
+        "--output", type=Path, default=Path("/Users/chrischo/server/brain/models/adapters/lora_v1/")
     )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--force", action="store_true", help="Bypass BRAIN_FINETUNE_ENABLED check")

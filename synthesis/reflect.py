@@ -221,7 +221,13 @@ def dispatch_to_sage(new_memories: list[dict], all_preferences: list[dict]) -> d
 
 
 def index_patterns(reflection: dict) -> int:
-    """Index extracted patterns into the patterns ChromaDB collection."""
+    """Index extracted patterns into the knowledge collection with origin=patterns.
+
+    Qdrant migration merged the old `patterns` collection into `knowledge`
+    via payload discriminator (``origin="patterns"``). Writing to a bare
+    `patterns` name creates an orphan collection with no HNSW tuning or
+    sparse index, so route through the discriminator instead.
+    """
     patterns = reflection.get("patterns", [])
     if not patterns:
         return 0
@@ -239,6 +245,7 @@ def index_patterns(reflection: dict) -> int:
                 "content": desc,
                 "source": "brain-reflect:nightly",
                 "type": "pattern",
+                "origin": "patterns",
                 "service": "",
                 "agent": "sage",
                 "section": "",
@@ -252,8 +259,8 @@ def index_patterns(reflection: dict) -> int:
         sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "brain_core"))
         from indexer import add_documents
 
-        count = add_documents("patterns", docs, skip_stale_cleanup=True)
-        _log(f"indexed {count} patterns into patterns collection")
+        count = add_documents("knowledge", docs, skip_stale_cleanup=True)
+        _log(f"indexed {count} patterns into knowledge collection (origin=patterns)")
         return count
     except Exception as e:
         _log(f"ERROR indexing patterns: {e}")

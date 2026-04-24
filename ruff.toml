@@ -105,8 +105,6 @@ select = [
   "S",   # bandit-lite security checks
 ]
 ignore = [
-  "ANN101",  # missing-type-self
-  "ANN102",  # missing-type-cls
   "ANN401",  # any-type allowed (pragmatic)
   "E501",    # line-too-long handled by formatter
   "B008",    # function-call-in-default-arg (FastAPI Depends pattern)
@@ -122,6 +120,55 @@ ignore = [
 "cli/**" = ["T20", "S603", "S607"]
 "brain_mcp_server.py" = ["T20"]
 "server.py" = ["T20"]
+
+# These modules are dual-use service helpers and direct cron/maintenance CLI
+# entrypoints. Their `print` calls are the stable subprocess JSON interface used
+# by JOB_REGISTRY; keep T20 active elsewhere in brain_core.
+"brain_core/_watchdog.py" = ["T20"]
+"brain_core/attention.py" = ["T20", "S108"]
+"brain_core/brain_loop.py" = ["T20", "S108"]
+"brain_core/canonical_design_drift.py" = ["T20"]
+"brain_core/canonical_staleness.py" = ["T20"]
+"brain_core/claude_memory_regen.py" = ["T20", "S108"]
+"brain_core/claude_session.py" = ["T20", "S608"]
+"brain_core/coding_events.py" = ["T20", "S108"]
+"brain_core/confidence_calibration.py" = ["T20", "E402"]
+"brain_core/cross_agent_lessons.py" = ["T20"]
+"brain_core/db_maintenance.py" = ["T20", "S608"]
+"brain_core/entity_reconcile.py" = ["T20"]
+"brain_core/intent_miss_scan.py" = ["T20"]
+"brain_core/live_state_snapshot.py" = ["T20"]
+"brain_core/llm_backlog.py" = ["T20"]
+"brain_core/predictive.py" = ["T20"]
+"brain_core/prompt_attribution.py" = ["T20"]
+"brain_core/raw_events_fts.py" = ["T20", "E402"]
+"brain_core/recall_judge.py" = ["T20", "S310"]
+"brain_core/recall_outcome_labeler.py" = ["T20"]
+"brain_core/retrieval_inhibition.py" = ["T20"]
+"brain_core/schema_revision.py" = ["T20"]
+"brain_core/self_eval.py" = ["T20"]
+"brain_core/self_modify.py" = ["T20"]
+"brain_core/skill_materializer.py" = ["T20"]
+"brain_core/speak.py" = ["T20"]
+"brain_core/speak_drives.py" = ["S608"]
+"brain_core/speak_urgent.py" = ["S108"]
+"brain_core/valence.py" = ["T20", "S608"]
+
+# These scripts intentionally call trusted local service endpoints or build
+# parameterized SQL from allowlisted identifiers/placeholders.
+"cli/bench_all.py" = ["S108"]
+"cli/brain_stale_cli.py" = ["S608"]
+"cli/lora_ab_gate.py" = ["S310"]
+"cli/ltr_train.py" = ["S310"]
+"cli/migrate_claude_memory.py" = ["S310"]
+"cli/migrate_openclaw_memory.py" = ["S310"]
+"cli/rebuild_atom_entity.py" = ["S608"]
+
+"brain_core/autonomy.py" = ["E402"]
+"cli/canonical_merge_apply.py" = ["E402"]
+"cli/canonicalize_entities.py" = ["E402"]
+"cli/canonicalize_entities_cross_lang.py" = ["E402"]
+
 # Wholesale-extracted from server.py — inherits pre-existing exception-
 # handling patterns (B904 raise-without-from, S110/S112 best-effort
 # swallowed exceptions). Treated as intentional for these files; clean up

@@ -39,8 +39,9 @@ from pathlib import Path
 BRAIN_ROOT = Path("/Users/chrischo/server/brain")
 EVAL_COMPARE = BRAIN_ROOT / "cli" / "eval_compare.py"
 TRAINING_DIR = BRAIN_ROOT / "logs" / "training"
-LORA_ACTIVE = TRAINING_DIR / "lora_active"
-DEFAULT_CANDIDATE = TRAINING_DIR / "lora_v_candidate"
+ADAPTERS_DIR = BRAIN_ROOT / "models" / "adapters"
+LORA_ACTIVE = ADAPTERS_DIR / "lora_active"
+DEFAULT_CANDIDATE = ADAPTERS_DIR / "lora_v_candidate"
 REJECTS_DIR = TRAINING_DIR / "rejects"
 
 OPENCLAW_BIN = "/Users/chrischo/.local/bin/openclaw"
@@ -111,7 +112,7 @@ def _per_query_worst_regression(base_report: dict, cand_report: dict) -> tuple[f
     """Return (max_regression_pts, N_regressed_cases) from paired per_test arrays.
 
     Each per_test entry has a `hit_content` bool and optional numeric score;
-    we score 1.0 / 0.0 per case and compute candidate − base per-aligned-case.
+    we score 1.0 / 0.0 per case and compute candidate - base per-aligned-case.
     If per_test is missing from either side, falls back to (+inf, -1) which
     the caller should treat as FAIL (do not promote — we couldn't verify).
     """

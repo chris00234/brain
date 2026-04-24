@@ -56,6 +56,14 @@ MIN_CONTRADICTION_OVERLAP = 0.55
 # that happen to share vocabulary.
 NEAR_DUPLICATE_DISTANCE = 0.05
 NEAR_DUPLICATE_MIN_OVERLAP = 0.70
+# Soft near-duplicate gate — looser thresholds for additive paraphrases that
+# the strict gate misses. Tuned against the 2026-04-23 pipeline-atom incident
+# where 44 paraphrase variants of one fact accumulated as separate
+# contradictions because cosine sat in the 0.85–0.94 band, just under the
+# strict 0.95 ceiling. Same-polarity pairs in this band are auto-resolved
+# (loser deleted) rather than queued for human review.
+SOFT_NEAR_DUPLICATE_DISTANCE = 0.15
+SOFT_NEAR_DUPLICATE_MIN_OVERLAP = 0.50
 # Exclude "wants / would like / prefers / should" statements about broad topics
 # from contradiction detection - these are additive preferences, not flips.
 PREFERENCE_STOPWORDS = frozenset(
@@ -77,6 +85,79 @@ PREFERENCE_STOPWORDS = frozenset(
         "be",
     }
 )
+
+# Negation/polarity markers — English + Korean. A real contradiction flips
+# polarity on the same subject ("uses npm" vs "does NOT use npm"); two atoms
+# that both assert something positively with different qualifier words are
+# additive restatements, not contradictions.
+_NEGATION_TOKENS = frozenset(
+    {
+        "not",
+        "no",
+        "never",
+        "doesnt",
+        "doesn",
+        "dont",
+        "don",
+        "won",
+        "wont",
+        "cant",
+        "cannot",
+        "isn",
+        "isnt",
+        "aren",
+        "arent",
+        "wasn",
+        "wasnt",
+        "weren",
+        "werent",
+        "shouldn",
+        "shouldnt",
+        "against",
+        "without",
+        "stop",
+        "avoid",
+        "refuse",
+        "reject",
+        "disallow",
+        "forbid",
+        "banned",
+        "prohibit",
+        "안",
+        "못",
+        "없",
+        "없어",
+        "없다",
+        "싫",
+        "싫어",
+        "말고",
+        "말자",
+        "아니",
+        "아님",
+        "금지",
+    }
+)
+
+
+def _has_negation(tokens: set[str], raw: str) -> bool:
+    """True if text contains a negation marker.
+
+    Korean negation morphemes (안/못/없) are often suffix/infix and won't
+    tokenize cleanly, so check both token set and substring of the raw text.
+    """
+    if tokens & _NEGATION_TOKENS:
+        return True
+    low = (raw or "").lower()
+    # Cheap substring checks for Korean morphemes; false positives on words
+    # like "stop" are already covered by token match above.
+    if any(frag in low for frag in ("안 ", " 안", "못 ", " 못", "없어", "없다", "없음", "말고", "금지", "싫어", "싫다")):
+        return True
+    # English contraction forms that tokenise apart (" n't " -> "n" + "t")
+    if re.search(r"\b(?:not|never|no)\b", low):
+        return True
+    if "n't" in low:
+        return True
+    return False
 DISTILL_TIMEOUT_SEC = 90
 EMBED_TRUNCATE = 1000
 SESSION_SUMMARY_MAX_LEN = 200
@@ -114,15 +195,25 @@ def _count_corroborating_trust(content: str) -> float:
         return TRUST_BASELINE
 
     store = get_vector_store()
-    matched = 0
-    for col_name in CORROBORATION_COLLECTIONS:
+
+    # Parallel fan-out across corroboration collections — runs inline on
+    # the POST /memory hot path. Four collections × ~15ms serial ≈ 60ms;
+    # parallel collapses to ~20ms (one round-trip bound by slowest query).
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    def _probe(col_name: str) -> bool:
         try:
             hits = store.query(col_name, vector=emb, k=1, with_payload=False)
-            # Previous: cosine distance <= 0.25 → similarity >= 0.75
-            if hits and hits[0].score >= 0.75:
-                matched += 1
+            return bool(hits) and hits[0].score >= 0.75
         except Exception:
-            continue
+            return False
+
+    matched = 0
+    with ThreadPoolExecutor(max_workers=min(len(CORROBORATION_COLLECTIONS), 4)) as pool:
+        futures = [pool.submit(_probe, c) for c in CORROBORATION_COLLECTIONS]
+        for fut in as_completed(futures):
+            if fut.result():
+                matched += 1
 
     score = TRUST_BASELINE + TRUST_PER_SOURCE * min(matched, TRUST_MAX_SOURCES)
     return round(min(1.0, score), 3)
@@ -183,34 +274,79 @@ def _cosine(v1: list[float], v2: list[float]) -> float:
     return dot / (n1 * n2)
 
 
-# ── Session summary extraction (heuristic, no LLM) ────────────────────
+# ── Session summary extraction ─────────────────────────────────────────
 # Pattern: "Human:" or "User:" prefixed lines in the transcript
 _USER_MSG_RE = re.compile(r"(?:^|\n)\s*(?:Human|User|Chris)\s*:\s*(.+)", re.IGNORECASE)
+_ASSISTANT_MSG_RE = re.compile(r"(?:^|\n)\s*(?:Assistant|Claude|AI)\s*:\s*(.+)", re.IGNORECASE)
+
+_SUMMARY_PROMPT = """Summarize this session in ONE sentence (under 180 chars).
+Capture WHAT the user was doing, not their last verbatim prompt.
+Respond in the same language the user used. No prose, no preamble — just the summary.
+
+<transcript>
+{transcript}
+</transcript>"""
+
+
+def _heuristic_summary(transcript: str) -> str | None:
+    """Last-resort fallback — used only if the LLM call fails."""
+    if not transcript or len(transcript) < 30:
+        return None
+    matches = _USER_MSG_RE.findall(transcript)
+    for msg in reversed(matches):
+        msg = msg.strip()
+        if len(msg) > 20:
+            return msg[:SESSION_SUMMARY_MAX_LEN].strip()
+    clean = transcript.strip()[:SESSION_SUMMARY_MAX_LEN].strip()
+    return clean if len(clean) > 20 else None
 
 
 def _extract_session_summary(transcript: str) -> str | None:
-    """Extract a 1-2 sentence session summary from the raw transcript.
+    """Return a 1-sentence summary via cli_llm.dispatch. Falls back to heuristic.
 
-    Strategy: find the last substantive user message (>20 chars, not a
-    one-word reaction). Falls back to first 200 chars of transcript.
-    No LLM call - pure regex/heuristic.
+    The prior implementation was pure regex that grabbed the last user prompt
+    verbatim, so recent_sessions showed the same Korean question 5 times in a
+    row. Now routes through cli_dispatch (codex primary, claude fallback) with
+    a 15s timeout; on failure falls back to the heuristic so summaries are
+    always written.
     """
     if not transcript or len(transcript) < 30:
         return None
 
-    # Try to find user messages and pick the last substantive one
-    matches = _USER_MSG_RE.findall(transcript)
-    for msg in reversed(matches):
-        msg = msg.strip()
-        # Skip short reactions like "ok", "good", "thanks"
-        if len(msg) > 20:
-            return msg[:SESSION_SUMMARY_MAX_LEN].strip()
+    # Trim the transcript for the LLM — keep tail (most relevant) and a tiny head.
+    t = transcript.strip()
+    if len(t) > 12000:
+        t = t[:1500] + "\n...[truncated]...\n" + t[-10000:]
 
-    # Fallback: first 200 chars of the transcript body
-    clean = transcript.strip()[:SESSION_SUMMARY_MAX_LEN].strip()
-    if len(clean) > 20:
-        return clean
-    return None
+    prompt = _SUMMARY_PROMPT.format(transcript=t)
+    try:
+        result = _dispatch(
+            agent="jenna",
+            message=prompt,
+            thinking="low",
+            timeout=15,
+            backlog_kind="distill",
+            backlog_payload={"purpose": "session_summary"},
+        )
+    except Exception as exc:
+        log.warning("session summary LLM dispatch raised: %s — falling back to heuristic", exc)
+        return _heuristic_summary(transcript)
+
+    if not result or not getattr(result, "ok", False) or not result.text:
+        log.info("session summary LLM returned empty — falling back to heuristic")
+        return _heuristic_summary(transcript)
+
+    summary = result.text.strip().strip('"').strip("'")
+    # Strip common preamble that some models emit even when told not to.
+    for prefix in ("Summary:", "요약:", "- ", "* "):
+        if summary.startswith(prefix):
+            summary = summary[len(prefix):].strip()
+    # Collapse to single line and truncate.
+    summary = " ".join(summary.split("\n")[0:2]).strip()
+    summary = summary[:SESSION_SUMMARY_MAX_LEN].strip()
+    if len(summary) < 15:
+        return _heuristic_summary(transcript)
+    return summary
 
 
 def _write_session_summary(transcript: str, source: str, agent: str) -> str | None:
@@ -478,10 +614,30 @@ def embed_and_store(memories: list[dict[str, Any]], source: str, agent: str) -> 
     metadatas: list[dict[str, Any]] = []
 
     # Phase 1: Prepare embeddings and dedup outside the lock (HTTP calls to Ollama/ChromaDB)
+    try:
+        from atoms_gate import scan_content
+    except Exception:
+        scan_content = None  # type: ignore[assignment]
+
     for mem in memories[:MAX_PER_SESSION]:
         content = (mem.get("content") or "").strip()
         if len(content) < 10:
             continue
+
+        # Prompt-injection gate (hermes-agent pattern adoption). A poisoned
+        # atom persists in Qdrant and gets re-injected into every future LLM
+        # prompt — one landed payload can re-program Sage forever. Block
+        # before embed so we don't pay Ollama cost on rejected content.
+        if scan_content is not None:
+            scan = scan_content(content)
+            if not scan["safe"]:
+                log.warning(
+                    "atom write blocked by scan_content: findings=%s src=%s agent=%s",
+                    scan["findings"],
+                    source,
+                    agent,
+                )
+                continue
 
         category = mem.get("category", "other")
         if category not in ("preference", "fact", "decision", "entity", "correction", "other"):
@@ -554,7 +710,7 @@ def embed_and_store(memories: list[dict[str, Any]], source: str, agent: str) -> 
                 content,
                 embedding,
                 confidence,
-                col_id,
+                SEMANTIC_COLLECTION,
                 category=category,
             )
             supersede_target = target_id
@@ -731,6 +887,15 @@ def embed_and_store(memories: list[dict[str, Any]], source: str, agent: str) -> 
             )
             if mr.error:
                 log.warning("learn atoms_mirror_failed %s: %s", entry["id"], mr.error)
+            # Attribute the producing prompt so prompt_attribution.survival_report
+            # can compare A/B variants over time. Best-effort, no exceptions
+            # bubble out — attribution is observability, not correctness.
+            try:
+                from prompt_attribution import CURRENT_DEFAULTS, record as _attr_record
+
+                _attr_record(entry["id"], "distill", CURRENT_DEFAULTS["distill"])
+            except Exception:
+                pass
     except Exception as _e:
         log.warning("learn atoms_mirror_outer error: %s", str(_e)[:200])
 
@@ -744,6 +909,161 @@ def embed_and_store(memories: list[dict[str, Any]], source: str, agent: str) -> 
 
 
 # ── Step 4: contradiction detection ─────────────────────────────────────
+def _record_predictive_error_audit(mem_id: str, other_id: str, content: str) -> None:
+    """Friston predictive-coding signal — disagreement against an existing
+    atom is learning evidence. Best-effort; any failure is swallowed."""
+    try:
+        from atoms_store import insert_action_audit as _iaa
+
+        _iaa(
+            route="/memory.contradiction",
+            tool="predictive_error",
+            query_text=content[:500],
+            retrieved_chroma_ids=[mem_id, other_id],
+        )
+    except Exception:
+        pass
+
+
+def _shift_loser_confidence(other_id: str, mem_id: str, embedding: list[float]) -> None:
+    """Phase N2 ledger update: drop the loser atom's confidence (logit -1.0),
+    scaled 1/k by cluster size so near-duplicates don't stack penalties."""
+    try:
+        from atoms_store import (
+            cluster_size_for as _cluster_size,
+        )
+        from atoms_store import (
+            derive_atom_id as _derive_atom_id,
+        )
+        from atoms_store import (
+            update_atom_confidence as _uac,
+        )
+
+        _uac(
+            atom_id=_derive_atom_id(other_id),
+            event_type="contradict",
+            weight=-1.0,
+            evidence_ref=_derive_atom_id(mem_id),
+            cluster_size=_cluster_size(other_id, embedding),
+        )
+    except Exception:
+        pass
+
+
+def _auto_resolve_and_delete(
+    contradiction: dict[str, Any],
+    other_id: str,
+    mem_id: str,
+    store: Any,
+    resolution: str,
+    audit_reason: str,
+    audit_score_digits: int,
+) -> bool:
+    """Shared auto-resolution path: store the contradiction doc, delete
+    the loser atom, write the audit log. Returns True on success, False if
+    the _store_contradiction step failed (caller then appends as pending)."""
+    contradiction["review_state"] = "auto_resolved"
+    contradiction["resolution"] = resolution
+    try:
+        _store_contradiction(contradiction)
+    except Exception:
+        contradiction["review_state"] = "pending"
+        contradiction.pop("resolution", None)
+        return False
+    try:
+        store.delete(SEMANTIC_COLLECTION, ids=[other_id])
+        try:
+            from audit_log import log_event
+
+            log_event(
+                "resolve",
+                entity_a=other_id,
+                entity_b=mem_id,
+                match_score=round(float(contradiction["distance"]), audit_score_digits),
+                conflict_type="contradiction",
+                resolution=resolution,
+                reason=audit_reason,
+            )
+        except Exception:
+            pass
+        # Retroactive recall labeling: every past action_audit row that
+        # surfaced the losing atom was, in hindsight, returning a soon-to-be-
+        # deleted atom. Mark those rows outcome='wrong' so self_eval/LtR stops
+        # rewarding them. Fail-open — propagation is best-effort.
+        try:
+            _propagate_contradiction_to_recall_audit(
+                loser_atom_id=other_id,
+                winner_atom_id=mem_id,
+                contradiction_id=contradiction.get("id", ""),
+            )
+        except Exception as _exc:
+            log.debug("recall_audit propagation silenced: %s", _exc)
+    except Exception:
+        pass
+    return True
+
+
+def _propagate_contradiction_to_recall_audit(
+    loser_atom_id: str,
+    winner_atom_id: str,
+    contradiction_id: str,
+) -> int:
+    """Mark action_audit rows that retrieved `loser_atom_id` as outcome='wrong'.
+
+    Searches both audit fields:
+      - retrieved_atom_ids (atom-id strings like "semantic_memory:HASH")
+      - retrieved_chroma_ids (Qdrant point UUIDs, dashed since the
+        2026-04-23 normalization fix)
+
+    The loser's Qdrant UUID is computed via the same _string_to_uuid that
+    QdrantStore._qid uses, so the two address spaces line up. Rows already
+    labeled (outcome IS NOT NULL) are not overwritten.
+    """
+    if not loser_atom_id:
+        return 0
+    try:
+        import sqlite3
+
+        from config import BRAIN_DB
+        from qdrant_store import _string_to_uuid
+    except Exception:
+        return 0
+    atom_needle = f'"{loser_atom_id}"'
+    try:
+        loser_uuid = _string_to_uuid(loser_atom_id)
+    except Exception:
+        loser_uuid = ""
+    chroma_needle = f'"{loser_uuid}"' if loser_uuid else ""
+    reason = json.dumps(
+        {
+            "contradiction_id": contradiction_id,
+            "loser_atom_id": loser_atom_id,
+            "winner_atom_id": winner_atom_id,
+        }
+    )
+    now = _now_iso()
+    conn = sqlite3.connect(str(BRAIN_DB))
+    try:
+        if chroma_needle:
+            cur = conn.execute(
+                "UPDATE action_audit SET outcome = ?, outcome_reason = ?, resolved_at = ? "
+                "WHERE outcome IS NULL "
+                "AND (retrieved_atom_ids LIKE ? OR retrieved_chroma_ids LIKE ?)",
+                ("wrong", reason, now, f"%{atom_needle}%", f"%{chroma_needle}%"),
+            )
+        else:
+            cur = conn.execute(
+                "UPDATE action_audit SET outcome = ?, outcome_reason = ?, resolved_at = ? "
+                "WHERE outcome IS NULL "
+                "AND retrieved_atom_ids LIKE ?",
+                ("wrong", reason, now, f"%{atom_needle}%"),
+            )
+        conn.commit()
+        return cur.rowcount
+    finally:
+        conn.close()
+
+
 def check_contradictions_for_memory(
     mem_id: str,
     content: str,
@@ -759,9 +1079,7 @@ def check_contradictions_for_memory(
     jaccard >= 0.55 + stopword-aware symmetric diff) but operates on a single
     memory's embedding so POST /memory and POST /memory/batch can wire it
     directly after the Chroma upsert. Auto-resolves clear cases (newer +
-    >= 0.2 higher confidence) and logs predictive_error action_audit rows
-    (Friston predictive coding - disagreement against stored beliefs is the
-    learning signal).
+    >= 0.2 higher confidence) and logs predictive_error action_audit rows.
     """
     contradictions: list[dict[str, Any]] = []
     if not embedding:
@@ -788,8 +1106,6 @@ def check_contradictions_for_memory(
     for h in hits:
         other_id = h.id
         other_doc = h.document or ""
-        # Preserve distance-based variables. ChromaStore gives similarity;
-        # re-derive distance so downstream comparisons keep their semantics.
         other_dist = max(0.0, 1.0 - h.score)
         other_meta = h.payload or {}
         if other_id == mem_id:
@@ -807,8 +1123,35 @@ def check_contradictions_for_memory(
         if not sym_diff:
             continue
 
+        # Polarity gate — real contradictions flip the sign of a claim.
+        # Same-polarity pairs are additive restatements (deduper's job).
+        neg_new = _has_negation(new_tokens, content)
+        neg_old = _has_negation(other_tokens, other_doc)
+        is_near_duplicate = (
+            float(other_dist) < NEAR_DUPLICATE_DISTANCE and overlap >= NEAR_DUPLICATE_MIN_OVERLAP
+        )
+        # Soft near-duplicate: same polarity, looser distance/overlap. These
+        # are paraphrase pairs the upstream classify_operation NOOP gate let
+        # through (different rank ordering, intra-batch race, etc). Auto-resolve
+        # by keeping the higher-confidence side instead of queuing a contradiction.
+        is_soft_near_duplicate = (
+            not is_near_duplicate
+            and neg_new == neg_old
+            and float(other_dist) < SOFT_NEAR_DUPLICATE_DISTANCE
+            and overlap >= SOFT_NEAR_DUPLICATE_MIN_OVERLAP
+        )
+        if neg_new == neg_old and not is_near_duplicate and not is_soft_near_duplicate:
+            continue
+
+        # Deterministic id per atom pair so concurrent fan-outs (POST /memory
+        # + /learn distill + /memory/batch firing on the same write) collapse
+        # to one Qdrant upsert instead of N copies. Pre-fix produced 3 records
+        # at the same timestamp for one pair; post-fix the second writer just
+        # overwrites the first with the latest snapshot.
+        pair_key = "|".join(sorted([mem_id, other_id]))
+        contra_id = f"contra:{hashlib.sha1(pair_key.encode()).hexdigest()[:12]}"
         contradiction = {
-            "id": f"contra:{uuid.uuid4().hex[:12]}",
+            "id": contra_id,
             "new_id": mem_id,
             "old_id": other_id,
             "new_content": content,
@@ -820,116 +1163,62 @@ def check_contradictions_for_memory(
             "review_state": "pending",
         }
 
-        # Phase N1: fire the predictive_error audit row - disagreement against
-        # an existing atom IS the Friston learning signal. Best-effort.
-        try:
-            from atoms_store import insert_action_audit as _iaa
-
-            _iaa(
-                route="/memory.contradiction",
-                tool="predictive_error",
-                query_text=content[:500],
-                retrieved_chroma_ids=[mem_id, other_id],
-            )
-        except Exception:
-            pass
-
-        # Phase N2: shift the LOSER atom's confidence down via the evidence
-        # ledger. Contradict = logit -1.0, scaled by cluster size so one
-        # contradictory observation among k near-duplicate atoms only counts
-        # as 1/k (Kuhn). Best-effort - update_atom_confidence is disabled
-        # until brain_db migrates to @7.
-        try:
-            from atoms_store import (
-                cluster_size_for as _cluster_size,
-            )
-            from atoms_store import (
-                derive_atom_id as _derive_atom_id,
-            )
-            from atoms_store import (
-                update_atom_confidence as _uac,
-            )
-
-            loser_atom_id = _derive_atom_id(other_id)
-            cluster = _cluster_size(other_id, embedding)
-            _uac(
-                atom_id=loser_atom_id,
-                event_type="contradict",
-                weight=-1.0,
-                evidence_ref=_derive_atom_id(mem_id),
-                cluster_size=cluster,
-            )
-        except Exception:
-            pass
+        _record_predictive_error_audit(mem_id, other_id, content)
+        _shift_loser_confidence(other_id, mem_id, embedding)
 
         new_conf = float(confidence or 0.5)
         old_conf = float((other_meta or {}).get("confidence", 0.5))
         new_time = created_at or ""
         old_time = (other_meta or {}).get("created_at", "")
 
-        is_near_duplicate = (
-            float(other_dist) < NEAR_DUPLICATE_DISTANCE and overlap >= NEAR_DUPLICATE_MIN_OVERLAP
-        )
-
         if is_near_duplicate:
-            contradiction["review_state"] = "auto_resolved"
-            contradiction["resolution"] = "keep_new_near_duplicate"
-            try:
-                _store_contradiction(contradiction)
-            except Exception:
-                contradiction["review_state"] = "pending"
-                contradiction.pop("resolution", None)
-                contradictions.append(contradiction)
-                continue
-            try:
-                store.delete(SEMANTIC_COLLECTION, ids=[other_id])
-                try:
-                    from audit_log import log_event
+            _auto_resolve_and_delete(
+                contradiction,
+                other_id,
+                mem_id,
+                store,
+                resolution="keep_new_near_duplicate",
+                audit_reason=f"Auto: near-duplicate (d={other_dist:.4f}, overlap={overlap:.2f})",
+                audit_score_digits=4,
+            )
+            contradictions.append(contradiction)
+            continue
 
-                    log_event(
-                        "resolve",
-                        entity_a=other_id,
-                        entity_b=mem_id,
-                        match_score=round(float(other_dist), 4),
-                        conflict_type="contradiction",
-                        resolution="auto_keep_new_near_duplicate",
-                        reason=f"Auto: near-duplicate (d={other_dist:.4f}, overlap={overlap:.2f})",
-                    )
-                except Exception:
-                    pass
-            except Exception:
-                pass
+        if is_soft_near_duplicate:
+            # Keep higher-confidence side; on tie keep the newer atom. The
+            # contradiction record is stored (idempotent via deterministic id)
+            # so the audit trail still shows the merge happened.
+            if new_conf > old_conf or (new_conf == old_conf and new_time > old_time):
+                loser_id, keeper_id = other_id, mem_id
+                resolution = "keep_new_paraphrase"
+            else:
+                loser_id, keeper_id = mem_id, other_id
+                resolution = "keep_old_paraphrase"
+            _auto_resolve_and_delete(
+                contradiction,
+                loser_id,
+                keeper_id,
+                store,
+                resolution=resolution,
+                audit_reason=(
+                    f"Auto: soft-paraphrase (d={other_dist:.4f}, "
+                    f"overlap={overlap:.2f}, conf={new_conf:.2f}/{old_conf:.2f})"
+                ),
+                audit_score_digits=4,
+            )
             contradictions.append(contradiction)
             continue
 
         if new_conf - old_conf > 0.2 and new_time and old_time and new_time > old_time:
-            contradiction["review_state"] = "auto_resolved"
-            contradiction["resolution"] = "keep_new"
-            try:
-                _store_contradiction(contradiction)
-            except Exception:
-                contradiction["review_state"] = "pending"
-                contradiction.pop("resolution", None)
-                contradictions.append(contradiction)
-                continue
-            try:
-                store.delete(SEMANTIC_COLLECTION, ids=[other_id])
-                try:
-                    from audit_log import log_event
-
-                    log_event(
-                        "resolve",
-                        entity_a=other_id,
-                        entity_b=mem_id,
-                        match_score=round(float(other_dist), 3),
-                        conflict_type="contradiction",
-                        resolution="auto_keep_new",
-                        reason=f"Auto: newer ({new_time[:10]}) + higher conf ({new_conf:.2f} vs {old_conf:.2f})",
-                    )
-                except Exception:
-                    pass
-            except Exception:
-                pass
+            _auto_resolve_and_delete(
+                contradiction,
+                other_id,
+                mem_id,
+                store,
+                resolution="keep_new",
+                audit_reason=f"Auto: newer ({new_time[:10]}) + higher conf ({new_conf:.2f} vs {old_conf:.2f})",
+                audit_score_digits=3,
+            )
             contradictions.append(contradiction)
         else:
             contradictions.append(contradiction)
@@ -980,10 +1269,13 @@ def _store_contradiction(contradiction: dict[str, Any]) -> None:
                 "new_id": contradiction["new_id"],
                 "old_id": contradiction["old_id"],
                 "category": contradiction["category"],
-                "distance": str(contradiction["distance"]),
-                "token_overlap": str(contradiction["token_overlap"]),
+                # Phase A4: native float types so Qdrant range filters work.
+                "distance": float(contradiction["distance"]),
+                "token_overlap": float(contradiction["token_overlap"]),
                 "created_at": contradiction["created_at"],
-                "review_state": "pending",
+                # Preserve caller-provided review_state so auto-resolved entries
+                # don't get downgraded to "pending".
+                "review_state": contradiction.get("review_state", "pending"),
             }
         ],
     )

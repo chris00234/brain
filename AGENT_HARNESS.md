@@ -55,7 +55,7 @@ curl -H "Authorization: Bearer $SECRET" \
 | Decide | `brain_decide` | `POST /brain/decide` | Preference-grounded recommendation. |
 | Reason | `brain_reason` | `POST /brain/reason` | Deep multi-hop reasoning. |
 | Ingest text/URL | `brain_ingest` | `POST /brain/ingest` | Agent dispatches Sage to extract. |
-| Ingest image | `brain_ingest_image` | `POST /brain/ingest/image` | Gemini Flash captioning. |
+| Ingest image | `brain_ingest_image` | `POST /brain/ingest/image` | Subscription CLI vision by default (`codex_cli`); Gemini is explicit opt-in fallback only. |
 | Web search | `brain_search_web` | `POST /web/search` | SearXNG + per-domain trust scoring. |
 | Focus/working mem | `brain_focus`, `brain_wm_*` | `POST /brain/focus`, `POST /brain/wm` | Session-scoped. |
 | Feedback | — | `POST /recall/feedback` | Report useful/wrong to train LtR + calibration. |

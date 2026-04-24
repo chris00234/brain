@@ -65,8 +65,8 @@ class SLOResult:
 SLOS: dict[str, SLO] = {
     "recall_v2_p95_ms": SLO(
         name="recall_v2_p95_ms",
-        description="/recall/v2 p95 latency budget (production hot path). Tightened 2026-04-21 from 500ms to 250ms to reflect the native-Qdrant + int8-quant steady state (observed p95 ~130-200ms under load). Warm steady-state is 27-50ms. Pre-migration ChromaDB era needed the 500ms headroom because of the 9p virtiofs bridge; native binary removes that.",
-        target=250.0,
+        description="/recall/v2 p95 latency budget (production hot path). Loosened 2026-04-22 from 250ms to 500ms after profiling: search_ms fan-out p95=375ms + cross_encoder_ms p95=308ms (BGE-v2-m3 on Korean, 568M params) are sequential and both accuracy-critical — 250ms was unrealistic without sacrificing retrieval quality. 500ms matches empirical p95=545ms and removes false alerts. Tightening back requires either skipping the cross-encoder (fast-mode opt-in) or a lighter multilingual reranker.",
+        target=500.0,
         severity="warning",
         metric_unit="ms",
         consecutive_breaches_required=3,
@@ -205,6 +205,22 @@ SLOS: dict[str, SLO] = {
     # 2026-04-17: disk watcher. logs/ grew silently (637MB embed cache
     # sat undetected for days). Alert when total size exceeds threshold
     # so we catch silent growth before disk fills.
+    "boot_context_degraded_1h": SLO(
+        name="boot_context_degraded_1h",
+        description="Count of degraded boot-context serves in the last hour. Non-zero = a session started without fresh brain state (cache fallback or brain unreachable). Target raised 2→10 2026-04-23 after subagent flood made 2 unrealistic — each subagent dispatch forks a fresh UserPromptSubmit on its own session_id, and a flurry of 10-15 subagents in an active coding hour is normal. Real degradation looks like sustained 20+ serves/hour.",
+        target=10.0,
+        severity="warning",
+        metric_unit="serves",
+        consecutive_breaches_required=2,
+    ),
+    "self_eval_drift_7d": SLO(
+        name="self_eval_drift_7d",
+        description="Percentage of sampled recent /recall queries whose top-3 results have Jaccard overlap < 0.7 when re-run. High drift = retrieval quality is shifting in ways SLOs didn't catch. Measured nightly by self_eval drive over last 7d of action_audit samples.",
+        target=25.0,  # breach when >25% of samples drift
+        severity="warning",
+        metric_unit="%",
+        consecutive_breaches_required=2,
+    ),
     "logs_dir_total_mb": SLO(
         name="logs_dir_total_mb",
         description="Total size of ~/server/brain/logs/ in MB (DBs + journals + job logs)",
@@ -224,6 +240,17 @@ SLOS: dict[str, SLO] = {
     "qdrant_backup_age_hours": SLO(
         name="qdrant_backup_age_hours",
         description="Age in hours of the most recent qdrant-backup-*.tar.gz. Breaches >36h (one full missed nightly backup window).",
+        target=36.0,
+        severity="warning",
+        metric_unit="hours",
+        consecutive_breaches_required=1,
+    ),
+    # Parity with qdrant_backup_age — Neo4j entity graph is as durability-
+    # critical as the vector store, and backup_neo4j has no post-upload
+    # verification of its own. Age watcher catches a silently failing chain.
+    "neo4j_backup_age_hours": SLO(
+        name="neo4j_backup_age_hours",
+        description="Age in hours of the most recent neo4j-backup-*.tar.gz in MinIO. Breaches >36h.",
         target=36.0,
         severity="warning",
         metric_unit="hours",
@@ -590,6 +617,41 @@ def _measure_qdrant_backup_age_hours() -> float:
         return 999.0
 
 
+def _measure_neo4j_backup_age_hours() -> float:
+    """Age of the newest neo4j-backup-*.tar.gz in MinIO.
+
+    Unlike qdrant backups which stage locally before MinIO upload, the Neo4j
+    job uploads straight from a tempdir so we have to query the bucket. A
+    36h threshold mirrors the qdrant watcher. 999.0 on any failure so a
+    configuration/auth regression surfaces immediately instead of looking
+    healthy. MinIO creds come from _minio.s3_client.
+    """
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "cli"))
+        from _minio import s3_client as _s3_client
+
+        s3 = _s3_client()
+        newest_ts = 0.0
+        paginator = s3.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket="rag-backups", Prefix="neo4j-backup-"):
+            for obj in page.get("Contents", []):
+                if not obj["Key"].endswith(".tar.gz"):
+                    continue
+                mtime = obj.get("LastModified")
+                if mtime is None:
+                    continue
+                ts = mtime.timestamp()
+                if ts > newest_ts:
+                    newest_ts = ts
+        if newest_ts == 0.0:
+            return 999.0
+        age_s = time.time() - newest_ts
+        return round(age_s / 3600.0, 2)
+    except Exception as exc:
+        log.debug("neo4j_backup_age measurement failed: %s", exc)
+        return 999.0
+
+
 def _measure_logs_dir_total_mb() -> float:
     """Sum size of all files under brain logs/ directory."""
     try:
@@ -603,6 +665,60 @@ def _measure_logs_dir_total_mb() -> float:
         return round(total / (1024 * 1024), 1)
     except Exception as exc:
         log.debug("logs_dir_total_mb measurement failed: %s", exc)
+        return 0.0
+
+
+def _measure_self_eval_drift_7d() -> float:
+    """Read the latest self_eval drift_pct from brain_config_store.
+
+    Non-zero until the nightly self_eval drive has run at least once;
+    returns 0 on missing/invalid data so the gauge stays silent at startup.
+    """
+    try:
+        import brain_config_store
+
+        raw = brain_config_store.get("self_eval.drift_7d")
+        if not raw:
+            return 0.0
+        data = json.loads(raw)
+        return float(data.get("drift_pct", 0.0))
+    except Exception:
+        return 0.0
+
+
+def _measure_boot_context_degraded_1h() -> float:
+    """Count degraded boot-context serves in the last hour.
+
+    Reads /Users/chrischo/server/brain/logs/degraded_serves.log, which
+    claude_boot.sh appends to on every cache-fallback or unreachable-brain
+    event. 0 = healthy; any sustained non-zero means Chris's sessions are
+    starting without fresh brain context and no one would otherwise notice.
+    """
+    try:
+        import datetime as _dt
+
+        log_file = BRAIN_LOGS_DIR / "degraded_serves.log"
+        if not log_file.exists():
+            return 0.0
+        cutoff = _dt.datetime.now(_dt.UTC) - _dt.timedelta(hours=1)
+        count = 0
+        with log_file.open() as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                ts_str = line.split("\t", 1)[0]
+                try:
+                    ts = _dt.datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                    if ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=_dt.UTC)
+                except (ValueError, TypeError):
+                    continue
+                if ts >= cutoff:
+                    count += 1
+        return float(count)
+    except Exception as exc:
+        log.debug("boot_context_degraded_1h measurement failed: %s", exc)
         return 0.0
 
 
@@ -647,7 +763,10 @@ _MEASUREMENTS: dict[str, Callable[[], float]] = {
     "dispatch_failure_rate_1h": _measure_dispatch_failure_rate_1h,
     "agent_session_max_mb": _measure_agent_session_max_mb,
     "logs_dir_total_mb": _measure_logs_dir_total_mb,
+    "boot_context_degraded_1h": _measure_boot_context_degraded_1h,
+    "self_eval_drift_7d": _measure_self_eval_drift_7d,
     "qdrant_backup_age_hours": _measure_qdrant_backup_age_hours,
+    "neo4j_backup_age_hours": _measure_neo4j_backup_age_hours,
 }
 
 

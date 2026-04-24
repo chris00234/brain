@@ -35,7 +35,8 @@ def _load_secret(force: bool = False) -> str:
     if not force and _SECRET_CACHE["value"] and (now - _SECRET_CACHE["loaded_at"] < 600):
         return _SECRET_CACHE["value"]
     try:
-        val = open(SECRET_FILE).read().strip()
+        with open(SECRET_FILE) as f:
+            val = f.read().strip()
     except Exception:
         val = ""
     _SECRET_CACHE["value"] = val
@@ -326,7 +327,7 @@ def handle_tools_list(params):
             },
             {
                 "name": "brain_ingest_image",
-                "description": "Caption an image via Gemini 2.5 Flash and index it in brain. Send either a local path or base64-encoded bytes. Future text queries about the image will retrieve it from the knowledge collection. Use this when Chris shares a screenshot/photo and you want brain to understand + remember it.",
+                "description": "Caption an image via the configured subscription CLI vision backend (codex_cli by default) and index it in brain. Gemini REST is explicit opt-in only via BRAIN_VISION_BACKEND=gemini. Send either a local path or base64-encoded bytes.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -377,6 +378,30 @@ def handle_tools_list(params):
                 "inputSchema": {"type": "object", "properties": {}},
             },
             {
+                "name": "brain_tick",
+                "description": "Mid-session pulse. Returns brain's current observations (contradictions, coding reverts, stale threads, synthesis patterns) so the calling agent can incorporate brain's state without waiting for the daily digest. Fast: <500ms SQL + no LLM. Call every 5-10 turns or after major actions.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "limit": {
+                            "type": "integer",
+                            "description": "Max observations to return (default 5)",
+                            "default": 5,
+                        },
+                        "min_severity": {
+                            "type": "number",
+                            "description": "Filter severity >= this (default 4.0)",
+                            "default": 4.0,
+                        },
+                        "agent": {
+                            "type": "string",
+                            "description": "Calling agent name (used for audit)",
+                        },
+                    },
+                    "required": [],
+                },
+            },
+            {
                 "name": "brain_doubt",
                 "description": "Surface what the brain is currently uncertain about: low-confidence atoms (confidence<0.4), unresolved semantic contradictions, and stale canonical notes. Use at the start of a research/decision session to know which beliefs to validate, or when Chris asks 'what are you unsure about?' / '잘 모르겠는 거 있어?'.",
                 "inputSchema": {
@@ -420,6 +445,7 @@ def handle_tools_call(params):
         # call with 1h cache, ~500ms hot / up to 3s cold) + embed (~60ms) +
         # ChromaDB/SQLite writes. Usually <1s but LLM-cold-path can spike past
         # 5s under load. 4s cap returns structured hint instead of -32001.
+        timeout_hint = "brain_store may hit ingest_classifier LLM (1-3s cold). Retry, or POST /memory via HTTP directly when the 5s MCP window is insufficient."
         try:
             result = _brain_request(
                 "POST",
@@ -433,18 +459,16 @@ def handle_tools_call(params):
                 actor=actor,
                 timeout_s=4,
             )
+            result = _normalize_timeout_result(result, timeout_hint)
         except Exception as exc:
-            result = {
-                "status": "timeout",
-                "hint": "brain_store may hit ingest_classifier LLM (1-3s cold). Retry, or POST /memory via HTTP directly when the 5s MCP window is insufficient.",
-                "error": str(exc)[:200],
-            }
+            result = _timeout_result(timeout_hint, str(exc))
 
     elif name == "brain_decide":
         # 2026-04-17 fix: OpenClaw's MCP transport has a 5s operation timeout;
         # /brain/decide dispatches an LLM (5-30s) and would always hit
         # -32001. Return a structured timeout hint instead so the agent gets
         # actionable feedback instead of an MCP protocol error.
+        timeout_hint = "brain_decide is LLM-backed (5-30s). Try brain_recall for fast lookups, or call /brain/decide via HTTP directly when the 5s MCP window is insufficient."
         try:
             result = _brain_request(
                 "POST",
@@ -457,14 +481,12 @@ def handle_tools_call(params):
                 actor=actor,
                 timeout_s=4,
             )
+            result = _normalize_timeout_result(result, timeout_hint)
         except Exception as exc:
-            result = {
-                "status": "timeout",
-                "hint": "brain_decide is LLM-backed (5-30s). Try brain_recall for fast lookups, or call /brain/decide via HTTP directly when the 5s MCP window is insufficient.",
-                "error": str(exc)[:200],
-            }
+            result = _timeout_result(timeout_hint, str(exc))
 
     elif name == "brain_reason":
+        timeout_hint = "brain_reason is multi-hop LLM (10-60s). Use brain_recall + brain_decide, or hit /brain/reason via HTTP for the full run."
         try:
             result = _brain_request(
                 "POST",
@@ -476,17 +498,15 @@ def handle_tools_call(params):
                 actor=actor,
                 timeout_s=4,
             )
+            result = _normalize_timeout_result(result, timeout_hint)
         except Exception as exc:
-            result = {
-                "status": "timeout",
-                "hint": "brain_reason is multi-hop LLM (10-60s). Use brain_recall + brain_decide, or hit /brain/reason via HTTP for the full run.",
-                "error": str(exc)[:200],
-            }
+            result = _timeout_result(timeout_hint, str(exc))
 
     elif name == "brain_ingest":
         # 2026-04-20 MCP timeout cap: ingest runs LLM classify + embed + store
         # (1-5s typical), blows past the 5s MCP window on spikes. 4s cap returns
         # a structured hint instead of -32001.
+        timeout_hint = "brain_ingest is LLM-backed (1-5s). Retry, or POST /brain/ingest via HTTP directly when the 5s MCP window is insufficient."
         try:
             result = _brain_request(
                 "POST",
@@ -498,12 +518,9 @@ def handle_tools_call(params):
                 actor=actor,
                 timeout_s=4,
             )
+            result = _normalize_timeout_result(result, timeout_hint)
         except Exception as exc:
-            result = {
-                "status": "timeout",
-                "hint": "brain_ingest is LLM-backed (1-5s). Retry, or POST /brain/ingest via HTTP directly when the 5s MCP window is insufficient.",
-                "error": str(exc)[:200],
-            }
+            result = _timeout_result(timeout_hint, str(exc))
 
     elif name == "brain_focus":
         result = _brain_request(
@@ -585,8 +602,9 @@ def handle_tools_call(params):
         result = _brain_request("GET", f"/brain/wm/{sid}/{agt}", actor=actor)
 
     elif name == "brain_ingest_image":
-        # 2026-04-20 MCP timeout cap: vision LLM (Gemini) call is 2-10s,
-        # always exceeds 5s MCP window. 4s cap returns structured hint.
+        # 2026-04-20 MCP timeout cap: vision LLM calls often take 2-10s and
+        # can exceed the 5s MCP window. 4s cap returns a structured hint.
+        timeout_hint = "brain_ingest_image is vision-LLM-backed (subscription CLI by default, 2-10s). Use POST /brain/ingest/image via HTTP directly for the full run."
         try:
             result = _brain_request(
                 "POST",
@@ -601,17 +619,15 @@ def handle_tools_call(params):
                 actor=actor,
                 timeout_s=4,
             )
+            result = _normalize_timeout_result(result, timeout_hint)
         except Exception as exc:
-            result = {
-                "status": "timeout",
-                "hint": "brain_ingest_image is vision-LLM-backed (Gemini, 2-10s). Use POST /brain/ingest/image via HTTP directly for the full run.",
-                "error": str(exc)[:200],
-            }
+            result = _timeout_result(timeout_hint, str(exc))
 
     elif name == "brain_search_web":
         # 2026-04-20 MCP timeout cap: searxng round-trip + ranking is 2-10s,
         # regularly exceeds 5s MCP window (gateway.err: 2026-04-20T13:19 Ellie
         # -32001). 4s cap returns structured hint instead of protocol error.
+        timeout_hint = "brain_search_web is network-backed (searxng, 2-10s). Retry, or POST /web/search via HTTP directly when the 5s MCP window is insufficient."
         try:
             result = _brain_request(
                 "POST",
@@ -624,12 +640,9 @@ def handle_tools_call(params):
                 actor=actor,
                 timeout_s=4,
             )
+            result = _normalize_timeout_result(result, timeout_hint)
         except Exception as exc:
-            result = {
-                "status": "timeout",
-                "hint": "brain_search_web is network-backed (searxng, 2-10s). Retry, or POST /web/search via HTTP directly when the 5s MCP window is insufficient.",
-                "error": str(exc)[:200],
-            }
+            result = _timeout_result(timeout_hint, str(exc))
 
     # 2026-04-16 Tier 3 #8: cognitive verb handlers
     elif name == "brain_forget":
@@ -646,13 +659,31 @@ def handle_tools_call(params):
     elif name == "brain_consolidate":
         # 2026-04-20 MCP timeout cap: full consolidation pass is 10s+, always
         # exceeds 5s MCP window. 4s cap returns structured hint.
+        timeout_hint = "brain_consolidate runs a full consolidation pass (10s+). POST /brain/consolidate via HTTP directly for the full run."
         try:
             result = _brain_request("POST", "/brain/consolidate", {}, actor=actor, timeout_s=4)
+            result = _normalize_timeout_result(result, timeout_hint)
         except Exception as exc:
+            result = _timeout_result(timeout_hint, str(exc))
+
+    elif name == "brain_tick":
+        # Mid-session pulse. Calls the existing drives endpoint (no LLM, SQL
+        # only) and filters client-side by severity so the response stays
+        # small for agents that tick frequently.
+        limit = int(args.get("limit", 5))
+        min_sev = float(args.get("min_severity", 4.0))
+        try:
+            raw = _brain_request("GET", "/brain/speak/drives", actor=actor, timeout_s=3)
+        except Exception as exc:
+            result = {"status": "error", "error": str(exc)[:200]}
+        else:
+            obs = (raw or {}).get("observations", []) if isinstance(raw, dict) else []
+            filtered = [o for o in obs if float(o.get("severity", 0)) >= min_sev]
+            filtered.sort(key=lambda o: -float(o.get("severity", 0)))
             result = {
-                "status": "timeout",
-                "hint": "brain_consolidate runs a full consolidation pass (10s+). POST /brain/consolidate via HTTP directly for the full run.",
-                "error": str(exc)[:200],
+                "count": len(filtered),
+                "observations": filtered[:limit],
+                "threshold": min_sev,
             }
 
     elif name == "brain_doubt":
@@ -701,6 +732,37 @@ def _handle_signal(signum, _frame):
     sys.exit(0)
 
 
+def _mcp_tool_error(message: str) -> dict:
+    """Return a valid MCP tool response instead of killing stdio transport."""
+    payload = {"status": "error", "error": message[:400]}
+    return {"content": [{"type": "text", "text": json.dumps(payload)}]}
+
+
+def _timeout_result(hint: str, error: str) -> dict:
+    return {"status": "timeout", "hint": hint, "error": error[:200]}
+
+
+def _normalize_timeout_result(result: dict | str, hint: str) -> dict | str:
+    """Convert urllib timeout payloads into the documented structured shape."""
+    if isinstance(result, dict):
+        error = str(result.get("error") or "")
+        if "timed out" in error.lower() or "timeout" in error.lower():
+            return _timeout_result(hint, error)
+    return result
+
+
+def _lifecycle_exit_reason(start: float, last_activity: float, original_parent: int) -> str | None:
+    now = time.monotonic()
+    if now - last_activity > IDLE_TIMEOUT_S:
+        return f"idle > {IDLE_TIMEOUT_S}s"
+    if now - start > MAX_LIFETIME_S:
+        return f"lifetime > {MAX_LIFETIME_S}s"
+    current_parent = os.getppid()
+    if current_parent != original_parent and current_parent == 1:
+        return "parent died (reparented to init)"
+    return None
+
+
 def main():
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGHUP, _handle_signal)
@@ -710,29 +772,31 @@ def main():
     original_parent = os.getppid()
 
     while True:
-        now = time.monotonic()
+        exit_after_response = False
+        exit_reason = _lifecycle_exit_reason(start, last_activity, original_parent)
+        if exit_reason and exit_reason.startswith("parent died"):
+            _log(f"{exit_reason}, exiting")
+            return
 
-        # Lifecycle guards — checked before each read so a wedged client
-        # can't keep us alive past these limits.
-        if now - last_activity > IDLE_TIMEOUT_S:
-            _log(f"idle > {IDLE_TIMEOUT_S}s, exiting")
-            return
-        if now - start > MAX_LIFETIME_S:
-            _log(f"lifetime > {MAX_LIFETIME_S}s, exiting")
-            return
-        current_parent = os.getppid()
-        if current_parent != original_parent and current_parent == 1:
-            _log("parent died (reparented to init), exiting")
-            return
+        # Lifecycle guards normally exit when idle/lifetime expires. If a
+        # request is already pending, process exactly one frame and then exit.
+        # That avoids Codex/OpenClaw seeing "transport closed" for a request
+        # that arrived on the boundary while still preventing long-lived leaks.
+        timeout = 0 if exit_reason else POLL_INTERVAL_S
 
         # Non-blocking wait on stdin. If no input within POLL_INTERVAL_S,
         # loop around and re-check lifecycle guards.
         try:
-            ready, _, _ = select.select([sys.stdin], [], [], POLL_INTERVAL_S)
+            ready, _, _ = select.select([sys.stdin], [], [], timeout)
         except (OSError, ValueError):
             # stdin closed hard — exit cleanly.
             _log("stdin select failed, exiting")
             return
+        if exit_reason and not ready:
+            _log(f"{exit_reason}, exiting")
+            return
+        if exit_reason and ready:
+            exit_after_response = True
         if not ready:
             continue
 
@@ -760,7 +824,11 @@ def main():
         elif method == "tools/list":
             result = handle_tools_list(params)
         elif method == "tools/call":
-            result = handle_tools_call(params)
+            try:
+                result = handle_tools_call(params)
+            except Exception as exc:
+                _log(f"tools/call failed: {type(exc).__name__}: {exc}")
+                result = _mcp_tool_error(f"{type(exc).__name__}: {exc}")
         elif method == "notifications/initialized":
             continue  # no response needed
         else:
@@ -768,8 +836,15 @@ def main():
 
         if msg_id is not None:
             response = {"jsonrpc": "2.0", "id": msg_id, "result": result}
-            sys.stdout.write(json.dumps(response) + "\n")
-            sys.stdout.flush()
+            try:
+                sys.stdout.write(json.dumps(response) + "\n")
+                sys.stdout.flush()
+            except (BrokenPipeError, OSError):
+                _log("stdout write failed, exiting")
+                return
+        if exit_after_response:
+            _log(f"{exit_reason} after pending response, exiting")
+            return
 
 
 if __name__ == "__main__":

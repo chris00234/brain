@@ -7,6 +7,7 @@ import os
 import threading
 import time
 import urllib.request
+from datetime import UTC, datetime
 from pathlib import Path
 
 from api_deps import SERVER_START, _safe_http_detail, verify_bearer
@@ -18,6 +19,68 @@ from scheduler import brain_scheduler
 from vector_store import get_vector_store
 
 router = APIRouter(dependencies=[Depends(verify_bearer)])
+
+
+def _parse_eval_timestamp(row: dict) -> datetime | None:
+    ts = row.get("timestamp")
+    if not isinstance(ts, str) or not ts:
+        return None
+    try:
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
+
+
+def _latest_jsonl(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        for line in reversed(path.read_text().strip().splitlines()):
+            try:
+                return json.loads(line)
+            except json.JSONDecodeError:
+                continue
+    except OSError:
+        return {}
+    return {}
+
+
+def _latest_eval_tracks(logs_dir: Path) -> dict[str, dict]:
+    track_files = {
+        "stable": logs_dir / "eval-history-stable.jsonl",
+        "extended": logs_dir / "eval-history-extended.jsonl",
+        "legacy": logs_dir / "eval-history.jsonl",
+    }
+    tracks: dict[str, dict] = {}
+    for track, path in track_files.items():
+        row = _latest_jsonl(path)
+        if row:
+            row.setdefault("track", track)
+            tracks[track] = row
+    return tracks
+
+
+def _latest_eval_summary(eval_tracks: dict[str, dict]) -> dict:
+    latest: tuple[datetime, dict] | None = None
+    for row in eval_tracks.values():
+        dt = _parse_eval_timestamp(row)
+        if dt is None:
+            continue
+        if latest is None or dt > latest[0]:
+            latest = (dt, row)
+    if latest:
+        return latest[1]
+    return eval_tracks.get("stable") or eval_tracks.get("extended") or eval_tracks.get("legacy") or {}
+
+
+def _eval_age_hours(row: dict) -> float | None:
+    dt = _parse_eval_timestamp(row)
+    if dt is None:
+        return None
+    return (datetime.now(UTC) - dt).total_seconds() / 3600
 
 
 # ── /brain/health ─────────────────────────────────────
@@ -60,15 +123,18 @@ def brain_health() -> dict:
     except Exception:
         alerts.append("Cannot read collection counts")
 
-    eval_info: dict = {}
-    eval_history_path = BRAIN_DIR / "logs" / "eval-history.jsonl"
-    if eval_history_path.exists():
-        try:
-            lines = eval_history_path.read_text().strip().splitlines()
-            if lines:
-                eval_info = json.loads(lines[-1])
-        except Exception:  # noqa: S110 — eval history is optional
-            pass
+    logs_dir = BRAIN_DIR / "logs"
+    eval_tracks = _latest_eval_tracks(logs_dir)
+    eval_info = _latest_eval_summary(eval_tracks)
+    if eval_tracks:
+        for track in ("stable", "extended"):
+            row = eval_tracks.get(track)
+            if not row:
+                alerts.append(f"{track.capitalize()} eval history missing")
+                continue
+            age_hours = _eval_age_hours(row)
+            if age_hours is not None and age_hours > 36:
+                alerts.append(f"{track.capitalize()} eval stale ({age_hours:.0f}h old)")
 
     scheduler_failures: list[dict] = []
     for job in brain_scheduler.list_jobs():
@@ -77,6 +143,11 @@ def brain_health() -> dict:
             scheduler_failures.append({"job": job["name"], "error": last["error"]})
     if scheduler_failures:
         alerts.append(f"{len(scheduler_failures)} job(s) failed recently")
+
+    scheduler_resources = brain_scheduler.resource_status()
+    pending_resource_retries = scheduler_resources.get("pending_retries") or {}
+    if pending_resource_retries:
+        alerts.append(f"{len(pending_resource_retries)} scheduler job(s) deferred by resource budget")
 
     if services.get(vector_key) == "down" or services.get("ollama") == "down":
         status = "unhealthy"
@@ -92,8 +163,10 @@ def brain_health() -> dict:
         "total_chunks": sum(collections.values()),
         "services": services,
         "eval": eval_info,
+        "eval_tracks": eval_tracks,
         "alerts": alerts,
         "scheduler_failures": scheduler_failures,
+        "scheduler_resources": scheduler_resources,
         "search_latency": _metrics_buf.search_latency_stats(),
     }
 

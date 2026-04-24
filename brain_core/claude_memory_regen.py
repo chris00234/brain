@@ -26,6 +26,7 @@ If the existing timestamp is less than 60 s old, the current regen is a no-op.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import re
@@ -63,10 +64,8 @@ def _throttled() -> bool:
 
 
 def _mark_regen() -> None:
-    try:
+    with contextlib.suppress(OSError):
         THROTTLE_TS.write_text(f"{time.time():.0f}")
-    except OSError:
-        pass
 
 
 def _query_atoms() -> dict[str, list[dict]]:

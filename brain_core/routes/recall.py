@@ -119,6 +119,7 @@ class RecallActiveResponse(BaseModel):
     total_tokens: int = 0
     latency_ms: int = 0
     new_since_last_turn: bool = False
+    quality: dict = Field(default_factory=dict)
     degraded: bool = False
 
 
@@ -743,6 +744,11 @@ def recall_v2(
         t_decay = time.time()
         fused = _time_decay.apply_to_results(fused)
         timing["decay_ms"] = int((time.time() - t_decay) * 1000)
+
+    for r in fused:
+        meta = r.get("metadata") or {}
+        if meta.get("primary_doc_lookup"):
+            r["score"] = float(r.get("score", 0)) + 35.0
 
     fused.sort(key=lambda r: r.get("score", 0), reverse=True)
 

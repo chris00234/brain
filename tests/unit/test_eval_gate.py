@@ -27,12 +27,13 @@ def fake_eval_gate(tmp_path, monkeypatch):
     importlib.reload(eval_gate)
 
 
-def _stub_report(content: float, source: float = 80.0, total: int = 100) -> dict:
+def _stub_report(content: float, source: float = 80.0, total: int = 100, loose: float | None = None) -> dict:
     return {
         "cases": total,
         "v2": {
             "total": total,
             "hit_content_pct": content,
+            "hit_content_loose_pct": content if loose is None else loose,
             "hit_source_pct": source,
             "mean_rank": 1.5,
             "mean_latency_ms": 300,
@@ -50,8 +51,26 @@ def test_persist_named_track_uses_suffixed_paths(fake_eval_gate, tmp_path):
     fake_eval_gate._persist_eval_report(_stub_report(95.7), track="stable")
     assert (tmp_path / "logs" / "eval-report-stable.json").exists()
     assert (tmp_path / "logs" / "eval-history-stable.jsonl").exists()
+    row = json.loads((tmp_path / "logs" / "eval-history-stable.jsonl").read_text().splitlines()[-1])
+    assert row["hit_content_pct"] == 95.7
+    assert row["hit_source_pct"] == 80.0
     # Default-track files should NOT exist
     assert not (tmp_path / "logs" / "eval-report.json").exists()
+
+
+def test_persist_loose_metric_keeps_strict_and_selected_content(fake_eval_gate, tmp_path):
+    fake_eval_gate._persist_eval_report(
+        _stub_report(70.0, loose=88.0), track="extended", content_metric="loose"
+    )
+
+    report = json.loads((tmp_path / "logs" / "eval-report-extended.json").read_text())
+    row = json.loads((tmp_path / "logs" / "eval-history-extended.jsonl").read_text().splitlines()[-1])
+
+    assert report["accuracy"] == 88.0
+    assert report["content_metric"] == "loose"
+    assert row["hit_content_pct"] == 70.0
+    assert row["hit_content_loose_pct"] == 88.0
+    assert row["selected_content_pct"] == 88.0
 
 
 def test_baseline_roundtrip(fake_eval_gate, tmp_path):
@@ -137,6 +156,65 @@ def test_main_regression_triggers_alarm(fake_eval_gate, tmp_path, monkeypatch):
     assert any("REGRESSION" in a for a in alerts)
 
 
+def test_main_source_regression_triggers_alarm(fake_eval_gate, tmp_path, monkeypatch):
+    eval_set = tmp_path / "eval_set.json"
+    eval_set.write_text("[]")
+    baseline = tmp_path / "baseline.json"
+    fake_eval_gate.write_baseline(_stub_report(95.0, source=80.0), baseline)
+
+    monkeypatch.setattr(fake_eval_gate, "run_current_eval", lambda p: _stub_report(95.0, source=50.0))
+
+    alerts: list[str] = []
+    monkeypatch.setattr(fake_eval_gate, "alert_chris", lambda m: alerts.append(m))
+
+    heal_called: list[dict] = []
+
+    def fake_heal_dispatch(signal):
+        heal_called.append(
+            {
+                "metric": signal.metric,
+                "value": signal.value,
+                "baseline": signal.baseline,
+                "context": signal.context,
+            }
+        )
+
+    fake_self_heal = type(
+        "M",
+        (),
+        {
+            "HealingSignal": type("HS", (), {"__init__": lambda self, **kw: self.__dict__.update(kw)}),
+            "dispatch": fake_heal_dispatch,
+        },
+    )
+    monkeypatch.setitem(sys.modules, "self_heal", fake_self_heal)
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "eval_gate",
+            "--eval-set",
+            str(eval_set),
+            "--baseline",
+            str(baseline),
+            "--track",
+            "extended",
+        ],
+    )
+    rc = fake_eval_gate.main()
+    assert rc == 1
+    assert any("hit_source@5" in a for a in alerts)
+    assert heal_called == [
+        {
+            "metric": "hit_source_pct",
+            "value": 50.0,
+            "baseline": 80.0,
+            "context": {"delta": -30.0, "threshold": 10.0, "track": "extended"},
+        }
+    ]
+
+
 def test_main_no_heal_flag_suppresses_dispatch(fake_eval_gate, tmp_path, monkeypatch):
     eval_set = tmp_path / "eval_set.json"
     eval_set.write_text("[]")
@@ -178,3 +256,35 @@ def test_main_no_heal_flag_suppresses_dispatch(fake_eval_gate, tmp_path, monkeyp
     rc = fake_eval_gate.main()
     assert rc == 1, "regression should still return 1"
     assert heal_called == [], "--no-heal should suppress dispatch"
+
+
+def test_main_loose_metric_ignores_strict_only_drop(fake_eval_gate, tmp_path, monkeypatch):
+    eval_set = tmp_path / "eval_set.json"
+    eval_set.write_text("[]")
+    baseline = tmp_path / "baseline.json"
+    fake_eval_gate.write_baseline(_stub_report(95.0, loose=86.0), baseline)
+
+    monkeypatch.setattr(fake_eval_gate, "run_current_eval", lambda p: _stub_report(70.0, loose=88.0))
+
+    alerts: list[str] = []
+    monkeypatch.setattr(fake_eval_gate, "alert_chris", lambda m: alerts.append(m))
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "eval_gate",
+            "--eval-set",
+            str(eval_set),
+            "--baseline",
+            str(baseline),
+            "--track",
+            "extended",
+            "--content-metric",
+            "loose",
+            "--no-heal",
+        ],
+    )
+    rc = fake_eval_gate.main()
+    assert rc == 0
+    assert alerts == []

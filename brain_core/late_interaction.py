@@ -90,9 +90,26 @@ def _embed_doc(text: str) -> list[float] | None:
         return None
 
 
+try:
+    import numpy as _np
+except ImportError:  # numpy is a hard dep via sentence-transformers, but keep graceful fallback
+    _np = None  # type: ignore[assignment]
+
+
 def _cosine(a: list[float], b: list[float]) -> float:
     if not a or not b or len(a) != len(b):
         return 0.0
+    # maxsim over a typical result set does 600+ 1024-dim cosine calls per
+    # query; pure-Python sum(x*y for zip(...)) was ~50ms/query. numpy.dot on
+    # the same 1024-vector pair is sub-millisecond.
+    if _np is not None:
+        va = _np.asarray(a, dtype=_np.float32)
+        vb = _np.asarray(b, dtype=_np.float32)
+        na = float(_np.linalg.norm(va))
+        nb = float(_np.linalg.norm(vb))
+        if na == 0.0 or nb == 0.0:
+            return 0.0
+        return float(_np.dot(va, vb)) / (na * nb)
     dot = sum(x * y for x, y in zip(a, b, strict=False))
     na = sum(x * x for x in a) ** 0.5
     nb = sum(x * x for x in b) ** 0.5

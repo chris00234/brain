@@ -35,6 +35,7 @@ from pathlib import Path
 log = logging.getLogger("brain.raw_events_fts")
 
 import sys as _sys
+
 _sys.path.insert(0, str(Path(__file__).resolve().parent))
 try:
     from config import BRAIN_DB

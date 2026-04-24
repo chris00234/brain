@@ -20,6 +20,7 @@ Log output (JSON on stdout) for observability.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import sqlite3
@@ -33,6 +34,41 @@ log = logging.getLogger("brain.backup_brain_db")
 BRAIN_LOGS_DIR = Path("/Users/chrischo/server/brain/logs")
 BACKUP_DIR = BRAIN_LOGS_DIR / "backups"
 RETENTION_DAYS = 14
+MINIO_BUCKET = "rag-backups"
+MINIO_PREFIX = "brain-db-backup/"
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _upload_to_minio(label: str, local_path: Path) -> dict:
+    """Mirror the local backup to MinIO so a disk failure doesn't destroy
+    the atoms truth layer. Matches backup_qdrant.py / backup_neo4j.py
+    pattern. Returns {status, key?, reason?}.
+    """
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from _minio import s3_client as _s3_client
+
+        s3 = _s3_client()
+    except Exception as exc:
+        return {"status": "skipped", "reason": f"minio_unavailable: {exc}"}
+    try:
+        key = f"{MINIO_PREFIX}{local_path.name}"
+        s3.upload_file(str(local_path), MINIO_BUCKET, key)
+        digest = _sha256_file(local_path)
+        checksum_key = key.replace(".db", ".sha256")
+        checksum_body = f"{digest}  {local_path.name}\n"
+        s3.put_object(Bucket=MINIO_BUCKET, Key=checksum_key, Body=checksum_body.encode())
+        return {"status": "ok", "key": key, "sha256": digest}
+    except Exception as exc:
+        return {"status": "error", "reason": str(exc)[:200]}
+
 
 DATABASES = [
     ("brain.db", BRAIN_LOGS_DIR / "brain.db"),
@@ -105,6 +141,9 @@ def run(keep_days: int = RETENTION_DAYS) -> dict:
         summary["results"].append(res)
         if res["status"] == "error":
             summary["all_ok"] = False
+            continue
+        if res["status"] == "ok":
+            res["minio"] = _upload_to_minio(label, Path(res["dest"]))
     summary["rotated"] = _rotate(BACKUP_DIR, keep_days)
     summary["finished_at"] = datetime.now(UTC).isoformat(timespec="seconds")
     return summary

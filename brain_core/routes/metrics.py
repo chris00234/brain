@@ -79,7 +79,7 @@ def metrics() -> MetricsResponse:
         embed_cache = {}
 
     try:
-        from cross_encoder_model import cache_stats as _ce_stats
+        from brain_core.cross_encoder_model import cache_stats as _ce_stats
 
         ce_cache = _ce_stats()
     except Exception:

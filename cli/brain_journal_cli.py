@@ -17,6 +17,7 @@ import argparse
 import json
 import re
 import sys
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -40,7 +41,7 @@ def _parse_since(period: str) -> datetime:
     return datetime.now(UTC) - delta
 
 
-def _iter_lines():
+def _iter_lines() -> Iterator[dict]:
     if not JOURNAL.exists():
         return
     for line in JOURNAL.read_text(errors="replace").splitlines():

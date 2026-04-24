@@ -18,7 +18,7 @@ Process:
      signal hashtags.
   2. Call search_unified.search_all(query) — gets normal RRF-fused candidates.
   3. Re-score with:
-       priority = base_score × (1 + valence_boost) × novelty_factor × domain_match
+       priority = base_score x (1 + valence_boost) x novelty_factor x domain_match
      where domain_match favors atoms whose category aligns with the session
      (e.g. session mentions "coding" → canonical:decisions + procedures win).
   4. Return top N (default 3) with a reason string tagging why each was picked.
@@ -39,6 +39,7 @@ Safety:
 from __future__ import annotations
 
 import logging
+import math
 import sqlite3
 import sys
 from datetime import UTC, datetime
@@ -69,9 +70,11 @@ def _now_iso() -> str:
 def _recent_focus_signal() -> tuple[str, list[dict]]:
     """Return (concat_query, raw_focus_items) — the freshest Chris signal.
 
-    Pulls focus_items with category in ('focus', 'session_summary'), not
-    expired, ordered by recency. Skips HTML-noise-only rows (shell stdout
-    snippets) by length filter.
+    Pulls `focus` items only (not `session_summary`). Including session
+    summaries in the signal created a feedback loop: yesterday's summary
+    would become today's predictive query, which would retrieve the same
+    summary back out under "predictive". Focus items are the ground-truth
+    signal of what Chris is actively doing.
     """
     if not AUTONOMY_DB.exists():
         return "", []
@@ -82,7 +85,7 @@ def _recent_focus_signal() -> tuple[str, list[dict]]:
             rows = conn.execute(
                 "SELECT id, content, category, created_at, expires_at "
                 "FROM focus_items "
-                "WHERE category IN ('focus', 'session_summary') "
+                "WHERE category = 'focus' "
                 "  AND (expires_at IS NULL OR expires_at >= ?) "
                 "ORDER BY created_at DESC LIMIT ?",
                 (now_iso, MAX_FOCUS_ITEMS * 2),  # pull 2x so we can filter noise
@@ -142,12 +145,16 @@ def _domain_match(candidate: dict, focus_items: list[dict]) -> float:
             return 1.10
         if "canonical" in src or cat == "canonical":
             return 1.05
-    if "deploy" in focus_text or "infra" in focus_text or "docker" in focus_text:
-        if cat in ("decision", "entity") or "infra" in src:
-            return 1.08
-    if "코딩" in focus_text or "coding" in focus_text or "refactor" in focus_text:
-        if cat in ("procedure", "heuristic", "preference"):
-            return 1.07
+    if ("deploy" in focus_text or "infra" in focus_text or "docker" in focus_text) and (
+        cat in ("decision", "entity") or "infra" in src
+    ):
+        return 1.08
+    if ("코딩" in focus_text or "coding" in focus_text or "refactor" in focus_text) and cat in (
+        "procedure",
+        "heuristic",
+        "preference",
+    ):
+        return 1.07
     return 1.0
 
 
@@ -188,6 +195,7 @@ def predict_relevant_context(limit: int = 3) -> list[dict]:
         valence_to_boost = lambda v: 0.0  # noqa: E731
 
     shown_counts = _get_session_shown_counts()
+    now_ts = datetime.now(UTC)
 
     # Re-score
     scored = []
@@ -198,12 +206,34 @@ def predict_relevant_context(limit: int = 3) -> list[dict]:
         base = float(c.get("score", 0) or 0)
         if base <= 0:
             continue
+        meta = c.get("metadata", {}) if isinstance(c.get("metadata"), dict) else {}
+        cat_lower = str(meta.get("category") or "").lower()
+        src_lower = str(c.get("source") or "").lower()
+        # Exclude stale session summaries and raw event dumps — they're what
+        # the predictor was surfacing as "predictive" even though they carry
+        # no durable signal.
+        if cat_lower == "session_summary" or "session_summary" in src_lower:
+            continue
         v = valence_map.get(cid, 0.0)
         v_boost = valence_to_boost(v)
         shown = shown_counts.get(cid, 0)
         novelty = 1.0 / (1.0 + shown / NOVELTY_HALF_LIFE)
         domain = _domain_match(c, focus_items)
-        priority = base * (1.0 + v_boost) * novelty * domain
+        # Temporal decay — atoms are exponentially less "predictive" as they
+        # age. Half-life 30 days. Prevents 2026-01 session fragments from
+        # outscoring last week's decisions on pure cosine.
+        created_at = meta.get("created_at") or c.get("created_at") or ""
+        age_decay = 1.0
+        if created_at:
+            try:
+                c_dt = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
+                if c_dt.tzinfo is None:
+                    c_dt = c_dt.replace(tzinfo=UTC)
+                age_days = max(0.0, (now_ts - c_dt).total_seconds() / 86400.0)
+                age_decay = math.exp(-age_days / 30.0)
+            except (ValueError, TypeError):
+                age_decay = 1.0
+        priority = base * (1.0 + v_boost) * novelty * domain * age_decay
 
         reasons = []
         if v > 0.1:
@@ -215,7 +245,9 @@ def predict_relevant_context(limit: int = 3) -> list[dict]:
         elif shown >= NOVELTY_HALF_LIFE:
             reasons.append(f"habituated({shown})")
         if domain > 1.0:
-            reasons.append(f"domain×{domain:.2f}")
+            reasons.append(f"domainx{domain:.2f}")
+        if age_decay < 0.5:
+            reasons.append(f"aged({age_decay:.2f})")
         if not reasons:
             reasons.append("base-match")
 

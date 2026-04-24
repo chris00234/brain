@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "brain_core"))
 
@@ -13,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "brain_core"))
 def _reset_rate_limit():
     """Clear the rate-limit table between tests so they don't leak state."""
     import sqlite3
+
     from config import AUTONOMY_DB
 
     try:

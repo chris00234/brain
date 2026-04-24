@@ -41,6 +41,7 @@ import json
 import math
 import sys
 import time
+from typing import TextIO
 
 sys.path.insert(0, "/Users/chrischo/server/brain/brain_core")
 
@@ -86,12 +87,13 @@ def cosine(a: list[float], b: list[float]) -> float:
 
 
 def fetch_entities() -> list[dict]:
+    # node_id was never consumed downstream — dropped to silence the
+    # deprecated-id() warning without touching the callers' contract.
     rows = run_query(
         "MATCH (e:Entity) "
         "RETURN e.name AS name, e.entity_type AS etype, "
         "       coalesce(e.aliases, []) AS aliases, "
-        "       e.mention_count AS mentions, "
-        "       id(e) AS node_id "
+        "       e.mention_count AS mentions "
         "ORDER BY e.mention_count DESC",
     )
     return [dict(r) for r in rows]
@@ -148,7 +150,7 @@ def merge_cluster(
     cluster: list[int],
     embeddings: list[list[float]],
     dry_run: bool,
-    audit_fh,
+    audit_fh: TextIO,
 ) -> tuple[bool, str]:
     """Merge a cluster of entity indices. Returns (merged, reason)."""
     members = [entities[i] for i in cluster]

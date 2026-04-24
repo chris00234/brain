@@ -92,7 +92,8 @@ CREATE TABLE IF NOT EXISTS outcomes (
     chris_override INTEGER DEFAULT 0,
     override_reason TEXT DEFAULT '',
     confidence_was REAL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    acked INTEGER DEFAULT 1
 );
 
 CREATE TABLE IF NOT EXISTS accuracy_tracker (

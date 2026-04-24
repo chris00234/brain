@@ -23,8 +23,8 @@ Pipeline (fast path, <1200 ms hard budget):
   5. Dedup                    — against session_context[session_id, agent,
                                 'recall_seen'] with decay tiers (critical ∞,
                                 preference 20 turns, proactive 5 turns).
-  6. Confidence sentinel      — if no block score ≥ 0.5, inject a
-                                "brain confidence low" system reminder.
+  6. Confidence sentinel      — diagnostic-only fallback, disabled by default
+                                so hooks do not inject low-value noise.
   7. Budget                   — 2 KB max, priority: critical > high > medium.
   8. Observability            — insert_action_audit(route='/recall/active', ...)
 
@@ -40,6 +40,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
+import re
 import sqlite3
 import sys
 import time
@@ -85,6 +87,16 @@ DOORBELL_TEMPLATE = "{session_id}"
 BUDGET_TOKEN_LIMIT = 2048
 LOW_CONFIDENCE_THRESHOLD = 0.5
 HARD_TIMEOUT_MS = 1200
+SEMANTIC_MIN_SCORE = float(os.getenv("BRAIN_ACTIVE_RECALL_SEMANTIC_MIN_SCORE", "0.82"))
+SEMANTIC_MIN_SCORE_WITH_INTENT = float(
+    os.getenv("BRAIN_ACTIVE_RECALL_SEMANTIC_MIN_SCORE_WITH_INTENT", "0.72")
+)
+DISABLE_GENERIC_SUMMARY_BLOCKS = os.getenv("BRAIN_ACTIVE_RECALL_GENERIC_SUMMARIES", "0").lower() not in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 
 # ── Types ─────────────────────────────────────────────────────────
@@ -181,6 +193,8 @@ def _match_canonical_routes(prompt: str) -> list[IntentMatch]:
     lowered = prompt.lower()
     matches: list[IntentMatch] = []
     for intent_name, cfg in intents_cfg.items():
+        if _intent_blocked_by_context(intent_name, lowered):
+            continue
         keywords_en = [k.lower() for k in (cfg.get("keywords_en") or [])]
         keywords_ko = cfg.get("keywords_ko") or []  # Korean doesn't need lowercasing
         hit = False
@@ -204,6 +218,38 @@ def _match_canonical_routes(prompt: str) -> list[IntentMatch]:
                 )
             )
     return matches
+
+
+def _intent_blocked_by_context(intent_name: str, lowered_prompt: str) -> bool:
+    """Suppress broad intent routes when the prompt is about implementation,
+    not the domain object itself.
+
+    The visual route intentionally includes broad words like "image" and
+    "이미지" so "what was the image I sent?" works. But prompts about the
+    image-processing pipeline ("Gemini API vs subscription CLI") should not
+    fan out to remembered screenshots/photos.
+    """
+    if intent_name != "visual":
+        return False
+    technical_markers = (
+        "api",
+        "backend",
+        "gemini",
+        "codex",
+        "claude",
+        "gpt",
+        "ingest",
+        "caption",
+        "pipeline",
+        "model",
+        "subscription",
+        "구독",
+        "비용",
+        "백엔드",
+        "파이프라인",
+        "캡션",
+    )
+    return any(marker in lowered_prompt for marker in technical_markers)
 
 
 def _load_canonical_path(raw_path: str) -> tuple[str, str] | None:
@@ -366,9 +412,14 @@ def _semantic_blocks(
                 with contextlib.suppress(Exception):
                     all_results.extend(f.result())
 
-    # Dedup by path or id within this call
+    # Dedup by path/id and near-duplicate content within this call. Active
+    # recall runs every turn, so repeated generic Summary atoms are worse
+    # than a missed optional hint: they dilute the prompt and make the model
+    # over-anchor on stale/redundant context.
     blocks: list[InjectionBlock] = []
     hashes_this_call: set[str] = set()
+    content_signatures: list[set[str]] = []
+    generic_summary_seen = False
     for r in all_results:
         if not isinstance(r, dict):
             continue
@@ -377,12 +428,28 @@ def _semantic_blocks(
         content = (r.get("content") or "")[:1200]
         score = float(r.get("score") or 0)
         collection = r.get("collection", "")
+        if _is_noisy_semantic_result(title, content, r.get("path")):
+            continue
+        is_generic_summary = _is_generic_summary_title(title)
+        if is_generic_summary and (DISABLE_GENERIC_SUMMARY_BLOCKS or generic_summary_seen):
+            continue
+        norm_score = min(1.0, max(0.0, score / 100.0))
+        min_score = SEMANTIC_MIN_SCORE_WITH_INTENT if matches else SEMANTIC_MIN_SCORE
+        if norm_score < min_score:
+            continue
+        if not _semantic_result_matches_prompt(prompt, title, content):
+            continue
         h = _hash(f"semantic:{rid}:{title}:{content[:200]}")
         if h in seen_hashes or h in hashes_this_call:
             continue
+        signature = _content_signature(content)
+        if signature and any(_jaccard(signature, prior) >= 0.72 for prior in content_signatures):
+            continue
         hashes_this_call.add(h)
-        # Normalize score 0..1 from the brain's 0..100 range
-        norm_score = min(1.0, max(0.0, score / 100.0))
+        if signature:
+            content_signatures.append(signature)
+        if is_generic_summary:
+            generic_summary_seen = True
         blocks.append(
             InjectionBlock(
                 id=h,
@@ -399,6 +466,72 @@ def _semantic_blocks(
         if len(blocks) >= limit:
             break
     return blocks
+
+
+def _is_generic_summary_title(title: str) -> bool:
+    return bool(re.match(r"(?i)^\s*summary(?:\s*\(part\s*\d+\))?\s*$", title or ""))
+
+
+def _is_noisy_semantic_result(title: str, content: str, path: str | None) -> bool:
+    haystack = f"{title}\n{path or ''}\n{content[:200]}".lower()
+    if "raw_shell_" in haystack:
+        return True
+    if title.lstrip().startswith("### Metadata"):
+        return True
+    return bool(re.match(r"(?is)^\s*(?:#\s*)?metadata\b", content or ""))
+
+
+_QUERY_STOPWORDS = {
+    "그리고",
+    "그러면",
+    "그럼",
+    "계속",
+    "다시",
+    "여기서",
+    "이제",
+    "진행",
+    "진행해줘",
+    "확인",
+    "해줘",
+    "하는",
+    "있는",
+    "것도",
+    "what",
+    "when",
+    "where",
+    "which",
+    "this",
+    "that",
+    "with",
+    "from",
+    "into",
+}
+
+
+def _query_terms(prompt: str) -> set[str]:
+    terms = _content_signature(prompt)
+    return {t for t in terms if t not in _QUERY_STOPWORDS and len(t) >= 3}
+
+
+def _semantic_result_matches_prompt(prompt: str, title: str, content: str) -> bool:
+    terms = _query_terms(prompt)
+    if not terms:
+        return False
+    hay_terms = _content_signature(f"{title}\n{content[:600]}")
+    return bool(terms & hay_terms)
+
+
+def _content_signature(text: str) -> set[str]:
+    normalized = re.sub(r"(?im)^signal:\s*\w+\s*$", " ", text or "")
+    normalized = re.sub(r"(?im)^openclaw\s+\w+\s+session\s*\([^)]*\)\s*$", " ", normalized)
+    normalized = re.sub(r"\b20\d{2}-\d{2}-\d{2}\b", " ", normalized)
+    return {tok for tok in re.findall(r"[a-zA-Z가-힣0-9]{3,}", normalized.lower()) if len(tok) >= 3}
+
+
+def _jaccard(a: set[str], b: set[str]) -> float:
+    if not a or not b:
+        return 0.0
+    return len(a & b) / max(1, len(a | b))
 
 
 # ── Proactive layer ───────────────────────────────────────────────
@@ -609,6 +742,15 @@ def _confidence_sentinel() -> InjectionBlock:
     )
 
 
+def _confidence_sentinel_enabled() -> bool:
+    return os.getenv("BRAIN_ACTIVE_RECALL_CONFIDENCE_SENTINEL", "0").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 # ── Budget enforcement ────────────────────────────────────────────
 
 
@@ -700,6 +842,19 @@ def _audit(
         log.debug("silenced exception in active_recall.py: %s", _exc)
 
 
+def _quality_report(blocks: list[InjectionBlock]) -> dict:
+    generic_summary_count = sum(1 for b in blocks if _is_generic_summary_title(b.title))
+    noisy_count = sum(1 for b in blocks if _is_noisy_semantic_result(b.title, b.content, b.path))
+    semantic_count = sum(1 for b in blocks if b.source.startswith("semantic"))
+    return {
+        "block_count": len(blocks),
+        "semantic_count": semantic_count,
+        "generic_summary_count": generic_summary_count,
+        "noisy_count": noisy_count,
+        "max_score": max((b.score for b in blocks), default=0.0),
+    }
+
+
 # ── Helpers ───────────────────────────────────────────────────────
 
 
@@ -747,8 +902,10 @@ def build_injection(
         filtered = _apply_decay_filter(all_blocks, seen_registry, turn_idx)
 
         if (
-            not filtered or max((b.score for b in filtered), default=0) < LOW_CONFIDENCE_THRESHOLD
-        ) and not any(b.priority == "critical" for b in filtered):
+            _confidence_sentinel_enabled()
+            and (not filtered or max((b.score for b in filtered), default=0) < LOW_CONFIDENCE_THRESHOLD)
+            and not any(b.priority == "critical" for b in filtered)
+        ):
             filtered.insert(0, _confidence_sentinel())
 
         budgeted = _enforce_budget(filtered, BUDGET_TOKEN_LIMIT)
@@ -765,6 +922,7 @@ def build_injection(
             "total_tokens": sum(_rough_tokens(b.content) + _rough_tokens(b.title) for b in budgeted),
             "latency_ms": latency_ms,
             "new_since_last_turn": len(budgeted) > 0,
+            "quality": _quality_report(budgeted),
             "degraded": False,
         }
     except Exception as e:

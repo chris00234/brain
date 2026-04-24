@@ -895,7 +895,7 @@
   },
   {
     "query": "Chris는 프론트엔드 스택으로 뭘 선호해?",
-    "expected_source": "canonical/chris/frontend-stack-preference.md",
+    "expected_source": "canonical/chris/_state.md",
     "expected_content": "React + Vite + TypeScript",
     "collection": "all",
     "_relabel_origin": "React + Vite + TypeScript"
@@ -1365,7 +1365,7 @@
   },
   {
     "query": "Chris는 프론트엔드 기본 스택으로 뭘 써?",
-    "expected_source": "canonical/chris/preferred-frontend-stack.md",
+    "expected_source": "canonical/chris/_state.md",
     "expected_content": "React + Vite + TypeScript",
     "collection": "all",
     "_relabel_origin": "React + Vite + TypeScript"
@@ -6726,20 +6726,20 @@
   },
   {
     "query": "현재 memory retrieval substrate는 뭐야?",
-    "expected_source": "canonical/infra/rag-chromadb.md",
-    "expected_content": "ChromaDB backed RAG substrate",
+    "expected_source": "canonical/infra/infra_rag_retrieval_stack.md",
+    "expected_content": "native Qdrant v1.17",
     "collection": "all",
     "expected_alternates": [
-      "current retrieval uses ChromaDB RAG",
-      "RAG substrate is ChromaDB based",
-      "ChromaDB is the retrieval base"
+      "Qdrant is the retrieval base",
+      "RAG substrate is Qdrant based",
+      "native Qdrant v1.17 as the vector store"
     ],
-    "_relabel_origin": "ChromaDB-backed RAG"
+    "_relabel_origin": "native Qdrant RAG"
   },
   {
     "query": "What should v1 layer above the current retrieval substrate?",
-    "expected_source": "canonical/infra/rag-chromadb.md",
-    "expected_content": "canonical memory layer above RAG",
+    "expected_source": "canonical/decisions/canonical-memory-layer.md",
+    "expected_content": "canonical memory layer as the current truth and governance layer",
     "collection": "all",
     "expected_alternates": [
       "v1 adds canonical memory on top",
@@ -6749,21 +6749,21 @@
     "_relabel_origin": "canonical memory above it"
   },
   {
-    "query": "Should canonical memory replace the ChromaDB RAG substrate?",
-    "expected_source": "canonical/infra/rag-chromadb.md",
+    "query": "Should canonical memory replace the current RAG substrate?",
+    "expected_source": "canonical/infra/infra_rag_retrieval_stack.md",
     "expected_content": "canonical memory does not replace RAG",
     "collection": "all",
     "expected_alternates": [
       "RAG stays as retrieval substrate",
       "canonical layer sits above not replaces",
-      "keep ChromaDB RAG underneath"
+      "canonical memory should sit above"
     ],
     "_relabel_origin": "rather than replacing it"
   },
   {
     "query": "RAG와 canonical notes 역할을 Chris 시스템에서 어떻게 나눠?",
-    "expected_source": "canonical/infra/rag-stack-role.md",
-    "expected_content": "RAG retrieves evidence canonical notes govern truth",
+    "expected_source": "canonical/infra/infra_rag_retrieval_stack.md",
+    "expected_content": "provides evidence retrieval, embeddings, and document recall",
     "collection": "all",
     "expected_alternates": [
       "retrieval in RAG truth in canonical notes",
@@ -6775,14 +6775,14 @@
   {
     "query": "Which components provide vectors and embeddings in the RAG stack?",
     "expected_source": "canonical/infra/rag-stack-role.md",
-    "expected_content": "ChromaDB vectors and Ollama embeddings",
+    "expected_content": "Qdrant stores vectors and Ollama provides embeddings",
     "collection": "all",
     "expected_alternates": [
-      "Chroma stores vectors Ollama embeds",
-      "vectors in Chroma embeddings via Ollama",
-      "RAG uses Chroma and Ollama"
+      "Qdrant stores vectors Ollama embeds",
+      "vectors in Qdrant embeddings via Ollama",
+      "RAG uses Qdrant and Ollama"
     ],
-    "_relabel_origin": "ChromaDB stores vectors"
+    "_relabel_origin": "Qdrant stores vectors"
   },
   {
     "query": "Chris는 brain foundation에서 지금 기능 말고 뭘 더 중요하게 봐?",

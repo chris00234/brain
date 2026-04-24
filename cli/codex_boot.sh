@@ -25,9 +25,9 @@ fi
 command -v jq >/dev/null 2>&1 || exit 0
 [ -r "$SECRET_FILE" ] || exit 0
 
-SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // .sessionId // empty' 2>/dev/null || echo "")
-PROMPT=$(printf '%s' "$PAYLOAD" | jq -r '.prompt // .user_message // empty' 2>/dev/null || echo "")
-CWD_RAW=$(printf '%s' "$PAYLOAD" | jq -r '.cwd // empty' 2>/dev/null || echo "")
+SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r '(.session_id // .sessionId // "") | tostring | .[0:128]' 2>/dev/null || echo "")
+PROMPT=$(printf '%s' "$PAYLOAD" | jq -r '(.prompt // .user_message // "") | tostring | .[0:8000]' 2>/dev/null || echo "")
+CWD_RAW=$(printf '%s' "$PAYLOAD" | jq -r '(.cwd // "") | tostring | .[0:512]' 2>/dev/null || echo "")
 [ -z "$SESSION_ID" ] && SESSION_ID="codex-$$"
 
 # Turn counter scoped to session id. Codex doesn't guarantee the same session
@@ -43,7 +43,7 @@ trap 'rm -f "$HEADER_FILE" 2>/dev/null' EXIT HUP INT TERM
 { printf 'Authorization: Bearer '; cat "$SECRET_FILE"; printf '\n'; } > "$HEADER_FILE"
 chmod 600 "$HEADER_FILE"
 
-REQ_BODY=$(jq -n \
+REQ_BODY=$(jq -nc \
   --arg prompt "$PROMPT" \
   --arg session_id "$SESSION_ID" \
   --argjson turn_idx "$TURN_IDX" \
@@ -58,6 +58,9 @@ RESP=$(curl -sS --max-time 1.5 \
   "${BRAIN_URL}/recall/active" 2>/dev/null || echo "")
 
 [ -z "$RESP" ] && exit 0
+BLOCK_COUNT=$(printf '%s' "$RESP" | jq '[.blocks[]?] | length' 2>/dev/null || echo 0)
+[[ "$BLOCK_COUNT" =~ ^[0-9]+$ ]] || BLOCK_COUNT=0
+[ "$BLOCK_COUNT" -gt 0 ] || exit 0
 
 # Format blocks into a <system-reminder> block. Codex treats
 # UserPromptSubmit stdout as trailing context on the current turn.

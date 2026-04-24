@@ -1,7 +1,7 @@
 """brain_core/maintenance.py — scheduled maintenance tasks.
 
 D3: Job log rotation — truncate logs older than 7 days, cap at 1MB.
-D4: ChromaDB integrity check — PRAGMA integrity_check on the SQLite file.
+D4: Qdrant collections integrity check — readyz probe + points count sanity.
 
 Called by the scheduler as fire-and-forget jobs. Alerts via openclaw_dispatch
 to Jenna if integrity check fails.
@@ -463,22 +463,33 @@ def incremental_stale_cleanup() -> dict:
     collections = ["knowledge", "experience", "canonical"]
     total_cleaned = 0
 
+    # Page through each collection via cursor so a single `get(limit=count)`
+    # can't materialize 500k+ payloads in memory at once.
+    PAGE = 1000
     for col_name in collections:
         try:
             count = store.count(col_name)
             if count == 0:
                 continue
-            points = store.get(
-                col_name,
-                limit=count,
-                with_payload=True,
-                with_documents=False,
-            )
-            stale = []
-            for p in points:
-                source = (p.payload or {}).get("source", "")
-                if source and source.startswith("/") and not Path(source).exists():
-                    stale.append(p.id)
+            stale: list[str] = []
+            cursor = None
+            while True:
+                page = store.get(
+                    col_name,
+                    limit=PAGE,
+                    offset=cursor,
+                    with_payload=True,
+                    with_documents=False,
+                )
+                if not page:
+                    break
+                for p in page:
+                    source = (p.payload or {}).get("source", "")
+                    if source and source.startswith("/") and not Path(source).exists():
+                        stale.append(p.id)
+                if len(page) < PAGE:
+                    break
+                cursor = page[-1].id
             if stale:
                 BATCH = 20
                 for s in range(0, len(stale), BATCH):

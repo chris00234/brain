@@ -90,8 +90,13 @@ class VectorStore(Protocol):
         filter: Filter = None,
         with_payload: bool = True,
         with_vectors: bool = False,
+        query_text: str | None = None,
     ) -> list[VectorHit]:
-        """kNN search; ``filter`` uses the Chroma-native shape translated at the backend boundary."""
+        """kNN search; ``filter`` uses the Chroma-native shape translated at the backend boundary.
+
+        ``query_text`` is optional and only used by hybrid-search backends
+        (QdrantStore) for BM25 sparse fusion. Dense-only backends ignore it.
+        """
 
     def get(
         self,

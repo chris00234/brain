@@ -53,7 +53,7 @@ def _query_cue_hash(query: str) -> str:
         return ""
     tokens = sorted(set(_CUE_WORD_RE.findall(query.lower())))
     joined = " ".join(tokens[:8])  # cap at 8 most-informative tokens
-    return hashlib.md5(joined.encode("utf-8")).hexdigest()[:12]
+    return hashlib.md5(joined.encode("utf-8"), usedforsecurity=False).hexdigest()[:12]
 
 
 def log_competition(winner_atom_id: str, loser_atom_ids: list[str], query: str) -> int:
