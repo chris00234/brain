@@ -131,6 +131,20 @@ def judgment_report(hours: int = Query(default=24, ge=1, le=168)) -> dict:
         raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e)) from e
 
 
+@router.get("/brain/judgment-tuning", tags=["brain"])
+def judgment_tuning(
+    hours: int = Query(default=24, ge=1, le=168),
+    min_samples: int = Query(default=20, ge=5, le=500),
+) -> dict:
+    """Evidence-based active-recall policy recommendations; does not apply changes."""
+    try:
+        from judgment_feedback import tuning_report
+
+        return tuning_report(hours=hours, min_samples=min_samples)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e)) from e
+
+
 # ── MCP tool discovery ─────────────────────────────────
 @router.get("/brain/tools", tags=["mcp"])
 def brain_tools() -> dict:
