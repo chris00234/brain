@@ -2403,16 +2403,19 @@ def search_all(
             r["_debug"] = _dbg
     unique.sort(key=lambda x: x.get("score", 0), reverse=True)
 
-    # Preference recency boost: for semantic_memory preferences, newer ones
-    # get a significant boost to prevent stale preferences from dominating
-    # via accumulated access_count reinforcement.
-    now_utc = datetime.now(UTC)
+    # Preference category backfill (no second decay multiplication).
+    # Older semantic_memory preferences often lack the `category` metadata
+    # field, which made `time_decay` apply the generic 180d half-life
+    # instead of the preference-specific 90d. We infer the category here and
+    # write it onto metadata so the downstream time_decay pass sees it.
+    #
+    # The previous version of this block ALSO multiplied score by an
+    # independent 30d half-life on top of time_decay's 90d, which stacked
+    # two decay curves and pushed older preferences past the 0.25 floor
+    # faster than either curve alone intended. The score multiplication
+    # was removed 2026-04-26; only the category backfill remains.
 
     def _infer_category(r: dict, content: str) -> str:
-        """2026-04-16 Tier 2 fix: older memories lack explicit `category`
-        metadata so the preference recency boost below never fired. Infer
-        from content + existing meta signals. Cheap keyword heuristic.
-        """
         existing = (r.get("metadata") or {}).get("category")
         if existing:
             return existing
@@ -2426,33 +2429,16 @@ def search_all(
         return ""
 
     for r in unique:
-        collection = r.get("collection", "")
-        if collection != "semantic_memory":
+        if r.get("collection") != "semantic_memory":
             continue
-        meta = r.get("metadata") or {}
-        # 2026-04-16 Tier 2: infer category when metadata lacks it so
-        # older unlabeled preference memories still decay appropriately.
-        category = meta.get("category") or _infer_category(r, r.get("content", ""))
-        if category != "preference":
+        meta = dict(r.get("metadata") or {})
+        if meta.get("category"):
             continue
-        created_at_raw = meta.get("created_at") or meta.get("updated_at")
-        if not created_at_raw:
+        inferred = _infer_category(r, r.get("content", ""))
+        if not inferred:
             continue
-        try:
-            ts = created_at_raw.replace("Z", "+00:00")
-            created_dt = datetime.fromisoformat(ts)
-            if created_dt.tzinfo is None:
-                created_dt = created_dt.replace(tzinfo=UTC)
-            age_days = max(0, (now_utc - created_dt).total_seconds() / 86400)
-            # 30-day half-life recency curve: a preference from today gets 1.0,
-            # from 30 days ago gets 0.5, from 90 days ago gets 0.125
-            recency = 0.5 ** (age_days / 30)
-            # Blend: 60% original score + 40% recency-weighted score
-            # This ensures a fresh preference strongly outranks a stale one
-            # while still respecting relevance (can't boost an irrelevant result)
-            r["score"] = round(r["score"] * (0.6 + 0.4 * recency), 2)
-        except (ValueError, TypeError):
-            continue
+        meta["category"] = inferred
+        r["metadata"] = meta
 
     # Graph-aware boost: find entities mentioned in query, look up connected
     # memory_ids via Neo4j 2-hop traversal, boost results whose IDs match.

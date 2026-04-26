@@ -3,7 +3,7 @@
 Improvements over the previous per-module `[a-z0-9_-]{3,}` regex:
   - Min token length 2 (catches "AI", "DB", "OS", etc.)
   - Korean character support (가-힣)
-  - English stopword removal
+  - English + Korean stopword removal
 """
 
 from __future__ import annotations
@@ -14,6 +14,9 @@ _LATIN_RE = re.compile(r"[a-z0-9_\-]{2,}")
 _KOREAN_RE = re.compile(r"[가-힣]{2,}")
 _STOPWORDS = frozenset(
     {
+        # English function words (articles, copula, modals, demonstratives,
+        # interrogatives, common prepositions). Single-character English
+        # words are already excluded by the {2,} length floor.
         "the",
         "is",
         "an",
@@ -62,6 +65,37 @@ _STOPWORDS = frozenset(
         "how",
         "which",
         "about",
+        # Korean function words. Single-syllable particles like 은/는/이/가/을/를/의/에
+        # don't pass the [가-힣]{2,} regex and are already excluded. This list
+        # only filters multi-syllable function words that carry no domain
+        # signal — conjunctions, demonstratives, interrogatives, formal
+        # sentence endings, postposition compounds. Nouns/verbs/adjectives
+        # with semantic content are intentionally NOT included.
+        "그리고",  # and
+        "그러나",  # but
+        "그래서",  # so
+        "또한",  # also
+        "하지만",  # however
+        "또는",  # or
+        "혹은",  # or (alternative)
+        "이것",  # this
+        "그것",  # that
+        "저것",  # that (over there)
+        "이런",  # this kind of
+        "그런",  # that kind of
+        "저런",  # that kind of (over there)
+        "무엇",  # what
+        "어떻게",  # how
+        "어디서",  # where (from)
+        "언제",  # when
+        "어디",  # where
+        "누구",  # who
+        "입니다",  # (formal copula ending)
+        "됩니다",  # (formal "becomes" ending)
+        "합니다",  # (formal "do" ending)
+        "위해",  # for (the sake of)
+        "통해",  # through
+        "대해",  # about
     }
 )
 

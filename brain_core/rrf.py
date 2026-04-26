@@ -93,6 +93,12 @@ def rrf_fuse(
         normalized = max(0.0, min(100.0, (raw / theoretical_max) * 100.0))
         doc["rrf_score"] = round(normalized, 2)
         doc["score"] = doc["rrf_score"]
+        # Score is now rank-based (RRF), not the upstream decayed/composed
+        # value. Clearing _decay_applied lets the downstream time_decay pass
+        # re-apply freshness against the new score; without this, expand/hyde
+        # multi-variant queries effectively skipped time decay because the
+        # idempotency flag from per-variant decay survived the shallow copy.
+        doc.pop("_decay_applied", None)
         fused.append(doc)
 
     fused.sort(key=lambda d: d.get("rrf_score", 0), reverse=True)

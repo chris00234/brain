@@ -29,6 +29,25 @@ def test_multi_source_consensus_ranks_higher_than_single_source_top():
     assert fused[0]["path"] == "/b", "consensus doc should rank first"
 
 
+def test_rrf_clears_decay_applied_so_downstream_decay_can_re_run():
+    """RRF replaces score with rank-based score. The shallow copy preserved
+    _decay_applied which made expand/hyde queries effectively skip time
+    decay because the downstream apply_to_results no-op'd on the flag.
+    """
+    docs = [
+        {"path": "/a", "score": 90, "_decay_applied": True, "_rerank_applied": True},
+        {"path": "/b", "score": 50, "_decay_applied": True, "_rerank_applied": True},
+    ]
+    fused = rrf_fuse([docs])
+    for r in fused:
+        assert "_decay_applied" not in r, "RRF must clear _decay_applied so decay re-runs on the new score"
+        # _rerank_applied is intentionally preserved — re-applying token-overlap
+        # rerank against the rank-based RRF score would compound trust boosts
+        # (see recall.py:709 comment from the 2026-04-16 fix).
+        assert r["_rerank_applied"] is True
+        assert r["score"] == r["rrf_score"]
+
+
 def test_trust_weights_break_ties():
     src1 = [{"path": "/x"}]
     src2 = [{"path": "/y"}]
