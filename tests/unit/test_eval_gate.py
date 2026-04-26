@@ -58,6 +58,56 @@ def test_failure_breakdown_splits_retrieval_and_eval_stale_cases(fake_eval_gate)
     assert summary["source_only_failed"] == 1
 
 
+def test_failure_analysis_classifies_fix_lanes(fake_eval_gate):
+    analysis = fake_eval_gate._failure_analysis(
+        [
+            {
+                "query": "pass",
+                "hit_content_loose": True,
+                "hit_source": True,
+            },
+            {
+                "query": "stale phrase",
+                "expected_source": "canonical/current.md",
+                "expected_content": "old exact phrase",
+                "hit_content_loose": False,
+                "hit_source": True,
+            },
+            {
+                "query": "source alias",
+                "expected_source": "canonical/old.md",
+                "expected_content": "right answer",
+                "hit_content_loose": True,
+                "hit_source": False,
+            },
+            {
+                "query": "archived consolidation",
+                "expected_source": "canonical/archived/chris/original-specific-memory.md",
+                "expected_content": "specific wording",
+                "hit_content_loose": False,
+                "hit_source": False,
+                "top_sources": ["canonical/chris/current-memory.md"],
+            },
+            {
+                "query": "true miss",
+                "expected_source": "canonical/project/alpha.md",
+                "expected_content": "alpha",
+                "hit_content_loose": False,
+                "hit_source": False,
+                "top_sources": ["canonical/project/beta.md"],
+                "latency_ms": 1500,
+            },
+        ]
+    )
+
+    assert analysis["failed"] == 4
+    assert analysis["buckets"]["stale_expected_content"]["count"] == 1
+    assert analysis["buckets"]["source_alias_or_successor"]["count"] == 1
+    assert analysis["buckets"]["canonical_consolidation_gap"]["count"] == 1
+    assert analysis["buckets"]["retrieval_miss"]["count"] == 1
+    assert analysis["secondary_flags"]["slow_failure"] == 1
+
+
 def test_persist_default_track_uses_legacy_paths(fake_eval_gate, tmp_path):
     fake_eval_gate._persist_eval_report(_stub_report(95.7), track="default")
     assert (tmp_path / "logs" / "eval-report.json").exists()
@@ -99,6 +149,7 @@ def test_persist_loose_metric_keeps_strict_and_selected_content(fake_eval_gate, 
     assert row["hit_content_loose_pct"] == 88.0
     assert row["selected_content_pct"] == 88.0
     assert report["failure_breakdown"]["content_only_failed"] == 1
+    assert report["failure_analysis"]["buckets"]["stale_expected_content"]["count"] == 1
 
 
 def test_baseline_roundtrip(fake_eval_gate, tmp_path):

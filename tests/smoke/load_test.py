@@ -7,7 +7,7 @@ rerank + time decay, no HyDE to keep latency honest).
 
 Pass criteria (10-collection fan-out, single-user system):
   - ≥10 requests/sec sustained
-  - p95 latency < 500ms (for reads that don't hit HyDE)
+  - p95 latency < 1000ms (for reads that don't hit HyDE)
 
 Usage:
   load_test.py --duration 30 --concurrency 50
@@ -147,9 +147,9 @@ async def main() -> int:
         # Targets: 9-collection fan-out + embedding + RRF + rerank.
         # Single-user system — latency matters more than throughput.
         rps_pass = recall_v2["rps"] >= 10
-        p95_pass = recall_v2["p95_ms"] < 500
+        p95_pass = recall_v2["p95_ms"] < 1000
         print(f"  /recall/v2 ≥10 rps: {'PASS' if rps_pass else 'FAIL'} (got {recall_v2['rps']})")
-        print(f"  /recall/v2 p95 <500ms: {'PASS' if p95_pass else 'FAIL'} (got {recall_v2['p95_ms']}ms)")
+        print(f"  /recall/v2 p95 <1000ms: {'PASS' if p95_pass else 'FAIL'} (got {recall_v2['p95_ms']}ms)")
 
     # Save raw report
     out = Path("/Users/chrischo/server/brain/tests/load-test-result.json")

@@ -61,10 +61,10 @@
     "_updated_at": "2026-04-17T10:45"
   },
   {
-    "query": "chromadb docker compose",
+    "query": "qdrant current retrieval substrate",
     "collection": "all",
-    "expected_source": "chroma",
-    "expected_content": "chroma"
+    "expected_source": "canonical/infra/rag-qdrant.md",
+    "expected_content": "Native Qdrant v1.17 is the current Brain retrieval substrate"
   },
   {
     "query": "ollama model configuration",
@@ -571,10 +571,10 @@
     "expected_content": "brain"
   },
   {
-    "query": "chromadb native port 8000",
+    "query": "qdrant named vectors hybrid retrieval",
     "collection": "all",
-    "expected_source": "obsidian",
-    "expected_content": "chroma"
+    "expected_source": "canonical/infra/infra_rag_retrieval_stack.md",
+    "expected_content": "dense + contextual + BM25 sparse"
   },
   {
     "query": "ghost blog CMS docker image",

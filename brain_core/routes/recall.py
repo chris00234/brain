@@ -24,7 +24,6 @@ import search_unified
 import temporal
 import time_decay as _time_decay
 from api_deps import _safe_http_detail, get_request_id, log, verify_bearer
-from config import BRAIN_DIR
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from indexer import get_embedding as _get_embedding
@@ -32,6 +31,8 @@ from metrics_buffer import metrics_buffer as _metrics_buf
 from pydantic import BaseModel, Field
 from rate_limit import limiter
 from vector_store import get_vector_store
+
+from config import BRAIN_DIR
 
 # First-failure flag so hook telemetry bugs surface once in logs instead of
 # being silently swallowed on every request.
@@ -100,6 +101,13 @@ class InjectionBlockModel(BaseModel):
     score: float
     priority: str
     path: str | None = None
+    memory_id: str | None = None
+    include_reason: str | None = None
+    token_estimate: int | None = None
+    freshness: str | None = None
+    risk_flags: list[str] = Field(default_factory=list)
+    compiler_score: float | None = None
+    contract_category: str | None = None
 
 
 class RecallActiveRequest(BaseModel):

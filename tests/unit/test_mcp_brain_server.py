@@ -1,7 +1,7 @@
 """Unit tests for brain_mcp_server stdio transport.
 
 Spawns the MCP server as a subprocess, sends initialize + tools/list, and
-verifies all 11 brain_* tools are exposed with valid schemas.
+verifies all registered brain_* tools are exposed with valid schemas.
 """
 
 from __future__ import annotations
@@ -149,15 +149,25 @@ def test_tools_have_valid_input_schema():
         assert "properties" in schema
 
 
-def test_expired_lifecycle_processes_one_pending_request_before_exit():
+def test_lifecycle_self_reap_disabled_by_default_for_long_codex_sessions():
     replies = _send_jsonrpc(
         [{"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}],
-        extra_env={"BRAIN_MCP_MAX_LIFETIME_S": "0"},
+        extra_env={
+            "BRAIN_MCP_IDLE_TIMEOUT_S": "0",
+            "BRAIN_MCP_MAX_LIFETIME_S": "0",
+        },
     )
 
     list_reply = next((r for r in replies if r.get("id") == 1), None)
-    assert list_reply is not None, "expired MCP process dropped a pending request"
+    assert list_reply is not None, "disabled lifecycle self-reap should not drop a pending request"
     assert "tools" in list_reply["result"]
+
+
+def test_lifecycle_reap_can_still_be_enabled_explicitly():
+    assert 'os.environ.get("BRAIN_MCP_IDLE_TIMEOUT_S", "0")' in MCP_SOURCE
+    assert 'os.environ.get("BRAIN_MCP_MAX_LIFETIME_S", "0")' in MCP_SOURCE
+    assert "if IDLE_TIMEOUT_S > 0" in MCP_SOURCE
+    assert "if MAX_LIFETIME_S > 0" in MCP_SOURCE
 
 
 def test_tool_handler_exception_returns_mcp_response():
@@ -189,8 +199,11 @@ def test_tool_handler_exception_returns_mcp_response():
 # incident that prompted this coverage.
 
 import re  # noqa: E402
+import sys  # noqa: E402
 
 MCP_SOURCE = MCP_SERVER.read_text()
+sys.path.insert(0, str(BRAIN_ROOT))
+import brain_mcp_server  # noqa: E402
 
 # Tools that MUST be capped because they can exceed 5s:
 #   - LLM-backed: decide, reason, ingest (classify+embed), store (cold path)
@@ -271,3 +284,120 @@ def test_no_new_uncapped_tools_added():
         f"Add each to either TIMEOUT_CAPPED_TOOLS (slow, needs timeout_s=4) or "
         f"FAST_TOOLS (pure SQLite / instant) in this test file."
     )
+
+
+def test_brain_outcome_success_records_task_outcome(monkeypatch):
+    calls = []
+
+    def fake_request(method, path, body=None, actor=None, timeout_s=60):
+        calls.append((method, path, body, actor, timeout_s))
+        return {"ok": True}
+
+    monkeypatch.setattr(brain_mcp_server, "_brain_request", fake_request)
+
+    brain_mcp_server.handle_tools_call(
+        {
+            "name": "brain_outcome",
+            "arguments": {
+                "task_id": "task_123",
+                "success": True,
+                "notes": "worked",
+                "agent": "codex",
+            },
+        }
+    )
+
+    assert calls == [
+        (
+            "POST",
+            "/brain/tasks/task_123/complete?chris_acked=true",
+            {"result": "worked", "agent": "codex"},
+            "codex",
+            60,
+        )
+    ]
+
+
+def test_brain_outcome_updates_decision_ledger_for_decision_ids(monkeypatch):
+    calls = []
+
+    def fake_request(method, path, body=None, actor=None, timeout_s=60):
+        calls.append((method, path, body, actor, timeout_s))
+        return {"ok": True}
+
+    monkeypatch.setattr(brain_mcp_server, "_brain_request", fake_request)
+
+    brain_mcp_server.handle_tools_call(
+        {
+            "name": "brain_outcome",
+            "arguments": {
+                "task_id": "decision_abc123",
+                "success": False,
+                "notes": "recommendation missed",
+                "agent": "codex",
+            },
+        }
+    )
+
+    assert calls == [
+        (
+            "POST",
+            "/brain/decisions/decision_abc123/outcome",
+            {
+                "actual_outcome": "recommendation missed",
+                "outcome_status": "failed",
+                "review_status": "needs_review",
+            },
+            "codex",
+            60,
+        )
+    ]
+
+
+def test_brain_decide_forwards_context_and_domain(monkeypatch):
+    calls = []
+
+    def fake_request(method, path, body=None, actor=None, timeout_s=60):
+        calls.append((method, path, body, actor, timeout_s))
+        return {"recommendation": "a"}
+
+    monkeypatch.setattr(brain_mcp_server, "_brain_request", fake_request)
+
+    brain_mcp_server.handle_tools_call(
+        {
+            "name": "brain_decide",
+            "arguments": {
+                "situation": "Choose the next brain quality improvement.",
+                "options": [{"label": "a"}, {"label": "b"}],
+                "context": "No extra paid API.",
+                "domain": "brain",
+                "agent": "codex",
+            },
+        }
+    )
+
+    assert calls[0][2]["context"] == "No extra paid API."
+    assert calls[0][2]["domain"] == "brain"
+
+
+def test_brain_tick_ignores_non_numeric_severity(monkeypatch):
+    def fake_request(method, path, body=None, actor=None, timeout_s=60):
+        return {
+            "observations": [
+                {"id": "bad", "severity": "unknown"},
+                {"id": "good", "severity": "5.5"},
+            ]
+        }
+
+    monkeypatch.setattr(brain_mcp_server, "_brain_request", fake_request)
+
+    result = brain_mcp_server.handle_tools_call(
+        {
+            "name": "brain_tick",
+            "arguments": {"min_severity": 4.0, "agent": "codex"},
+        }
+    )
+
+    payload = json.loads(result["content"][0]["text"])
+    assert payload["count"] == 1
+    assert payload["observations"][0]["id"] == "good"

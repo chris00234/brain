@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import re
 import subprocess
 import sys
 from datetime import datetime
@@ -97,6 +98,122 @@ def _failure_breakdown(per_test: list[dict]) -> dict:
     }
 
 
+def _failure_analysis(per_test: list[dict], *, slow_ms: int = 1000) -> dict:
+    """Classify failed eval rows into deterministic, fix-oriented causes."""
+    buckets: dict[str, dict] = {}
+    secondary_flags: dict[str, int] = {}
+    failed_rows = [row for row in per_test if _row_failed(row)]
+    for row in failed_rows:
+        bucket, reason = _classify_failure_row(row)
+        _bucket_add(buckets, bucket, row, reason)
+        if _safe_float(row.get("latency_ms"), 0.0) > slow_ms:
+            secondary_flags["slow_failure"] = secondary_flags.get("slow_failure", 0) + 1
+
+    return {
+        "version": 1,
+        "total": len(per_test),
+        "failed": len(failed_rows),
+        "buckets": buckets,
+        "secondary_flags": dict(sorted(secondary_flags.items())),
+    }
+
+
+def _row_failed(row: dict) -> bool:
+    return not bool(row.get("hit_content_loose")) or not bool(row.get("hit_source"))
+
+
+def _classify_failure_row(row: dict) -> tuple[str, str]:
+    hit_content = bool(row.get("hit_content_loose"))
+    hit_source = bool(row.get("hit_source"))
+    expected_source = str(row.get("expected_source") or "")
+    top_sources = [str(src) for src in (row.get("top_sources") or []) if src]
+    best_source_overlap = max((_source_overlap(expected_source, src) for src in top_sources), default=0.0)
+    expected_is_archived = _looks_archived_or_superseded(expected_source)
+    top_has_canonical = any("canonical" in src.lower() for src in top_sources)
+
+    if not hit_content and hit_source:
+        return (
+            "stale_expected_content",
+            "expected source was found but expected phrase/alternate did not appear",
+        )
+    if hit_content and not hit_source:
+        return (
+            "source_alias_or_successor",
+            "expected content was found under a different source/provenance",
+        )
+    if expected_is_archived and top_has_canonical:
+        return (
+            "canonical_consolidation_gap",
+            "archived expected source now resolves toward canonical/successor material",
+        )
+    if best_source_overlap >= 0.22:
+        return (
+            "source_moved_or_archived",
+            f"top source slug overlaps expected source ({best_source_overlap:.2f})",
+        )
+    return (
+        "retrieval_miss",
+        "neither expected content nor expected source was found in top results",
+    )
+
+
+def _bucket_add(buckets: dict[str, dict], bucket: str, row: dict, reason: str, *, sample_limit: int = 10) -> None:
+    item = buckets.setdefault(bucket, {"count": 0, "samples": []})
+    item["count"] += 1
+    if len(item["samples"]) < sample_limit:
+        item["samples"].append(
+            {
+                "query": row.get("query", ""),
+                "expected_source": row.get("expected_source", ""),
+                "expected_content": row.get("expected_content", ""),
+                "top_sources": list(row.get("top_sources") or [])[:5],
+                "rank": row.get("rank", 0),
+                "reason": reason,
+            }
+        )
+
+
+def _source_overlap(expected_source: str, actual_source: str) -> float:
+    expected = _source_tokens(expected_source)
+    actual = _source_tokens(actual_source)
+    if not expected or not actual:
+        return 0.0
+    return len(expected & actual) / max(1, len(expected | actual))
+
+
+def _source_tokens(source: str) -> set[str]:
+    tail = source.replace("\\", "/").split("/")[-1]
+    tail = re.sub(r"\.[a-z0-9]{1,8}$", "", tail.lower())
+    return {tok for tok in re.findall(r"[a-z0-9가-힣]{3,}", tail) if tok not in _SOURCE_STOPWORDS}
+
+
+def _looks_archived_or_superseded(source: str) -> bool:
+    lowered = source.lower()
+    return any(marker in lowered for marker in ("archived", "archive", "superseded", "obsolete", "deprecated"))
+
+
+def _safe_float(value: object, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+_SOURCE_STOPWORDS = {
+    "and",
+    "for",
+    "from",
+    "the",
+    "with",
+    "this",
+    "that",
+    "chris",
+    "canonical",
+    "archived",
+    "archive",
+}
+
+
 def _persist_eval_report(report: dict, track: str = "default", content_metric: str = "strict") -> None:
     """Write eval-report.json + append eval-history.jsonl so Brain UI stays current.
 
@@ -114,7 +231,9 @@ def _persist_eval_report(report: dict, track: str = "default", content_metric: s
     source_pct = float(v2.get("hit_source_pct", 0))
     passed = round(total * content_pct / 100) if total else 0
     failed = total - passed
-    failure_breakdown = _failure_breakdown(list(v2.get("per_test") or []))
+    per_test = list(v2.get("per_test") or [])
+    failure_breakdown = _failure_breakdown(per_test)
+    failure_analysis = _failure_analysis(per_test)
 
     if track == "default":
         report_path = logs / "eval-report.json"
@@ -136,6 +255,7 @@ def _persist_eval_report(report: dict, track: str = "default", content_metric: s
                 "slow_count": 0,
                 "v2": v2,
                 "failure_breakdown": failure_breakdown,
+                "failure_analysis": failure_analysis,
             },
             indent=2,
             ensure_ascii=False,

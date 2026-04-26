@@ -11,9 +11,9 @@
 #     loads identity/state/focus/recent sessions/atoms-due/proactive/messages) only
 #     runs on the first turn of a session or when the 5-min payload cache misses.
 #     Subsequent turns hit the running uvicorn directly — no Python cold start.
-#   - Doorbell read: if brain_loop has queued urgent context for this session,
-#     it lives at /tmp/.brain_doorbell.<session_id>.jsonl; this script prints and
-#     clears it so brain-initiated context reaches Claude mid-session.
+#   - Doorbell consume: queued urgent context is consumed after /recall/active
+#     has had a chance to apply relevance/criticality gates. The hook no longer
+#     raw-renders doorbell files because that bypasses judgment and adds noise.
 #
 # v2 baseline behavior preserved as the first-turn path:
 #   - 5-min TTL payload cache
@@ -215,8 +215,8 @@ if [ -n "$PROMPT" ]; then
         printf '%s' "$ACTIVE_RESP" | jq -r '
           if ([.blocks[]? | select(((.source // "") | startswith("doorbell")) | not)] | length) == 0 then empty
           else
-            "### Brain Active Recall — per-turn injection",
-            (.blocks[]? | select(((.source // "") | startswith("doorbell")) | not) | "- **\(.title // "untitled")** [\(.source // "?")] \(.content // "" | gsub("\n"; " ") | .[:300])"),
+            "### Brain Active Recall — prompt-relevant context contract",
+            (.blocks[]? | select(((.source // "") | startswith("doorbell")) | not) | "- **\(.title // "untitled")** [\(.contract_category // "direct_evidence")/\(.source // "?")] \((.include_reason // "prompt-relevant context")) — \(.content // "" | gsub("\n"; " ") | .[:300])"),
             ""
           end
         ' 2>/dev/null || true
@@ -225,22 +225,12 @@ if [ -n "$PROMPT" ]; then
   fi
 fi
 
-# ── Step 4: Brain doorbell ───────────────────────────────────────
-# brain_loop writes urgent context here when it decides Chris needs to see
-# something now. File is consumed (read + deleted) on each turn.
+# ── Step 4: Brain doorbell cleanup ───────────────────────────────
+# /recall/active reads this file and returns only prompt-relevant or critical
+# doorbell blocks. Delete after the recall attempt so stale, irrelevant
+# doorbells do not repeat forever in future turns.
 DOORBELL="/tmp/.brain_doorbell.${SESSION_ID}.jsonl"
 if [ -f "$DOORBELL" ]; then
-  # Format each line as an injection block. Lines are newline-delimited JSON.
-  if command -v jq >/dev/null 2>&1; then
-    jq -r '
-      "### ⚠ Brain Doorbell — \(.source // "brain_loop") [\(.priority // "medium")]",
-      "**\(.title // "untitled")**",
-      (.content // ""),
-      ""
-    ' "$DOORBELL" 2>/dev/null || cat "$DOORBELL"
-  else
-    cat "$DOORBELL"
-  fi
   rm -f "$DOORBELL"
 fi
 

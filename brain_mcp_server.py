@@ -16,26 +16,25 @@ import sys
 import time
 import urllib.parse
 import urllib.request
+from pathlib import Path
 
 BRAIN_URL = "http://127.0.0.1:8791"
-SECRET_FILE = os.path.expanduser("~/.openclaw/credentials/.personal_webhook_secret")
+SECRET_FILE = Path("~/.openclaw/credentials/.personal_webhook_secret").expanduser()
 
 # 2026-04-16 R-6: secret is read once at module load AND re-read on
 # every auth-failure (401) to handle rotation without requiring a full
-# process restart. MCP lifecycle is capped at MAX_LIFETIME_S=3600 so
-# this is a belt-and-suspenders: the self-reap limits worst-case drift,
-# the re-read handles mid-lifecycle rotations.
-import time as _time
+# process restart. Secret reload makes long-lived Codex sessions safe without
+# forcing lifecycle self-reap that closes the MCP transport mid-session.
 
 _SECRET_CACHE: dict = {"value": "", "loaded_at": 0.0}
 
 
 def _load_secret(force: bool = False) -> str:
-    now = _time.time()
+    now = time.time()
     if not force and _SECRET_CACHE["value"] and (now - _SECRET_CACHE["loaded_at"] < 600):
         return _SECRET_CACHE["value"]
     try:
-        with open(SECRET_FILE) as f:
+        with SECRET_FILE.open() as f:
             val = f.read().strip()
     except Exception:
         val = ""
@@ -66,14 +65,14 @@ def _brain_request(
     elif actor and method == "GET":
         path = path + "?actor=" + urllib.parse.quote(actor)
 
-    def _do_request(secret: str):
-        req = urllib.request.Request(f"{BRAIN_URL}{path}", data=data, method=method)
+    def _do_request(secret: str) -> object:
+        req = urllib.request.Request(f"{BRAIN_URL}{path}", data=data, method=method)  # noqa: S310
         req.add_header("Authorization", f"Bearer {secret}")
         if actor:
             req.add_header("x-agent", actor)
         if data:
             req.add_header("Content-Type", "application/json")
-        return urllib.request.urlopen(req, timeout=timeout_s)
+        return urllib.request.urlopen(req, timeout=timeout_s)  # noqa: S310
 
     try:
         with _do_request(_load_secret()) as resp:
@@ -101,7 +100,7 @@ def _brain_request(
 
 
 # MCP protocol implementation (stdio transport)
-def handle_initialize(params):
+def handle_initialize(params: dict) -> dict:
     return {
         "protocolVersion": "2024-11-05",
         "capabilities": {"tools": {}},
@@ -109,7 +108,7 @@ def handle_initialize(params):
     }
 
 
-def handle_tools_list(params):
+def handle_tools_list(params: dict) -> dict:
     return {
         "tools": [
             {
@@ -163,6 +162,11 @@ def handle_tools_list(params):
                             "description": "Options to evaluate",
                         },
                         "agent": {"type": "string"},
+                        "domain": {"type": "string"},
+                        "context": {
+                            "type": "string",
+                            "description": "Optional extra context that should be included in decision evaluation",
+                        },
                     },
                     "required": ["situation", "options"],
                 },
@@ -175,6 +179,8 @@ def handle_tools_list(params):
                     "properties": {
                         "question": {"type": "string", "description": "The question to analyze"},
                         "agent": {"type": "string"},
+                        "domain": {"type": "string"},
+                        "context": {"type": "string"},
                     },
                     "required": ["question"],
                 },
@@ -415,7 +421,7 @@ def handle_tools_list(params):
     }
 
 
-def handle_tools_call(params):
+def handle_tools_call(params: dict) -> dict:
     name = params.get("name", "")
     args = params.get("arguments", {})
 
@@ -477,6 +483,8 @@ def handle_tools_call(params):
                     "situation": args["situation"],
                     "options": args.get("options", []),
                     "agent": actor,
+                    "domain": args.get("domain"),
+                    "context": args.get("context"),
                 },
                 actor=actor,
                 timeout_s=4,
@@ -494,6 +502,8 @@ def handle_tools_call(params):
                 {
                     "question": args["question"],
                     "agent": actor,
+                    "domain": args.get("domain"),
+                    "context": args.get("context"),
                 },
                 actor=actor,
                 timeout_s=4,
@@ -564,17 +574,31 @@ def handle_tools_call(params):
         result = _brain_request("GET", f"/brain/procedures?{params}", actor=actor)
 
     elif name == "brain_outcome":
-        result = _brain_request(
-            "POST",
-            "/brain/tasks/"
-            + urllib.parse.quote(args["task_id"])
-            + ("/complete" if args["success"] else "/reject"),
-            {
-                "result": args.get("notes", ""),
-                "agent": actor,
-            },
-            actor=actor,
-        )
+        task_or_decision_id = str(args["task_id"])
+        success = bool(args["success"])
+        notes = args.get("notes", "")
+        if task_or_decision_id.startswith("decision_"):
+            result = _brain_request(
+                "POST",
+                "/brain/decisions/" + urllib.parse.quote(task_or_decision_id) + "/outcome",
+                {
+                    "actual_outcome": notes or ("accepted" if success else "rejected"),
+                    "outcome_status": "succeeded" if success else "failed",
+                    "review_status": "accepted" if success else "needs_review",
+                },
+                actor=actor,
+            )
+        else:
+            suffix = "/complete?chris_acked=true" if success else "/reject"
+            result = _brain_request(
+                "POST",
+                "/brain/tasks/" + urllib.parse.quote(task_or_decision_id) + suffix,
+                {
+                    "result": notes,
+                    "agent": actor,
+                },
+                actor=actor,
+            )
 
     elif name == "brain_wm_set":
         result = _brain_request(
@@ -678,8 +702,8 @@ def handle_tools_call(params):
             result = {"status": "error", "error": str(exc)[:200]}
         else:
             obs = (raw or {}).get("observations", []) if isinstance(raw, dict) else []
-            filtered = [o for o in obs if float(o.get("severity", 0)) >= min_sev]
-            filtered.sort(key=lambda o: -float(o.get("severity", 0)))
+            filtered = [o for o in obs if _safe_float(o.get("severity"), 0.0) >= min_sev]
+            filtered.sort(key=lambda o: -_safe_float(o.get("severity"), 0.0))
             result = {
                 "count": len(filtered),
                 "observations": filtered[:limit],
@@ -708,26 +732,50 @@ def handle_tools_call(params):
 # held open from the parent's side. A blocking `for line in sys.stdin` never
 # sees EOF. Children accumulated to 35+ on one machine.
 #
-# Three belt-and-suspenders checks here, all tunable via env so the gateway
-# can override if it ever fixes the upstream leak:
-#   1. IDLE_TIMEOUT_S — no request for N seconds → exit. Next tool call
-#      respawns fresh. Default 10 minutes.
-#   2. MAX_LIFETIME_S — hard cap on total uptime. Catches anything that
-#      somehow stays "active" without being useful. Default 1 hour.
+# Three belt-and-suspenders checks here, all tunable via env:
+#   1. Optional IDLE_TIMEOUT_S — no request for N seconds → exit.
+#   2. Optional MAX_LIFETIME_S — hard cap on total uptime.
 #   3. Parent-death detection — if our original parent died and we got
 #      reparented to launchd (PID 1), we're an orphan. Exit immediately.
-IDLE_TIMEOUT_S = int(os.environ.get("BRAIN_MCP_IDLE_TIMEOUT_S", "600"))
-MAX_LIFETIME_S = int(os.environ.get("BRAIN_MCP_MAX_LIFETIME_S", "3600"))
+#
+# 2026-04-24: Codex keeps one MCP subprocess per session and may not respawn it
+# after a clean self-reap. Default self-reap to disabled so long coding sessions
+# do not hit "Transport closed"; OpenClaw can opt in by setting these env vars.
+IDLE_TIMEOUT_S = int(os.environ.get("BRAIN_MCP_IDLE_TIMEOUT_S", "0"))
+MAX_LIFETIME_S = int(os.environ.get("BRAIN_MCP_MAX_LIFETIME_S", "0"))
 POLL_INTERVAL_S = 30.0  # how often to re-check lifecycle conditions
+TRANSPORT_DEBUG = os.environ.get("BRAIN_MCP_TRANSPORT_DEBUG") == "1" or os.environ.get(
+    "OMX_MCP_TRANSPORT_DEBUG"
+) == "1"
+LOG_FILE = os.environ.get(
+    "BRAIN_MCP_LOG_FILE",
+    str(Path("~/server/brain/logs/brain-mcp-server.log").expanduser()),
+)
 
 
 def _log(msg: str) -> None:
-    """Log to stderr. stdout is reserved for the MCP JSON-RPC response stream."""
-    sys.stderr.write(f"[brain_mcp_server pid={os.getpid()}] {msg}\n")
-    sys.stderr.flush()
+    """Log to stderr + optional file. stdout is reserved for JSON-RPC."""
+    line = f"[brain_mcp_server pid={os.getpid()}] {msg}\n"
+    try:
+        sys.stderr.write(line)
+        sys.stderr.flush()
+    except (BrokenPipeError, OSError, ValueError):
+        pass
+    if TRANSPORT_DEBUG:
+        try:
+            log_path = Path(LOG_FILE)
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with log_path.open("a") as f:
+                f.write(f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {line}")
+        except OSError as exc:
+            try:
+                sys.stderr.write(f"[brain_mcp_server pid={os.getpid()}] log file write failed: {exc}\n")
+                sys.stderr.flush()
+            except (BrokenPipeError, OSError, ValueError):
+                pass
 
 
-def _handle_signal(signum, _frame):
+def _handle_signal(signum: int, _frame: object) -> None:
     _log(f"signal {signum} received, exiting")
     sys.exit(0)
 
@@ -751,11 +799,18 @@ def _normalize_timeout_result(result: dict | str, hint: str) -> dict | str:
     return result
 
 
+def _safe_float(value: object, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _lifecycle_exit_reason(start: float, last_activity: float, original_parent: int) -> str | None:
     now = time.monotonic()
-    if now - last_activity > IDLE_TIMEOUT_S:
+    if IDLE_TIMEOUT_S > 0 and now - last_activity > IDLE_TIMEOUT_S:
         return f"idle > {IDLE_TIMEOUT_S}s"
-    if now - start > MAX_LIFETIME_S:
+    if MAX_LIFETIME_S > 0 and now - start > MAX_LIFETIME_S:
         return f"lifetime > {MAX_LIFETIME_S}s"
     current_parent = os.getppid()
     if current_parent != original_parent and current_parent == 1:
@@ -763,13 +818,18 @@ def _lifecycle_exit_reason(start: float, last_activity: float, original_parent: 
     return None
 
 
-def main():
+def main() -> None:
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGHUP, _handle_signal)
 
     start = time.monotonic()
     last_activity = start
     original_parent = os.getppid()
+    _log(
+        "started "
+        f"parent={original_parent} idle_timeout={IDLE_TIMEOUT_S}s "
+        f"max_lifetime={MAX_LIFETIME_S}s debug={int(TRANSPORT_DEBUG)}"
+    )
 
     while True:
         exit_after_response = False

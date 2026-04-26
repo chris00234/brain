@@ -6586,16 +6586,16 @@
     "_relabel_origin": "Contradictions"
   },
   {
-    "query": "brain 서비스 health에서 host process랑 Docker는 어떻게 나뉘어?",
-    "expected_source": "canonical/archived/infra/openclaw-ellie-session-2026-04-09.md",
-    "expected_content": "ChromaDB and Ollama are host processes",
+    "query": "현재 Brain native vector service는 launchd에서 뭐로 떠 있어?",
+    "expected_source": "canonical/live_state/launchd_services.md",
+    "expected_content": "ai.openclaw.qdrant-native",
     "collection": "all",
     "expected_alternates": [
-      "host process services are ChromaDB and Ollama",
-      "Chroma and Ollama run on host",
-      "not Docker for ChromaDB and Ollama"
+      "qdrant-native launchd service",
+      "Qdrant native service",
+      "ai.openclaw.qdrant-native"
     ],
-    "_relabel_origin": "ChromaDB and Ollama are expected as host processes"
+    "_relabel_origin": "stale pre-Qdrant eval replaced after Qdrant cutover"
   },
   {
     "query": "What service is expected to stay inside Docker in Chris's brain stack?",
@@ -6610,28 +6610,26 @@
     "_relabel_origin": "MinIO is expected as a healthy Docker container"
   },
   {
-    "query": "How should ChromaDB and Ollama be checked in Chris's health model?",
-    "expected_source": "canonical/archived/infra/openclaw-ellie-session-2026-04-09.md",
-    "expected_content": "validate via reachable localhost APIs",
+    "query": "How should Qdrant and Ollama be represented in Chris's current retrieval stack?",
+    "expected_source": "canonical/infra/infra_rag_retrieval_stack.md",
+    "expected_content": "native Qdrant v1.17 as the vector store",
     "collection": "all",
     "expected_alternates": [
-      "health checked through local API endpoints",
-      "use localhost health endpoints",
-      "reachable local API checks"
+      "Qdrant vector store and Ollama embeddings",
+      "native Qdrant plus Ollama embedder"
     ],
-    "_relabel_origin": "reachable local APIs"
+    "_relabel_origin": "stale pre-Qdrant eval replaced after Qdrant cutover"
   },
   {
-    "query": "ChromaDB, Ollama, MinIO 토폴로지는 Chris 기준으로 어떻게 나뉘어?",
-    "expected_source": "canonical/archived/infra/openclaw-liz-session-2026-04-09.md",
-    "expected_content": "host processes plus Docker split",
+    "query": "Qdrant와 Ollama는 현재 Brain RAG stack에서 어떤 역할이야?",
+    "expected_source": "canonical/infra/rag-stack-role.md",
+    "expected_content": "Qdrant stores vectors",
     "collection": "all",
     "expected_alternates": [
-      "Chroma Ollama on host MinIO in Docker",
-      "runtime topology splits host and Docker",
-      "host versus container service layout"
+      "Ollama provides embeddings",
+      "Qdrant stores vectors and Ollama provides embeddings"
     ],
-    "_relabel_origin": "ChromaDB and Ollama as local host processes"
+    "_relabel_origin": "stale pre-Qdrant eval replaced after Qdrant cutover"
   },
   {
     "query": "What service is not expected to be published on localhost?",
@@ -6646,16 +6644,15 @@
     "_relabel_origin": "MinIO is healthy only inside Docker networking"
   },
   {
-    "query": "How should ChromaDB health be validated in Chris's runtime model?",
-    "expected_source": "canonical/archived/infra/openclaw-liz-session-2026-04-09.md",
-    "expected_content": "validate ChromaDB with localhost endpoints",
+    "query": "What does the current launchd live state use for Brain's vector backend?",
+    "expected_source": "canonical/live_state/launchd_services.md",
+    "expected_content": "ai.openclaw.qdrant-native",
     "collection": "all",
     "expected_alternates": [
-      "ChromaDB checked through local API",
-      "localhost health check for ChromaDB",
-      "use Chroma localhost endpoint"
+      "qdrant-native",
+      "Qdrant native launchd service"
     ],
-    "_relabel_origin": "successful localhost health/API endpoints"
+    "_relabel_origin": "stale pre-Qdrant eval replaced after Qdrant cutover"
   },
   {
     "query": "What exact Docker command does Chris want for gradual redeploys?",
@@ -7111,14 +7108,13 @@
   {
     "query": "What data stores power Chris's personal intelligence system?",
     "expected_source": "canonical/projects/project_personal_intelligence_system_v1.md",
-    "expected_content": "ChromaDB Ollama and SQLite",
+    "expected_content": "Qdrant (native) + Ollama (native) + SQLite",
     "collection": "all",
     "expected_alternates": [
-      "powered by Chroma Ollama SQLite",
-      "data stores are Chroma Ollama SQLite",
-      "native Chroma Ollama plus SQLite"
+      "Qdrant native Ollama native SQLite",
+      "native Qdrant plus Ollama and SQLite"
     ],
-    "_relabel_origin": "ChromaDB (native) + Ollama (native) + SQLite"
+    "_relabel_origin": "stale pre-Qdrant eval replaced after Qdrant cutover"
   },
   {
     "query": "왜 RAG만으로는 ground truth가 안 돼?",

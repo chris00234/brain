@@ -54,10 +54,10 @@
     "expected_content": "limit_req"
   },
   {
-    "query": "chromadb docker compose",
+    "query": "qdrant current retrieval substrate",
     "collection": "all",
-    "expected_source": "chroma",
-    "expected_content": "chroma"
+    "expected_source": "canonical/infra/rag-qdrant.md",
+    "expected_content": "Native Qdrant v1.17 is the current Brain retrieval substrate"
   },
   {
     "query": "ollama model configuration",
@@ -546,10 +546,10 @@
     "expected_content": "brain"
   },
   {
-    "query": "chromadb native port 8000",
+    "query": "qdrant named vectors hybrid retrieval",
     "collection": "all",
-    "expected_source": "obsidian",
-    "expected_content": "chroma"
+    "expected_source": "canonical/infra/infra_rag_retrieval_stack.md",
+    "expected_content": "dense + contextual + BM25 sparse"
   },
   {
     "query": "ghost blog CMS docker image",
@@ -4134,10 +4134,10 @@
     "collection": "all"
   },
   {
-    "query": "brain 서비스 health에서 host process랑 Docker는 어떻게 나뉘어?",
-    "expected_source": "canonical/archived/infra/openclaw-ellie-session-2026-04-09.md",
-    "expected_content": "ChromaDB and Ollama are expected as host processes",
-    "collection": "all"
+    "query": "현재 Brain native vector service는 launchd에서 뭐로 떠 있어?",
+    "collection": "all",
+    "expected_source": "canonical/live_state/launchd_services.md",
+    "expected_content": "ai.openclaw.qdrant-native"
   },
   {
     "query": "What service is expected to stay inside Docker in Chris's brain stack?",
@@ -4146,16 +4146,16 @@
     "collection": "all"
   },
   {
-    "query": "How should ChromaDB and Ollama be checked in Chris's health model?",
-    "expected_source": "canonical/archived/infra/openclaw-ellie-session-2026-04-09.md",
-    "expected_content": "reachable local APIs",
-    "collection": "all"
+    "query": "How should Qdrant and Ollama be represented in Chris's current retrieval stack?",
+    "collection": "all",
+    "expected_source": "canonical/infra/infra_rag_retrieval_stack.md",
+    "expected_content": "native Qdrant v1.17 as the vector store, Ollama-served"
   },
   {
-    "query": "ChromaDB, Ollama, MinIO 토폴로지는 Chris 기준으로 어떻게 나뉘어?",
-    "expected_source": "canonical/archived/infra/openclaw-liz-session-2026-04-09.md",
-    "expected_content": "ChromaDB and Ollama as local host processes",
-    "collection": "all"
+    "query": "Qdrant와 Ollama는 현재 Brain RAG stack에서 어떤 역할이야?",
+    "collection": "all",
+    "expected_source": "canonical/infra/rag-stack-role.md",
+    "expected_content": "Qdrant stores vectors"
   },
   {
     "query": "What service is not expected to be published on localhost?",
@@ -4164,10 +4164,10 @@
     "collection": "all"
   },
   {
-    "query": "How should ChromaDB health be validated in Chris's runtime model?",
-    "expected_source": "canonical/archived/infra/openclaw-liz-session-2026-04-09.md",
-    "expected_content": "successful localhost health/API endpoints",
-    "collection": "all"
+    "query": "What does the current launchd live state use for Brain's vector backend?",
+    "collection": "all",
+    "expected_source": "canonical/live_state/launchd_services.md",
+    "expected_content": "ai.openclaw.qdrant-native"
   },
   {
     "query": "What exact Docker command does Chris want for gradual redeploys?",
@@ -4207,21 +4207,21 @@
   },
   {
     "query": "현재 memory retrieval substrate는 뭐야?",
-    "expected_source": "canonical/infra/rag-chromadb.md",
-    "expected_content": "ChromaDB-backed RAG",
-    "collection": "all"
+    "collection": "all",
+    "expected_source": "canonical/infra/rag-qdrant.md",
+    "expected_content": "Native Qdrant v1.17 is the current Brain retrieval substrate"
   },
   {
-    "query": "What should v1 layer above the current retrieval substrate?",
-    "expected_source": "canonical/infra/rag-chromadb.md",
-    "expected_content": "canonical memory above it",
-    "collection": "all"
+    "query": "What layer sits above the current Qdrant retrieval substrate?",
+    "collection": "all",
+    "expected_source": "canonical/infra/rag-qdrant.md",
+    "expected_content": "Canonical memory remains the accepted-truth layer above raw retrieval"
   },
   {
-    "query": "Should canonical memory replace the ChromaDB RAG substrate?",
-    "expected_source": "canonical/infra/rag-chromadb.md",
-    "expected_content": "rather than replacing it",
-    "collection": "all"
+    "query": "Should canonical memory replace the Qdrant RAG substrate?",
+    "collection": "all",
+    "expected_source": "canonical/infra/infra_rag_retrieval_stack.md",
+    "expected_content": "Canonical memory should sit above, not inside, the vector index"
   },
   {
     "query": "RAG와 canonical notes 역할을 Chris 시스템에서 어떻게 나눠?",
@@ -4231,9 +4231,9 @@
   },
   {
     "query": "Which components provide vectors and embeddings in the RAG stack?",
+    "collection": "all",
     "expected_source": "canonical/infra/rag-stack-role.md",
-    "expected_content": "ChromaDB stores vectors",
-    "collection": "all"
+    "expected_content": "Qdrant stores vectors"
   },
   {
     "query": "Chris는 brain foundation에서 지금 기능 말고 뭘 더 중요하게 봐?",
@@ -4399,9 +4399,9 @@
   },
   {
     "query": "What data stores power Chris's personal intelligence system?",
+    "collection": "all",
     "expected_source": "canonical/projects/project_personal_intelligence_system_v1.md",
-    "expected_content": "ChromaDB (native) + Ollama (native) + SQLite",
-    "collection": "all"
+    "expected_content": "Qdrant (native) + Ollama (native) + SQLite"
   },
   {
     "query": "왜 RAG만으로는 ground truth가 안 돼?",

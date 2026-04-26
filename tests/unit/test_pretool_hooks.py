@@ -169,7 +169,7 @@ def test_codex_boot_suppresses_empty_active_recall(tmp_path: Path):
     assert "/recall/active" in args_file.read_text()
 
 
-def test_codex_boot_delivers_doorbell_when_active_recall_empty(tmp_path: Path):
+def test_codex_boot_suppresses_raw_doorbell_when_active_recall_empty(tmp_path: Path):
     args_file = tmp_path / "curl_args.txt"
     session_id = "codex-doorbell-only"
     doorbell = Path("/tmp") / f".brain_doorbell.{session_id}.jsonl"
@@ -206,11 +206,11 @@ def test_codex_boot_delivers_doorbell_when_active_recall_empty(tmp_path: Path):
     finally:
         doorbell.unlink(missing_ok=True)
 
-    assert "Brain Doorbell" in result.stdout
-    assert "Brain should deliver this" in result.stdout
+    assert result.stdout == ""
+    assert not doorbell.exists()
 
 
-def test_codex_boot_does_not_duplicate_doorbell_from_active_recall(tmp_path: Path):
+def test_codex_boot_suppresses_doorbell_from_active_recall(tmp_path: Path):
     args_file = tmp_path / "curl_args.txt"
     session_id = "codex-doorbell-dedupe"
     doorbell = Path("/tmp") / f".brain_doorbell.{session_id}.jsonl"
@@ -218,7 +218,7 @@ def test_codex_boot_does_not_duplicate_doorbell_from_active_recall(tmp_path: Pat
         json.dumps(
             {
                 "title": "urgent signal",
-                "content": "Only the direct doorbell renderer should print this.",
+                "content": "Only the judged active recall response should print this.",
                 "priority": "high",
             }
         )
@@ -228,7 +228,7 @@ def test_codex_boot_does_not_duplicate_doorbell_from_active_recall(tmp_path: Pat
         "blocks": [
             {
                 "title": "urgent signal",
-                "content": "Only the direct doorbell renderer should print this.",
+                "content": "Only the judged active recall response should print this.",
                 "source": "doorbell:brain_speak_urgent",
             },
             {
@@ -261,9 +261,49 @@ def test_codex_boot_does_not_duplicate_doorbell_from_active_recall(tmp_path: Pat
     finally:
         doorbell.unlink(missing_ok=True)
 
+    assert "Brain Doorbell" not in result.stdout
+    assert "Only the judged active recall response should print this." not in result.stdout
     assert "Brain Active Recall" in result.stdout
-    assert "Brain Doorbell" in result.stdout
-    assert result.stdout.count("Only the direct doorbell renderer should print this.") == 1
+    assert "Brain Rule" in result.stdout
+    assert not doorbell.exists()
+
+
+def test_codex_boot_renders_context_contract_metadata(tmp_path: Path):
+    args_file = tmp_path / "curl_args.txt"
+    recall_response = {
+        "blocks": [
+            {
+                "title": "LLM budget policy",
+                "content": "Use subscription CLI paths and avoid extra paid API usage.",
+                "source": "semantic:canonical",
+                "contract_category": "risk_constraint",
+                "include_reason": "semantic evidence passed score floor for intent=policy_or_memory",
+            }
+        ]
+    }
+    env = os.environ.copy()
+    env.update(
+        {
+            "HOME": str(_home_with_secret(tmp_path)),
+            "PATH": f"{_fake_curl(tmp_path)}:{env['PATH']}",
+            "CURL_ARGS_FILE": str(args_file),
+            "FAKE_RECALL_ACTIVE_RESPONSE": json.dumps(recall_response),
+        }
+    )
+    payload = {"prompt": "브레인 비용 정책 확인", "session_id": "codex-contract", "cwd": str(ROOT)}
+
+    result = subprocess.run(
+        ["bash", str(ROOT / "cli" / "codex_boot.sh")],
+        input=json.dumps(payload),
+        text=True,
+        capture_output=True,
+        env=env,
+        check=True,
+    )
+
+    assert "prompt-relevant context contract" in result.stdout
+    assert "[risk_constraint/semantic:canonical]" in result.stdout
+    assert "semantic evidence passed score floor" in result.stdout
 
 
 def test_codex_boot_truncates_active_recall_payload_to_server_schema(tmp_path: Path):

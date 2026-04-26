@@ -66,19 +66,16 @@ fi
 # Format blocks into a <system-reminder> block. Codex treats
 # UserPromptSubmit stdout as trailing context on the current turn.
 if [ "$BLOCK_COUNT" -gt 0 ]; then
-  printf '<system-reminder>\n### Brain Active Recall — per-turn injection\n'
-  printf '%s' "$RESP" | jq -r '.blocks[]? | select(((.source // "") | startswith("doorbell")) | not) | "- **\(.title)** [\(.source)] \(.content[:280])"' 2>/dev/null
+  printf '<system-reminder>\n### Brain Active Recall — prompt-relevant context contract\n'
+  printf '%s' "$RESP" | jq -r '.blocks[]? | select(((.source // "") | startswith("doorbell")) | not) | "- **\(.title)** [\(.contract_category // "direct_evidence")/\(.source)] \((.include_reason // "prompt-relevant context")) — \(.content[:280])"' 2>/dev/null
   printf '</system-reminder>\n'
 fi
 
-# Doorbell: urgent brain_loop messages for this session.
+# Doorbell files are consumed by /recall/active, which now applies prompt
+# relevance/criticality gates before returning any doorbell block. Do not raw
+# render the file here; that bypasses judgment and creates prompt noise.
 DOORBELL="/tmp/.brain_doorbell.${SESSION_ID}.jsonl"
 if [ -f "$DOORBELL" ]; then
-  echo
-  echo '<system-reminder>'
-  echo '### ⚠ Brain Doorbell — brain_speak_urgent'
-  cat "$DOORBELL" 2>/dev/null | jq -r '"\(.title // "urgent"): \(.content // "")"' 2>/dev/null | head -20
-  echo '</system-reminder>'
   rm -f "$DOORBELL"
 fi
 
