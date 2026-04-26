@@ -6,9 +6,10 @@ import re
 from datetime import datetime
 
 from api_deps import verify_bearer
-from config import DISTILLED_DAILY, MONTHLY_DIR, WEEKLY_DIR
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import PlainTextResponse
+
+from config import DISTILLED_DAILY, MONTHLY_DIR, WEEKLY_DIR
 
 router = APIRouter(dependencies=[Depends(verify_bearer)])
 

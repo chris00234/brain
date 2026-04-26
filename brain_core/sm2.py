@@ -27,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 try:
     from atoms_store import _conn, get_atom_by_chroma_id
+
     from config import BRAIN_ATOMS_ENABLED, BRAIN_DB
 except ImportError:
     BRAIN_ATOMS_ENABLED = False

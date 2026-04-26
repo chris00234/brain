@@ -32,6 +32,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from cli_llm import dispatch as _dispatch
+
 from config import BRAIN_DB
 
 log = logging.getLogger("brain.recall_judge")

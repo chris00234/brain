@@ -39,6 +39,7 @@ import time
 sys.path.insert(0, "/Users/chrischo/server/brain/brain_core")
 
 from atoms_store import BRAIN_ATOMS_ENABLED, _conn, link_atom_entity, upsert_entity
+
 from config import BRAIN_LOGS_DIR
 
 BRAIN_DB = BRAIN_LOGS_DIR / "brain.db"

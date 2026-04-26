@@ -28,8 +28,9 @@ log = logging.getLogger("brain.migrations_brain_db")
 try:
     from atoms_store import _DDL as BRAIN_DB_DDL
     from atoms_store import _now, derive_atom_id, derive_content_hash
-    from config import BRAIN_DB, CANONICAL_DIR, INBOX_DIR
     from schema_versions import CURRENT_VERSIONS, migration
+
+    from config import BRAIN_DB, CANONICAL_DIR, INBOX_DIR
 except ImportError as e:
     log.error(f"migrations_brain_db import failed: {e}")
     raise

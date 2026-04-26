@@ -32,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "brain_core"))
 
 try:
     from cli_llm import cli_dispatch_with_schema
+
     from config import AUTONOMY_DB
 except ImportError:
     AUTONOMY_DB = Path("/Users/chrischo/server/brain/logs/autonomy.db")

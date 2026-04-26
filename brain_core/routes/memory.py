@@ -18,7 +18,6 @@ from typing import Annotated, Any, Literal
 import learn
 import search_unified
 from api_deps import _safe_http_detail, log, verify_bearer
-from config import BRAIN_DIR
 from conflict_resolver import recommend_resolution
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi import Path as PathParam
@@ -28,6 +27,8 @@ from pydantic import BaseModel, Field
 from rate_limit import limiter
 from scheduler import brain_scheduler
 from vector_store import get_vector_store
+
+from config import BRAIN_DIR
 
 router = APIRouter(dependencies=[Depends(verify_bearer)])
 
@@ -1192,16 +1193,6 @@ def vote_on_contradiction(contra_id: Annotated[str, PathParam()], req: Contradic
         raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e))
 
 
-@router.get(
-    "/brain/contradictions",
-    response_model=ContradictionListResponse,
-    tags=["memory"],
-)
-def list_contradictions_brain_alias(limit: int = 50) -> ContradictionListResponse:
-    """Alias of GET /memory/contradictions for consistent /brain/* namespacing."""
-    return list_contradictions(limit=limit)
-
-
 @router.get("/brain/conflict-resolution-report", tags=["memory"])
 def conflict_resolution_report(limit: int = 50) -> dict:
     """Pending contradiction queue with deterministic policy recommendations."""
@@ -1225,29 +1216,6 @@ def conflict_resolution_report(limit: int = 50) -> dict:
         "review_required": review_required,
         "items": [item.model_dump() for item in listed.results],
     }
-
-
-@router.post("/brain/contradictions/{contra_id}/resolve", tags=["memory"])
-def resolve_contradiction_brain_alias(
-    contra_id: Annotated[str, PathParam()],
-    req: ContradictionResolveRequest,
-) -> dict:
-    """Alias of POST /memory/contradictions/{id}/resolve."""
-    return resolve_contradiction(contra_id=contra_id, req=req)
-
-
-@router.post("/brain/contradictions/{contra_id}/vote", tags=["memory"])
-def vote_on_contradiction_brain_alias(
-    contra_id: Annotated[str, PathParam()], req: ContradictionVoteRequest
-) -> dict:
-    """Alias of POST /memory/contradictions/{id}/vote."""
-    return vote_on_contradiction(contra_id=contra_id, req=req)
-
-
-@router.get("/brain/contradictions/{contra_id}/votes", tags=["memory"])
-def get_contradiction_votes_brain_alias(contra_id: Annotated[str, PathParam()]) -> dict:
-    """Alias of GET /memory/contradictions/{id}/votes."""
-    return get_contradiction_votes(contra_id=contra_id)
 
 
 @router.get("/memory/contradictions/{contra_id}/votes", tags=["memory"])

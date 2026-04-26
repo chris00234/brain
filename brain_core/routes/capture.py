@@ -10,10 +10,11 @@ from pathlib import Path
 from typing import Annotated, Any, Literal
 
 from api_deps import log, verify_bearer
-from config import INBOX_DIR
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi import Path as PathParam
 from pydantic import BaseModel, Field
+
+from config import INBOX_DIR
 
 router = APIRouter(dependencies=[Depends(verify_bearer)])
 

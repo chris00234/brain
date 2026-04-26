@@ -26,8 +26,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from config import BRAIN_DB
 from indexer import get_embedding
+
+from config import BRAIN_DB
 
 log = logging.getLogger("brain.recall_outcome_labeler")
 

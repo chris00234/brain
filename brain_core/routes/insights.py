@@ -7,8 +7,9 @@ from datetime import datetime as _dt
 from datetime import timedelta as _td
 
 from api_deps import _safe_http_detail, verify_bearer
-from config import DISTILLED_DAILY
 from fastapi import APIRouter, Depends, HTTPException, Query
+
+from config import DISTILLED_DAILY
 
 router = APIRouter(dependencies=[Depends(verify_bearer)])
 

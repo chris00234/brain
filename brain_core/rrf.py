@@ -71,7 +71,8 @@ def rrf_fuse(
                 import hashlib
 
                 body = str(doc.get("content", ""))[:512]
-                doc_id = f"__anon_{hashlib.md5(body.encode()).hexdigest()[:12]}"
+                # md5 is fine here — non-crypto stable hash for dedup keying.
+                doc_id = f"__anon_{hashlib.md5(body.encode(), usedforsecurity=False).hexdigest()[:12]}"
             doc_id = str(doc_id)
             contribution = trust * (1.0 / (k + rank))
             rrf_scores[doc_id] = rrf_scores.get(doc_id, 0.0) + contribution

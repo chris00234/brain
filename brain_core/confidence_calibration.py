@@ -134,6 +134,7 @@ def _collect_pairs_from_eval() -> list[tuple[float, int]]:
     pairs: list[tuple[float, int]] = []
     try:
         from atoms_store import BRAIN_DB
+
         from config import BRAIN_LOGS_DIR
 
         report_path = BRAIN_LOGS_DIR / "eval-report-stable.json"

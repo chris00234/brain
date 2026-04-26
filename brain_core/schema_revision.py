@@ -38,6 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 try:
     from atoms_store import BRAIN_DB
+
     from config import INBOX_DIR
 except ImportError:
     BRAIN_DB = Path("/Users/chrischo/server/brain/logs/brain.db")

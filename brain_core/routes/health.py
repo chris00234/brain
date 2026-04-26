@@ -11,12 +11,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from api_deps import SERVER_START, _safe_http_detail, verify_bearer
-from config import BRAIN_DIR
 from fastapi import APIRouter, Depends, HTTPException
 from metrics_buffer import metrics_buffer as _metrics_buf
 from pydantic import BaseModel, Field
 from scheduler import brain_scheduler
 from vector_store import get_vector_store
+
+from config import BRAIN_DIR
 
 router = APIRouter(dependencies=[Depends(verify_bearer)])
 

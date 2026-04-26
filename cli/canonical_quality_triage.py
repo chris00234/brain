@@ -32,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "brain_core"))
 
 try:
     from cli_llm import cli_dispatch_with_schema
+
     from config import BRAIN_DIR, KNOWLEDGE_DIR
 except ImportError:
     BRAIN_DIR = Path("/Users/chrischo/server/brain")

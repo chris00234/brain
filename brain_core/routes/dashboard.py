@@ -10,8 +10,9 @@ from __future__ import annotations
 import json
 
 from api_deps import _safe_http_detail, verify_bearer
-from config import BRAIN_DIR
 from fastapi import APIRouter, Depends, HTTPException, Query
+
+from config import BRAIN_DIR
 
 router = APIRouter(dependencies=[Depends(verify_bearer)])
 

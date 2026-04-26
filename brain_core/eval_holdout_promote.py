@@ -29,8 +29,9 @@ def _now_iso() -> str:
 log = logging.getLogger("brain.eval_holdout_promote")
 
 try:
-    from config import AUTONOMY_DB, BRAIN_DIR
     from eval_proposals import list_candidates, mark_status
+
+    from config import AUTONOMY_DB, BRAIN_DIR
 except ImportError:
     AUTONOMY_DB = Path("/Users/chrischo/server/brain/logs/autonomy.db")
     BRAIN_DIR = Path("/Users/chrischo/server/brain")

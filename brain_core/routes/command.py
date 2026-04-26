@@ -6,10 +6,11 @@ from datetime import UTC, datetime
 from typing import Annotated
 
 from api_deps import _safe_http_detail, log, verify_bearer
-from config import BRAIN_DIR
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi import Path as PathParam
 from pydantic import BaseModel, Field
+
+from config import BRAIN_DIR
 
 router = APIRouter(dependencies=[Depends(verify_bearer)])
 

@@ -18,9 +18,10 @@ from datetime import UTC, datetime
 from typing import Annotated, Literal
 
 import structlog
-from config import FAILURE_LOG, SECRET_FILE
 from fastapi import Header, HTTPException
 from pydantic import BaseModel
+
+from config import FAILURE_LOG, SECRET_FILE
 
 log = structlog.get_logger("brain.server")
 
