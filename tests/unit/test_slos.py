@@ -43,13 +43,13 @@ def test_slo_count(slos_module):
 
 def test_recall_v2_p95_lower_is_better(slos_module):
     slo = slos_module.SLOS["recall_v2_p95_ms"]
-    # Loosened 2026-04-22 to 500ms after profiling showed fan-out (375ms) +
-    # cross-encoder (308ms) are both accuracy-critical and sequential.
-    assert slo.target == 500.0
+    # Loosened 2026-04-24 to 1000ms: quality-critical search + rerank should
+    # not page the operator while still under the human-facing latency ceiling.
+    assert slo.target == 1000.0
     assert slo.severity == "warning"
-    # 600ms > 500 target → breach (latency is lower-is-better)
-    assert slos_module._is_breach(slo, 600.0) is True
-    assert slos_module._is_breach(slo, 400.0) is False
+    # 1100ms > 1000 target -> breach (latency is lower-is-better)
+    assert slos_module._is_breach(slo, 1100.0) is True
+    assert slos_module._is_breach(slo, 900.0) is False
 
 
 def test_content_hit_higher_is_better(slos_module):
@@ -81,7 +81,7 @@ def test_check_one_returns_result(slos_module, monkeypatch):
     assert result is not None
     assert result.actual == 150.0
     assert result.breached is False
-    assert result.delta == 150.0 - 500.0
+    assert result.delta == 150.0 - 1000.0
 
 
 def test_check_one_unknown_slo(slos_module):

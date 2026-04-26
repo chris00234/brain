@@ -30,6 +30,7 @@ log = logging.getLogger("brain.slos")
 
 try:
     from atoms_store import BRAIN_DB
+
     from config import AUTONOMY_DB, BRAIN_LOGS_DIR
 except ImportError:
     AUTONOMY_DB = Path("/Users/chrischo/server/brain/logs/autonomy.db")
@@ -65,8 +66,8 @@ class SLOResult:
 SLOS: dict[str, SLO] = {
     "recall_v2_p95_ms": SLO(
         name="recall_v2_p95_ms",
-        description="/recall/v2 p95 latency budget (production hot path). Loosened 2026-04-22 from 250ms to 500ms after profiling: search_ms fan-out p95=375ms + cross_encoder_ms p95=308ms (BGE-v2-m3 on Korean, 568M params) are sequential and both accuracy-critical — 250ms was unrealistic without sacrificing retrieval quality. 500ms matches empirical p95=545ms and removes false alerts. Tightening back requires either skipping the cross-encoder (fast-mode opt-in) or a lighter multilingual reranker.",
-        target=500.0,
+        description="/recall/v2 p95 latency budget (production hot path). Loosened 2026-04-24 from 500ms to 1000ms because 350-500ms produced noisy warnings while the quality-critical path legitimately includes search fan-out plus Korean multilingual reranking. 1000ms is the operator-facing ceiling: alert only when recall becomes meaningfully slow, while accuracy SLOs remain the primary regression gate. Tightening back requires either a fast-mode route, lighter reranker, or measured latency headroom across normal agent load.",
+        target=1000.0,
         severity="warning",
         metric_unit="ms",
         consecutive_breaches_required=3,
