@@ -1,4 +1,8 @@
 from __future__ import annotations
+import logging
+
+log = logging.getLogger("brain.score_proposals")
+
 
 import argparse
 import json
@@ -113,8 +117,8 @@ def score_proposal(metadata: dict[str, Any], body: str) -> tuple[int, str, list[
                 reasons.append(f"surprise_bonus_{surprise_delta}")
             else:
                 reasons.append(f"redundancy_penalty_{surprise_delta}")
-    except Exception:
-        pass
+    except Exception as exc:
+        log.debug("score_proposals: surprise reason append skipped: %s", exc)
 
     return score, "high" if score >= 65 else ("medium" if score >= 42 else "low"), reasons
 

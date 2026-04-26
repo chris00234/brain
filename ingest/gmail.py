@@ -29,6 +29,10 @@ import sys
 from datetime import UTC, datetime, timedelta
 from email.header import decode_header
 from pathlib import Path
+import logging
+
+log = logging.getLogger("brain.gmail")
+
 
 # ── Config ──────────────────────────────────────────────
 ENV_FILE = Path.home() / ".openclaw/credentials/gmail-imap.env"
@@ -100,8 +104,8 @@ def log_failure(reason: str) -> None:
         FAILURE_LOG.parent.mkdir(parents=True, exist_ok=True)
         with FAILURE_LOG.open("a") as f:
             f.write(json.dumps({"timestamp": datetime.now().isoformat(), "reason": reason[:500]}) + "\n")
-    except Exception:
-        pass
+    except Exception as exc:
+        log.debug("gmail: failure-log write skipped: %s", exc)
 
 
 try:

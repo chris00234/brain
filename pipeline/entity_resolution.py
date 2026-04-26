@@ -13,6 +13,10 @@ Usage:
 """
 
 from __future__ import annotations
+import logging
+
+log = logging.getLogger("brain.entity_resolution")
+
 
 import sys
 from datetime import UTC, datetime
@@ -241,8 +245,8 @@ def run(apply: bool = False, auto_merge_threshold: float = 0.95):
                         resolution="auto_merge",
                         reason=f"Embedding similarity {c['similarity']:.4f} >= {auto_merge_threshold}",
                     )
-                except Exception:
-                    pass
+                except Exception as exc:
+                    log.warning("entity_resolution: auto_merge audit insert skipped: %s", exc)
             except Exception as e:
                 print(f"  FAILED: {c['alias']} → {c['canonical']}: {e}")
     elif not apply:

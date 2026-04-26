@@ -20,6 +20,10 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
+import logging
+
+log = logging.getLogger("brain.openclaw_sessions")
+
 
 # ── Config ──────────────────────────────────────────────
 AGENTS_DIR = Path.home() / ".openclaw/agents"
@@ -135,8 +139,8 @@ def log_failure(reason: str) -> None:
         FAILURE_LOG.parent.mkdir(parents=True, exist_ok=True)
         with FAILURE_LOG.open("a") as f:
             f.write(json.dumps({"timestamp": datetime.now().isoformat(), "reason": reason[:500]}) + "\n")
-    except Exception:
-        pass
+    except Exception as exc:
+        log.debug("openclaw_sessions: failure-log write skipped: %s", exc)
 
 
 def queue_for_retry(

@@ -28,6 +28,10 @@ import sys
 import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+import logging
+
+log = logging.getLogger("brain.personal")
+
 
 # Reuse helpers from brain_core.indexer (single source of truth).
 sys.path.insert(0, "/Users/chrischo/server/brain/brain_core")
@@ -439,8 +443,8 @@ def _extract_text_from_zdata(blob):
                                 return text
                         except Exception:
                             continue
-    except Exception:
-        pass
+    except Exception as exc:
+        log.debug("personal: outer protobuf walker fallback skipped: %s", exc)
 
     # Fallback: legacy byte-range heuristic
     return _extract_text_legacy(raw)

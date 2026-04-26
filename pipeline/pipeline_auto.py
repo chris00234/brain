@@ -360,8 +360,8 @@ def main():
                         dest = orphaned / f"{f.stem}.{int(f.stat().st_mtime)}.json"
                     f.rename(dest)
                     cleaned += 1
-            except Exception:
-                pass
+            except Exception as exc:
+                log.warning("orphaned file rename skipped: %s", exc)
         if cleaned:
             print(f"  Quarantined {cleaned} old inbox files (>30d) to raw/orphaned/")
 
