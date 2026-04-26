@@ -263,8 +263,11 @@ def main() -> int:
                 m2.pop("reconsolidated_at", None)
                 try:
                     write_markdown_frontmatter(p, m2, b2)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    log.warning(
+                        "reconsolidated body write failed path=%s: %s",
+                        p, exc,
+                    )
                 break
     # If any reconsolidation landed, prefer the most recent merged body
     # over the raw proposal body for the canonical record — ensures no
@@ -307,8 +310,8 @@ def main() -> int:
                 resolution="canonical_merge",
                 reason="Jaccard > 0.7 with existing canonical",
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning("canonical_merge audit insert skipped: %s", exc)
         target = existing  # for audit trail
     else:
         write_markdown_frontmatter(target, metadata, body)

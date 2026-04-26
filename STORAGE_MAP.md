@@ -6,22 +6,28 @@ Authoritative list of every on-disk store brain owns. Anything not listed here i
 
 ## SQLite databases (`~/server/brain/logs/`)
 
-| File | Size | Purpose | Key tables | Defined in |
-|---|---|---|---|---|
-| `brain.db` | ~14 MB | **Atoms truth layer.** Every canonical fact/memory lives here as a row. | `raw_events`, `atoms`, `entities`, `atom_entity`, `provenance`, `action_audit`, `atom_evidence`, `atom_coactivation`, `sleep_cycles`, `web_search_*`, `community_summaries`, `eval_holdout_lifecycle` | `brain_core/atoms_store.py`, `brain_core/migrations_brain_db.py` |
-| `autonomy.db` | ~600 KB | **Executive state.** Tasks, goals, outcomes, agent messages, focus, triggers, breakers, session context, todos, procedures, autopilot state. | `tasks`, `goals`, `outcomes`, `accuracy_tracker`, `focus_items`, `messages`, `triggers`, `entities`, `entity_relations`, `memory_access`, `session_context`, `todos`, `contradiction_votes`, `entity_activation`, `episodes`, `episode_membership`, `procedures`, `agent_source_prefs`, `heal_breakers`, `brain_config`, `eval_proposals` | `brain_core/task_queue.py`, `brain_core/working_memory.py`, `brain_core/agent_messenger.py`, `brain_core/autonomy.py`, `brain_core/brain_config_store.py` |
-| `facts.db` | ~32 KB | Structured `(entity, attribute, value)` triple store with temporal validity. Separate from atoms because facts have different lifecycle semantics. | `facts` | `brain_core/fact_store.py` |
-| `audit.db` | ~80 KB | Unified audit log for merges, conflicts, dedup events. Separate from `action_audit` (which lives in brain.db for atom lineage). | `audit_events` | `brain_core/audit_log.py` |
-| `embedding_cache.db` | ~525 MB | Shared query/document embedding cache. The size reflects the multilingual-e5-large-instruct 1024-dim vectors accumulated since model swap. | `embeddings` | `brain_core/embed_cache.py` |
-| `hyde_cache.db` | ~12 KB | HyDE hypothetical document expansion cache. | `hyde_expansions` | `brain_core/hyde.py` |
-| `llm_usage.db` | ~131 KB | LLM token/cost accounting per agent and per call. | `llm_calls` | `brain_core/openclaw_dispatch.py` (writer) |
-| `metrics_history.db` | ~2.8 MB | Ring-buffer persistence for `metrics_buffer.py`. Recent metrics snapshots for observability. | `metrics` | `brain_core/metrics_buffer.py` |
-| `reasoning_checkpoints.db` | ~16 KB | LangGraph-style checkpoints for multi-hop reasoning threads that can be resumed. | `checkpoints` | `brain_core/reasoning_loop.py` |
-| `scheduler_history.db` | ~86 KB | APScheduler job run history. Backs `GET /jobs/{name}/history`. | `job_runs` | `brain_core/scheduler.py` |
-| `schema_versions.db` | ~12 KB | Migration version gate for brain.db. | `schema_versions` | `brain_core/schema_versions.py`, `brain_core/migrations_brain_db.py` |
-| `self_heal_state.db` | ~12 KB | Self-healing dispatcher state — signal dedup, recent actions, heal history. | `heal_state`, `heal_log` | `brain_core/self_heal.py` |
+| File | Size | Purpose | Key tables | Retention | Defined in |
+|---|---|---|---|---|---|
+| `brain.db` | ~81 MB | **Atoms truth layer.** Every canonical fact/memory lives here as a row. | `raw_events`, `atoms`, `entities`, `atom_entity`, `provenance`, `action_audit`, `atom_evidence`, `atom_coactivation`, `sleep_cycles`, `web_search_*`, `community_summaries`, `eval_holdout_lifecycle`, `raw_events_fts` | `action_audit` 90d (`run_action_audit_retention`); atoms / entities / provenance never decay. | `brain_core/atoms_store.py`, `brain_core/migrations_brain_db.py` |
+| `autonomy.db` | ~82 MB | **Executive state.** Tasks, goals, outcomes, agent messages, focus, triggers, breakers, session context, todos, procedures, autopilot state, decision ledger + autonomy gate audit. | `tasks`, `goals`, `outcomes`, `accuracy_tracker`, `focus_items`, `messages`, `triggers`, `entities`, `entity_relations`, `memory_access`, `session_context`, `todos`, `contradiction_votes`, `entity_activation`, `episodes`, `episode_membership`, `procedures`, `agent_source_prefs`, `heal_breakers`, `brain_config`, `eval_proposals`, `autonomy_decisions`, `decision_ledger` | `autonomy_decisions` 14d (`run_autonomy_decisions_retention`, daily 04:35) — table writes ~48K rows/day from every `autonomy.authorize` call; without retention this table grew the DB 600KB → 81MB in 8 days. `decision_ledger` and `outcomes` retained unbounded (low write rate, used by belief_state). `memory_access` 180d via `maintenance.prune_memory_access`. `session_context` is session-scoped via `wm_consolidate` on SessionEnd; orphaned sessions are not yet swept. | `brain_core/task_queue.py`, `brain_core/working_memory.py`, `brain_core/agent_messenger.py`, `brain_core/autonomy.py`, `brain_core/brain_config_store.py`, `brain_core/decision_ledger.py` |
+| `facts.db` | ~32 KB | Structured `(entity, attribute, value)` triple store with temporal validity. Separate from atoms because facts have different lifecycle semantics. | `facts` | none (low write rate) | `brain_core/fact_store.py` |
+| `audit.db` | ~456 KB | Unified audit log for merges, conflicts, dedup events. Separate from `action_audit` (which lives in brain.db for atom lineage). | `audit_events` | none yet (low write rate) | `brain_core/audit_log.py` |
+| `embedding_cache.db` | ~397 MB | Shared query/document embedding cache. The size reflects the multilingual-e5-large-instruct 1024-dim vectors accumulated since model swap. | `embeddings` | `prune_old(max_age_days=30, max_rows=15_000)` in `embed_cache.py`. Verify the prune job is hitting the cap (currently exceeds 15K — investigate). | `brain_core/embed_cache.py` |
+| `hyde_cache.db` | ~12 KB | HyDE hypothetical document expansion cache. Two-tier (in-memory TTLCache + persistent SQLite). | `hyde_expansions` | TTLCache 5min, persistent rows TTL via `clear_cache()` on prefix bump | `brain_core/hyde.py` |
+| `llm_usage.db` | ~2.2 MB | LLM token/cost accounting per agent and per call. | `llm_calls`, `llm_usage_monthly` | 90d detail (`run_llm_usage_retention`, monthly 1st 04:30) → archived to `llm_usage_monthly` rollup forever. | `brain_core/openclaw_dispatch.py` (writer), `brain_core/db_maintenance.py` (retention) |
+| `metrics_history.db` | ~81 MB | Persistence for `metrics_buffer.py`. Recent metrics snapshots for observability. SLOs only read the last 20 rows; everything older is trend-history. | `metrics_snapshots` | 14d via `run_metrics_history_retention` (daily 04:40) plus 90d safety net inside `metrics_buffer.persist`. Weekly VACUUM Sun 05:30. | `brain_core/metrics_buffer.py`, `brain_core/db_maintenance.py` (retention + VACUUM) |
+| `reasoning_checkpoints.db` | ~16 KB | LangGraph-style checkpoints for multi-hop reasoning threads that can be resumed. | `checkpoints` | none (per-thread lifecycle) | `brain_core/reasoning_loop.py` |
+| `scheduler_history.db` | ~2.3 MB | APScheduler job run history. Backs `GET /jobs/{name}/history`. | `job_runs` | 30d via `maintenance.prune_scheduler_history` | `brain_core/scheduler.py`, `brain_core/maintenance.py` |
+| `schema_versions.db` | ~12 KB | Migration version gate for brain.db. | `schema_versions` | none (always grows by version count, currently 11) | `brain_core/schema_versions.py`, `brain_core/migrations_brain_db.py` |
+| `self_heal_state.db` | ~12 KB | Self-healing dispatcher state — signal dedup, recent actions, heal history. | `heal_state`, `heal_log` | none (low write rate) | `brain_core/self_heal.py` |
 
-**Total SQLite footprint:** ~570 MB, dominated by `embedding_cache.db` (525 MB).
+**Total SQLite footprint:** ~643 MB. `embedding_cache.db` (397 MB) is the bulk; `brain.db` / `autonomy.db` / `metrics_history.db` are each ~80 MB and the latter two trim to steady-state under retention.
+
+**Retention policy summary** (defined in `brain_core/db_maintenance.py`):
+- Hot audit trails (write-only, no SELECT outside maintenance): 14d — `autonomy_decisions`, `metrics_snapshots`.
+- Operational data (used by SLOs, calibration, post-mortems): 30–90d — `action_audit`, `llm_usage`, `scheduler_history`, `memory_access`, `embeddings`.
+- Truth layer (canonical facts, decisions, atoms, ledger): no decay; managed via `supersede_by` pointers.
+- Weekly VACUUM (Sun 05:30) covers `brain.db`, `autonomy.db`, `llm_usage.db`, `metrics_history.db`.
 
 ## JSONL state + log files (`~/server/brain/logs/`)
 

@@ -48,6 +48,10 @@ AUTONOMY_DECISIONS_RETENTION_DAYS = 14
 # older is observability history. 14d keeps two weeks of trend; the existing
 # 90d DELETE in metrics_buffer.persist remains as the longer-term safety net.
 METRICS_HISTORY_RETENTION_DAYS = 14
+# session_context cleanup is normally session-scoped via wm_consolidate on
+# SessionEnd. Crashes / never-ended sessions accumulate orphans. 30d sweep
+# catches them without losing live working memory of active sessions.
+SESSION_CONTEXT_RETENTION_DAYS = 30
 
 
 def _sqlite_size_mb(path: Path) -> float:
@@ -234,6 +238,39 @@ def run_autonomy_decisions_retention(days: int = AUTONOMY_DECISIONS_RETENTION_DA
     return summary
 
 
+def run_session_context_retention(days: int = SESSION_CONTEXT_RETENTION_DAYS) -> dict:
+    """Sweep session_context rows older than N days. Normally
+    wm_consolidate clears a session's rows on SessionEnd; this catches
+    orphans from crashes or sessions that never explicitly ended.
+    """
+    summary: dict = {
+        "table": "session_context",
+        "days_kept": days,
+        "started_at": _now_iso(),
+    }
+    if not AUTONOMY_DB.exists():
+        summary["status"] = "db_missing"
+        summary["finished_at"] = _now_iso()
+        return summary
+    try:
+        conn = sqlite3.connect(str(AUTONOMY_DB))
+        try:
+            cur = conn.execute(
+                "DELETE FROM session_context WHERE updated_at < datetime('now', 'utc', ? || ' days')",
+                (f"-{int(days)}",),
+            )
+            summary["deleted"] = cur.rowcount
+            conn.commit()
+            summary["remaining"] = conn.execute("SELECT count(*) FROM session_context").fetchone()[0]
+            summary["status"] = "ok"
+        finally:
+            conn.close()
+    except Exception as exc:
+        summary["status"] = f"error:{str(exc)[:150]}"
+    summary["finished_at"] = _now_iso()
+    return summary
+
+
 def run_metrics_history_retention(days: int = METRICS_HISTORY_RETENTION_DAYS) -> dict:
     """Trim metrics_snapshots beyond N days. metrics_buffer.persist already
     does a 90d DELETE on every persist, but the file does not shrink without
@@ -312,6 +349,7 @@ if __name__ == "__main__":
     sub.add_parser("retention_usage")
     sub.add_parser("retention_decisions")
     sub.add_parser("retention_metrics")
+    sub.add_parser("retention_session_context")
     sub.add_parser("stats")
     args = p.parse_args()
     if args.cmd == "vacuum":
@@ -324,6 +362,8 @@ if __name__ == "__main__":
         print(json.dumps(run_autonomy_decisions_retention(), indent=2))
     elif args.cmd == "retention_metrics":
         print(json.dumps(run_metrics_history_retention(), indent=2))
+    elif args.cmd == "retention_session_context":
+        print(json.dumps(run_session_context_retention(), indent=2))
     elif args.cmd == "stats":
         print(json.dumps(growth_stats(), indent=2))
     else:

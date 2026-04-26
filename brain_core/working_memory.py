@@ -46,10 +46,17 @@ CREATE TABLE IF NOT EXISTS focus_items (
 
 def _init_db() -> None:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(str(DB_PATH)) as conn:
+    # Explicit try/finally — the `with sqlite3.connect()` context manager
+    # only calls commit()/rollback(), never close(), so it leaks the
+    # connection (one fd per process import). Caught by lint_sqlite_close.
+    conn = sqlite3.connect(str(DB_PATH))
+    try:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA cache_size=-8000")
         conn.execute(_CREATE_TABLE)
+        conn.commit()
+    finally:
+        conn.close()
 
 
 _db_initialized = False

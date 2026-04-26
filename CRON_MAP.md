@@ -3,7 +3,7 @@
 > Auto-generated from `brain_core/job_definitions.py` by `cli/render_cron_map.py`.
 > Do not hand-edit; run `.venv/bin/python cli/render_cron_map.py --write`.
 
-**Total jobs**: 121
+**Total jobs**: 122
 **Default `misfire_grace`**: 300s (5min). Heavy nightly jobs override per job.
 
 ## Jobs by owning agent
@@ -53,7 +53,7 @@
 | `screen_time_ingest` | `cron(day_of_week=sun, hour=4, minute=35)` | standard | - | 300s | Screen Time daily patterns via Sage -> raw/inbox (weekly) |
 | `weekly_synthesis` | `cron(day_of_week=sun, hour=4, minute=15)` | heavy | llm | 300s | Weekly arc (Sage, Sunday 4:15am) |
 
-### system (96 jobs)
+### system (97 jobs)
 
 | Name | Trigger | Budget | Tags | Misfire Grace | Description |
 |---|---|---|---|---|---|
@@ -139,6 +139,7 @@
 | `schema_revision` | `cron(day_of_week=sun, hour=8, minute=50)` | heavy | llm, sqlite | 900s | Weekly free-energy schema revision (Sun 08:50 - staggered off eval_holdout_promote @8:45) |
 | `self_eval` | `cron(hour=3, minute=37)` | heavy | embedder, eval, qdrant | 900s | Nightly 03:37 PT: sample recent /recall queries, re-run, measure top-3 overlap drift. Populates self_eval_drift_7d SLO. |
 | `self_model_regen` | `cron(hour=5, minute=25)` | standard | - | 900s | Nightly DMN-like unified self-model atom regen (05:25 PT) |
+| `session_context_retention` | `cron(hour=4, minute=45)` | standard | - | 900s | Prune orphaned session_context rows older than 30d (daily 4:45am) |
 | `session_rotate` | `cron(day_of_week=sun, hour=4, minute=30)` | standard | - | 900s | Weekly: archive old agent session checkpoints; alert on oversized live sessions (Sun 4:30am) |
 | `skill_extract` | `cron(day_of_week=sun, hour=7, minute=45)` | heavy | llm, sqlite | 900s | Weekly skill graph indexing (Sunday 7:45am) |
 | `skill_materialize_cleanup` | `cron(hour=4, minute=10)` | standard | - | 900s | T2.10: archive orphaned/stale auto-* SKILL.md files; enforce MAX_AUTO_SKILLS cap (daily 4:10am) |
@@ -263,6 +264,7 @@
 | `screen_time_ingest` | `cron(day_of_week=sun, hour=4, minute=35)` | sage | standard | - | 300s | Screen Time daily patterns via Sage -> raw/inbox (weekly) |
 | `self_eval` | `cron(hour=3, minute=37)` | system | heavy | embedder, eval, qdrant | 900s | Nightly 03:37 PT: sample recent /recall queries, re-run, measure top-3 overlap drift. Populates self_eval_drift_7d SLO. |
 | `self_model_regen` | `cron(hour=5, minute=25)` | system | standard | - | 900s | Nightly DMN-like unified self-model atom regen (05:25 PT) |
+| `session_context_retention` | `cron(hour=4, minute=45)` | system | standard | - | 900s | Prune orphaned session_context rows older than 30d (daily 4:45am) |
 | `session_rotate` | `cron(day_of_week=sun, hour=4, minute=30)` | system | standard | - | 900s | Weekly: archive old agent session checkpoints; alert on oversized live sessions (Sun 4:30am) |
 | `shell_ingest` | `cron(hour=2, minute=15)` | ellie | standard | - | 300s | Shell history -> experience collection |
 | `skill_extract` | `cron(day_of_week=sun, hour=7, minute=45)` | system | heavy | llm, sqlite | 900s | Weekly skill graph indexing (Sunday 7:45am) |

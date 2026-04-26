@@ -49,7 +49,8 @@ def _load_params() -> dict | None:
         if not raw:
             return None
         return json.loads(raw)
-    except Exception:
+    except Exception as exc:
+        log.warning("confidence_calibration._load_params failed: %s", exc)
         return None
 
 
@@ -164,7 +165,8 @@ def _collect_pairs_from_eval() -> list[tuple[float, int]]:
             top = top_ids[0] if isinstance(top_ids, list) else None
             if top and top in conf_by_id:
                 pairs.append((conf_by_id[top], correct))
-    except Exception:
+    except Exception as exc:
+        log.warning("_collect_pairs_from_eval failed (calibration may degrade): %s", exc)
         return []
     return pairs
 
@@ -213,7 +215,8 @@ def _collect_pairs_from_outcomes(days_window: int = 90) -> list[tuple[float, int
             if 0.0 <= c <= 1.0:
                 correct = 0 if int(override or 0) else 1
                 pairs.append((c, correct))
-    except Exception:
+    except Exception as exc:
+        log.warning("_collect_pairs_from_outcomes failed (calibration may degrade): %s", exc)
         return []
     return pairs
 

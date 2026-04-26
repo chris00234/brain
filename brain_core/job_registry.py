@@ -281,6 +281,14 @@ JOB_REGISTRY: dict[str, list[str]] = {
         "-c",
         f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from db_maintenance import run_metrics_history_retention; import json; print(json.dumps(run_metrics_history_retention()))",
     ],
+    # 2026-04-26 retention: session_context orphans (sessions that crashed
+    # or never sent SessionEnd). Normal lifecycle is wm_consolidate per-session;
+    # this 30d sweep is the catch-all safety net.
+    "session_context_retention": [
+        _py,
+        "-c",
+        f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from db_maintenance import run_session_context_retention; import json; print(json.dumps(run_session_context_retention()))",
+    ],
     # v3 Phase 6: weekly entity canonicalization proposal (dry-run only).
     "canonicalize_entities_dryrun": [
         _py,
