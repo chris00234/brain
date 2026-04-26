@@ -2,7 +2,7 @@
 
 Layout:
     tests/unit/         — pure unit tests, no IO outside tmp_path
-    tests/integration/  — needs Chroma/Ollama (marked @pytest.mark.integration)
+    tests/integration/  — needs Qdrant/Ollama (marked @pytest.mark.integration)
     tests/e2e/          — spawns brain-server (marked @pytest.mark.e2e)
     tests/smoke/        — operator load/SLO scripts (excluded from collection)
 
