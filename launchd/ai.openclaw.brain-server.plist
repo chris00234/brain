@@ -22,6 +22,10 @@
 		<string>true</string>
 		<key>BRAIN_MMR_DIVERSITY_ENABLED</key>
 		<string>true</string>
+		<key>BRAIN_ONTOLOGY_EXPANSION_ENABLED</key>
+		<string>true</string>
+		<key>BRAIN_ONTOLOGY_EXPANSION_MAX_TERMS</key>
+		<string>5</string>
 		<key>BRAIN_SALIENCE_RANKING_ENABLED</key>
 		<string>true</string>
 		<key>BRAIN_SERVER_PORT</key>
@@ -34,6 +38,16 @@
 		<string>/Users/chrischo</string>
 		<key>PATH</key>
 		<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+		<key>BRAIN_ONTOLOGY_EXPANSION_SOURCE</key>
+		<string>neo4j</string>
+		<key>BRAIN_ONTOLOGY_EXPANSION_RELATIONS</key>
+		<string>has_agent,owned_by,owns,proxies,depends_on,manages,has_event,prefers</string>
+		<key>BRAIN_ONTOLOGY_CONDITIONAL_EXPANSION_ENABLED</key>
+		<string>true</string>
+		<key>BRAIN_ONTOLOGY_EXPANSION_MODE</key>
+		<string>sidecar</string>
+		<key>BRAIN_ONTOLOGY_SIDECAR_LIMIT</key>
+		<string>2</string>
 	</dict>
 	<key>KeepAlive</key>
 	<dict>

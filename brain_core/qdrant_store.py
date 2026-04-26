@@ -381,6 +381,17 @@ class QdrantStore:
             self._sparse_cache[collection] = has
         return has
 
+    def _has_dense_vector(self, collection: str) -> bool:
+        try:
+            info = self._client.get_collection(collection_name=collection)
+            params = getattr(getattr(info, "config", None), "params", None)
+            vectors = getattr(params, "vectors", None)
+            if isinstance(vectors, dict):
+                return "dense" in vectors
+            return False
+        except Exception:
+            return False
+
     def _hit_payload(self, payload: dict | None) -> tuple[dict, str, str | None]:
         """Split a Qdrant payload into (user_payload, original_id, document).
 
@@ -426,13 +437,18 @@ class QdrantStore:
         try:
             existing = {c.name for c in (self._client.get_collections().collections or [])}
             if real in existing:
-                return
+                if real == "healthcheck_probe" and not self._has_dense_vector(real):
+                    self._client.delete_collection(collection_name=real)
+                else:
+                    return
             self._client.create_collection(
                 collection_name=real,
-                vectors_config=VectorParams(
-                    size=self.DEFAULT_VECTOR_SIZE,
-                    distance=Distance.COSINE,
-                ),
+                vectors_config={
+                    "dense": VectorParams(
+                        size=self.DEFAULT_VECTOR_SIZE,
+                        distance=Distance.COSINE,
+                    )
+                },
             )
         except Exception as exc:
             log.warning("qdrant create_collection(%s) failed: %s", name, exc)

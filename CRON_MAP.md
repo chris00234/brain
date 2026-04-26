@@ -74,7 +74,7 @@
 | `canonical_pipeline` | `cron(hour=2,7,22, minute=0)` | heavy | qdrant, sqlite | 900s | Automated canonical promotion (3x daily: 02:00 / 07:00 / 22:00 PT) |
 | `canonical_quality_filter_report` | `cron(day_of_week=sun, hour=6, minute=35)` | standard | - | 900s | Weekly quality filter dry-run report (Sunday 6:35am, review only) |
 | `canonical_quality_triage` | `cron(day_of_week=sun, hour=7, minute=0)` | heavy | llm, sqlite | 1800s | LLM classifies score=2 canonical_quality items as archive/keep/uncertain |
-| `canonical_staleness_check` | `cron(hour=4, minute=30)` | standard | - | 900s | Daily 04:30 PT: scan distilled/*.md for invalidated claims (missing imports / NameErrors that the code has since fixed). Retire stale files and delete their Qdrant atoms so brain stops surfacing already-fixed bugs. |
+| `canonical_staleness_check` | `cron(hour=4, minute=30)` | standard | - | 900s | Daily 04:30 PT: scan distilled/*.md for invalidated code claims and active canonical notes for stale current-truth supersession claims. Retire fixed-bug files and fail on current-truth blockers so brain stops surfacing obsolete facts. |
 | `canonicalize_entities_dryrun` | `cron(day_of_week=sun, hour=6, minute=45)` | heavy | embedder, neo4j | 900s | v3: weekly entity dedup proposal scan (Sun 06:45, dry-run) |
 | `code_index_refresh` | `cron(hour=3, minute=35)` | heavy | embedder, index, qdrant | 1200s | Daily incremental code function indexer (3:35am - staggered off sm2_nightly at 03:25) |
 | `confidence_calibration` | `cron(day_of_week=sun, hour=4, minute=10)` | heavy | eval, sqlite | 900s | Weekly Platt calibration of atoms.confidence vs eval outcomes (Sun 04:10) |
@@ -177,7 +177,7 @@
 | `canonical_pipeline` | `cron(hour=2,7,22, minute=0)` | system | heavy | qdrant, sqlite | 900s | Automated canonical promotion (3x daily: 02:00 / 07:00 / 22:00 PT) |
 | `canonical_quality_filter_report` | `cron(day_of_week=sun, hour=6, minute=35)` | system | standard | - | 900s | Weekly quality filter dry-run report (Sunday 6:35am, review only) |
 | `canonical_quality_triage` | `cron(day_of_week=sun, hour=7, minute=0)` | system | heavy | llm, sqlite | 1800s | LLM classifies score=2 canonical_quality items as archive/keep/uncertain |
-| `canonical_staleness_check` | `cron(hour=4, minute=30)` | system | standard | - | 900s | Daily 04:30 PT: scan distilled/*.md for invalidated claims (missing imports / NameErrors that the code has since fixed). Retire stale files and delete their Qdrant atoms so brain stops surfacing already-fixed bugs. |
+| `canonical_staleness_check` | `cron(hour=4, minute=30)` | system | standard | - | 900s | Daily 04:30 PT: scan distilled/*.md for invalidated code claims and active canonical notes for stale current-truth supersession claims. Retire fixed-bug files and fail on current-truth blockers so brain stops surfacing obsolete facts. |
 | `canonicalize_entities_dryrun` | `cron(day_of_week=sun, hour=6, minute=45)` | system | heavy | embedder, neo4j | 900s | v3: weekly entity dedup proposal scan (Sun 06:45, dry-run) |
 | `claude_code_sessions_ingest` | `cron(hour=1, minute=15)` | jenna | heavy | llm, qdrant | 300s | Claude Code session distillation via Jenna -> raw/inbox |
 | `code_index_refresh` | `cron(hour=3, minute=35)` | system | heavy | embedder, index, qdrant | 1200s | Daily incremental code function indexer (3:35am - staggered off sm2_nightly at 03:25) |

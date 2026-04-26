@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>ai.openclaw.ontology-rollout-gate</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/chrischo/server/brain/.venv/bin/python</string>
+		<string>/Users/chrischo/server/brain/cli/ontology_rollout_gate.py</string>
+		<string>--relations</string>
+		<string>has_agent,owned_by,owns,proxies,depends_on,manages,has_event,prefers</string>
+		<string>--mode</string>
+		<string>sidecar</string>
+		<string>--sidecar-limit</string>
+		<string>2</string>
+		<string>--conditional</string>
+		<string>--live-retries</string>
+		<string>1</string>
+		<string>--live-retry-sleep</string>
+		<string>1.0</string>
+		<string>--json</string>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>/Users/chrischo/server/brain</string>
+	<key>StartCalendarInterval</key>
+	<dict>
+		<key>Hour</key>
+		<integer>4</integer>
+		<key>Minute</key>
+		<integer>45</integer>
+	</dict>
+	<key>StandardOutPath</key>
+	<string>/Users/chrischo/server/brain/logs/jobs/ontology_rollout_gate.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/chrischo/server/brain/logs/jobs/ontology_rollout_gate.err.log</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>HOME</key>
+		<string>/Users/chrischo</string>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+		<key>PYTHONUNBUFFERED</key>
+		<string>1</string>
+	</dict>
+</dict>
+</plist>

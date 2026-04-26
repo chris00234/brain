@@ -116,6 +116,40 @@ intents:
     priority: high
     max_tokens: 600
 
+  brain_quality:
+    keywords_en:
+      - brain quality
+      - brain intelligence
+      - actual brain
+      - real brain
+      - improve brain
+      - brain goal
+      - brain direction
+      - no regression
+      - defect free
+    keywords_ko:
+      - 브레인 품질
+      - 브레인 지능
+      - 실제 브레인
+      - 진짜 브레인
+      - 브레인 경지
+      - 브레인 목표
+      - 브레인 방향
+      - 부족한 부분
+      - 개선 할 수
+      - 개선할 수
+      - 무결점
+      - 회귀
+    canonical_paths:
+      - ~/.codex/skills/brain-learned-brain-system/SKILL.md
+      - ~/server/brain/BRAIN_EVOLUTION_PLAN.md
+      - ~/server/brain/.omx/wiki/decision-observability-boundary-map.md
+    always_push_queries:
+      - brain system quality goals decision feedback prehook context contract
+      - no regression no extra cost resource efficient brain improvements
+    priority: high
+    max_tokens: 700
+
   llm_budget:
     keywords_en:
       - llm cost

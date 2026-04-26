@@ -516,7 +516,7 @@ JOB_SCHEDULE: list[ScheduledJob] = [
     ),
     ScheduledJob(
         name="canonical_staleness_check",
-        description="Daily 04:30 PT: scan distilled/*.md for invalidated claims (missing imports / NameErrors that the code has since fixed). Retire stale files and delete their Qdrant atoms so brain stops surfacing already-fixed bugs.",
+        description="Daily 04:30 PT: scan distilled/*.md for invalidated code claims and active canonical notes for stale current-truth supersession claims. Retire fixed-bug files and fail on current-truth blockers so brain stops surfacing obsolete facts.",
         trigger=CronTrigger(hour=4, minute=30),
         agent="system",
         misfire_grace=900,

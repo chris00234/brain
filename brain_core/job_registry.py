@@ -13,10 +13,11 @@ import threading
 from pathlib import Path
 
 import boot_context
-from config import BRAIN_DIR, PYTHON
 from metrics_buffer import metrics_buffer as _metrics_buf
 from openclaw_dispatch import dispatch as _openclaw_dispatch
 from scheduler import brain_scheduler
+
+from config import BRAIN_DIR, PYTHON
 
 _py = PYTHON
 _bd = str(BRAIN_DIR)
@@ -28,8 +29,9 @@ JOB_REGISTRY: dict[str, list[str]] = {
     # or Codex session. Boot hooks read + consume those on the next turn.
     "brain_speak_urgent": [_py, f"{_bd}/brain_core/speak.py", "urgent_scan"],
     # Canonical staleness detector: daily scan of distilled/*.md for claims
-    # invalidated by the current code. Retires stale files and deletes
-    # corresponding Qdrant atoms so brain stops surfacing fixed bugs.
+    # invalidated by the current code, plus active canonical notes for
+    # stale current-truth supersession claims. Retires fixed-bug files,
+    # deletes corresponding Qdrant atoms, and fails on current-truth blockers.
     "canonical_staleness_check": [_py, f"{_bd}/brain_core/canonical_staleness.py"],
     "memory_provenance_lint": [
         _py,

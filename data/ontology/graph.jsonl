@@ -1,0 +1,27 @@
+{"op":"create","entity":{"id":"person_chris","type":"Person","properties":{"name":"Chris Cho","timezone":"America/Los_Angeles","role":"Software Engineer","location":"Irvine, California"}}}
+{"op":"create","entity":{"id":"agent_jenna","type":"Agent","properties":{"name":"Jenna","role":"Chief of Staff","domain":"scheduling, email, reminders, daily planning, briefings","model":"openai-codex/gpt-5.4"}}}
+{"op":"create","entity":{"id":"agent_liz","type":"Agent","properties":{"name":"Liz","role":"Principal Staff Engineer","domain":"code review, architecture, debugging, observability, security","model":"openai-codex/gpt-5.4"}}}
+{"op":"create","entity":{"id":"agent_ellie","type":"Agent","properties":{"name":"Ellie","role":"AI & Infrastructure Specialist","domain":"Docker, homelab, gateway, Cloudflare, AI research","model":"openai-codex/gpt-5.4"}}}
+{"op":"create","entity":{"id":"agent_sage","type":"Agent","properties":{"name":"Sage","role":"Research & Knowledge Specialist","domain":"research, fact-checking, comparisons, deep dives","model":"openai-codex/gpt-5.4"}}}
+{"op":"relate","from":"person_chris","rel":"has_agent","to":"agent_jenna"}
+{"op":"relate","from":"person_chris","rel":"has_agent","to":"agent_liz"}
+{"op":"relate","from":"person_chris","rel":"has_agent","to":"agent_ellie"}
+{"op":"relate","from":"person_chris","rel":"has_agent","to":"agent_sage"}
+{"op":"create","entity":{"id":"proj_mcc","type":"Project","properties":{"name":"MCC","status":"active","description":"Main web app - UI/UX overhaul, calendar redesign, content page split"}}}
+{"op":"create","entity":{"id":"proj_brain_control","type":"Project","properties":{"name":"brain-control","status":"active","description":"Center topology graph - cyberpunk/neon aesthetic"}}}
+{"op":"relate","from":"proj_mcc","rel":"owned_by","to":"person_chris"}
+{"op":"relate","from":"proj_brain_control","rel":"owned_by","to":"person_chris"}
+{"op":"create","entity":{"id":"svc_nextcloud","type":"Service","properties":{"name":"Nextcloud","port":8000}}}
+{"op":"create","entity":{"id":"svc_filebrowser","type":"Service","properties":{"name":"FileBrowser","port":8086}}}
+{"op":"create","entity":{"id":"svc_minio","type":"Service","properties":{"name":"MinIO","port":9000}}}
+{"op":"create","entity":{"id":"svc_paperless","type":"Service","properties":{"name":"Paperless-ngx","port":8082}}}
+{"op":"create","entity":{"id":"svc_trilium","type":"Service","properties":{"name":"Trilium Notes","port":8081}}}
+{"op":"create","entity":{"id":"svc_stirling","type":"Service","properties":{"name":"Stirling PDF","port":8080}}}
+{"op":"create","entity":{"id":"svc_codeserver","type":"Service","properties":{"name":"Code-server","port":8087}}}
+{"op":"create","entity":{"id":"svc_portainer","type":"Service","properties":{"name":"Portainer","port":9443}}}
+{"op":"create","entity":{"id":"svc_homer","type":"Service","properties":{"name":"Homer Dashboard","port":8084}}}
+{"op":"create","entity":{"id":"svc_vaultwarden","type":"Service","properties":{"name":"Vaultwarden","port":8083}}}
+{"op":"create","entity":{"id":"svc_grafana","type":"Service","properties":{"name":"Grafana","port":3000}}}
+{"op":"create","entity":{"id":"svc_prometheus","type":"Service","properties":{"name":"Prometheus","port":9090}}}
+{"op":"create","entity":{"id":"svc_node_exporter","type":"Service","properties":{"name":"Node Exporter","port":9100}}}
+{"op":"create","entity":{"id":"svc_cadvisor","type":"Service","properties":{"name":"cAdvisor","port":8085}}}

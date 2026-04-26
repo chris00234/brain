@@ -21,8 +21,8 @@ import sqlite3
 import subprocess
 import sys
 import threading
-from functools import lru_cache
 from concurrent.futures import ThreadPoolExecutor as _TPE
+from functools import lru_cache
 
 log = logging.getLogger("brain.search_unified")
 
@@ -88,12 +88,30 @@ except Exception:
     _RAG_IN_PROCESS = False
 
 try:
-    from config import BRAIN_DIR, OBSIDIAN_VAULT, ONTOLOGY_GRAPH
+    from config import (
+        BRAIN_DIR,
+        BRAIN_ONTOLOGY_CONDITIONAL_EXPANSION_ENABLED,
+        BRAIN_ONTOLOGY_EXPANSION_ENABLED,
+        BRAIN_ONTOLOGY_EXPANSION_MAX_TERMS,
+        BRAIN_ONTOLOGY_EXPANSION_MODE,
+        BRAIN_ONTOLOGY_EXPANSION_RELATIONS,
+        BRAIN_ONTOLOGY_EXPANSION_SOURCE,
+        BRAIN_ONTOLOGY_SIDECAR_LIMIT,
+        OBSIDIAN_VAULT,
+        ONTOLOGY_GRAPH,
+    )
 
     _PIPELINE_DIR = BRAIN_DIR / "pipeline"
     KNOWLEDGE_SEARCH = _PIPELINE_DIR / "search_memory.py"
     RAG_SEARCH = BRAIN_DIR / "brain_core" / "search.py"
 except ImportError:
+    BRAIN_ONTOLOGY_EXPANSION_ENABLED = False
+    BRAIN_ONTOLOGY_EXPANSION_MAX_TERMS = 5
+    BRAIN_ONTOLOGY_EXPANSION_MODE = "rewrite"
+    BRAIN_ONTOLOGY_EXPANSION_RELATIONS = ("has_agent", "owned_by", "owns")
+    BRAIN_ONTOLOGY_EXPANSION_SOURCE = "file"
+    BRAIN_ONTOLOGY_SIDECAR_LIMIT = 5
+    BRAIN_ONTOLOGY_CONDITIONAL_EXPANSION_ENABLED = False
     _PIPELINE_DIR = Path("/Users/chrischo/server/brain/pipeline")
     OBSIDIAN_VAULT = Path("/Users/chrischo/.openclaw/workspace/obsidian-vault")
     KNOWLEDGE_SEARCH = Path("/Users/chrischo/server/brain/pipeline/search_memory.py")
@@ -137,24 +155,113 @@ _ontology_cache = None
 _ontology_cache_ts = 0.0
 _ONTOLOGY_TTL = 300.0  # 5 minutes
 _ontology_lock = threading.Lock()
+_CONDITIONAL_RELATION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "proxies",
+        re.compile(r"\b(proxy|proxies|reverse[- ]proxy|nginx|route|routing|domain|subdomain)\b", re.I),
+    ),
+    (
+        "depends_on",
+        re.compile(r"\b(depends?|dependency|dependencies|requires?|requirement|prereq|prerequisite|relies?)\b", re.I),
+    ),
+    (
+        "manages",
+        re.compile(r"\b(manages?|managed|manager|management|responsible)\b", re.I),
+    ),
+)
+_SYMMETRIC_ONTOLOGY_EXPANSION_RELATIONS = {"related_to", "co_mention", "co_retrieved", "complements"}
+_INVERSE_ONTOLOGY_EXPANSION_RELATIONS = {
+    # If nginx proxies searxng, expanding "nginx" to every proxied service is
+    # noisy; expanding "searxng" to "nginx" is useful and bounded.
+    "proxies",
+    # If A depends_on B, queries about B can benefit from A as context; queries
+    # about A should not append every dependency as raw query text.
+    "depends_on",
+    # If Chris manages X, queries about Chris should not expand to every managed
+    # topic; queries about X can use Chris/the manager as context.
+    "manages",
+}
+_SPECIFIC_LOOKUP_PATTERN = re.compile(
+    r"\b("
+    r"native port|port|server block|model config(?:uration)?|configuration|config|"
+    r"endpoint|url|path|file|version|error|status code|"
+    r"host|hostname|ip|address"
+    r")\b|:\d{2,5}\b|\b\d{3,5}\b",
+    re.I,
+)
+_ONTOLOGY_INTENT_PATTERN = re.compile(
+    r"\b("
+    r"owner|owns?|agent|responsibilit(?:y|ies)|proxy|proxies|route|routing|"
+    r"depends?|dependency|dependencies|requires?|manages?|managed|manager|"
+    r"preference|prefers?|relationship|related"
+    r")\b",
+    re.I,
+)
 
 
-def load_ontology():
-    global _ontology_cache, _ontology_cache_ts
-    now = time.time()
-    with _ontology_lock:
-        if _ontology_cache is not None and (now - _ontology_cache_ts) < _ONTOLOGY_TTL:
-            return _ontology_cache
-        if not ONTOLOGY_GRAPH.exists():
-            _ontology_cache = ({}, {})
-            _ontology_cache_ts = now
-            return _ontology_cache
+def _empty_ontology():
+    return {}, {}
+
+
+def _append_ontology_edge(adjacency: dict[str, list[str]], source: str, target: str, relation: str) -> None:
+    source = source.strip()
+    target = target.strip()
+    if not source or not target:
+        return
+    relation = relation.strip()
+    if relation in _INVERSE_ONTOLOGY_EXPANSION_RELATIONS:
+        adjacency.setdefault(source, [])
+        adjacency.setdefault(target, []).append(source)
+    elif relation in _SYMMETRIC_ONTOLOGY_EXPANSION_RELATIONS:
+        adjacency.setdefault(source, []).append(target)
+        adjacency.setdefault(target, []).append(source)
+    else:
+        adjacency.setdefault(source, []).append(target)
+        adjacency.setdefault(target, [])
+
+
+def _ontology_edge_allowed(relation: str, source_type: str = "", target_type: str = "") -> bool:
+    """Hot-path relation type guard backed by the central ontology registry."""
+    try:
+        from ontology import relation_types_compatible
+
+        return relation_types_compatible(
+            relation,
+            source_type,
+            target_type,
+            require_known_types=True,
+            expansion_policy=True,
+        )
+    except Exception:
+        # Retrieval should fail open if the registry import breaks; audits/tests
+        # catch that separately and the ontology feature flag remains the
+        # operational rollback switch.
+        return True
+
+
+def _load_file_ontology():
+    if not ONTOLOGY_GRAPH.exists():
+        return _empty_ontology()
+    try:
+        from ontology import load_openclaw_ontology, normalize_relation_record
+
+        ontology_entities, relations = load_openclaw_ontology(ONTOLOGY_GRAPH)
+        entities = {meta["name"].lower(): meta for meta in ontology_entities.values()}
+        adjacency: dict[str, list[str]] = {}
+        for relation in relations:
+            normalized = normalize_relation_record(relation)
+            _append_ontology_edge(adjacency, relation.source, relation.target, normalized.relation or "")
+        return entities, {key: list(dict.fromkeys(values)) for key, values in adjacency.items()}
+    except Exception:
         entities = {}
         relations = []
         for line in ONTOLOGY_GRAPH.read_text().splitlines():
             if not line.strip():
                 continue
-            record = json.loads(line)
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
             if record.get("op") == "create" and "entity" in record:
                 ent = record["entity"]
                 entities[ent["properties"]["name"].lower()] = ent
@@ -163,35 +270,167 @@ def load_ontology():
         adjacency = {}
         id_to_name = {ent["id"]: ent["properties"]["name"] for ent in entities.values()}
         for frm, to in relations:
-            adjacency.setdefault(frm, []).append(to)
-            adjacency.setdefault(to, []).append(frm)
-        result = (
-            entities,
-            {id_to_name.get(k, k): [id_to_name.get(v, v) for v in vs] for k, vs in adjacency.items()},
+            _append_ontology_edge(adjacency, id_to_name.get(frm, frm), id_to_name.get(to, to), "related_to")
+        return entities, {key: list(dict.fromkeys(values)) for key, values in adjacency.items()}
+
+
+def _normalize_relation_tuple(relations) -> tuple[str, ...]:
+    return tuple(rel for rel in dict.fromkeys(str(rel).strip() for rel in relations or ()) if rel)
+
+
+def ontology_relations_for_query(query: str) -> tuple[str, ...]:
+    relations = list(_normalize_relation_tuple(BRAIN_ONTOLOGY_EXPANSION_RELATIONS))
+    if BRAIN_ONTOLOGY_CONDITIONAL_EXPANSION_ENABLED:
+        for relation, pattern in _CONDITIONAL_RELATION_PATTERNS:
+            if pattern.search(query or ""):
+                relations.append(relation)
+    return _normalize_relation_tuple(relations)
+
+
+def _load_neo4j_ontology(relations=None):
+    relations = _normalize_relation_tuple(relations or BRAIN_ONTOLOGY_EXPANSION_RELATIONS)
+    if not relations:
+        return _empty_ontology()
+    try:
+        from neo4j_client import is_healthy, run_query
+
+        if not is_healthy():
+            return _empty_ontology()
+        rows = run_query(
+            """
+            MATCH (s:Entity)-[r:RELATES_TO]->(t:Entity)
+            WHERE r.relationship IN $relations
+            RETURN coalesce(s.name, '') AS source,
+                   coalesce(s.entity_type, '') AS source_type,
+                   coalesce(r.relationship, '') AS relation,
+                   coalesce(t.name, '') AS target,
+                   coalesce(t.entity_type, '') AS target_type,
+                   coalesce(r.weight, 1.0) AS weight
+            ORDER BY weight DESC
+            LIMIT 1000
+            """,
+            {"relations": list(relations)},
         )
-        _ontology_cache = result
+    except Exception:
+        return _empty_ontology()
+
+    entities: dict[str, dict] = {}
+    adjacency: dict[str, list[str]] = {}
+    for row in rows:
+        source = str(row.get("source") or "")
+        target = str(row.get("target") or "")
+        relation = str(row.get("relation") or "")
+        source_type = str(row.get("source_type") or "")
+        target_type = str(row.get("target_type") or "")
+        if not _ontology_edge_allowed(relation, source_type, target_type):
+            continue
+        if source:
+            entities[source.lower()] = {"name": source, "type": source_type}
+        if target:
+            entities[target.lower()] = {"name": target, "type": target_type}
+        _append_ontology_edge(adjacency, source, target, relation)
+    return entities, {key: list(dict.fromkeys(values)) for key, values in adjacency.items()}
+
+
+def load_ontology(relations=None, source=None):
+    global _ontology_cache, _ontology_cache_ts
+    now = time.time()
+    active_source = source or BRAIN_ONTOLOGY_EXPANSION_SOURCE
+    active_relations = _normalize_relation_tuple(relations or BRAIN_ONTOLOGY_EXPANSION_RELATIONS)
+    cache_key = (active_source, active_relations)
+    with _ontology_lock:
+        if _ontology_cache is not None and (now - _ontology_cache_ts) < _ONTOLOGY_TTL:
+            if isinstance(_ontology_cache, dict):
+                if cache_key in _ontology_cache:
+                    return _ontology_cache[cache_key]
+            else:
+                return _ontology_cache
+        if active_source == "neo4j":
+            result = _load_neo4j_ontology(active_relations)
+            if not result[1]:
+                result = _load_file_ontology()
+        else:
+            result = _load_file_ontology()
+        if not isinstance(_ontology_cache, dict) or (now - _ontology_cache_ts) >= _ONTOLOGY_TTL:
+            _ontology_cache = {}
+        _ontology_cache[cache_key] = result
         _ontology_cache_ts = now
         return result
 
 
-def expand_with_ontology(query, adjacency):
+def ontology_expansion_terms(query, adjacency, *, max_terms: int | None = None):
+    """Return bounded 1-hop ontology entity expansions for a query."""
+    max_terms = max(0, int(max_terms if max_terms is not None else BRAIN_ONTOLOGY_EXPANSION_MAX_TERMS))
+    if max_terms <= 0:
+        return []
     query_lower = query.lower()
     expansions = []
     for name, related in adjacency.items():
         if name.lower() in query_lower:
             expansions.extend(related[:3])
-    # Also expand via entity graph (Zep/Graphiti pattern)
-    try:
-        from entity_graph import expand_with_entities
+    unique = [term for term in dict.fromkeys(expansions) if term and term.lower() not in query_lower]
+    return unique[:max_terms]
 
-        entity_expansions = expand_with_entities(query)
-        expansions.extend(entity_expansions)
-    except Exception:
-        pass
+
+def expand_with_ontology(query, adjacency, *, include_entity_graph: bool = True, max_terms: int | None = None):
+    expansions = ontology_expansion_terms(query, adjacency, max_terms=max_terms)
+    if include_entity_graph:
+        # Also expand via entity graph (Zep/Graphiti pattern). search_all does
+        # not use this path because it has its own graph-aware stages and hot
+        # path deadlines; the CLI helper can keep the broader legacy behavior.
+        try:
+            from entity_graph import expand_with_entities
+
+            expansions.extend(expand_with_entities(query))
+        except Exception:
+            pass
     if expansions:
-        unique = list(dict.fromkeys(expansions))[:5]
+        unique = list(dict.fromkeys(expansions))[: (max_terms or BRAIN_ONTOLOGY_EXPANSION_MAX_TERMS)]
         return query + " " + " ".join(unique)
     return query
+
+
+def maybe_expand_query_with_ontology(query: str) -> tuple[str, list[str], int]:
+    """Feature-flagged ontology expansion for the recall hot path.
+
+    Returns the original query unchanged when disabled or when ontology loading
+    fails, so recall has a clean rollback switch and fails open.
+    """
+    if not BRAIN_ONTOLOGY_EXPANSION_ENABLED:
+        return query, [], 0
+    t0 = time.time()
+    try:
+        relations = ontology_relations_for_query(query)
+        _, adjacency = load_ontology(relations=relations)
+        terms = ontology_expansion_terms(query, adjacency)
+    except Exception:
+        return query, [], int((time.time() - t0) * 1000)
+    if not terms:
+        return query, [], int((time.time() - t0) * 1000)
+    return query + " " + " ".join(terms), terms, int((time.time() - t0) * 1000)
+
+
+def ontology_sidecar_limit_for_query(query: str, terms: list[str], rag_limit: int) -> int:
+    """Return the sidecar fanout budget for a query.
+
+    Full ontology is safe in production because it is a bounded sidecar, not a
+    rewrite. Exact fact/config lookups are the one class where even sidecar
+    candidates can perturb provenance, so keep those on the original query
+    unless the user explicitly asks for a relationship/ownership/dependency
+    style answer.
+    """
+    if not terms:
+        return 0
+    configured = max(0, int(BRAIN_ONTOLOGY_SIDECAR_LIMIT))
+    if configured <= 0 or rag_limit <= 0:
+        return 0
+    specific_lookup = bool(_SPECIFIC_LOOKUP_PATTERN.search(query or ""))
+    ontology_intent = bool(_ONTOLOGY_INTENT_PATTERN.search(query or ""))
+    if specific_lookup and not ontology_intent:
+        return 0
+    if specific_lookup:
+        return max(1, min(1, configured, rag_limit))
+    return max(1, min(rag_limit, configured))
 
 
 _ALL_COLLECTIONS = [
@@ -847,6 +1086,25 @@ def _is_superseded_canonical_result(result: dict) -> bool:
     )
 
 
+def _is_stale_current_truth_result(result: dict) -> bool:
+    """Detect stale active-current claims in any retrieved collection.
+
+    Canonical file audits and scheduled jobs clean known data, but retrieval
+    should still behave like a brain: once a fact is known superseded, old
+    current-state claims should not win unless the user explicitly asks for
+    history.
+    """
+    try:
+        from stale_current_truth import find_current_truth_blockers_in_text
+
+        content = str(result.get("content") or "")
+        if not content:
+            return False
+        return bool(find_current_truth_blockers_in_text(content, source=str(result.get("path") or result.get("id") or "")))
+    except Exception:
+        return False
+
+
 @lru_cache(maxsize=16)
 def _find_obsidian_doc_by_name(required_terms: tuple[str, ...]) -> str | None:
     terms = tuple(term.casefold() for term in required_terms if term)
@@ -1243,6 +1501,7 @@ def search_all(
     # Phase C2: Intent-based source routing — skip sources that won't help
     # for this query type (temporal, preference, code, relational).
     sources = _route_sources(original_query or query, sources)
+    source_timing = {}
 
     # Bilingual query expansion (free, no LLM) — helps Korean queries find English docs.
     # 2026-04-16 R-3 fix: original bug joined variants into a mixed-language
@@ -1262,7 +1521,24 @@ def search_all(
     except Exception:
         pass
 
+    base_relevance_query = original_query or query
+    ontology_sidecar_query = ""
+    ontology_terms: list[str] = []
+    if BRAIN_ONTOLOGY_EXPANSION_ENABLED:
+        expanded_query, terms, elapsed_ms = maybe_expand_query_with_ontology(query)
+        ontology_terms = terms
+        source_timing["ontology_expansion_terms"] = len(terms)
+        source_timing["ontology_expansion_applied"] = bool(terms)
+        source_timing["ontology_expansion_ms"] = elapsed_ms
+        source_timing["ontology_expansion_sidecar_mode"] = int(BRAIN_ONTOLOGY_EXPANSION_MODE == "sidecar")
+        if terms and BRAIN_ONTOLOGY_EXPANSION_MODE == "sidecar":
+            ontology_sidecar_query = expanded_query
+        else:
+            query = expanded_query
+
     relevance_query = original_query or query
+    if BRAIN_ONTOLOGY_EXPANSION_ENABLED:
+        relevance_query = base_relevance_query
 
     rag_results = []
     canonical_results = []
@@ -1273,7 +1549,6 @@ def search_all(
 
     from concurrent.futures import as_completed
 
-    source_timing: dict[str, int] = {}
     _entity_query = _is_entity_query(relevance_query)
 
     def _search_rag():
@@ -1340,6 +1615,14 @@ def search_all(
             _futs.append(_pool.submit(search_rag, query, rag_limit, local_where or None, filtered_cols))
         if plain_cols:
             _futs.append(_pool.submit(search_rag, query, rag_limit, plain_where or None, plain_cols))
+        if ontology_sidecar_query and ontology_sidecar_query != query:
+            sidecar_limit = ontology_sidecar_limit_for_query(relevance_query, ontology_terms, rag_limit)
+            source_timing["ontology_sidecar_limit"] = sidecar_limit
+            source_timing["ontology_sidecar_skipped_specific_lookup"] = int(sidecar_limit == 0)
+            if sidecar_limit > 0 and plain_cols:
+                _futs.append(
+                    _pool.submit(search_rag, ontology_sidecar_query, sidecar_limit, plain_where or None, plain_cols)
+                )
         # 2026-04-16 R-3: bilingual-variant expansion in parallel with the
         # primary fan-outs — variants are independent queries so we can run
         # them concurrently instead of after the fact.
@@ -1409,6 +1692,12 @@ def search_all(
                 and not include_history
                 and not _HISTORY_LOOKUP_PATTERNS.search(relevance_query)
                 and _is_superseded_canonical_result(r)
+            ):
+                continue
+            if (
+                not include_history
+                and not _HISTORY_LOOKUP_PATTERNS.search(relevance_query)
+                and _is_stale_current_truth_result(r)
             ):
                 continue
             # Only gate semantic_memory results with lifecycle filters
@@ -1495,6 +1784,7 @@ def search_all(
         ]
         if not include_history and not _HISTORY_LOOKUP_PATTERNS.search(relevance_query):
             res = [r for r in res if not _is_superseded_canonical_result(r)]
+            res = [r for r in res if not _is_stale_current_truth_result(r)]
         source_timing["canonical_ms"] = int((time.time() - t0) * 1000)
         return res
 
