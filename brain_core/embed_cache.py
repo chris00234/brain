@@ -208,8 +208,12 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Prune embed_cache.db")
-    parser.add_argument("--max-age-days", type=int, default=60)
-    parser.add_argument("--max-rows", type=int, default=25_000)
+    # Defaults match prune_old() function signature (tightened from 60d/25K
+    # 2026-04-26 after the cache sat at 26K rows because the scheduled job
+    # invoked the CLI with no args and the older 60d/25K argparse defaults
+    # won out over the function's 30d/15K).
+    parser.add_argument("--max-age-days", type=int, default=30)
+    parser.add_argument("--max-rows", type=int, default=15_000)
     args = parser.parse_args()
     out = prune_old(max_age_days=args.max_age_days, max_rows=args.max_rows)
     print(json.dumps(out, indent=2))
