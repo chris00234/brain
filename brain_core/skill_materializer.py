@@ -27,6 +27,7 @@ in their frontmatter when the backing procedure is deleted or has gone stale
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import logging
 import re
@@ -46,6 +47,26 @@ MIN_STEPS = 3
 # Staleness + overload thresholds
 STALE_DAYS = 90  # skills backing procedures last_used > N days are archived
 MAX_AUTO_SKILLS = 50  # global cap per skill dir; lowest-success skills evicted first
+
+
+def _sync_openclaw_registry() -> dict[str, Any]:
+    """Best-effort central OpenClaw registry/allowlist sync.
+
+    skill_materializer writes SKILL.md files for Claude, Codex, and OpenClaw.
+    Claude/Codex discover the files directly, but OpenClaw also has a strict
+    registry plus per-agent skill allowlists. Delegate that write path to the
+    single owner (`cli/skill_sync.py`) instead of duplicating config mutation
+    logic here.
+    """
+    sync_path = Path(__file__).resolve().parents[1] / "cli" / "skill_sync.py"
+    spec = importlib.util.spec_from_file_location("brain_skill_sync", sync_path)
+    if spec is None or spec.loader is None:
+        return {"ok": False, "reason": f"load_failed:{sync_path}"}
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    registry = module.reconcile_registry(dry_run=False)
+    attach = module.attach_generated_skills(dry_run=False)
+    return {"ok": True, "registry": registry, "attach": attach}
 
 
 def _slug(task_type: str) -> str:
@@ -227,9 +248,12 @@ def materialize(proc: dict[str, Any], *, min_success: int = MIN_SUCCESS_COUNT) -
         oc_path.write_text(skill_md)
         oc_meta_path.write_text(meta_json)
 
+        openclaw_sync = _sync_openclaw_registry()
+
         result["materialized"] = True
         result["paths"] = [str(cc_path), str(codex_path), str(oc_path), str(oc_meta_path)]
         result["reason"] = "ok"
+        result["openclaw_sync"] = openclaw_sync
         log.info(
             "materialized skill %s (success_count=%d, steps=%d)",
             slug,

@@ -31,7 +31,6 @@ import argparse
 import json
 import re
 import sqlite3
-import stat
 import sys
 from collections import defaultdict
 from datetime import UTC, datetime
@@ -394,6 +393,15 @@ def _extract_rule(text: str) -> str:
         joined = _CANONICAL_PREAMBLE.sub(" ", joined)
     joined = re.sub(r"\s+", " ", joined).strip()
     joined = _strip_duplicated_prefix(joined)
+    # Canonical atom bodies can concatenate a short rule with explanatory
+    # markdown sections ("## Why", "## Context"). Skills should carry the
+    # actionable rule, not the full canonical note prose.
+    joined = re.split(
+        r"\s+##\s+(?:why|context|source|observations|distilled evidence|merge suggestion)\b",
+        joined,
+        maxsplit=1,
+        flags=re.I,
+    )[0].strip()
     return joined[:300].strip()
 
 
@@ -510,9 +518,6 @@ def write_skills(by_domain: dict[str, list[dict]], dry_run: bool = False) -> dic
     return stats
 
 
-OPENCLAW_CONFIG = Path.home() / ".openclaw" / "openclaw.json"
-
-
 def prune_orphan_skills(available_domains: set[str], dry_run: bool = False) -> dict:
     """Remove brain-learned-<domain> dirs whose domain no longer has atoms.
 
@@ -545,78 +550,27 @@ def prune_orphan_skills(available_domains: set[str], dry_run: bool = False) -> d
     return stats
 
 
-def sync_openclaw_agents(written_domains: set[str], dry_run: bool = False) -> dict:
-    """Add brain-learned-<domain> to each OpenClaw agent's skills allowlist.
+def run_openclaw_skill_sync(dry_run: bool = False) -> dict:
+    """Delegate OpenClaw registry + per-agent allowlist updates to skill_sync.
 
-    OpenClaw's per-agent `skills: [...]` array is an allowlist (src/agents/skills/
-    agent-filter.ts:28 — 'Explicit per-agent skills win when present'). Skills
-    discovered on disk but not listed per-agent never load. This function
-    ensures every agent gets every brain-learned-* skill, and prunes stale
-    entries for domains we no longer generate.
-
-    Returns stats with per-agent adds/prunes.
+    atoms_to_skills owns atom→SKILL.md rendering. OpenClaw config mutation has
+    exactly one owner (`cli/skill_sync.py`) so generated brain-learned-* and
+    auto-* skills cannot drift through two separate reconciliation paths.
     """
-    stats: dict = {"added": [], "pruned": [], "agents_touched": 0, "skipped_reason": None}
-
-    if not OPENCLAW_CONFIG.exists():
-        stats["skipped_reason"] = f"config_not_found: {OPENCLAW_CONFIG}"
-        return stats
-
     try:
-        cfg = json.loads(OPENCLAW_CONFIG.read_text())
-    except (json.JSONDecodeError, OSError) as e:
-        stats["skipped_reason"] = f"parse_error: {e}"
-        return stats
+        from skill_sync import attach_generated_skills, reconcile_registry
 
-    agents_list = cfg.get("agents", {}).get("list", [])
-    if not isinstance(agents_list, list) or not agents_list:
-        stats["skipped_reason"] = "no_agents_list"
-        return stats
+        registry = reconcile_registry(dry_run=dry_run)
+        attach = attach_generated_skills(dry_run=dry_run)
+        return {"ok": True, "registry": registry, "attach": attach, "dry_run": dry_run}
+    except Exception as exc:
+        return {"ok": False, "reason": str(exc)[:200], "dry_run": dry_run}
 
-    desired = {f"{SKILL_PREFIX}{d}" for d in written_domains}
-    changed = False
 
-    for agent in agents_list:
-        aid = agent.get("id", "?")
-        skills = agent.get("skills")
-        if not isinstance(skills, list):
-            continue
-        current_bl = {s for s in skills if s.startswith(SKILL_PREFIX)}
-
-        to_add = sorted(desired - current_bl)
-        to_prune = sorted(current_bl - desired)
-
-        if not to_add and not to_prune:
-            continue
-
-        new_skills = [s for s in skills if not s.startswith(SKILL_PREFIX)] + sorted(desired)
-        # Preserve original (non-brain) ordering; append brain-learned alphabetically.
-        # Use new_skills only if it differs meaningfully.
-        if new_skills != skills:
-            agent["skills"] = new_skills
-            stats["agents_touched"] += 1
-            changed = True
-            for s in to_add:
-                stats["added"].append({"agent": aid, "skill": s})
-            for s in to_prune:
-                stats["pruned"].append({"agent": aid, "skill": s})
-
-    if changed and not dry_run:
-        # Atomic write: tmp + rename. Preserve original permission bits —
-        # openclaw.json is chmod 0600 (credential refs); Path.write_text would
-        # default to 0644 which is a privacy regression.
-        original_mode = stat.S_IMODE(OPENCLAW_CONFIG.stat().st_mode)
-        tmp = OPENCLAW_CONFIG.with_suffix(".json.tmp")
-        try:
-            tmp.write_text(json.dumps(cfg, indent=2) + "\n")
-            tmp.chmod(original_mode)
-            tmp.replace(OPENCLAW_CONFIG)
-        except Exception:
-            if tmp.exists():
-                tmp.unlink()  # cleanup half-written tmp
-            raise
-
-    return stats
+def sync_openclaw_agents(written_domains: set[str], dry_run: bool = False) -> dict:
+    """Compatibility shim; use run_openclaw_skill_sync for new code."""
+    _ = written_domains
+    return run_openclaw_skill_sync(dry_run=dry_run)
 
 
 def main() -> int:
@@ -659,7 +613,7 @@ def main() -> int:
     prune_stats = prune_orphan_skills(available_domains, dry_run=args.dry_run)
     stats["orphan_prune"] = prune_stats
 
-    sync_stats = sync_openclaw_agents(available_domains, dry_run=args.dry_run)
+    sync_stats = run_openclaw_skill_sync(dry_run=args.dry_run)
     stats["openclaw_sync"] = sync_stats
 
     if args.json:
@@ -686,14 +640,13 @@ def main() -> int:
             for p in pruned:
                 print(f"  - {p['path']}")
         print()
-        if sync_stats.get("skipped_reason"):
-            print(f"OpenClaw sync: SKIPPED ({sync_stats['skipped_reason']})")
+        if not sync_stats.get("ok"):
+            print(f"OpenClaw sync: SKIPPED ({sync_stats.get('reason')})")
         else:
-            print(f"OpenClaw sync: {sync_stats['agents_touched']} agents updated")
-            for a in sync_stats["added"]:
-                print(f"  + {a['agent']}: {a['skill']}")
-            for a in sync_stats["pruned"]:
-                print(f"  - {a['agent']}: {a['skill']} (pruned)")
+            attach = sync_stats.get("attach", {})
+            print(f"OpenClaw sync: {len(attach.get('agents_touched', []))} agents updated")
+            if attach.get("attached"):
+                print(f"  attached generated skills: {attach['attached']}")
     return 0
 
 

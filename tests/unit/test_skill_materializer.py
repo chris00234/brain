@@ -31,6 +31,7 @@ def test_materialize_writes_claude_codex_and_openclaw(tmp_path):
         patch.object(skill_materializer, "CODEX_SKILLS_DIR", codex),
         patch.object(skill_materializer, "OPENCLAW_SKILLS_DIR", openclaw),
         patch.object(skill_materializer, "_fetch_related_lessons", return_value=[]),
+        patch.object(skill_materializer, "_sync_openclaw_registry", return_value={"ok": True}),
     ):
         result = skill_materializer.materialize(_procedure())
 
@@ -41,6 +42,7 @@ def test_materialize_writes_claude_codex_and_openclaw(tmp_path):
     assert (openclaw / slug / "SKILL.md").exists()
     assert (openclaw / slug / "_meta.json").exists()
     assert any(".codex" in path for path in result["paths"])
+    assert result["openclaw_sync"]["ok"] is True
 
 
 def test_list_auto_skill_dirs_includes_codex(tmp_path):

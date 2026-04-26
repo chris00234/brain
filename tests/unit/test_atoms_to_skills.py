@@ -7,18 +7,16 @@ tmp_path.
 
 from __future__ import annotations
 
-import json
-import stat
 from unittest.mock import patch
 
 from atoms_to_skills import (
     SKILL_PREFIX,
+    _extract_rule,
     _is_durable_rule,
     _runtime_for_skill_path,
     _strip_duplicated_prefix,
     classify,
     prune_orphan_skills,
-    sync_openclaw_agents,
     write_skills,
 )
 
@@ -70,6 +68,16 @@ class TestDuplicatedPrefixStripper:
 
     def test_no_op_on_short_rule(self):
         assert _strip_duplicated_prefix("Chris wants X Y Z") == "Chris wants X Y Z"
+
+
+class TestRuleExtraction:
+    def test_strips_canonical_explanation_sections(self):
+        text = (
+            "Use canonical memory layer over raw RAG alone "
+            "## Why This reduces stale recall and supports provenance. "
+            "## Source raw session"
+        )
+        assert _extract_rule(text) == "Use canonical memory layer over raw RAG alone"
 
 
 class TestClassifier:
@@ -129,88 +137,6 @@ class TestWriteSkills:
 
     def test_runtime_for_skill_path_identifies_codex(self, tmp_path):
         assert _runtime_for_skill_path(tmp_path / ".codex" / "skills" / "x" / "SKILL.md") == "codex"
-
-
-class TestSyncOpenclawAgents:
-    def _make_config(self, agent_skills: dict[str, list[str]]) -> dict:
-        return {"agents": {"list": [{"id": aid, "skills": skills} for aid, skills in agent_skills.items()]}}
-
-    def test_adds_missing_brain_learned_to_all_agents(self, tmp_path):
-        cfg_path = tmp_path / "openclaw.json"
-        cfg = self._make_config({"jenna": ["todoist"], "liz": ["github", "react-expert"]})
-        cfg_path.write_text(json.dumps(cfg))
-
-        with patch("atoms_to_skills.OPENCLAW_CONFIG", cfg_path):
-            stats = sync_openclaw_agents({"infra-ops", "communication"})
-
-        assert stats["agents_touched"] == 2
-        updated = json.loads(cfg_path.read_text())
-        for agent in updated["agents"]["list"]:
-            assert "brain-learned-infra-ops" in agent["skills"]
-            assert "brain-learned-communication" in agent["skills"]
-
-    def test_prunes_stale_brain_learned_entries(self, tmp_path):
-        cfg_path = tmp_path / "openclaw.json"
-        cfg = self._make_config({"jenna": ["todoist", "brain-learned-deprecated-domain"]})
-        cfg_path.write_text(json.dumps(cfg))
-
-        with patch("atoms_to_skills.OPENCLAW_CONFIG", cfg_path):
-            stats = sync_openclaw_agents({"infra-ops"})
-
-        assert any(p["skill"] == "brain-learned-deprecated-domain" for p in stats["pruned"])
-        updated = json.loads(cfg_path.read_text())
-        assert "brain-learned-deprecated-domain" not in updated["agents"]["list"][0]["skills"]
-        assert "brain-learned-infra-ops" in updated["agents"]["list"][0]["skills"]
-
-    def test_preserves_non_brain_skills_order(self, tmp_path):
-        cfg_path = tmp_path / "openclaw.json"
-        cfg = self._make_config({"jenna": ["zeta", "alpha", "mike"]})
-        cfg_path.write_text(json.dumps(cfg))
-
-        with patch("atoms_to_skills.OPENCLAW_CONFIG", cfg_path):
-            sync_openclaw_agents({"infra-ops"})
-
-        updated = json.loads(cfg_path.read_text())
-        skills = updated["agents"]["list"][0]["skills"]
-        non_bl = [s for s in skills if not s.startswith("brain-learned-")]
-        assert non_bl == ["zeta", "alpha", "mike"]  # original order kept
-
-    def test_no_op_when_already_synced(self, tmp_path):
-        cfg_path = tmp_path / "openclaw.json"
-        cfg = self._make_config({"jenna": ["todoist", "brain-learned-infra-ops"]})
-        cfg_path.write_text(json.dumps(cfg))
-        mtime_before = cfg_path.stat().st_mtime
-
-        with patch("atoms_to_skills.OPENCLAW_CONFIG", cfg_path):
-            stats = sync_openclaw_agents({"infra-ops"})
-
-        assert stats["agents_touched"] == 0
-        assert cfg_path.stat().st_mtime == mtime_before  # file not rewritten
-
-    def test_preserves_file_permissions(self, tmp_path):
-        """Regression test — atomic write must keep 0600, not default 0644."""
-        cfg_path = tmp_path / "openclaw.json"
-        cfg = self._make_config({"jenna": ["todoist"]})
-        cfg_path.write_text(json.dumps(cfg))
-        cfg_path.chmod(0o600)
-
-        with patch("atoms_to_skills.OPENCLAW_CONFIG", cfg_path):
-            sync_openclaw_agents({"infra-ops"})
-
-        assert stat.S_IMODE(cfg_path.stat().st_mode) == 0o600
-
-    def test_skips_gracefully_when_config_missing(self, tmp_path):
-        missing = tmp_path / "nope.json"
-        with patch("atoms_to_skills.OPENCLAW_CONFIG", missing):
-            stats = sync_openclaw_agents({"infra-ops"})
-        assert "config_not_found" in stats["skipped_reason"]
-
-    def test_skips_gracefully_on_malformed_json(self, tmp_path):
-        cfg_path = tmp_path / "openclaw.json"
-        cfg_path.write_text("{not json")
-        with patch("atoms_to_skills.OPENCLAW_CONFIG", cfg_path):
-            stats = sync_openclaw_agents({"infra-ops"})
-        assert "parse_error" in stats["skipped_reason"]
 
 
 class TestPruneOrphanSkills:
