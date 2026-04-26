@@ -3,7 +3,7 @@
 > Auto-generated from `brain_core/job_definitions.py` by `cli/render_cron_map.py`.
 > Do not hand-edit; run `.venv/bin/python cli/render_cron_map.py --write`.
 
-**Total jobs**: 122
+**Total jobs**: 123
 **Default `misfire_grace`**: 300s (5min). Heavy nightly jobs override per job.
 
 ## Jobs by owning agent
@@ -53,7 +53,7 @@
 | `screen_time_ingest` | `cron(day_of_week=sun, hour=4, minute=35)` | standard | - | 300s | Screen Time daily patterns via Sage -> raw/inbox (weekly) |
 | `weekly_synthesis` | `cron(day_of_week=sun, hour=4, minute=15)` | heavy | llm | 300s | Weekly arc (Sage, Sunday 4:15am) |
 
-### system (97 jobs)
+### system (98 jobs)
 
 | Name | Trigger | Budget | Tags | Misfire Grace | Description |
 |---|---|---|---|---|---|
@@ -126,6 +126,7 @@
 | `metrics_history_retention` | `cron(hour=4, minute=40)` | standard | - | 900s | Prune metrics_snapshots rows older than 14d (daily 4:40am) |
 | `near_dedup` | `cron(hour=3, minute=22)` | heavy | embedder, qdrant, sqlite | 300s | Daily retroactive near-duplicate scan of semantic_memory (3:22am). Bumped weekly->daily 2026-04-23 after bilingual preference atoms accumulated past the weekly gate. Moved off 3:20 to avoid collision with habituation_prune and off 3:25 to avoid sm2_nightly brain.db/Qdrant contention. |
 | `neo4j_backup` | `cron(hour=3, minute=15)` | heavy | backup, neo4j | 300s | Nightly Neo4j data backup to MinIO (14-day retention) |
+| `obsolete_expired_atoms` | `cron(hour=4, minute=50)` | standard | - | 900s | Mark superseded+expired+unaccessed atoms tier=obsolete (daily 4:50am, 60d window) |
 | `outbox_drain` | `interval(0:05:00)` | standard | - | 120s | Phase 2D: drain SessionEnd outbox envelopes (every 5 min) |
 | `pdf_ingest` | `cron(hour=5, minute=30)` | heavy | embedder, qdrant | 1800s | M7-WS2a: scan ~/Documents/PDFs, parse via Docling, embed -> knowledge |
 | `proactive_insights` | `cron(hour=8, minute=0)` | standard | - | 900s | Daily proactive insights surfacing (8:00am PST) |
@@ -244,6 +245,7 @@
 | `near_dedup` | `cron(hour=3, minute=22)` | system | heavy | embedder, qdrant, sqlite | 300s | Daily retroactive near-duplicate scan of semantic_memory (3:22am). Bumped weekly->daily 2026-04-23 after bilingual preference atoms accumulated past the weekly gate. Moved off 3:20 to avoid collision with habituation_prune and off 3:25 to avoid sm2_nightly brain.db/Qdrant contention. |
 | `neo4j_backup` | `cron(hour=3, minute=15)` | system | heavy | backup, neo4j | 300s | Nightly Neo4j data backup to MinIO (14-day retention) |
 | `obsidian_sync` | `interval(1:00:00)` | jenna | standard | - | 300s | Obsidian vault ↔ CouchDB pull |
+| `obsolete_expired_atoms` | `cron(hour=4, minute=50)` | system | standard | - | 900s | Mark superseded+expired+unaccessed atoms tier=obsolete (daily 4:50am, 60d window) |
 | `openclaw_sessions_ingest` | `cron(hour=0,3,6,19,21,23, minute=35)` | jenna | heavy | llm, qdrant | 300s | OpenClaw agent session distillation via Jenna -> raw/inbox (6x/day off-peak, respects 9am-6pm no-local-embedder rule) |
 | `outbox_drain` | `interval(0:05:00)` | system | standard | - | 120s | Phase 2D: drain SessionEnd outbox envelopes (every 5 min) |
 | `pdf_ingest` | `cron(hour=5, minute=30)` | system | heavy | embedder, qdrant | 1800s | M7-WS2a: scan ~/Documents/PDFs, parse via Docling, embed -> knowledge |

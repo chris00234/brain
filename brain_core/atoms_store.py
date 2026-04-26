@@ -707,6 +707,99 @@ def mark_superseded(parent_chroma_id: str, child_chroma_id: str, *, db_path: Pat
         return False
 
 
+def apply_explicit_replaces(
+    new_atom_chroma_id: str,
+    replaces_atom_ids: list[str],
+    *,
+    reason: str = "",
+    agent: str = "unknown",
+    db_path: Path | None = None,
+) -> dict:
+    """Explicit AI-driven supersession (2026-04-26).
+
+    The caller (an AI front-end or user-correction handler) tells the brain
+    that the new atom EXPLICITLY replaces specific older atoms. This skips
+    the cosine-similarity gate in `ingest_mirror._run_semantic_supersession`
+    and goes straight to:
+      - parent.superseded_by = new_atom_id
+      - parent.valid_until   = now()
+      - new.supersedes (via mark_superseded provenance edge)
+      - audit_log entry: "explicit_update" with agent + reason
+
+    Used for:
+      1. AI detected change language ("X was Y, now Z" / "이제 X")
+      2. User correction ("아니야, 그게 아니라 ...")
+      3. Programmatic update from a deterministic source
+
+    Returns: {"applied": [ids], "skipped": [{"id":..., "reason":...}], "error": str|None}
+    """
+    if not BRAIN_ATOMS_ENABLED:
+        return {"applied": [], "skipped": [], "error": "atoms_disabled"}
+    if not replaces_atom_ids:
+        return {"applied": [], "skipped": [], "error": None}
+
+    summary: dict = {"applied": [], "skipped": [], "error": None}
+    now_iso = _now()
+    try:
+        with _conn(db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            new_row = conn.execute(
+                "SELECT id, chroma_id FROM atoms WHERE chroma_id = ?",
+                (new_atom_chroma_id,),
+            ).fetchone()
+            if not new_row:
+                conn.rollback()
+                return {"applied": [], "skipped": [], "error": "new_atom_not_found"}
+            new_id = new_row["id"]
+            for old_id in replaces_atom_ids:
+                old = conn.execute(
+                    "SELECT id, tier FROM atoms WHERE id = ? OR chroma_id = ?",
+                    (old_id, old_id),
+                ).fetchone()
+                if not old:
+                    summary["skipped"].append({"id": old_id, "reason": "not_found"})
+                    continue
+                if old["tier"] == "obsolete":
+                    summary["skipped"].append({"id": old_id, "reason": "already_obsolete"})
+                    continue
+                conn.execute(
+                    "UPDATE atoms SET superseded_by = ?, valid_until = ?, updated_at = ? " "WHERE id = ?",
+                    (new_id, now_iso, now_iso, old["id"]),
+                )
+                conn.execute(
+                    "UPDATE atoms SET supersedes = ?, updated_at = ? WHERE id = ?",
+                    (old["id"], now_iso, new_id),
+                )
+                conn.execute(
+                    "INSERT OR IGNORE INTO provenance "
+                    "(parent_kind, parent_id, child_kind, child_id, relation, created_at) "
+                    "VALUES ('atom', ?, 'atom', ?, 'explicit_supersede', ?)",
+                    (old["id"], new_id, now_iso),
+                )
+                summary["applied"].append(old["id"])
+            conn.commit()
+    except sqlite3.Error as exc:
+        return {"applied": [], "skipped": [], "error": f"sqlite:{exc}"}
+
+    # Best-effort audit log so explicit updates are visible in /brain/audit.
+    if summary["applied"]:
+        try:
+            from audit_log import log_event
+
+            log_event(
+                event_type="explicit_update",
+                source=f"agent:{agent}",
+                payload={
+                    "new_atom_id": new_id,
+                    "replaced_ids": summary["applied"],
+                    "reason": reason or "ai-explicit-update",
+                },
+            )
+        except Exception as exc:
+            log.debug("apply_explicit_replaces audit log skipped: %s", exc)
+    return summary
+
+
 def reinforce(chroma_id: str, *, success: bool = True, db_path: Path | None = None) -> dict | None:
     """Bump reinforcement_count + apply SM-2 schedule update. SM-2 lives in sm2.py
     (Phase 4). Until then we just bump the counter so the data is captured.

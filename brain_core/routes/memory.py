@@ -83,6 +83,19 @@ class MemoryCreateRequest(BaseModel):
     # want to store this memory as a child of a larger-context parent atom.
     # Retrieval can expand the child → parent when extra context is useful.
     parent_atom_id: str | None = Field(default=None, max_length=64)
+    # 2026-04-26: explicit AI update intent. When the caller knows this new
+    # atom REPLACES specific older atoms (e.g., user said "I work 8-6 now,
+    # was 8-5"; or AI gave a wrong answer and user corrected), the caller
+    # passes the older atom_ids here. The brain skips the cosine-similarity
+    # supersession gate and directly marks each as superseded_by + sets
+    # valid_until. Audit log records this as `explicit_update` so the
+    # provenance is distinguishable from inferred supersession.
+    replaces: list[str] | None = Field(default=None, description="atom_ids this new atom explicitly replaces")
+    replaces_reason: str = Field(
+        default="",
+        max_length=300,
+        description="why the caller knows these atoms are superseded (e.g., user-correction)",
+    )
 
 
 class MemoryPatchRequest(BaseModel):
@@ -514,7 +527,7 @@ def create_memory(request: Request, req: MemoryCreateRequest) -> MemoryEntry:
     # POST /memory went through the hygiene pipeline — batch was an
     # implicit bypass. HR4 fix: log errors instead of bare-except swallow.
     try:
-        from atoms_store import mark_superseded
+        from atoms_store import apply_explicit_replaces, mark_superseded
         from ingest_mirror import mirror_memory
 
         _mr = mirror_memory(
@@ -541,6 +554,29 @@ def create_memory(request: Request, req: MemoryCreateRequest) -> MemoryEntry:
 
         if operation == "UPDATE" and supersede_target:
             mark_superseded(supersede_target, mem_id)
+
+        # Explicit AI/user update intent — bypass the cosine gate and directly
+        # supersede the named atoms. See atoms_store.apply_explicit_replaces.
+        if req.replaces:
+            _explicit = apply_explicit_replaces(
+                mem_id,
+                req.replaces,
+                reason=req.replaces_reason or req.reason,
+                agent=req.agent,
+            )
+            if _explicit.get("error"):
+                log.warning(
+                    "explicit_replaces_failed mem_id=%s error=%s",
+                    mem_id,
+                    _explicit["error"],
+                )
+            else:
+                log.info(
+                    "explicit_replaces_applied mem_id=%s applied=%s skipped=%s",
+                    mem_id,
+                    _explicit["applied"],
+                    _explicit["skipped"],
+                )
         # Attribute the producing prompt — manual /memory POST calls don't
         # use a distill prompt, so they get a synthetic "manual_v1" id.
         # Lets prompt_attribution.survival_report distinguish manual writes

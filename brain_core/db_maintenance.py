@@ -52,6 +52,11 @@ METRICS_HISTORY_RETENTION_DAYS = 14
 # SessionEnd. Crashes / never-ended sessions accumulate orphans. 30d sweep
 # catches them without losing live working memory of active sessions.
 SESSION_CONTEXT_RETENTION_DAYS = 30
+# Auto-obsolete atoms whose valid_until passed N days ago AND who have a
+# proper superseded_by chain AND were never reinforced. Conservative window:
+# we trust the supersession chain (set by ingest_mirror's semantic gate or
+# explicit AI replaces=); we don't blanket-obsolete every expired atom.
+EXPIRED_ATOM_OBSOLETE_DAYS = 60
 
 
 def _sqlite_size_mb(path: Path) -> float:
@@ -271,6 +276,99 @@ def run_session_context_retention(days: int = SESSION_CONTEXT_RETENTION_DAYS) ->
     return summary
 
 
+def run_obsolete_expired_atoms(days: int = EXPIRED_ATOM_OBSOLETE_DAYS) -> dict:
+    """Auto-mark very-stale atoms `tier='obsolete'` so they stop appearing
+    in retrieval entirely.
+
+    Only targets atoms that meet ALL of:
+      - valid_until is set AND older than `days` (default 60d)
+      - superseded_by is set (the supersession chain explicitly recorded
+        a replacement — either via AI explicit replaces= or via the
+        cosine gate in ingest_mirror)
+      - reinforcement_count == 0 (never accessed since being expired)
+      - tier != 'obsolete' already
+
+    Atoms that are merely expired but lack a supersede chain are LEFT
+    ALONE — the underlying fact may still be true (Chris's pushback in
+    the 2026-04-26 stale audit). time_decay's 0.3x ranking penalty
+    continues to apply to them.
+
+    Safety: max 50 per run, max 5% of active atoms.
+    """
+    summary: dict = {
+        "table": "atoms",
+        "days": days,
+        "started_at": _now_iso(),
+        "obsoleted": [],
+        "skipped_safety_cap": False,
+    }
+    if not BRAIN_DB.exists():
+        summary["status"] = "db_missing"
+        summary["finished_at"] = _now_iso()
+        return summary
+    try:
+        conn = sqlite3.connect(str(BRAIN_DB))
+        conn.row_factory = sqlite3.Row
+        try:
+            total_active = conn.execute("SELECT COUNT(*) FROM atoms WHERE tier != 'obsolete'").fetchone()[0]
+            safety_cap = min(50, max(1, int(total_active * 0.05)))
+            cur = conn.execute(
+                "SELECT id, kind, substr(text, 1, 80) AS preview "
+                "FROM atoms "
+                "WHERE tier != 'obsolete' "
+                "AND superseded_by IS NOT NULL "
+                "AND valid_until IS NOT NULL "
+                "AND valid_until < datetime('now', 'utc', ? || ' days') "
+                "AND reinforcement_count = 0 "
+                "ORDER BY valid_until ASC "
+                "LIMIT ?",
+                (f"-{int(days)}", safety_cap + 1),
+            )
+            candidates = [dict(row) for row in cur.fetchall()]
+            if len(candidates) > safety_cap:
+                summary["skipped_safety_cap"] = True
+                summary["candidates"] = len(candidates)
+                summary["safety_cap"] = safety_cap
+                summary["status"] = "skipped:exceeds_cap"
+                summary["finished_at"] = _now_iso()
+                return summary
+            if not candidates:
+                summary["status"] = "ok"
+                summary["finished_at"] = _now_iso()
+                return summary
+            now_iso = _now_iso()
+            ids = [c["id"] for c in candidates]
+            placeholders = ",".join("?" for _ in ids)
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                f"UPDATE atoms SET tier = 'obsolete', updated_at = ? WHERE id IN ({placeholders})",
+                [now_iso, *ids],
+            )
+            conn.commit()
+            summary["obsoleted"] = ids
+            summary["count"] = len(ids)
+            summary["status"] = "ok"
+        finally:
+            conn.close()
+    except Exception as exc:
+        summary["status"] = f"error:{str(exc)[:150]}"
+    summary["finished_at"] = _now_iso()
+    # Best-effort audit log so the auto-obsolete decisions are visible.
+    if summary.get("obsoleted"):
+        try:
+            from audit_log import log_event
+
+            for atom_id in summary["obsoleted"]:
+                log_event(
+                    event_type="atom_obsolete",
+                    source="db_maintenance.run_obsolete_expired_atoms",
+                    payload={"atom_id": atom_id, "reason": f"expired_>{days}d_with_supersede_chain"},
+                )
+        except Exception as exc:
+            log.debug("run_obsolete_expired_atoms audit log skipped: %s", exc)
+    return summary
+
+
 def run_metrics_history_retention(days: int = METRICS_HISTORY_RETENTION_DAYS) -> dict:
     """Trim metrics_snapshots beyond N days. metrics_buffer.persist already
     does a 90d DELETE on every persist, but the file does not shrink without
@@ -350,6 +448,7 @@ if __name__ == "__main__":
     sub.add_parser("retention_decisions")
     sub.add_parser("retention_metrics")
     sub.add_parser("retention_session_context")
+    sub.add_parser("obsolete_expired_atoms")
     sub.add_parser("stats")
     args = p.parse_args()
     if args.cmd == "vacuum":
@@ -364,6 +463,8 @@ if __name__ == "__main__":
         print(json.dumps(run_metrics_history_retention(), indent=2))
     elif args.cmd == "retention_session_context":
         print(json.dumps(run_session_context_retention(), indent=2))
+    elif args.cmd == "obsolete_expired_atoms":
+        print(json.dumps(run_obsolete_expired_atoms(), indent=2))
     elif args.cmd == "stats":
         print(json.dumps(growth_stats(), indent=2))
     else:

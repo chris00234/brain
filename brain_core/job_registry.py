@@ -289,6 +289,13 @@ JOB_REGISTRY: dict[str, list[str]] = {
         "-c",
         f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from db_maintenance import run_session_context_retention; import json; print(json.dumps(run_session_context_retention()))",
     ],
+    # 2026-04-26 stale-atoms auto-obsolete: only targets atoms with a real
+    # supersede chain + 60d expired + never reinforced. Conservative.
+    "obsolete_expired_atoms": [
+        _py,
+        "-c",
+        f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from db_maintenance import run_obsolete_expired_atoms; import json; print(json.dumps(run_obsolete_expired_atoms()))",
+    ],
     # v3 Phase 6: weekly entity canonicalization proposal (dry-run only).
     "canonicalize_entities_dryrun": [
         _py,

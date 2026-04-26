@@ -129,7 +129,14 @@ def handle_tools_list(params: dict) -> dict:
             },
             {
                 "name": "brain_store",
-                "description": "Store a memory/fact/preference in the brain.",
+                "description": (
+                    "Store a memory/fact/preference in the brain. "
+                    "If this new fact REPLACES specific older atoms (user said "
+                    "'I work 8-6 now (was 8-5)', or you're correcting a wrong "
+                    "earlier answer), pass their atom_ids in `replaces` so the "
+                    "brain explicitly supersedes them instead of guessing. "
+                    "For pure user corrections, prefer brain_correct."
+                ),
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -139,8 +146,48 @@ def handle_tools_list(params: dict) -> dict:
                             "enum": ["preference", "fact", "decision", "entity", "other"],
                         },
                         "agent": {"type": "string", "description": "Your agent name"},
+                        "replaces": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "atom_ids this new fact explicitly supersedes (skip the cosine gate)",
+                        },
+                        "replaces_reason": {
+                            "type": "string",
+                            "description": "why these atoms are superseded (e.g., 'user said it changed', 'corrected wrong answer')",
+                        },
                     },
                     "required": ["content", "category"],
+                },
+            },
+            {
+                "name": "brain_correct",
+                "description": (
+                    "Use when the user corrects a wrong answer you just gave. "
+                    "Recall the wrong atom(s) first via brain_recall, then call "
+                    "brain_correct with the correction text + the wrong atom_ids. "
+                    "The brain marks the wrong atoms superseded and stores the "
+                    "correction as the new truth. Always use this for explicit "
+                    "user-correction signals like '아니야', 'that's wrong', 'no, "
+                    "actually X' — bypasses the cosine-similarity guess."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "correction": {"type": "string", "description": "The corrected fact (what should be true)"},
+                        "wrong_atom_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "atom_ids that were wrong and should be superseded",
+                        },
+                        "category": {
+                            "type": "string",
+                            "enum": ["preference", "fact", "decision", "entity", "other"],
+                            "description": "Category of the corrected fact",
+                        },
+                        "agent": {"type": "string", "description": "Your agent name"},
+                        "reason": {"type": "string", "description": "user's correction context"},
+                    },
+                    "required": ["correction", "wrong_atom_ids"],
                 },
             },
             {
@@ -453,15 +500,20 @@ def handle_tools_call(params: dict) -> dict:
         # 5s under load. 4s cap returns structured hint instead of -32001.
         timeout_hint = "brain_store may hit ingest_classifier LLM (1-3s cold). Retry, or POST /memory via HTTP directly when the 5s MCP window is insufficient."
         try:
+            payload: dict = {
+                "content": args["content"],
+                "category": args.get("category", "fact"),
+                "agent": actor,
+                "source": "mcp",
+            }
+            if args.get("replaces"):
+                payload["replaces"] = args["replaces"]
+            if args.get("replaces_reason"):
+                payload["replaces_reason"] = args["replaces_reason"]
             result = _brain_request(
                 "POST",
                 "/memory",
-                {
-                    "content": args["content"],
-                    "category": args.get("category", "fact"),
-                    "agent": actor,
-                    "source": "mcp",
-                },
+                payload,
                 actor=actor,
                 timeout_s=4,
             )
@@ -713,6 +765,32 @@ def handle_tools_call(params: dict) -> dict:
     elif name == "brain_doubt":
         limit = int(args.get("limit", 20))
         result = _brain_request("GET", f"/brain/doubt?limit={limit}", actor=actor)
+
+    elif name == "brain_correct":
+        # Explicit user-correction handler. Posts the correction as a new
+        # atom AND marks the named wrong atoms as superseded — bypasses
+        # the cosine-similarity gate so paraphrases-of-wrong-answers don't
+        # accidentally COEXIST with the corrected version.
+        timeout_hint = "brain_correct may hit ingest_classifier LLM (1-3s cold). Retry, or POST /memory via HTTP directly when the 5s MCP window is insufficient."
+        try:
+            wrong_ids = args.get("wrong_atom_ids") or []
+            if not wrong_ids or not args.get("correction"):
+                result = {
+                    "error": "brain_correct requires both `correction` and `wrong_atom_ids`",
+                }
+            else:
+                payload = {
+                    "content": args["correction"],
+                    "category": args.get("category", "fact"),
+                    "agent": actor,
+                    "source": "mcp:brain_correct",
+                    "replaces": wrong_ids,
+                    "replaces_reason": args.get("reason") or "user-correction via brain_correct",
+                }
+                result = _brain_request("POST", "/memory", payload, actor=actor, timeout_s=4)
+                result = _normalize_timeout_result(result, timeout_hint)
+        except Exception as exc:
+            result = {"error": f"brain_correct failed: {exc}"}
 
     else:
         result = {"error": f"Unknown tool: {name}"}

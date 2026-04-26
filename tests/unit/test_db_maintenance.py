@@ -108,3 +108,71 @@ def test_metrics_history_retention_db_missing(monkeypatch: pytest.MonkeyPatch, t
     monkeypatch.setattr(db_maintenance, "METRICS_HISTORY_DB", tmp_path / "missing.db")
     summary = db_maintenance.run_metrics_history_retention(days=14)
     assert summary["status"] == "db_missing"
+
+
+# ── obsolete_expired_atoms ────────────────────────────────────────────
+
+
+@pytest.fixture()
+def atoms_db_with_expired(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A brain.db with three atoms exercising every branch of the
+    obsolete-expired-atoms job:
+      atm_safe   — eligible: superseded + 90d expired + reinforce=0
+      atm_recent — ineligible: only 5d expired
+      atm_used   — ineligible: superseded + 90d expired but reinforce=2
+      atm_no_chain — ineligible: 90d expired but no superseded_by
+    """
+    db = tmp_path / "brain.db"
+    conn = sqlite3.connect(str(db))
+    try:
+        conn.execute(
+            """
+            CREATE TABLE atoms (
+                id TEXT PRIMARY KEY,
+                tier TEXT NOT NULL DEFAULT 'episodic',
+                superseded_by TEXT,
+                valid_until TEXT,
+                reinforcement_count INTEGER NOT NULL DEFAULT 0,
+                kind TEXT NOT NULL DEFAULT 'fact',
+                text TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT '2026-01-01'
+            )
+            """
+        )
+        conn.executemany(
+            "INSERT INTO atoms (id, tier, superseded_by, valid_until, reinforcement_count, kind, text) VALUES (?, ?, ?, ?, ?, 'fact', ?)",
+            [
+                ("atm_safe", "episodic", "atm_new", "2026-01-01T00:00:00Z", 0, "expired+chain+unused"),
+                ("atm_recent", "episodic", "atm_new", "2026-04-25T00:00:00Z", 0, "5d expired"),
+                ("atm_used", "episodic", "atm_new", "2026-01-01T00:00:00Z", 2, "expired but accessed"),
+                ("atm_no_chain", "episodic", None, "2026-01-01T00:00:00Z", 0, "expired no chain"),
+                ("atm_new", "episodic", None, None, 0, "the active replacement"),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    monkeypatch.setattr(db_maintenance, "BRAIN_DB", db)
+    return db
+
+
+def test_obsolete_expired_atoms_only_targets_eligible(atoms_db_with_expired: Path) -> None:
+    summary = db_maintenance.run_obsolete_expired_atoms(days=60)
+    assert summary["status"] == "ok"
+    assert summary["obsoleted"] == ["atm_safe"]
+    conn = sqlite3.connect(str(atoms_db_with_expired))
+    try:
+        rows = dict(conn.execute("SELECT id, tier FROM atoms").fetchall())
+    finally:
+        conn.close()
+    assert rows["atm_safe"] == "obsolete"
+    assert rows["atm_recent"] == "episodic"
+    assert rows["atm_used"] == "episodic"
+    assert rows["atm_no_chain"] == "episodic"
+    assert rows["atm_new"] == "episodic"
+
+
+def test_obsolete_expired_atoms_db_missing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(db_maintenance, "BRAIN_DB", tmp_path / "missing.db")
+    summary = db_maintenance.run_obsolete_expired_atoms(days=60)
+    assert summary["status"] == "db_missing"

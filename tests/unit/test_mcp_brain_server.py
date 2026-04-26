@@ -40,6 +40,8 @@ EXPECTED_TOOLS = {
     "brain_consolidate",
     "brain_tick",
     "brain_doubt",
+    # 2026-04-26: explicit AI-driven update intent
+    "brain_correct",
 }
 
 
@@ -218,6 +220,7 @@ TIMEOUT_CAPPED_TOOLS = {
     "brain_search_web",
     "brain_store",
     "brain_consolidate",
+    "brain_correct",  # 2026-04-26: same POST /memory path, also 4s capped
 }
 
 

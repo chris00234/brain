@@ -251,6 +251,19 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         agent="system",
         misfire_grace=900,
     ),
+    # 2026-04-26 stale atoms: auto-mark `tier='obsolete'` for atoms whose
+    # valid_until passed >60 days ago AND who have a recorded
+    # superseded_by chain AND were never reinforced. Conservative — we
+    # trust the supersession chain (set by ingest_mirror's semantic gate
+    # or by AI explicit replaces=). Atoms expired without a supersede
+    # link are left alone (the fact may still be true). Daily 4:50am.
+    ScheduledJob(
+        name="obsolete_expired_atoms",
+        description="Mark superseded+expired+unaccessed atoms tier=obsolete (daily 4:50am, 60d window)",
+        trigger=CronTrigger(hour=4, minute=50),
+        agent="system",
+        misfire_grace=900,
+    ),
     # Maintenance
     ScheduledJob(
         name="memory_lifecycle",
