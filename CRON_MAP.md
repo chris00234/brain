@@ -3,7 +3,7 @@
 > Auto-generated from `brain_core/job_definitions.py` by `cli/render_cron_map.py`.
 > Do not hand-edit; run `.venv/bin/python cli/render_cron_map.py --write`.
 
-**Total jobs**: 119
+**Total jobs**: 121
 **Default `misfire_grace`**: 300s (5min). Heavy nightly jobs override per job.
 
 ## Jobs by owning agent
@@ -53,7 +53,7 @@
 | `screen_time_ingest` | `cron(day_of_week=sun, hour=4, minute=35)` | standard | - | 300s | Screen Time daily patterns via Sage -> raw/inbox (weekly) |
 | `weekly_synthesis` | `cron(day_of_week=sun, hour=4, minute=15)` | heavy | llm | 300s | Weekly arc (Sage, Sunday 4:15am) |
 
-### system (94 jobs)
+### system (96 jobs)
 
 | Name | Trigger | Budget | Tags | Misfire Grace | Description |
 |---|---|---|---|---|---|
@@ -62,6 +62,7 @@
 | `apple_health_ingest` | `cron(hour=8, minute=0)` | standard | - | 900s | Apple Health daily recovery signal (sleep/HRV/RHR/kcal) -> raw/inbox (8:00am, after iPhone 7:30 Shortcut + iCloud sync) |
 | `atoms_to_skills` | `cron(day_of_week=sun, hour=4, minute=58)` | heavy | llm, sqlite | 900s | Promote high-confidence atoms -> domain Claude Code skills (Sun 04:58 - staggered off llm_usage_purge @4:55) |
 | `auto_resolve_contradictions` | `cron(hour=6, minute=0)` | standard | - | 900s | Daily auto-resolve stale/low-confidence contradictions (6:00am) - v3 bumped from weekly to daily after finding 20-item pending backlog that should have been closed overnight |
+| `autonomy_decisions_retention` | `cron(hour=4, minute=35)` | standard | - | 900s | Prune autonomy_decisions rows older than 14d (daily 4:35am) |
 | `autonomy_proposer` | `cron(hour=4, minute=45)` | standard | - | 300s | Phase 7: surface autonomy level promote/demote proposals (4:45am) |
 | `backup_verify` | `cron(day=1, hour=4, minute=45)` | heavy | backup, sqlite | 900s | Monthly backup restore smoke test (1st of month, 4:45am - staggered off llm_usage_retention @04:30 which also touches SQLite / MinIO) |
 | `brain_loop_tick` | `interval(0:01:30)` | standard | - | 30s | v3: brain_loop executive cortex tick (every 90s — relaxed from 60s 2026-04-22 to cut 33% of ticks) |
@@ -122,6 +123,7 @@
 | `memory_provenance_lint` | `cron(hour=6, minute=25)` | standard | - | 900s | Daily read-only lint of canonical/distilled provenance and supersession metadata (06:25 PT) |
 | `memory_pruning` | `cron(day=15, hour=4, minute=10)` | heavy | qdrant, sqlite | 1800s | Monthly atrophied-memory dry-run (15th 4:10am) |
 | `memory_pruning_active` | `cron(day=15, hour=4, minute=15)` | heavy | qdrant, sqlite | 1800s | Monthly REAL atrophied-memory pruning (15th 4:15am, dry_run=False) |
+| `metrics_history_retention` | `cron(hour=4, minute=40)` | standard | - | 900s | Prune metrics_snapshots rows older than 14d (daily 4:40am) |
 | `near_dedup` | `cron(hour=3, minute=22)` | heavy | embedder, qdrant, sqlite | 300s | Daily retroactive near-duplicate scan of semantic_memory (3:22am). Bumped weekly->daily 2026-04-23 after bilingual preference atoms accumulated past the weekly gate. Moved off 3:20 to avoid collision with habituation_prune and off 3:25 to avoid sm2_nightly brain.db/Qdrant contention. |
 | `neo4j_backup` | `cron(hour=3, minute=15)` | heavy | backup, neo4j | 300s | Nightly Neo4j data backup to MinIO (14-day retention) |
 | `outbox_drain` | `interval(0:05:00)` | standard | - | 120s | Phase 2D: drain SessionEnd outbox envelopes (every 5 min) |
@@ -162,6 +164,7 @@
 | `apple_health_ingest` | `cron(hour=8, minute=0)` | system | standard | - | 900s | Apple Health daily recovery signal (sleep/HRV/RHR/kcal) -> raw/inbox (8:00am, after iPhone 7:30 Shortcut + iCloud sync) |
 | `atoms_to_skills` | `cron(day_of_week=sun, hour=4, minute=58)` | system | heavy | llm, sqlite | 900s | Promote high-confidence atoms -> domain Claude Code skills (Sun 04:58 - staggered off llm_usage_purge @4:55) |
 | `auto_resolve_contradictions` | `cron(hour=6, minute=0)` | system | standard | - | 900s | Daily auto-resolve stale/low-confidence contradictions (6:00am) - v3 bumped from weekly to daily after finding 20-item pending backlog that should have been closed overnight |
+| `autonomy_decisions_retention` | `cron(hour=4, minute=35)` | system | standard | - | 900s | Prune autonomy_decisions rows older than 14d (daily 4:35am) |
 | `autonomy_proposer` | `cron(hour=4, minute=45)` | system | standard | - | 300s | Phase 7: surface autonomy level promote/demote proposals (4:45am) |
 | `backup_verify` | `cron(day=1, hour=4, minute=45)` | system | heavy | backup, sqlite | 900s | Monthly backup restore smoke test (1st of month, 4:45am - staggered off llm_usage_retention @04:30 which also touches SQLite / MinIO) |
 | `brain_loop_tick` | `interval(0:01:30)` | system | standard | - | 30s | v3: brain_loop executive cortex tick (every 90s — relaxed from 60s 2026-04-22 to cut 33% of ticks) |
@@ -235,6 +238,7 @@
 | `memory_provenance_lint` | `cron(hour=6, minute=25)` | system | standard | - | 900s | Daily read-only lint of canonical/distilled provenance and supersession metadata (06:25 PT) |
 | `memory_pruning` | `cron(day=15, hour=4, minute=10)` | system | heavy | qdrant, sqlite | 1800s | Monthly atrophied-memory dry-run (15th 4:10am) |
 | `memory_pruning_active` | `cron(day=15, hour=4, minute=15)` | system | heavy | qdrant, sqlite | 1800s | Monthly REAL atrophied-memory pruning (15th 4:15am, dry_run=False) |
+| `metrics_history_retention` | `cron(hour=4, minute=40)` | system | standard | - | 900s | Prune metrics_snapshots rows older than 14d (daily 4:40am) |
 | `monthly_synthesis` | `cron(day=1, hour=5, minute=0)` | sage | heavy | llm | 300s | Monthly arc (Sage, 1st of month 5am) |
 | `near_dedup` | `cron(hour=3, minute=22)` | system | heavy | embedder, qdrant, sqlite | 300s | Daily retroactive near-duplicate scan of semantic_memory (3:22am). Bumped weekly->daily 2026-04-23 after bilingual preference atoms accumulated past the weekly gate. Moved off 3:20 to avoid collision with habituation_prune and off 3:25 to avoid sm2_nightly brain.db/Qdrant contention. |
 | `neo4j_backup` | `cron(hour=3, minute=15)` | system | heavy | backup, neo4j | 300s | Nightly Neo4j data backup to MinIO (14-day retention) |

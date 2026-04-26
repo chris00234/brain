@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 from pathlib import Path
 
 from common import (
@@ -14,6 +15,8 @@ from common import (
     warn_ontology_metadata,
     write_markdown_frontmatter,
 )
+
+log = logging.getLogger("brain.promote_canonical")
 
 ENTITY_SKIP = {"chris cho", "chris", "daehyun", "daehyun cho", "chrischo"}
 
@@ -113,8 +116,13 @@ def _mirror_supersession_to_vector_store(note_path: Path, replacement_id: str) -
                 "updated_at": utc_now(),
             },
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning(
+            "vector_store_mirror failed for note_path=%s replacement_id=%s: %s",
+            note_path,
+            replacement_id,
+            exc,
+        )
 
 
 def _reconsolidate_via_sage(old_body: str, new_body: str, title: str) -> str | None:
@@ -314,8 +322,8 @@ def main() -> int:
 
         note_text = f"{metadata.get('title', '')} {body[:500]}"
         extract_and_store_entities(note_text, canonical_id)
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("entity_graph_extract failed canonical_id=%s: %s", canonical_id, exc)
 
     # 2026-04-16 Tier 3 #10: HyDE at promote time (Gao et al. 2022).
     # Generate 3-5 hypothetical queries the note would answer, embed
@@ -347,7 +355,8 @@ def main() -> int:
                 hyp = _gen_hyp(seed_q, allow_dispatch=True)
                 if hyp and len(hyp) > 20:
                     hypothetical_queries.append(hyp[:500])
-            except Exception:
+            except Exception as exc:
+                log.debug("hyde generation skipped seed=%r: %s", seed_q[:80], exc)
                 continue
         # Index each hypothetical as a query-prefixed multi-vector
         # pointing at the canonical_id. Uses a dedicated sub-id namespace
@@ -359,7 +368,8 @@ def main() -> int:
                 try:
                     e = _get_emb_pc(hq, use_cache=True, prefix="query")
                     embeddings.append(e or None)
-                except Exception:
+                except Exception as exc:
+                    log.debug("hyde embed failed hq=%r: %s", hq[:80], exc)
                     embeddings.append(None)
             # Drop failed embeds
             filtered = [
@@ -407,8 +417,8 @@ def main() -> int:
                     source_type="canonical",
                     confidence=confidence,
                 )
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("fact_store_mirror failed canonical_id=%s: %s", canonical_id, exc)
 
     # Phase 3 atoms-truth-layer mirror: project canonical note as a tier='core' atom.
     # Best-effort, gated by BRAIN_ATOMS_ENABLED.
@@ -432,8 +442,13 @@ def main() -> int:
             valid_until=metadata.get("valid_to"),
             provenance={"path": str(target), "owner": args.owner, "scope": args.scope},
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning(
+            "atoms_store_upsert failed canonical_id=%s target=%s: %s",
+            canonical_id,
+            target,
+            exc,
+        )
 
     audit_payload = {
         "timestamp": utc_now(),

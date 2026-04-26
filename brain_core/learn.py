@@ -696,8 +696,8 @@ def embed_and_store(memories: list[dict[str, Any]], source: str, agent: str) -> 
             )
             if existing_points:
                 continue
-        except Exception:
-            pass
+        except Exception as exc:
+            log.debug("learn: chroma duplicate-check skipped: %s", exc)
 
         # Phase 1A: Memory operations semantics (Mem0-inspired classification)
         operation = "ADD"
@@ -740,8 +740,8 @@ def embed_and_store(memories: list[dict[str, Any]], source: str, agent: str) -> 
                         resolution="invalidation_phrase",
                         reason=f"DELETE classified from content: {content[:100]}",
                     )
-                except Exception:
-                    pass
+                except Exception as exc:
+                    log.debug("learn: mark_superseded(DELETE) skipped: %s", exc)
             except Exception as e:
                 log.warning("DELETE: failed to remove %s: %s", supersede_target, e)
             continue
@@ -772,15 +772,15 @@ def embed_and_store(memories: list[dict[str, Any]], source: str, agent: str) -> 
                         resolution="update_chain",
                         reason="Phase 1A classified as UPDATE - refinement of prior fact",
                     )
-                except Exception:
-                    pass
+                except Exception as exc:
+                    log.debug("learn: mark_superseded(UPDATE) skipped: %s", exc)
                 # Phase 3 atoms-truth-layer mirror: mark superseded + insert provenance edge
                 try:
                     from atoms_store import mark_superseded
 
                     mark_superseded(supersede_target, mem_id)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    log.debug("learn: atoms-truth mark_superseded skipped: %s", exc)
             except Exception as e:
                 log.warning("failed to mark %s superseded: %s", supersede_target, e)
 
@@ -860,8 +860,8 @@ def embed_and_store(memories: list[dict[str, Any]], source: str, agent: str) -> 
                 category=entry["metadata"].get("category", "other"),
                 operation=entry.get("operation", "ADD"),
             )
-    except Exception:
-        pass
+    except Exception as exc:
+        log.debug("learn: atom upsert batch skipped: %s", exc)
 
     # HR3 fix (2026-04-14): use shared ingest_mirror helper so /learn
     # gets the full v3 Brain Hygiene pipeline (classifier, topic
@@ -894,8 +894,8 @@ def embed_and_store(memories: list[dict[str, Any]], source: str, agent: str) -> 
                 from prompt_attribution import CURRENT_DEFAULTS, record as _attr_record
 
                 _attr_record(entry["id"], "distill", CURRENT_DEFAULTS["distill"])
-            except Exception:
-                pass
+            except Exception as exc:
+                log.debug("learn: _attr_record(distill) skipped: %s", exc)
     except Exception as _e:
         log.warning("learn atoms_mirror_outer error: %s", str(_e)[:200])
 
@@ -921,8 +921,8 @@ def _record_predictive_error_audit(mem_id: str, other_id: str, content: str) -> 
             query_text=content[:500],
             retrieved_chroma_ids=[mem_id, other_id],
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        log.debug("learn: contradiction action_audit skipped: %s", exc)
 
 
 def _shift_loser_confidence(other_id: str, mem_id: str, embedding: list[float]) -> None:
@@ -946,8 +946,8 @@ def _shift_loser_confidence(other_id: str, mem_id: str, embedding: list[float]) 
             evidence_ref=_derive_atom_id(mem_id),
             cluster_size=_cluster_size(other_id, embedding),
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        log.debug("learn: contradiction confidence shift skipped: %s", exc)
 
 
 def _auto_resolve_and_delete(
@@ -984,8 +984,8 @@ def _auto_resolve_and_delete(
                 resolution=resolution,
                 reason=audit_reason,
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            log.debug("learn: recall_audit propagation insert skipped: %s", exc)
         # Retroactive recall labeling: every past action_audit row that
         # surfaced the losing atom was, in hindsight, returning a soon-to-be-
         # deleted atom. Mark those rows outcome='wrong' so self_eval/LtR stops
@@ -998,8 +998,8 @@ def _auto_resolve_and_delete(
             )
         except Exception as _exc:
             log.debug("recall_audit propagation silenced: %s", _exc)
-    except Exception:
-        pass
+    except Exception as exc:
+        log.debug("learn: outer post-store enrichment skipped: %s", exc)
     return True
 
 
