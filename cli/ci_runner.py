@@ -107,6 +107,17 @@ def main() -> int:
         _alert("brain CI: ruff format drift", out[-800:])
         return 1
 
+    # Catch sqlite3 connection leaks across brain_core. The pre-commit hook
+    # also runs this, but a developer with --no-verify could bypass that path
+    # — wiring it into CI closes the gap.
+    rc, out = run_step(
+        "lint_sqlite_close",
+        [str(VENV_BIN / "python"), "cli/lint_sqlite_close.py", "brain_core"],
+    )
+    if rc != 0:
+        _alert("brain CI: sqlite3 connection leak", out[-800:])
+        return 1
+
     # Security scanning happens via ruff S-rules above (configured in ruff.toml).
     # Bandit was dropped because bandit 1.8.0 doesn't parse Python 3.14 AST.
 
