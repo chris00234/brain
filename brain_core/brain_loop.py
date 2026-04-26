@@ -95,6 +95,16 @@ try:
 except ImportError:
     _insert_action_audit = None  # type: ignore[assignment]
 
+try:
+    from belief_state import build_belief_state as _build_belief_state
+except ImportError:
+    _build_belief_state = None  # type: ignore[assignment]
+
+try:
+    from decision_ledger import record_decision as _record_decision_ledger
+except ImportError:
+    _record_decision_ledger = None  # type: ignore[assignment]
+
 BRAIN_DB = BRAIN_LOGS_DIR / "brain.db"
 JOURNAL_PATH = BRAIN_LOGS_DIR / "brain_loop_journal.jsonl"
 # WAKE_FILE removed (MR8 fix 2026-04-14): the /tmp/.brain_loop_wake
@@ -286,6 +296,7 @@ class Decision:
     reasoning: str = ""
     confidence: float = 0.5
     requires_autonomy: str = "brain_loop.observe"
+    autonomy_level: str = ""
 
     def to_journal_dict(self) -> dict:
         return {
@@ -295,6 +306,7 @@ class Decision:
             "reasoning": self.reasoning[:200],
             "confidence": self.confidence,
             "requires_autonomy": self.requires_autonomy,
+            "autonomy_level": self.autonomy_level,
         }
 
 
@@ -1160,6 +1172,7 @@ def _decide(decisions: list[Decision]) -> list[Decision]:
         except Exception as e:
             log.debug("autonomy check failed for %s: %s", d.requires_autonomy, e)
             level = "L0"
+        d.autonomy_level = level
 
         # Downgrade per level
         if level == "L0":
@@ -1394,8 +1407,10 @@ def _apply_self_modification(payload: dict) -> bool:
 
 def _act(decisions: list[Decision]) -> list[dict]:
     results: list[dict] = []
+    belief_snapshot = _decision_belief_snapshot()
     for d in decisions:
         result: dict[str, Any] = {"status": "skipped"}
+        action_audit_id: int | None = None
         try:
             if d.kind == DecisionKind.OBSERVE_ONLY:
                 result = {"status": "observed"}
@@ -1427,7 +1442,7 @@ def _act(decisions: list[Decision]) -> list[dict]:
             # Audit write
             if _insert_action_audit is not None:
                 try:
-                    _insert_action_audit(
+                    action_audit_id = _insert_action_audit(
                         route=f"brain_loop/{d.kind.value}",
                         query_text=f"{d.observation.kind}:{d.observation.subject}"[:2000],
                         tool="brain_loop",
@@ -1439,8 +1454,111 @@ def _act(decisions: list[Decision]) -> list[dict]:
         except Exception as e:
             result = {"status": "error", "error": str(e)[:200]}
 
+        _record_decision_outcome(d, result, belief_snapshot, action_audit_id)
         results.append({"decision": d.to_journal_dict(), "result": result})
     return results
+
+
+def _decision_belief_snapshot() -> dict:
+    if _build_belief_state is None:
+        return {}
+    try:
+        state = _build_belief_state(limit=5)
+        return {
+            "version": state.get("version"),
+            "summary": state.get("summary", {}),
+            "top_goals": [
+                {
+                    "id": goal.get("id"),
+                    "title": goal.get("title"),
+                    "priority_score": goal.get("priority_score"),
+                }
+                for goal in state.get("goals", [])[:3]
+            ],
+            "top_uncertainties": [
+                {
+                    "id": item.get("id"),
+                    "reason": item.get("reason"),
+                    "freshness": item.get("freshness"),
+                }
+                for item in state.get("uncertainties", [])[:3]
+            ],
+        }
+    except Exception as exc:
+        log.debug("belief snapshot for decision ledger failed: %s", exc)
+        return {}
+
+
+def _record_decision_outcome(
+    decision: Decision,
+    result: dict[str, Any],
+    belief_snapshot: dict,
+    action_audit_id: int | None,
+) -> None:
+    if _record_decision_ledger is None:
+        return
+    status = str(result.get("status") or "unknown")
+    try:
+        _record_decision_ledger(
+            actor="brain_loop",
+            domain=str(decision.observation.evidence.get("domain") or decision.observation.kind),
+            source="brain_loop",
+            observation_kind=decision.observation.kind,
+            observation_subject=decision.observation.subject,
+            perceived_state={
+                "belief_state": belief_snapshot,
+                "observation": {
+                    "kind": decision.observation.kind,
+                    "subject": decision.observation.subject,
+                    "salience": decision.observation.salience,
+                    "evidence": decision.observation.evidence,
+                },
+            },
+            candidate_options=_candidate_options(decision),
+            selected_option=decision.kind.value,
+            selected_payload=decision.action_payload,
+            confidence=decision.confidence,
+            autonomy_level=decision.autonomy_level,
+            expected_outcome=decision.reasoning[:1000],
+            actual_outcome=json.dumps(result, ensure_ascii=True, default=str)[:1000],
+            outcome_status=_ledger_outcome_status(status),
+            review_status=_ledger_review_status(status),
+            action_audit_id=action_audit_id,
+        )
+    except Exception as exc:
+        log.debug("decision ledger write failed: %s", exc)
+
+
+def _candidate_options(decision: Decision) -> list[dict]:
+    options = [
+        {
+            "option": decision.kind.value,
+            "reason": decision.reasoning[:500],
+            "confidence": decision.confidence,
+        }
+    ]
+    if decision.kind != DecisionKind.OBSERVE_ONLY:
+        options.append({"option": DecisionKind.OBSERVE_ONLY.value, "reason": "safe abstention"})
+    return options
+
+
+def _ledger_outcome_status(status: str) -> str:
+    if status in {
+        "observed",
+        "proposed",
+        "dispatched",
+        "doorbell_written",
+        "telegram_sent",
+        "self_mod_queued",
+    }:
+        return "succeeded"
+    if status.endswith("_failed") or status == "error":
+        return "failed"
+    return "pending"
+
+
+def _ledger_review_status(status: str) -> str:
+    return "needs_review" if _ledger_outcome_status(status) == "failed" else "unreviewed"
 
 
 # ── Journal ──────────────────────────────────────────────────────

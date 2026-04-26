@@ -130,9 +130,15 @@ class InjectionBlock:
     # 2026-04-18: actual ChromaDB document id (not the local dedup hash in `id`).
     # Needed by reinforce_on_access for the MemoryBank bump on semantic blocks.
     memory_id: str | None = None
+    include_reason: str | None = None
+    token_estimate: int | None = None
+    freshness: str | None = None
+    risk_flags: list[str] = field(default_factory=list)
+    compiler_score: float | None = None
+    contract_category: str | None = None
 
     def to_dict(self) -> dict:
-        return {
+        out = {
             "id": self.id,
             "title": self.title,
             "content": self.content,
@@ -142,6 +148,19 @@ class InjectionBlock:
             "path": self.path,
             "memory_id": self.memory_id,
         }
+        if self.include_reason:
+            out["include_reason"] = self.include_reason
+        if self.token_estimate is not None:
+            out["token_estimate"] = self.token_estimate
+        if self.freshness:
+            out["freshness"] = self.freshness
+        if self.risk_flags:
+            out["risk_flags"] = list(self.risk_flags)
+        if self.compiler_score is not None:
+            out["compiler_score"] = self.compiler_score
+        if self.contract_category:
+            out["contract_category"] = self.contract_category
+        return out
 
 
 @dataclass
@@ -243,7 +262,9 @@ def _intent_blocked_by_context(intent_name: str, lowered_prompt: str) -> bool:
     image-processing pipeline ("Gemini API vs subscription CLI") should not
     fan out to remembered screenshots/photos.
     """
-    if intent_name == "brain_self" and _looks_like_llm_budget_prompt(lowered_prompt):
+    if intent_name == "brain_self" and (
+        _looks_like_llm_budget_prompt(lowered_prompt) or not _looks_like_brain_ops_prompt(lowered_prompt)
+    ):
         return True
 
     if intent_name != "visual":
@@ -295,6 +316,52 @@ def _looks_like_llm_budget_prompt(lowered_prompt: str) -> bool:
         "클로드 구독",
     )
     return any(marker in lowered_prompt for marker in budget_markers)
+
+
+def _looks_like_brain_ops_prompt(lowered_prompt: str) -> bool:
+    """Allow RUNBOOK/CRON/STORAGE only for operational brain questions.
+
+    The word "brain/브레인/뇌" is too broad for prehook routing. Strategic
+    quality/intelligence questions should receive policy/goal/decision context,
+    not operational runbooks.
+    """
+    ops_markers = (
+        "scheduler",
+        "cron",
+        "storage",
+        "runbook",
+        "healthcheck",
+        "health check",
+        "backup",
+        "qdrant",
+        "chroma",
+        "chromadb",
+        "neo4j",
+        "server",
+        "launchd",
+        "mcp",
+        "transport",
+        "action_audit",
+        "brain_loop",
+        "active recall",
+        "proactive insight",
+        "atoms",
+        "database",
+        "db",
+        "스케줄러",
+        "크론",
+        "저장",
+        "스토리지",
+        "런북",
+        "헬스체크",
+        "백업",
+        "서버",
+        "장애",
+        "운영",
+        "아톰",
+        "데이터베이스",
+    )
+    return any(marker in lowered_prompt for marker in ops_markers)
 
 
 def _load_canonical_path(raw_path: str) -> tuple[str, str] | None:
@@ -379,6 +446,7 @@ def _canonical_blocks_from_matches(
 
 _SEMANTIC_POOL_MAX_WORKERS = 4
 _SEMANTIC_OVERALL_TIMEOUT_S = 1.2  # hard cap for the whole fanout
+_SEMANTIC_FAST_TIMEOUT_S = 0.35  # when canonical policy already satisfies the hook contract
 # Shared module-level pool so a slow worker thread does not block the caller
 # on a context manager's shutdown(wait=True). Abandoned futures keep running
 # on the pool and their results get discarded on completion.
@@ -393,6 +461,7 @@ def _semantic_blocks(
     seen_hashes: set[str],
     limit: int = 5,
     min_score: float | None = None,
+    timeout_s: float | None = None,
 ) -> list[InjectionBlock]:
     """Fan out the prompt + matched intents' always_push_queries through
     search_unified.search_all. Returns up to `limit` dedup'd blocks.
@@ -433,8 +502,9 @@ def _semantic_blocks(
 
     all_results: list[dict] = []
     futures = {_semantic_pool.submit(_one, q): q for q in queries}
+    overall_timeout = timeout_s if timeout_s is not None else _SEMANTIC_OVERALL_TIMEOUT_S
     try:
-        for fut in as_completed(futures, timeout=_SEMANTIC_OVERALL_TIMEOUT_S):
+        for fut in as_completed(futures, timeout=overall_timeout):
             try:
                 all_results.extend(fut.result())
             except Exception as e:
@@ -447,7 +517,7 @@ def _semantic_blocks(
         done = sum(1 for f in futures if f.done())
         log.info(
             "active_recall fanout exceeded %.1fs budget (%d/%d queries done)",
-            _SEMANTIC_OVERALL_TIMEOUT_S,
+            overall_timeout,
             done,
             len(futures),
         )
@@ -690,10 +760,16 @@ def _proactive_blocks(seen_hashes: set[str]) -> list[InjectionBlock]:
 # ── Doorbell layer ────────────────────────────────────────────────
 
 
-def _doorbell_blocks(session_id: str) -> list[InjectionBlock]:
+def _doorbell_blocks(session_id: str, *, prompt: str = "") -> list[InjectionBlock]:
     """Read /tmp/.brain_doorbell.<session_id>.jsonl if present. DOES NOT clear
     it — the hook script is responsible for clearing to keep the transport
     idempotent for MCP consumers that may also read it.
+
+    Doorbell is an interrupt lane, but UserPromptSubmit context must remain
+    prompt-relevant. A queued item is injected only when it is explicitly
+    critical or overlaps the current prompt. Non-matching items are intentionally
+    left to digest/Telegram surfaces instead of polluting the model's immediate
+    working context.
     """
     if not session_id:
         return []
@@ -715,6 +791,11 @@ def _doorbell_blocks(session_id: str) -> list[InjectionBlock]:
             content = (rec.get("content") or "")[:800]
             priority = rec.get("priority", "high")
             source_tag = rec.get("source", "brain_loop")
+            severity = _safe_float(rec.get("severity"), 0.0)
+            if not _doorbell_relevant(
+                prompt, title=title, content=content, priority=priority, severity=severity
+            ):
+                continue
             h = _hash(f"doorbell:{title}:{content[:100]}")
             blocks.append(
                 InjectionBlock(
@@ -729,6 +810,36 @@ def _doorbell_blocks(session_id: str) -> list[InjectionBlock]:
     except Exception as e:
         log.debug("doorbell read failed: %s", e)
     return blocks
+
+
+def _doorbell_relevant(
+    prompt: str,
+    *,
+    title: str,
+    content: str,
+    priority: str,
+    severity: float,
+) -> bool:
+    """Return True when a doorbell belongs in this prompt's context.
+
+    This is deliberately deterministic and cheap. It avoids the old behavior
+    where every urgent queue item was injected into every next prompt, even
+    when Chris was asking about an unrelated policy or implementation detail.
+    """
+    if priority == "critical" or severity >= 9.0:
+        return True
+    prompt_terms = _query_terms(prompt)
+    if not prompt_terms:
+        return False
+    doorbell_terms = _content_signature(f"{title}\n{content[:800]}")
+    return bool(prompt_terms & doorbell_terms)
+
+
+def _safe_float(value: object, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 # ── Session seen tracking (dedup with decay tiers) ────────────────
@@ -908,6 +1019,304 @@ def _enforce_budget(blocks: list[InjectionBlock], limit: int) -> list[InjectionB
     return kept
 
 
+# ── Context compiler ────────────────────────────────────────────────
+
+
+def _compile_context_blocks(
+    blocks: list[InjectionBlock],
+    *,
+    judgment: object | None = None,
+) -> list[InjectionBlock]:
+    """Annotate selected blocks with deterministic inclusion metadata.
+
+    This is deliberately a metadata-only pass. It explains the context plan
+    without changing ordering, scores, or budget behavior, keeping the hook
+    regression surface small.
+    """
+
+    intent = _judgment_intent(judgment)
+    for block in blocks:
+        token_estimate = _rough_tokens(block.content) + _rough_tokens(block.title)
+        flags = _compiler_risk_flags(block, token_estimate)
+        block.token_estimate = token_estimate
+        block.freshness = _compiler_freshness(block)
+        block.risk_flags = flags
+        block.include_reason = _compiler_include_reason(block, intent=intent)
+        block.compiler_score = _compiler_score(block, flags)
+        block.contract_category = _contract_category(block)
+    return blocks
+
+
+def _judgment_intent(judgment: object | None) -> str:
+    if judgment is None:
+        return "unknown"
+    return str(getattr(judgment, "intent", "") or "unknown")
+
+
+def _compiler_include_reason(block: InjectionBlock, *, intent: str) -> str:
+    source = (block.source or "").lower()
+    if source == "canonical":
+        return f"canonical guarantee matched intent={intent}"
+    if source.startswith("doorbell"):
+        return "explicit urgent doorbell for this session"
+    if source.startswith("proactive"):
+        return "recent proactive insight passed urgency gate"
+    if source.startswith("semantic"):
+        return f"semantic evidence passed score floor for intent={intent}"
+    if source == "confidence_sentinel":
+        return "diagnostic fallback because no high-confidence context survived"
+    return f"selected by active recall arbitration for intent={intent}"
+
+
+def _compiler_freshness(block: InjectionBlock) -> str:
+    haystack = f"{block.title}\n{block.path or ''}\n{block.content[:500]}".lower()
+    if _contains_temporal_marker(haystack, ("today", "yesterday", "어제", "오늘", "최근", "last ")):
+        return "time_sensitive"
+    if _looks_like_usage_snapshot(block.title, block.content, block.path):
+        return "snapshot"
+    if any(marker in haystack for marker in ("stale", "obsolete", "superseded", "archived", "폐기", "대체")):
+        return "possibly_stale"
+    if block.source == "canonical" or "canonical" in (block.path or "").lower():
+        return "canonical"
+    return "unknown"
+
+
+def _contains_temporal_marker(text: str, markers: tuple[str, ...]) -> bool:
+    return any(marker in text for marker in markers)
+
+
+def _compiler_risk_flags(block: InjectionBlock, token_estimate: int) -> list[str]:
+    flags: list[str] = []
+    source = (block.source or "").lower()
+    if token_estimate > 600:
+        flags.append("large_block")
+    if source.startswith("semantic") and block.score < 0.8:
+        flags.append("low_semantic_score")
+    if _compiler_freshness(block) in {"snapshot", "possibly_stale", "time_sensitive"}:
+        flags.append(_compiler_freshness(block))
+    if source.startswith("doorbell"):
+        flags.append("session_push")
+    if source == "canonical":
+        flags.append("canonical_authority")
+    return flags
+
+
+def _compiler_score(block: InjectionBlock, flags: list[str]) -> float:
+    priority_bonus = {"critical": 0.25, "high": 0.15, "medium": 0.05, "low": 0.0}.get(block.priority, 0.0)
+    source_bonus = {
+        "canonical": 0.2,
+        "doorbell": 0.18,
+        "proactive": 0.08,
+        "semantic": 0.05,
+        "confidence_sentinel": -0.1,
+    }.get(_compiler_source_family(block), 0.0)
+    risk_penalty = 0.03 * len([f for f in flags if f not in {"canonical_authority", "session_push"}])
+    return round(
+        max(0.0, min(1.0, float(block.score or 0.0) + priority_bonus + source_bonus - risk_penalty)), 3
+    )
+
+
+def _compiler_source_family(block: InjectionBlock) -> str:
+    source = (block.source or "").lower()
+    if source == "canonical":
+        return "canonical"
+    if source.startswith("doorbell"):
+        return "doorbell"
+    if source.startswith("proactive"):
+        return "proactive"
+    if source.startswith("semantic"):
+        return "semantic"
+    if source == "confidence_sentinel":
+        return "confidence_sentinel"
+    return "other"
+
+
+def _context_compiler_report(blocks: list[InjectionBlock]) -> dict:
+    flags: dict[str, int] = {}
+    token_estimates = []
+    for block in blocks:
+        if block.token_estimate is not None:
+            token_estimates.append(block.token_estimate)
+        for flag in block.risk_flags:
+            flags[flag] = flags.get(flag, 0) + 1
+    return {
+        "version": 1,
+        "annotated_blocks": sum(1 for b in blocks if b.include_reason),
+        "estimated_tokens": sum(token_estimates),
+        "risk_flags": dict(sorted(flags.items())),
+    }
+
+
+def _context_contract_report(blocks: list[InjectionBlock], *, judgment: object | None = None) -> dict:
+    categories: dict[str, int] = {}
+    for block in blocks:
+        category = block.contract_category or _contract_category(block)
+        categories[category] = categories.get(category, 0) + 1
+    return {
+        "version": 1,
+        "intent": _judgment_intent(judgment),
+        "allowed_categories": _allowed_contract_categories(judgment),
+        "block_categories": dict(sorted(categories.items())),
+        "suppresses_raw_doorbell": True,
+        "uses_llm": False,
+        "contract": "inject only prompt-relevant policy, goals/current task, recent decisions, risk constraints, or direct evidence",
+    }
+
+
+def _semantic_timeout_for_contract(
+    prompt: str,
+    canonical: list[InjectionBlock],
+    judgment: object | None,
+) -> float | None:
+    """Shorten semantic fanout when critical canonical context already exists.
+
+    UserPromptSubmit is latency-sensitive. If a critical canonical route already
+    supplies the relevant policy/constraint, semantic recall becomes optional
+    enrichment and should not hold the prompt for the full 1.2s budget unless
+    Chris asks for recent/current/stale/task context.
+    """
+    if not canonical or not any(block.priority in {"critical", "high"} for block in canonical):
+        return None
+    if judgment is not None and str(getattr(judgment, "intent", "")) == "factual_question":
+        return None
+    if _prompt_requests_extra_context(prompt):
+        return None
+    return _SEMANTIC_FAST_TIMEOUT_S
+
+
+def _prompt_requests_extra_context(prompt: str) -> bool:
+    lowered = (prompt or "").lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "recent",
+            "current",
+            "latest",
+            "stale",
+            "history",
+            "decision",
+            "task",
+            "prehook",
+            "hook",
+            "최근",
+            "현재",
+            "지금",
+            "결정",
+            "판단",
+            "작업",
+            "남은",
+            "이력",
+        )
+    )
+
+
+def _contract_category(block: InjectionBlock) -> str:
+    source = (block.source or "").lower()
+    haystack = f"{block.title}\n{block.path or ''}\n{block.content[:800]}".lower()
+    if source.startswith("doorbell") or source.startswith("proactive"):
+        return "urgent_interrupt"
+    if any(marker in haystack for marker in _RISK_CONSTRAINT_MARKERS):
+        return "risk_constraint"
+    if any(marker in haystack for marker in _CURRENT_TASK_MARKERS):
+        return "current_task"
+    if any(marker in haystack for marker in _GOAL_MARKERS):
+        return "project_goal"
+    if any(marker in haystack for marker in _RECENT_DECISION_MARKERS):
+        return "recent_decision"
+    if any(marker in haystack for marker in _POLICY_MARKERS):
+        return "policy"
+    return "direct_evidence"
+
+
+def _allowed_contract_categories(judgment: object | None) -> list[str]:
+    if judgment is not None and not bool(getattr(judgment, "needs_memory", True)):
+        return ["urgent_interrupt"]
+    return [
+        "policy",
+        "project_goal",
+        "current_task",
+        "recent_decision",
+        "risk_constraint",
+        "direct_evidence",
+        "urgent_interrupt",
+    ]
+
+
+_POLICY_MARKERS = (
+    "prefers",
+    "preference",
+    "requires",
+    "expects",
+    "wants",
+    "should",
+    "policy",
+    "rule",
+    "선호",
+    "원해",
+    "요구",
+    "정책",
+    "규칙",
+)
+
+_GOAL_MARKERS = (
+    "goal",
+    "objective",
+    "direction",
+    "project",
+    "brain system",
+    "목표",
+    "방향",
+    "프로젝트",
+    "브레인 시스템",
+)
+
+_CURRENT_TASK_MARKERS = (
+    "current task",
+    "next step",
+    "in progress",
+    "pending",
+    "남은 작업",
+    "다음 단계",
+    "진행중",
+    "진행 중",
+)
+
+_RECENT_DECISION_MARKERS = (
+    "decision",
+    "decided",
+    "ledger",
+    "outcome",
+    "결정",
+    "판단",
+    "결과",
+)
+
+_RISK_CONSTRAINT_MARKERS = (
+    "no extra cost",
+    "extra llm api",
+    "extra api",
+    "api spend",
+    "paid api",
+    "spend",
+    "subscription",
+    "resource",
+    "latency",
+    "stability",
+    "scalability",
+    "regression",
+    "local llm",
+    "추가 비용",
+    "유료 api",
+    "구독",
+    "리소스",
+    "지연",
+    "안정",
+    "확장",
+    "회귀",
+    "로컬 llm",
+)
+
+
 # ── Observability ─────────────────────────────────────────────────
 
 
@@ -978,6 +1387,8 @@ def _quality_report(
         report["judgment"] = judgment.to_dict()
     if arbitration is not None and hasattr(arbitration, "to_quality_dict"):
         report["arbitration"] = arbitration.to_quality_dict()
+    report["compiler"] = _context_compiler_report(blocks)
+    report["context_contract"] = _context_contract_report(blocks, judgment=judgment)
     return report
 
 
@@ -1034,12 +1445,13 @@ def build_injection(
                 seen_set,
                 limit=max(1, min(5, semantic_limit)),
                 min_score=semantic_min_score,
+                timeout_s=_semantic_timeout_for_contract(prompt, canonical, judgment),
             )
             if allow_semantic
             else []
         )
         proactive = _proactive_blocks(seen_set) if allow_proactive else []
-        doorbell = _doorbell_blocks(session_id) if session_id else []
+        doorbell = _doorbell_blocks(session_id, prompt=prompt) if session_id else []
 
         all_blocks = canonical + doorbell + semantic + proactive
         filtered = _apply_decay_filter(all_blocks, seen_registry, turn_idx)
@@ -1056,6 +1468,7 @@ def build_injection(
             filtered.insert(0, _confidence_sentinel())
 
         budget_limit = int(getattr(judgment, "max_tokens", BUDGET_TOKEN_LIMIT) or BUDGET_TOKEN_LIMIT)
+        filtered = _compile_context_blocks(filtered, judgment=judgment)
         budgeted = _enforce_budget(filtered, min(BUDGET_TOKEN_LIMIT, budget_limit))
 
         latency_ms = int((time.time() - t0) * 1000)

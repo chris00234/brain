@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -20,30 +21,63 @@ log = logging.getLogger("brain.speak")
 
 URGENT_SEVERITY_THRESHOLD = 7.5
 DOORBELL_DIR = Path("/tmp")
+ACTIVE_SESSION_WINDOW_S = int(os.getenv("BRAIN_DOORBELL_ACTIVE_WINDOW_S", "600"))
+MAX_ACTIVE_SESSIONS = int(os.getenv("BRAIN_DOORBELL_MAX_ACTIVE_SESSIONS", "3"))
+STALE_DOORBELL_MAX_AGE_S = int(os.getenv("BRAIN_DOORBELL_STALE_AGE_S", "900"))
 
 
 def _active_session_ids() -> list[str]:
     """Discover active Claude Code/Codex sessions from turn marker files.
 
     claude_boot.sh and codex_boot.sh write one file per session on each turn.
-    Any file modified in the last hour is considered active.
+    Any file modified in the recent active window is considered active, capped
+    to the newest few sessions. Codex can create many short-lived session ids;
+    without this cap a single urgent scan fans out to dozens of stale sessions.
     """
     now = datetime.now(UTC).timestamp()
-    active: set[str] = set()
+    candidates: list[tuple[float, str]] = []
     try:
         for prefix in (".claude_turn_", ".codex_turn_"):
             for f in DOORBELL_DIR.glob(f"{prefix}*"):
                 try:
-                    if (now - f.stat().st_mtime) > 3600:
+                    mtime = f.stat().st_mtime
+                    if (now - mtime) > max(60, ACTIVE_SESSION_WINDOW_S):
                         continue
                 except OSError:
                     continue
                 sid = f.name[len(prefix) :]
                 if sid and sid != "anon":
-                    active.add(sid)
+                    candidates.append((mtime, sid))
     except Exception as exc:
         log.debug("active session scan failed: %s", exc)
+    active: list[str] = []
+    seen: set[str] = set()
+    for _mtime, sid in sorted(candidates, reverse=True):
+        if sid in seen:
+            continue
+        seen.add(sid)
+        active.append(sid)
+        if len(active) >= max(1, MAX_ACTIVE_SESSIONS):
+            break
     return sorted(active)
+
+
+def _cleanup_stale_doorbells(max_age_s: int = STALE_DOORBELL_MAX_AGE_S) -> int:
+    """Remove doorbell files for sessions that are no longer active."""
+    now = datetime.now(UTC).timestamp()
+    removed = 0
+    try:
+        for f in DOORBELL_DIR.glob(".brain_doorbell.*.jsonl"):
+            try:
+                if (now - f.stat().st_mtime) <= max(60, max_age_s):
+                    continue
+                f.unlink()
+                removed += 1
+            except OSError:
+                continue
+    except Exception as exc:
+        log.debug("stale doorbell cleanup failed: %s", exc)
+    return removed
 
 
 def urgent_scan() -> dict:
@@ -58,6 +92,7 @@ def urgent_scan() -> dict:
     Runs every 5 min via cron. Independent of the 07:55 morning digest.
     """
     ensure_schema()
+    _cleanup_stale_doorbells()
     obs = collect_observations()
     urgent = [o for o in obs if o.severity >= URGENT_SEVERITY_THRESHOLD]
     urgent_fresh = [o for o in urgent if not was_sent_recently(f"doorbell:{o.dedup_key}", within_h=6)]

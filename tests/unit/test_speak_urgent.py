@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "brain_core"))
@@ -17,6 +19,38 @@ def test_active_session_ids_include_codex_and_claude_turn_files(monkeypatch, tmp
     (tmp_path / ".codex_turn_anon").write_text("1")
 
     assert speak_urgent._active_session_ids() == ["claude-session", "codex-session"]
+
+
+def test_active_session_ids_ignore_stale_and_cap_newest(monkeypatch, tmp_path):
+    monkeypatch.setattr(speak_urgent, "DOORBELL_DIR", tmp_path)
+    monkeypatch.setattr(speak_urgent, "ACTIVE_SESSION_WINDOW_S", 600)
+    monkeypatch.setattr(speak_urgent, "MAX_ACTIVE_SESSIONS", 2)
+    now = time.time()
+    for idx in range(4):
+        f = tmp_path / f".codex_turn_session-{idx}"
+        f.write_text("1")
+        os.utime(f, (now - idx, now - idx))
+    stale = tmp_path / ".codex_turn_stale"
+    stale.write_text("1")
+    os.utime(stale, (now - 3600, now - 3600))
+
+    assert speak_urgent._active_session_ids() == ["session-0", "session-1"]
+
+
+def test_cleanup_stale_doorbells_removes_old_files(monkeypatch, tmp_path):
+    monkeypatch.setattr(speak_urgent, "DOORBELL_DIR", tmp_path)
+    now = time.time()
+    old = tmp_path / ".brain_doorbell.old.jsonl"
+    fresh = tmp_path / ".brain_doorbell.fresh.jsonl"
+    old.write_text("{}\n")
+    fresh.write_text("{}\n")
+    os.utime(old, (now - 1000, now - 1000))
+
+    removed = speak_urgent._cleanup_stale_doorbells(max_age_s=120)
+
+    assert removed == 1
+    assert not old.exists()
+    assert fresh.exists()
 
 
 def test_urgent_scan_writes_codex_doorbell(monkeypatch, tmp_path):

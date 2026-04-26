@@ -289,6 +289,42 @@ def test_tick_env_killswitch_returns_disabled(monkeypatch):
     assert result["status"] == "disabled_env"
 
 
+def test_act_records_decision_ledger(monkeypatch):
+    recorded = []
+    monkeypatch.setattr(
+        brain_loop,
+        "_build_belief_state",
+        lambda limit=5: {"version": 1, "summary": {"beliefs": 1}, "goals": [], "uncertainties": []},
+    )
+    monkeypatch.setattr(
+        brain_loop,
+        "_record_decision_ledger",
+        lambda **kwargs: recorded.append(kwargs) or "decision-test",
+    )
+    monkeypatch.setattr(brain_loop, "_insert_action_audit", lambda **kwargs: 42)
+
+    decision = brain_loop.Decision(
+        observation=brain_loop.Observation(
+            kind="contradiction",
+            subject="c1",
+            evidence={"domain": "brain"},
+        ),
+        kind=brain_loop.DecisionKind.OBSERVE_ONLY,
+        reasoning="Abstain until reviewed.",
+        confidence=0.6,
+        autonomy_level="L1",
+    )
+
+    results = brain_loop._act([decision])
+
+    assert results[0]["result"]["status"] == "observed"
+    assert recorded[0]["domain"] == "brain"
+    assert recorded[0]["selected_option"] == "observe"
+    assert recorded[0]["autonomy_level"] == "L1"
+    assert recorded[0]["perceived_state"]["belief_state"]["summary"]["beliefs"] == 1
+    assert recorded[0]["action_audit_id"] == 42
+
+
 def test_tick_reentrancy_guard_skips_overlap():
     """If tick_lock can't be acquired, tick() returns 'overlap_skipped'."""
     loop = brain_loop.BrainLoop()

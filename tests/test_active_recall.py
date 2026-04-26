@@ -82,6 +82,19 @@ def test_intent_matches_brain_self():
     assert "brain_self" in intents
 
 
+def test_brain_quality_prompt_does_not_inject_ops_runbook():
+    matches = active_recall._match_canonical_routes("실제 브레인에 얼만큼 근접했어?")
+    intents = [m.intent for m in matches]
+    assert "brain_quality" in intents
+    assert "brain_self" not in intents
+
+
+def test_brain_ops_prompt_still_injects_runbook_route():
+    matches = active_recall._match_canonical_routes("브레인 healthcheck 장애와 backup 상태 확인")
+    intents = [m.intent for m in matches]
+    assert "brain_self" in intents
+
+
 def test_llm_budget_intent_suppresses_broad_brain_self():
     matches = active_recall._match_canonical_routes("브레인 비용 정책 알려줘")
     intents = [m.intent for m in matches]
@@ -184,6 +197,44 @@ def test_apply_decay_filter_unseen_block_passes():
     )
     survivors = active_recall._apply_decay_filter([block], {}, turn_idx=5)
     assert survivors == [block]
+
+
+def test_doorbell_blocks_require_prompt_relevance(tmp_path, monkeypatch):
+    monkeypatch.setattr(active_recall, "DOORBELL_DIR", tmp_path)
+    session_id = "doorbell-relevance"
+    (tmp_path / f".brain_doorbell.{session_id}.jsonl").write_text(
+        '{"title":"OpenClaw stale","content":"OpenClaw response recovery is still pending","priority":"high","severity":8.0}\n'
+    )
+
+    blocks = active_recall._doorbell_blocks(session_id, prompt="prehook 정책과 컨텍스트 주입 확인")
+
+    assert blocks == []
+
+
+def test_doorbell_blocks_allow_matching_prompt(tmp_path, monkeypatch):
+    monkeypatch.setattr(active_recall, "DOORBELL_DIR", tmp_path)
+    session_id = "doorbell-match"
+    (tmp_path / f".brain_doorbell.{session_id}.jsonl").write_text(
+        '{"title":"prehook stale","content":"prehook context injection is noisy","priority":"high","severity":8.0}\n'
+    )
+
+    blocks = active_recall._doorbell_blocks(session_id, prompt="prehook 컨텍스트 주입 확인")
+
+    assert len(blocks) == 1
+    assert blocks[0].source == "doorbell:brain_loop"
+
+
+def test_doorbell_blocks_allow_explicit_critical_without_overlap(tmp_path, monkeypatch):
+    monkeypatch.setattr(active_recall, "DOORBELL_DIR", tmp_path)
+    session_id = "doorbell-critical"
+    (tmp_path / f".brain_doorbell.{session_id}.jsonl").write_text(
+        '{"title":"backup failure","content":"backup failure needs attention","priority":"critical","severity":7.0}\n'
+    )
+
+    blocks = active_recall._doorbell_blocks(session_id, prompt="진행해")
+
+    assert len(blocks) == 1
+    assert blocks[0].priority == "critical"
 
 
 def test_semantic_blocks_filters_low_score_and_near_duplicates(monkeypatch):
@@ -382,6 +433,121 @@ def test_rough_tokens_floor_is_one():
     assert active_recall._rough_tokens("a" * 4000) == 1000
 
 
+# ── Context compiler ─────────────────────────────────────
+
+
+def test_context_compiler_annotates_without_reordering():
+    canonical = active_recall.InjectionBlock(
+        id="canon",
+        title="Policy",
+        content="Chris prefers no extra LLM API spend.",
+        source="canonical",
+        score=1.0,
+        priority="critical",
+        path="/knowledge/canonical/policy.md",
+    )
+    semantic = active_recall.InjectionBlock(
+        id="sem",
+        title="Related note",
+        content="Subscription CLI should be used for background synthesis only.",
+        source="semantic:canonical",
+        score=0.83,
+        priority="high",
+    )
+
+    compiled = active_recall._compile_context_blocks([canonical, semantic])
+
+    assert [b.id for b in compiled] == ["canon", "sem"]
+    assert compiled[0].include_reason.startswith("canonical guarantee")
+    assert compiled[0].freshness == "canonical"
+    assert "canonical_authority" in compiled[0].risk_flags
+    assert compiled[0].contract_category == "risk_constraint"
+    assert compiled[1].include_reason.startswith("semantic evidence")
+    assert compiled[1].contract_category == "risk_constraint"
+    assert compiled[1].token_estimate == active_recall._rough_tokens(
+        semantic.title
+    ) + active_recall._rough_tokens(semantic.content)
+    assert compiled[1].compiler_score is not None
+
+
+def test_context_compiler_report_counts_flags():
+    block = active_recall.InjectionBlock(
+        id="usage",
+        title="LLM 사용량",
+        content="지난 7일 token usage total cost $1.23",
+        source="semantic:knowledge",
+        score=0.79,
+        priority="medium",
+    )
+
+    active_recall._compile_context_blocks([block])
+    report = active_recall._context_compiler_report([block])
+
+    assert report["version"] == 1
+    assert report["annotated_blocks"] == 1
+    assert report["estimated_tokens"] == block.token_estimate
+    assert report["risk_flags"]["snapshot"] == 1
+    assert report["risk_flags"]["low_semantic_score"] == 1
+
+
+def test_context_contract_report_declares_allowed_categories():
+    policy = active_recall.InjectionBlock(
+        id="policy",
+        title="Chris policy",
+        content="Chris prefers no extra cost and subscription-only LLM paths.",
+        source="semantic:canonical",
+        score=0.94,
+        priority="high",
+    )
+    active_recall._compile_context_blocks([policy])
+
+    report = active_recall._context_contract_report([policy])
+
+    assert report["uses_llm"] is False
+    assert report["suppresses_raw_doorbell"] is True
+    assert "risk_constraint" in report["allowed_categories"]
+    assert report["block_categories"]["risk_constraint"] == 1
+
+
+def test_semantic_timeout_shortens_when_critical_canonical_satisfies_contract():
+    canonical = [
+        active_recall.InjectionBlock(
+            id="budget",
+            title="LLM budget",
+            content="Chris requires subscription-only LLM usage.",
+            source="canonical",
+            score=1.0,
+            priority="critical",
+        )
+    ]
+
+    assert (
+        active_recall._semantic_timeout_for_contract("브레인 비용 정책 확인", canonical, None)
+        == active_recall._SEMANTIC_FAST_TIMEOUT_S
+    )
+    assert (
+        active_recall._semantic_timeout_for_contract("prehook 브레인 비용 정책 확인", canonical, None) is None
+    )
+
+
+def test_semantic_timeout_shortens_when_high_canonical_satisfies_contract():
+    canonical = [
+        active_recall.InjectionBlock(
+            id="quality",
+            title="Brain quality",
+            content="Chris wants production-quality brain improvements.",
+            source="canonical",
+            score=1.0,
+            priority="high",
+        )
+    ]
+
+    assert (
+        active_recall._semantic_timeout_for_contract("실제 브레인에 얼만큼 근접했어?", canonical, None)
+        == active_recall._SEMANTIC_FAST_TIMEOUT_S
+    )
+
+
 # ── Confidence sentinel ──────────────────────────────────
 
 
@@ -437,6 +603,7 @@ def test_build_injection_returns_latency_ms(monkeypatch):
     assert "latency_ms" in result
     assert "quality" in result
     assert result["quality"]["block_count"] == len(result["blocks"])
+    assert result["quality"]["compiler"]["version"] == 1
     assert not any(b.get("source") == "confidence_sentinel" for b in result["blocks"])
     assert isinstance(result["latency_ms"], int)
 
@@ -472,6 +639,8 @@ def test_build_injection_suppresses_short_proceed_prompt(monkeypatch):
     assert result["blocks"] == []
     assert result["quality"]["judgment"]["intent"] == "execution_control"
     assert result["quality"]["judgment"]["needs_memory"] is False
+    assert result["quality"]["compiler"]["annotated_blocks"] == 0
+    assert result["quality"]["context_contract"]["allowed_categories"] == ["urgent_interrupt"]
     assert recorded["actor"] == "codex"
     assert recorded["block_count"] == 0
     assert recorded["judgment"].intent == "execution_control"
@@ -487,6 +656,38 @@ def test_build_injection_can_include_opt_in_confidence_sentinel(monkeypatch):
         agent="codex",
     )
     assert any(b.get("source") == "confidence_sentinel" for b in result["blocks"])
+
+
+def test_build_injection_exposes_compiler_metadata(monkeypatch):
+    def _semantic(*args, **kwargs):
+        return [
+            active_recall.InjectionBlock(
+                id="sem-compiler",
+                title="brain cost policy",
+                content="Chris requires no extra LLM API spend beyond subscription CLI paths.",
+                source="semantic:canonical",
+                score=0.96,
+                priority="high",
+                path="canonical/decisions/current-memory-policy.md",
+            )
+        ]
+
+    monkeypatch.setattr(active_recall, "_semantic_blocks", _semantic)
+    result = active_recall.build_injection(
+        prompt="brain cost policy 알려줘",
+        session_id="t-compiler",
+        turn_idx=0,
+        agent="codex",
+    )
+
+    assert result["blocks"]
+    block = result["blocks"][0]
+    assert block["include_reason"]
+    assert block["token_estimate"] > 0
+    assert block["compiler_score"] >= block["score"]
+    assert block["contract_category"] in {"policy", "risk_constraint"}
+    assert result["quality"]["compiler"]["annotated_blocks"] == len(result["blocks"])
+    assert "context_contract" in result["quality"]
 
 
 def test_build_injection_design_query_returns_canonical(monkeypatch):

@@ -176,6 +176,22 @@ _STALE_MARKERS = (
     "대체",
 )
 
+_INTERRUPT_MARKERS = (
+    "urgent",
+    "doorbell",
+    "digest",
+    "alert",
+    "healthcheck",
+    "issue",
+    "incident",
+    "알림",
+    "긴급",
+    "문제",
+    "장애",
+    "헬스체크",
+    "다이제스트",
+)
+
 
 def classify_prompt(prompt: str | None, *, cwd: str | None = None) -> PromptJudgment:
     """Classify prompt shape before active recall spends context budget."""
@@ -186,6 +202,7 @@ def classify_prompt(prompt: str | None, *, cwd: str | None = None) -> PromptJudg
     asks_about_stale = _contains_any(lowered, _STALE_MARKERS)
     has_domain = _contains_any(lowered, _DOMAIN_TERMS)
     is_question = _contains_any(lowered, _QUESTION_MARKERS)
+    wants_interrupt_context = _contains_any(lowered, _INTERRUPT_MARKERS)
 
     if not text:
         return PromptJudgment(
@@ -216,7 +233,7 @@ def classify_prompt(prompt: str | None, *, cwd: str | None = None) -> PromptJudg
             intent="implementation",
             needs_memory=True,
             allow_semantic=True,
-            allow_proactive=True,
+            allow_proactive=wants_interrupt_context,
             max_blocks=4,
             max_tokens=1400,
             min_semantic_score=0.78,
@@ -229,7 +246,7 @@ def classify_prompt(prompt: str | None, *, cwd: str | None = None) -> PromptJudg
             intent="policy_or_memory",
             needs_memory=True,
             allow_semantic=True,
-            allow_proactive=True,
+            allow_proactive=wants_interrupt_context,
             max_blocks=5,
             max_tokens=1600,
             min_semantic_score=0.76,

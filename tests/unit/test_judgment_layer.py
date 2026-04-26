@@ -34,7 +34,16 @@ def test_classify_brain_prompt_allows_memory_even_when_short() -> None:
 
     assert judgment.needs_memory is True
     assert judgment.allow_semantic is True
+    assert judgment.allow_proactive is False
     assert judgment.intent == "implementation"
+
+
+def test_classify_digest_prompt_allows_interrupt_context() -> None:
+    judgment = judgment_layer.classify_prompt("Brain Digest로 온 문제 확인해줘")
+
+    assert judgment.needs_memory is True
+    assert judgment.allow_semantic is True
+    assert judgment.allow_proactive is True
 
 
 def test_arbitrate_suppresses_stale_semantic_when_not_requested() -> None:
