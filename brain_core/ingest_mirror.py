@@ -30,6 +30,24 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 log = logging.getLogger("brain.ingest_mirror")
 
+# 2026-04-26: semantic supersession thresholds.
+# Topic-key + speaker matching alone is too blunt — paraphrases of the same
+# fact were marking older atoms expired even though the fact itself stayed
+# true. We now compute cosine similarity between the new atom's embedding
+# and each existing-same-topic atom; only meaningful contradictions get
+# valid_until set.
+#
+#   sim ≥ SUPERSEDE_REINFORCE_FLOOR  → restatement; older stays unchanged
+#   SUPERSEDE_EXPIRE_CEILING ≤ sim < SUPERSEDE_REINFORCE_FLOOR
+#                                     → orthogonal/partial; older stays
+#   sim < SUPERSEDE_EXPIRE_CEILING   → real contradiction; older expires
+#
+# Conservative bias: when in doubt, keep both. time_decay handles ranking.
+SUPERSEDE_REINFORCE_FLOOR = 0.85
+SUPERSEDE_EXPIRE_CEILING = 0.70
+# Cap candidates per ingest to bound the embedding cost.
+SUPERSEDE_CANDIDATES_LIMIT = 20
+
 
 @dataclass
 class MirrorResult:
@@ -147,35 +165,152 @@ def mirror_memory(
         except Exception as e:
             result.warnings.append(f"backlog_enqueue:{e}")
 
-    # 5. Topic-based supersession (F5 fix — BEGIN IMMEDIATE + latest-wins)
+    # 5. Topic-based supersession with semantic similarity gate.
+    # Replaces the prior blunt "expire all older same-topic atoms" UPDATE.
+    # Each candidate is compared by cosine similarity against the new content;
+    # only real contradictions (sim < SUPERSEDE_EXPIRE_CEILING) get
+    # valid_until set. Restatements / paraphrases stay valid because the
+    # fact itself is unchanged.
     if classification and classification.topic_key:
-        try:
-            from atoms_store import _conn as _atoms_conn
-
-            with _atoms_conn() as _c:
-                _c.execute("BEGIN IMMEDIATE")
-                cursor = _c.execute(
-                    "UPDATE atoms SET valid_until = ?, updated_at = ? "
-                    "WHERE topic_key = ? AND speaker_entity = ? "
-                    "AND (valid_until IS NULL OR valid_until = '') "
-                    "AND id NOT IN ("
-                    "  SELECT id FROM atoms "
-                    "  WHERE topic_key = ? AND speaker_entity = ? "
-                    "  ORDER BY created_at DESC, id DESC LIMIT 1"
-                    ")",
-                    (
-                        now_iso,
-                        now_iso,
-                        classification.topic_key,
-                        classification.speaker_entity,
-                        classification.topic_key,
-                        classification.speaker_entity,
-                    ),
-                )
-                _c.commit()
-                if cursor.rowcount > 0:
-                    result.superseded_topic = True
-        except Exception as e:
-            result.warnings.append(f"supersession:{e}")
+        _run_semantic_supersession(
+            content=content,
+            chroma_id=chroma_id,
+            topic_key=classification.topic_key,
+            speaker_entity=classification.speaker_entity,
+            now_iso=now_iso,
+            result=result,
+        )
 
     return result
+
+
+def _run_semantic_supersession(
+    *,
+    content: str,
+    chroma_id: str,
+    topic_key: str,
+    speaker_entity: str,
+    now_iso: str,
+    result: MirrorResult,
+) -> None:
+    """Per-candidate semantic supersession.
+
+    Pulls every same-topic same-speaker atom (except the just-written one),
+    embeds the new content + each candidate, and only sets valid_until on
+    candidates whose meaning genuinely diverges. Logged decisions land in
+    `brain.ingest_mirror` so the reasoning is traceable.
+
+    Fail-open: any error (embedding service down, sqlite contention) leaves
+    every candidate untouched. Better to keep stale atoms than wrongly
+    expire a fact that's still true.
+    """
+    try:
+        from atoms_store import _conn as _atoms_conn
+        from indexer import get_embedding
+    except Exception as e:
+        result.warnings.append(f"supersession_import:{e}")
+        return
+
+    try:
+        with _atoms_conn() as _c:
+            rows = _c.execute(
+                "SELECT id, chroma_id, text FROM atoms "
+                "WHERE topic_key = ? AND speaker_entity = ? "
+                "AND (valid_until IS NULL OR valid_until = '') "
+                "AND tier != 'obsolete' "
+                "AND chroma_id != ? "
+                "ORDER BY created_at DESC LIMIT ?",
+                (topic_key, speaker_entity, chroma_id, SUPERSEDE_CANDIDATES_LIMIT),
+            ).fetchall()
+    except Exception as e:
+        result.warnings.append(f"supersession_select:{e}")
+        return
+
+    if not rows:
+        return
+
+    try:
+        new_emb = get_embedding(content[:2000], use_cache=True, prefix="passage")
+    except Exception as e:
+        result.warnings.append(f"supersession_embed_new:{e}")
+        return
+    if not new_emb:
+        return
+
+    # Lazy import — late_interaction owns the numpy-accelerated cosine.
+    try:
+        from late_interaction import _cosine
+    except Exception as e:
+        result.warnings.append(f"supersession_cosine:{e}")
+        return
+
+    expired_ids: list[str] = []
+    reinforced = 0
+    coexist = 0
+    for row in rows:
+        candidate_id = row["id"]
+        candidate_text = row["text"] or ""
+        try:
+            cand_emb = get_embedding(candidate_text[:2000], use_cache=True, prefix="passage")
+        except Exception as e:
+            log.debug("supersession candidate embed failed id=%s: %s", candidate_id, e)
+            continue
+        if not cand_emb:
+            continue
+        sim = _cosine(new_emb, cand_emb)
+        if sim >= SUPERSEDE_REINFORCE_FLOOR:
+            reinforced += 1
+            log.info(
+                "supersession: reinforce sim=%.3f topic=%s candidate=%s",
+                sim,
+                topic_key,
+                candidate_id,
+            )
+        elif sim < SUPERSEDE_EXPIRE_CEILING:
+            expired_ids.append(candidate_id)
+            log.info(
+                "supersession: expire sim=%.3f topic=%s candidate=%s",
+                sim,
+                topic_key,
+                candidate_id,
+            )
+        else:
+            coexist += 1
+            log.debug(
+                "supersession: coexist sim=%.3f topic=%s candidate=%s",
+                sim,
+                topic_key,
+                candidate_id,
+            )
+
+    if not expired_ids:
+        log.debug(
+            "supersession: no expirations topic=%s candidates=%d reinforced=%d coexist=%d",
+            topic_key,
+            len(rows),
+            reinforced,
+            coexist,
+        )
+        return
+
+    try:
+        with _atoms_conn() as _c:
+            _c.execute("BEGIN IMMEDIATE")
+            # Placeholders are constant `?` strings, not user input — S608 false positive.
+            placeholders = ",".join("?" for _ in expired_ids)
+            _c.execute(
+                f"UPDATE atoms SET valid_until = ?, updated_at = ? WHERE id IN ({placeholders})",  # noqa: S608
+                [now_iso, now_iso, *expired_ids],
+            )
+            _c.commit()
+            result.superseded_topic = True
+            log.info(
+                "supersession: expired %d/%d candidates topic=%s reinforced=%d coexist=%d",
+                len(expired_ids),
+                len(rows),
+                topic_key,
+                reinforced,
+                coexist,
+            )
+    except Exception as e:
+        result.warnings.append(f"supersession_update:{e}")

@@ -29,6 +29,9 @@ Authoritative list of every on-disk store brain owns. Anything not listed here i
 - Truth layer (canonical facts, decisions, atoms, ledger): no decay; managed via `supersede_by` pointers.
 - Weekly VACUUM (Sun 05:30) covers `brain.db`, `autonomy.db`, `llm_usage.db`, `metrics_history.db`.
 
+**`atoms.valid_until` semantics** (clarified 2026-04-26):
+The field is set by `ingest_mirror.py` when a NEW atom on the same `topic_key + speaker_entity` arrives AND the new content is semantically distant from the older atom (cosine similarity < 0.70 against the same Ollama embedder used for retrieval). Restatements / paraphrases (sim ≥ 0.85) leave the older atom untouched — the fact is unchanged, only the wording differs. Orthogonal-but-related atoms (0.70 ≤ sim < 0.85) coexist. This replaces the prior blunt "expire all older same-topic atoms" rule that was marking restatements as stale (430 such atoms accumulated under the old rule and remain in `valid_until < now AND tier != 'obsolete'`; they are NOT auto-obsoleted because the underlying facts may still be true — `time_decay` applies a 0.3× ranking penalty to expired atoms instead). Real expiry (calendar event end, immigration deadline) can also be set explicitly by the writer at upsert time.
+
 ## JSONL state + log files (`~/server/brain/logs/`)
 
 | File | Purpose | Rotated? |
