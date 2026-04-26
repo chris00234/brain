@@ -264,6 +264,23 @@ JOB_REGISTRY: dict[str, list[str]] = {
         "-c",
         f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from db_maintenance import run_llm_usage_retention; import json; print(json.dumps(run_llm_usage_retention()))",
     ],
+    # 2026-04-26 retention: autonomy_decisions writes ~48K rows/day; the table
+    # grew 600KB → 81MB in 8 days. 14d window keeps gate-check audit for
+    # incident review while bounding steady state ~670K rows.
+    "autonomy_decisions_retention": [
+        _py,
+        "-c",
+        f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from db_maintenance import run_autonomy_decisions_retention; import json; print(json.dumps(run_autonomy_decisions_retention()))",
+    ],
+    # 2026-04-26 retention: metrics_snapshots safety net (slos.py only reads
+    # last 20 rows; everything else is trend history). Existing 90d DELETE in
+    # metrics_buffer.persist remains; this trims more aggressively to 14d so
+    # the weekly VACUUM has reclaimable pages.
+    "metrics_history_retention": [
+        _py,
+        "-c",
+        f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from db_maintenance import run_metrics_history_retention; import json; print(json.dumps(run_metrics_history_retention()))",
+    ],
     # v3 Phase 6: weekly entity canonicalization proposal (dry-run only).
     "canonicalize_entities_dryrun": [
         _py,

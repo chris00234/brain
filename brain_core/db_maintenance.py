@@ -29,14 +29,25 @@ try:
     from config import AUTONOMY_DB, BRAIN_DB, BRAIN_LOGS_DIR
 
     LLM_USAGE_DB = BRAIN_LOGS_DIR / "llm_usage.db"
+    METRICS_HISTORY_DB = BRAIN_LOGS_DIR / "metrics_history.db"
 except ImportError:
     BRAIN_DB = Path("/Users/chrischo/server/brain/logs/brain.db")
     AUTONOMY_DB = Path("/Users/chrischo/server/brain/logs/autonomy.db")
     LLM_USAGE_DB = Path("/Users/chrischo/server/brain/logs/llm_usage.db")
+    METRICS_HISTORY_DB = Path("/Users/chrischo/server/brain/logs/metrics_history.db")
 
 # Retention policies
 ACTION_AUDIT_RETENTION_DAYS = 90
 LLM_USAGE_RETENTION_DAYS = 90
+# autonomy_decisions writes ~48K rows/day (one per autonomy.authorize call).
+# Only db_maintenance and incident review read it; nothing on the hot path.
+# 14d window keeps two weeks of gate-check audit, steady-state ~670K rows.
+# Without retention the table grew 600KB → 81MB in 8 days.
+AUTONOMY_DECISIONS_RETENTION_DAYS = 14
+# slos.py only reads the most-recent 20 rows of metrics_snapshots; everything
+# older is observability history. 14d keeps two weeks of trend; the existing
+# 90d DELETE in metrics_buffer.persist remains as the longer-term safety net.
+METRICS_HISTORY_RETENTION_DAYS = 14
 
 
 def _sqlite_size_mb(path: Path) -> float:
@@ -54,6 +65,7 @@ def run_vacuum() -> dict:
         ("brain.db", BRAIN_DB),
         ("autonomy.db", AUTONOMY_DB),
         ("llm_usage.db", LLM_USAGE_DB),
+        ("metrics_history.db", METRICS_HISTORY_DB),
     ]:
         if not path.exists():
             continue
@@ -185,6 +197,77 @@ def run_llm_usage_retention(days: int = LLM_USAGE_RETENTION_DAYS) -> dict:
     return summary
 
 
+def run_autonomy_decisions_retention(days: int = AUTONOMY_DECISIONS_RETENTION_DAYS) -> dict:
+    """Drop autonomy_decisions rows older than N days. The table records every
+    autonomy.authorize gate check (~48K rows/day) and was previously unbounded —
+    autonomy.db grew 600KB → 86MB in 8 days before retention.
+
+    decision_ledger (full decision units) and outcomes (Chris-override
+    feedback) are intentionally retained longer; this only prunes the gate-
+    audit trail.
+    """
+    summary: dict = {
+        "table": "autonomy_decisions",
+        "days_kept": days,
+        "started_at": _now_iso(),
+    }
+    if not AUTONOMY_DB.exists():
+        summary["status"] = "db_missing"
+        summary["finished_at"] = _now_iso()
+        return summary
+    try:
+        conn = sqlite3.connect(str(AUTONOMY_DB))
+        try:
+            cur = conn.execute(
+                "DELETE FROM autonomy_decisions WHERE ts_utc < datetime('now', 'utc', ? || ' days')",
+                (f"-{int(days)}",),
+            )
+            summary["deleted"] = cur.rowcount
+            conn.commit()
+            summary["remaining"] = conn.execute("SELECT count(*) FROM autonomy_decisions").fetchone()[0]
+            summary["status"] = "ok"
+        finally:
+            conn.close()
+    except Exception as exc:
+        summary["status"] = f"error:{str(exc)[:150]}"
+    summary["finished_at"] = _now_iso()
+    return summary
+
+
+def run_metrics_history_retention(days: int = METRICS_HISTORY_RETENTION_DAYS) -> dict:
+    """Trim metrics_snapshots beyond N days. metrics_buffer.persist already
+    does a 90d DELETE on every persist, but the file does not shrink without
+    a VACUUM. This job is the safety net that DELETEs aggressively (30d) so
+    the weekly VACUUM has reclaimable pages.
+    """
+    summary: dict = {
+        "table": "metrics_snapshots",
+        "days_kept": days,
+        "started_at": _now_iso(),
+    }
+    if not METRICS_HISTORY_DB.exists():
+        summary["status"] = "db_missing"
+        summary["finished_at"] = _now_iso()
+        return summary
+    try:
+        conn = sqlite3.connect(str(METRICS_HISTORY_DB))
+        try:
+            cur = conn.execute(
+                "DELETE FROM metrics_snapshots WHERE timestamp < datetime('now', 'utc', ? || ' days')",
+                (f"-{int(days)}",),
+            )
+            summary["deleted"] = cur.rowcount
+            conn.commit()
+            summary["remaining"] = conn.execute("SELECT count(*) FROM metrics_snapshots").fetchone()[0]
+            summary["status"] = "ok"
+        finally:
+            conn.close()
+    except Exception as exc:
+        summary["status"] = f"error:{str(exc)[:150]}"
+    summary["finished_at"] = _now_iso()
+    return summary
+
+
 def growth_stats() -> dict:
     """One-shot health: row counts + sizes across all brain SQLite DBs.
     Used by /brain/health and growth-rate SLO."""
@@ -192,6 +275,7 @@ def growth_stats() -> dict:
         "brain_db_mb": _sqlite_size_mb(BRAIN_DB),
         "autonomy_db_mb": _sqlite_size_mb(AUTONOMY_DB),
         "llm_usage_db_mb": _sqlite_size_mb(LLM_USAGE_DB),
+        "metrics_history_db_mb": _sqlite_size_mb(METRICS_HISTORY_DB),
         "tables": {},
     }
     for label, path, table in [
@@ -199,6 +283,9 @@ def growth_stats() -> dict:
         ("raw_events", BRAIN_DB, "raw_events"),
         ("action_audit", BRAIN_DB, "action_audit"),
         ("atom_coactivation", BRAIN_DB, "atom_coactivation"),
+        ("autonomy_decisions", AUTONOMY_DB, "autonomy_decisions"),
+        ("decision_ledger", AUTONOMY_DB, "decision_ledger"),
+        ("metrics_snapshots", METRICS_HISTORY_DB, "metrics_snapshots"),
         ("llm_usage", LLM_USAGE_DB, "llm_usage"),
     ]:
         if not path.exists():
@@ -223,6 +310,8 @@ if __name__ == "__main__":
     sub.add_parser("vacuum")
     sub.add_parser("retention_audit")
     sub.add_parser("retention_usage")
+    sub.add_parser("retention_decisions")
+    sub.add_parser("retention_metrics")
     sub.add_parser("stats")
     args = p.parse_args()
     if args.cmd == "vacuum":
@@ -231,6 +320,10 @@ if __name__ == "__main__":
         print(json.dumps(run_action_audit_retention(), indent=2))
     elif args.cmd == "retention_usage":
         print(json.dumps(run_llm_usage_retention(), indent=2))
+    elif args.cmd == "retention_decisions":
+        print(json.dumps(run_autonomy_decisions_retention(), indent=2))
+    elif args.cmd == "retention_metrics":
+        print(json.dumps(run_metrics_history_retention(), indent=2))
     elif args.cmd == "stats":
         print(json.dumps(growth_stats(), indent=2))
     else:

@@ -221,6 +221,27 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         agent="system",
         misfire_grace=1800,
     ),
+    # 2026-04-26 retention: autonomy_decisions grew 600KB → 81MB in 8 days
+    # (~48K rows/day from autonomy.authorize). 14d window keeps recent gate
+    # audit, bounds steady state. Slot at 4:35am avoids action_audit_retention
+    # @4:20am and codex_eval_proposals_triage @4:25am autonomy.db lock churn.
+    ScheduledJob(
+        name="autonomy_decisions_retention",
+        description="Prune autonomy_decisions rows older than 14d (daily 4:35am)",
+        trigger=CronTrigger(hour=4, minute=35),
+        agent="system",
+        misfire_grace=900,
+    ),
+    # 2026-04-26 retention: metrics_snapshots safety net at 14d so weekly
+    # VACUUM has reclaimable pages. metrics_buffer.persist already does a
+    # 90d DELETE on every persist; this trims more aggressively.
+    ScheduledJob(
+        name="metrics_history_retention",
+        description="Prune metrics_snapshots rows older than 14d (daily 4:40am)",
+        trigger=CronTrigger(hour=4, minute=40),
+        agent="system",
+        misfire_grace=900,
+    ),
     # Maintenance
     ScheduledJob(
         name="memory_lifecycle",

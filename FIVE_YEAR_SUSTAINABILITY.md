@@ -15,7 +15,9 @@ Brain is solid today. Main 5-year risks are **data growth without retention, emb
 |---|------|----------|----------------|--------|------------|
 | 1 | action_audit unbounded growth | HIGH | 6-12 months | **FIXED 2026-04-17** | `action_audit_retention` job (daily 4:20am, 90d retain) |
 | 2 | llm_usage table unbounded | HIGH | 12 months | **FIXED 2026-04-17** | `llm_usage_retention` job (monthly 4:30am, roll up to `llm_usage_monthly`) |
-| 3 | SQLite file size creep from deletes | HIGH | 12-18 months | **FIXED 2026-04-17** | `db_vacuum_weekly` job (Sun 5:30am) |
+| 3 | SQLite file size creep from deletes | HIGH | 12-18 months | **FIXED 2026-04-17** | `db_vacuum_weekly` job (Sun 5:30am) — now also covers metrics_history.db |
+| 1b | autonomy_decisions unbounded growth | HIGH | 30 days | **FIXED 2026-04-26** | `autonomy_decisions_retention` job (daily 4:35am, 14d retain). The table grew 600KB → 81MB in 8 days at ~48K rows/day. Only db_maintenance reads it; nothing on the hot path. |
+| 1c | metrics_snapshots safety-net retention | MEDIUM | ongoing | **FIXED 2026-04-26** | `metrics_history_retention` job (daily 4:40am, 14d retain). slos.py only reads the last 20 rows; everything older is observability history. metrics_buffer.persist still does its 90d DELETE as the longer-term ceiling. |
 | 4 | Embedding model obsolescence | HIGH | 2-3 years | OPEN | See §Embedding Upgrade Path |
 | 5 | Schema migration discipline | MEDIUM | ongoing | PARTIAL | `migrations_brain_db.py` exists, procedure documented §Migrations |
 | 6 | Chris's preferences drift over time | MEDIUM | ongoing | PARTIAL | supersede_by + memory_lifecycle handle some. No explicit "retire preference" UI. |
