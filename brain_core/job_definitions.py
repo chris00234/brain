@@ -243,11 +243,12 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         misfire_grace=900,
     ),
     # 2026-04-26 retention: session_context normally cleaned per-session
-    # by wm_consolidate, but crashes leave orphans. 30d sweep at 4:45am.
+    # by wm_consolidate, but crashes leave orphans. 30d sweep at 4:43am
+    # (avoids autonomy_proposer @4:45 which also touches autonomy.db).
     ScheduledJob(
         name="session_context_retention",
-        description="Prune orphaned session_context rows older than 30d (daily 4:45am)",
-        trigger=CronTrigger(hour=4, minute=45),
+        description="Prune orphaned session_context rows older than 30d (daily 4:43am)",
+        trigger=CronTrigger(hour=4, minute=43),
         agent="system",
         misfire_grace=900,
     ),

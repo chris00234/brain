@@ -790,7 +790,7 @@ def handle_tools_call(params: dict) -> dict:
                 result = _brain_request("POST", "/memory", payload, actor=actor, timeout_s=4)
                 result = _normalize_timeout_result(result, timeout_hint)
         except Exception as exc:
-            result = {"error": f"brain_correct failed: {exc}"}
+            result = _timeout_result(timeout_hint, str(exc))
 
     else:
         result = {"error": f"Unknown tool: {name}"}
