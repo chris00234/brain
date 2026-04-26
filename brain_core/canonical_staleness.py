@@ -14,7 +14,9 @@ Strategy (narrow but directly useful):
   3. If the claim is invalidated → move the distilled file into
      knowledge/obsolete/, stamp an OBSOLETE header with evidence, and delete
      every canonical atom in Qdrant whose `path` points at the old file.
-  4. Log every decision to logs/canonical_staleness.jsonl for audit.
+  4. Also scan active canonical notes for explicit current-truth supersession
+     drift (for example ChromaDB claims after the Qdrant cutover).
+  5. Log every decision to logs/canonical_staleness.jsonl for audit.
 
 Runs daily at 04:30am as a scheduled job; also callable via
 POST /brain/canonical_staleness/run (see server.py routes).
@@ -42,6 +44,15 @@ OBSOLETE_DIR = KNOWLEDGE_DIR / "obsolete"
 AUDIT_LOG = BRAIN_LOGS_DIR / "canonical_staleness.jsonl"
 
 log = logging.getLogger("brain.canonical_staleness")
+
+try:
+    from stale_current_truth import build_atoms_report as build_stale_atoms_truth_report
+    from stale_current_truth import build_report as build_stale_current_truth_report
+    from stale_current_truth import build_vector_report as build_stale_vector_truth_report
+except ImportError:  # pragma: no cover - keeps old deployments import-safe
+    build_stale_atoms_truth_report = None
+    build_stale_current_truth_report = None
+    build_stale_vector_truth_report = None
 
 
 # ── Claim extractors ────────────────────────────────────────────────────
@@ -330,6 +341,67 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--dry-run", action="store_true", help="scan + log without moving files")
     p.add_argument("--max-files", type=int, default=2000)
+    p.add_argument("--current-truth", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument("--vector-current-truth", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument("--atoms-current-truth", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument(
+        "--fail-on-current-truth-blockers",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="exit non-zero when active canonical notes contain stale current-truth claims",
+    )
     args = p.parse_args()
     result = scan_distilled(dry_run=args.dry_run, max_files=args.max_files)
+    if args.current_truth and build_stale_current_truth_report is not None:
+        current_truth = build_stale_current_truth_report(KNOWLEDGE_DIR)
+        result["current_truth"] = current_truth
+        if current_truth.get("blockers"):
+            result["status"] = "blocked"
+            result["reason"] = "stale current-truth blockers found"
+            _audit(
+                {
+                    "ts": datetime.now(UTC).isoformat(timespec="seconds"),
+                    "action": "current_truth_blocked",
+                    "blocker_count": current_truth.get("blocker_count"),
+                    "blockers": current_truth.get("blockers", [])[:20],
+                }
+            )
+    if args.vector_current_truth and build_stale_vector_truth_report is not None:
+        vector_truth = build_stale_vector_truth_report(apply=not args.dry_run)
+        result["vector_current_truth"] = vector_truth
+        if vector_truth.get("blockers"):
+            _audit(
+                {
+                    "ts": datetime.now(UTC).isoformat(timespec="seconds"),
+                    "action": "vector_current_truth_marked"
+                    if not args.dry_run
+                    else "vector_current_truth_dry_run",
+                    "blocker_count": vector_truth.get("blocker_count"),
+                    "marked": vector_truth.get("marked"),
+                    "blockers": vector_truth.get("blockers", [])[:20],
+                }
+            )
+    if args.atoms_current_truth and build_stale_atoms_truth_report is not None:
+        atoms_truth = build_stale_atoms_truth_report(apply=not args.dry_run)
+        result["atoms_current_truth"] = atoms_truth
+        if atoms_truth.get("blockers"):
+            _audit(
+                {
+                    "ts": datetime.now(UTC).isoformat(timespec="seconds"),
+                    "action": "atoms_current_truth_marked"
+                    if not args.dry_run
+                    else "atoms_current_truth_dry_run",
+                    "blocker_count": atoms_truth.get("blocker_count"),
+                    "marked_atoms": atoms_truth.get("marked_atoms"),
+                    "marked_vectors": atoms_truth.get("marked_vectors"),
+                    "blockers": atoms_truth.get("blockers", [])[:20],
+                }
+            )
     print(json.dumps(result, indent=2, ensure_ascii=False))
+    if (
+        args.current_truth
+        and args.fail_on_current_truth_blockers
+        and isinstance(result.get("current_truth"), dict)
+        and result["current_truth"].get("blockers")
+    ):
+        raise SystemExit(1)

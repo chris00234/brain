@@ -97,6 +97,22 @@ class EvalProposalCreateRequest(BaseModel):
     source_event: str = Field(default="manual", max_length=64)
 
 
+class DecisionOutcomeRequest(BaseModel):
+    actual_outcome: str = Field(..., min_length=1, max_length=2000)
+    outcome_status: str = Field(..., pattern=r"^(pending|succeeded|failed|overridden)$")
+    review_status: str | None = Field(
+        default=None,
+        pattern=r"^(unreviewed|needs_review|reviewed|accepted)$",
+    )
+
+
+class DecisionFeedbackTaskRequest(BaseModel):
+    hours: int = Field(default=168, ge=1, le=24 * 90)
+    min_failures: int = Field(default=2, ge=1, le=20)
+    limit: int = Field(default=200, ge=1, le=1000)
+    max_tasks: int = Field(default=5, ge=1, le=20)
+
+
 # ── Autonomy ───────────────────────────────────────────
 @router.get("/brain/autopilot", tags=["autonomy"])
 def get_autopilot() -> dict:
@@ -105,6 +121,107 @@ def get_autopilot() -> dict:
 
         return get_state()
     except Exception as e:
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e)) from e
+
+
+@router.get("/brain/state", tags=["autonomy"])
+def get_brain_state(limit: int = Query(default=10, ge=1, le=50)) -> dict:
+    """Read-only deterministic belief-state snapshot.
+
+    This endpoint does not call an LLM. It compiles existing atom/task/outcome
+    signals into a transparent agency surface for hooks, agents, and operators.
+    """
+    try:
+        from brain_core.belief_state import build_belief_state
+
+        return build_belief_state(limit=limit)
+    except Exception as e:
+        _log_failure(str(e), route="/brain/state")
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e)) from e
+
+
+@router.get("/brain/decisions", tags=["autonomy"])
+def list_brain_decisions(
+    limit: int = Query(default=50, ge=1, le=200),
+    outcome_status: str | None = Query(default=None),
+    review_status: str | None = Query(default=None),
+) -> dict:
+    try:
+        from brain_core.decision_ledger import list_decisions
+
+        decisions = list_decisions(
+            limit=limit,
+            outcome_status=outcome_status,
+            review_status=review_status,
+        )
+        return {"decisions": decisions, "total": len(decisions)}
+    except Exception as e:
+        _log_failure(str(e), route="/brain/decisions")
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e)) from e
+
+
+@router.get("/brain/decisions/feedback", tags=["autonomy"])
+def get_brain_decision_feedback(
+    hours: int = Query(default=168, ge=1, le=24 * 90),
+    min_failures: int = Query(default=2, ge=1, le=20),
+    limit: int = Query(default=200, ge=1, le=1000),
+) -> dict:
+    """Read-only decision outcome feedback loop.
+
+    Returns deterministic learning candidates from failed/overridden decisions.
+    No policy mutation and no LLM call happen on this endpoint.
+    """
+    try:
+        from brain_core.decision_ledger import decision_feedback_report
+
+        return decision_feedback_report(hours=hours, min_failures=min_failures, limit=limit)
+    except Exception as e:
+        _log_failure(str(e), route="/brain/decisions/feedback")
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e)) from e
+
+
+@router.post("/brain/decisions/feedback/tasks", tags=["autonomy"])
+def create_brain_decision_feedback_tasks(req: DecisionFeedbackTaskRequest) -> dict:
+    """Create deduped review tasks for decision feedback candidates.
+
+    This endpoint creates review tasks only; it does not mutate memory policy
+    or autonomy thresholds.
+    """
+    try:
+        from brain_core.decision_ledger import create_feedback_review_tasks
+
+        return create_feedback_review_tasks(
+            hours=req.hours,
+            min_failures=req.min_failures,
+            limit=req.limit,
+            max_tasks=req.max_tasks,
+        )
+    except Exception as e:
+        _log_failure(str(e), route="/brain/decisions/feedback/tasks")
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e)) from e
+
+
+@router.post("/brain/decisions/{decision_id}/outcome", tags=["autonomy"])
+def update_brain_decision_outcome(
+    decision_id: Annotated[str, PathParam()],
+    req: DecisionOutcomeRequest,
+) -> dict:
+    try:
+        from brain_core.decision_ledger import update_decision_outcome
+
+        updated = update_decision_outcome(
+            decision_id,
+            actual_outcome=req.actual_outcome,
+            outcome_status=req.outcome_status,
+            review_status=req.review_status,
+        )
+        if not updated:
+            raise HTTPException(status_code=404, detail=f"decision '{decision_id}' not found")
+        return {"status": "updated", "id": decision_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        _log_failure(str(e), route="/brain/decisions/outcome")
         raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e)) from e
 
 

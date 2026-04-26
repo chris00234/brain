@@ -8,10 +8,11 @@ import time
 from datetime import UTC, datetime
 
 from api_deps import _log_failure, _safe_http_detail, verify_bearer
-from config import BRAIN_DIR
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from rate_limit import limiter
+
+from config import BRAIN_DIR
 
 router = APIRouter(dependencies=[Depends(verify_bearer)])
 
@@ -35,6 +36,7 @@ class DecideResponse(BaseModel):
     latency_ms: int = 0
     cached: bool = False
     heuristic_fallback: bool = False
+    decision_id: str | None = None
 
 
 class ReasonRequest(BaseModel):
@@ -84,6 +86,79 @@ def _persist_reasoning_result(title: str, content: str, domain: str, confidence:
         pass
 
 
+def _decision_situation(req: DecideRequest) -> str:
+    if not req.context:
+        return req.situation
+    return f"{req.situation}\n\nAdditional context:\n{req.context}"
+
+
+def _decision_subject(req: DecideRequest) -> str:
+    payload = {
+        "situation": req.situation,
+        "context": req.context or "",
+        "options": req.options,
+        "domain": req.domain or "",
+    }
+    raw = _json.dumps(payload, sort_keys=True, ensure_ascii=True, default=str)
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
+def _record_decide_ledger(
+    *,
+    req: DecideRequest,
+    result: object,
+    evidence: list[dict],
+    latency_ms: int,
+) -> str | None:
+    """Best-effort decision ledger write for /brain/decide.
+
+    This is intentionally separate from _persist_reasoning_result: the latter
+    creates long-lived knowledge notes, while the ledger tracks a decision unit
+    whose real-world outcome can be reviewed later.
+    """
+    try:
+        from brain_core.decision_ledger import record_decision
+
+        return record_decision(
+            actor=req.agent or "unknown",
+            domain=req.domain or "decisions",
+            source="brain_decide",
+            observation_kind="preference_decision",
+            observation_subject=_decision_subject(req),
+            perceived_state={
+                "situation": req.situation,
+                "context": req.context or "",
+                "evidence": evidence,
+                "model": getattr(result, "model", ""),
+                "cached": bool(getattr(result, "cached", False)),
+                "heuristic_fallback": bool(getattr(result, "heuristic_fallback", False)),
+            },
+            candidate_options=[
+                {
+                    "option": str(option.get("label", "")),
+                    "description": str(option.get("description", "")),
+                }
+                for option in req.options
+            ],
+            selected_option=str(getattr(result, "recommendation", "")),
+            selected_payload={
+                "recommendation": getattr(result, "recommendation", ""),
+                "reasoning": getattr(result, "reasoning", ""),
+                "exceptions": getattr(result, "exceptions", []),
+                "latency_ms": latency_ms,
+            },
+            confidence=float(getattr(result, "confidence", 0.0) or 0.0),
+            autonomy_level="recommendation_only",
+            expected_outcome=str(getattr(result, "reasoning", ""))[:1000],
+            outcome_status="pending",
+            review_status="unreviewed",
+            dedupe_window_seconds=300,
+        )
+    except Exception as exc:
+        _log_failure(str(exc)[:500], route="/brain/decide/ledger")
+        return None
+
+
 @router.post("/brain/decide", response_model=DecideResponse, tags=["decide"])
 @limiter.limit("60/minute")
 def brain_decide(request: Request, req: DecideRequest) -> DecideResponse:
@@ -96,7 +171,7 @@ def brain_decide(request: Request, req: DecideRequest) -> DecideResponse:
             DecisionOption(label=o.get("label", ""), description=o.get("description", ""))
             for o in req.options
         ]
-        result = evaluate_decision(req.situation, options, req.agent, req.domain)
+        result = evaluate_decision(_decision_situation(req), options, req.agent, req.domain)
         evidence = [
             {
                 "content": h.content[:200],
@@ -106,6 +181,13 @@ def brain_decide(request: Request, req: DecideRequest) -> DecideResponse:
             }
             for h in result.preference_hits[:5]
         ]
+        latency_ms = int((time.time() - start) * 1000)
+        decision_id = _record_decide_ledger(
+            req=req,
+            result=result,
+            evidence=evidence,
+            latency_ms=latency_ms,
+        )
         resp = DecideResponse(
             situation=req.situation,
             recommendation=result.recommendation,
@@ -114,9 +196,10 @@ def brain_decide(request: Request, req: DecideRequest) -> DecideResponse:
             evidence=evidence,
             exceptions=result.exceptions,
             model=result.model,
-            latency_ms=int((time.time() - start) * 1000),
+            latency_ms=latency_ms,
             cached=result.cached,
             heuristic_fallback=result.heuristic_fallback,
+            decision_id=decision_id,
         )
         _persist_reasoning_result(
             f"Decision: {req.situation[:80]} → {result.recommendation}",

@@ -892,6 +892,19 @@ class TaskQueue:
             ),
         )
         conn.commit()
+        try:
+            from decision_ledger import resolve_task_decisions
+
+            resolved = resolve_task_decisions(
+                task_id,
+                actual_outcome=actual_action or override_reason,
+                success=not chris_override,
+                db_path=self._db_path,
+            )
+            if resolved:
+                log.info("resolved %d pending decision(s) for task %s", resolved, task_id)
+        except Exception as exc:
+            log.debug("decision ledger outcome resolution failed for %s: %s", task_id, exc)
         log.info("recorded outcome for task %s (override=%s)", task_id, chris_override)
 
     def list_outcomes(

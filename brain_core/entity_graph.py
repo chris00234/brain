@@ -256,6 +256,7 @@ def extract_and_store_entities(memory_content: str, memory_id: str = "") -> int:
             return 0
 
         now = _now()
+        _ontology_validate_extracted_relations(entities, relations, memory_id or "entity_graph.extract")
 
         if _use_neo4j():
             created = _neo4j_store_entities(entities, relations, now, memory_id)
@@ -310,6 +311,53 @@ _expand_cache: _OrderedDict[str, tuple[float, list[str]]] = _OrderedDict()
 _expand_cache_lock = _threading.Lock()
 _EXPAND_CACHE_TTL = 300.0  # 5 minutes
 _EXPAND_CACHE_MAX = 256
+
+
+def _ontology_validate_extracted_relations(entities: list, relations: list, origin: str) -> dict[str, int]:
+    """Warning-only validation for LLM-extracted graph edges.
+
+    Central ontology semantics live in ontology.py. This helper only adapts
+    entity_graph's extracted JSON shape to that registry and never blocks writes.
+    """
+    if not relations:
+        return {}
+    try:
+        from ontology import RelationRecord, issue_summary, validate_relation
+    except Exception as exc:
+        log.debug("ontology validation unavailable: %s", exc)
+        return {}
+
+    entity_types = {
+        (ent.get("name") or "").strip().lower(): (ent.get("type") or "concept")
+        for ent in entities[:5]
+        if isinstance(ent, dict)
+    }
+    issues = []
+    for rel in relations[:5]:
+        if not isinstance(rel, dict):
+            continue
+        src = (rel.get("source") or "").strip().lower()
+        tgt = (rel.get("target") or "").strip().lower()
+        issues.extend(
+            validate_relation(
+                RelationRecord(
+                    source=src,
+                    source_type=entity_types.get(src, ""),
+                    relation=rel.get("relationship", "related_to"),
+                    target=tgt,
+                    target_type=entity_types.get(tgt, ""),
+                    origin=origin,
+                )
+            )
+        )
+    summary = issue_summary(issue for issue in issues if issue.severity != "info")
+    if summary:
+        log.warning("ontology graph validation warnings origin=%s summary=%s", origin, summary)
+    else:
+        info_summary = issue_summary(issues)
+        if info_summary:
+            log.debug("ontology graph validation info origin=%s summary=%s", origin, info_summary)
+    return summary
 
 
 def resolve_entity(name: str, entity_type: str | None = None) -> str | None:

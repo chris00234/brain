@@ -1,0 +1,9 @@
+[
+  {
+    "term": "ChromaDB",
+    "replaced_by": "Qdrant",
+    "decommissioned_at": "2026-04-21",
+    "current_doc": "canonical/infra/rag-qdrant.md",
+    "aliases": ["ChromaDB", "chromadb", "chroma_api", "Chroma API"]
+  }
+]
