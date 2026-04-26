@@ -21,6 +21,7 @@ from common import (  # noqa: E402
     parse_markdown_frontmatter,
     slugify,
     utc_now,
+    warn_ontology_metadata,
     write_markdown_frontmatter,
 )
 
@@ -242,9 +243,11 @@ def main():
                     ex_meta["updated_at"] = utc_now()
                     if len(body) > len(ex_body):
                         ex_body = body
+                    warn_ontology_metadata(ex_meta, str(existing))
                     write_markdown_frontmatter(existing, ex_meta, ex_body)
                     item["merged_into"] = existing.name
                 else:
+                    warn_ontology_metadata(metadata, str(target))
                     write_markdown_frontmatter(target, metadata, body)
                 # 2026-04-18: previous guard was `target.exists() or existing.exists()`.
                 # On the merge branch the write goes to `existing` — but if `target`
@@ -275,6 +278,7 @@ def main():
                 metadata["pipeline_score"] = score
                 file_name = proposal_path.name
                 target = REVIEW_QUEUE_DIR / file_name
+                warn_ontology_metadata(metadata, str(target))
                 write_markdown_frontmatter(target, metadata, body)
                 proposal_path.unlink()
             held.append(item)

@@ -49,7 +49,8 @@ AUTONOMY_DB = BRAIN_LOGS_DIR / "autonomy.db"
 OPENCLAW_BIN = str(HOME / ".local" / "bin" / "openclaw")
 OPENCLAW_CREDENTIALS = OPENCLAW_DIR / "credentials"
 SECRET_FILE = OPENCLAW_CREDENTIALS / ".personal_webhook_secret"
-ONTOLOGY_GRAPH = OPENCLAW_DIR / "memory" / "ontology" / "graph.jsonl"
+OPENCLAW_ONTOLOGY_GRAPH = OPENCLAW_DIR / "memory" / "ontology" / "graph.jsonl"
+ONTOLOGY_GRAPH = Path(os.getenv("BRAIN_ONTOLOGY_GRAPH", str(BRAIN_DIR / "data" / "ontology" / "graph.jsonl")))
 OBSIDIAN_VAULT = OPENCLAW_DIR / "workspace" / "obsidian-vault"
 OBSIDIAN_VAULT_ICLOUD = (
     HOME / "Library" / "Mobile Documents" / "iCloud~md~obsidian" / "Documents" / "Obsidian-vault"
@@ -113,6 +114,31 @@ BRAIN_MMR_LAMBDA = float(os.getenv("BRAIN_MMR_LAMBDA", "0.85"))
 # 2026-04-17 Phase 3: learned-to-rank blend. Default OFF; enable via
 # BRAIN_LTR_ENABLED=true once cli/ltr_train.py has run and saved weights.
 BRAIN_LTR_ENABLED = os.getenv("BRAIN_LTR_ENABLED", "false").lower() in ("true", "1", "yes")
+
+# Ontology recall expansion: default OFF until recall eval + p95 gates pass.
+# When enabled, search_unified adds cached 1-hop ontology entity names to the
+# search query only; rerank/relevance still use the user's original query.
+BRAIN_ONTOLOGY_EXPANSION_ENABLED = os.getenv("BRAIN_ONTOLOGY_EXPANSION_ENABLED", "false").lower() in (
+    "true",
+    "1",
+    "yes",
+)
+BRAIN_ONTOLOGY_EXPANSION_MAX_TERMS = int(os.getenv("BRAIN_ONTOLOGY_EXPANSION_MAX_TERMS", "5"))
+BRAIN_ONTOLOGY_EXPANSION_MODE = os.getenv("BRAIN_ONTOLOGY_EXPANSION_MODE", "rewrite").strip().lower()
+BRAIN_ONTOLOGY_SIDECAR_LIMIT = int(os.getenv("BRAIN_ONTOLOGY_SIDECAR_LIMIT", "5"))
+# Keep this allowlist narrow. Stable eval on 2026-04-24 rejected broad
+# graph relations (`depends_on`, `manages`, `proxies`) despite acceptable
+# latency because source/content hit regressed. Add relations only after
+# cli/eval_ontology_expansion.py passes content/source + p95 gates.
+BRAIN_ONTOLOGY_EXPANSION_SOURCE = os.getenv("BRAIN_ONTOLOGY_EXPANSION_SOURCE", "neo4j").strip().lower()
+BRAIN_ONTOLOGY_EXPANSION_RELATIONS = tuple(
+    rel.strip()
+    for rel in os.getenv("BRAIN_ONTOLOGY_EXPANSION_RELATIONS", "has_agent,owned_by,owns").split(",")
+    if rel.strip()
+)
+BRAIN_ONTOLOGY_CONDITIONAL_EXPANSION_ENABLED = os.getenv(
+    "BRAIN_ONTOLOGY_CONDITIONAL_EXPANSION_ENABLED", "false"
+).lower() in ("true", "1", "yes")
 
 # Phase 3 — atoms truth layer (Brain v1 plan)
 # BRAIN_ATOMS_ENABLED: master flag for atoms write path. Default off until verified.

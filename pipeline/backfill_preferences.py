@@ -1,7 +1,7 @@
 #!/opt/homebrew/bin/python3
 """Backfill top semantic_memory preferences into Neo4j as Preference nodes.
 
-Queries semantic_memory ChromaDB collection for category=preference entries,
+Queries the semantic_memory vector collection for category=preference entries,
 creates typed Preference nodes linked to domain entities.
 
 Usage:
@@ -39,7 +39,7 @@ _DOMAIN_KEYWORDS = {
         "docker",
         "nginx",
         "cloudflare",
-        "chromadb",
+        "qdrant",
         "ollama",
         "neo4j",
         "container",

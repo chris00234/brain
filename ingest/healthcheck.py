@@ -12,8 +12,8 @@ Verifies every signal that could silently destroy data or degrade quality:
   7. MinIO backup freshness (via S3 API — not `mc`)
   8. Disk free space
   9. Ollama embedding probe
- 10. ChromaDB write probe
- 11. Recall vector search probe (catches the ChromaDB 1.4.1 `where` bug)
+ 10. Vector-store write probe
+ 11. Recall vector search probe
  12. Eval regression (reads eval-history.jsonl)
 
 Runs daily at 9 AM via the brain's APScheduler. Posts a single Telegram DM only
@@ -26,6 +26,7 @@ Usage:
 
 import argparse
 import json
+import logging
 import random
 import shutil
 import sqlite3
@@ -55,6 +56,7 @@ MONITORED_COLLECTIONS = {
     "knowledge": {"min_docs": 300, "source": "reindex"},
     "experience": {"min_docs": 1500, "source": "reindex"},
     "canonical": {"min_docs": 3000, "source": "canonical_pipeline"},
+    # Legacy Qdrant aliases folded into `knowledge` with origin filters.
     "context": {"min_docs": 400, "source": "reindex"},
     "semantic_memory": {"min_docs": 150, "source": "memory_store"},
     "obsidian": {"min_docs": 900, "source": "obsidian_sync"},
@@ -102,6 +104,8 @@ try:
     from config import EMBED_MODEL_VERSION
 except ImportError:
     EMBED_MODEL_VERSION = "multilingual-e5-large-instruct:v1"
+
+log = logging.getLogger("brain.healthcheck")
 
 
 # Collections small + stable enough that per-ID shrinkage diffs are useful.
@@ -155,7 +159,10 @@ def get_collection_counts() -> dict[str, int | str]:
         return {"_error": str(e)}
 
     counts: dict[str, int] = {}
-    for name in names:
+    # Qdrant migration collapsed legacy `context` and `patterns` into
+    # `knowledge` aliases. They will not appear in list_collections(), but
+    # store.count(alias) still returns the filtered count.
+    for name in sorted(set(names) | set(MONITORED_COLLECTIONS)):
         try:
             counts[name] = store.count(name)
         except Exception:
@@ -228,10 +235,11 @@ def recent_failures(hours: int = 24) -> list[dict]:
                     ts = ts.replace(tzinfo=UTC)
                 if ts >= cutoff:
                     out.append(entry)
-            except Exception:
+            except Exception as exc:
+                log.debug("failed to parse failure log line: %s", exc)
                 continue
-    except Exception:
-        pass
+    except Exception as exc:
+        log.debug("failed to read failure log: %s", exc)
     return out
 
 
@@ -254,10 +262,12 @@ def check_fda_regression() -> list[str]:
 
 # ── MinIO backup freshness (via S3 API, not `mc`) ──────
 def latest_backup_age_hours() -> tuple[float | None, str]:
-    """Return (age_hours, reason). reason is 'ok' | 'boto_missing' | 'unreachable' | 'no_backups'.
+    """Return (age_hours, reason).
+
+    reason is 'ok' | 'boto_missing' | 'unreachable' | 'no_qdrant_backups'.
 
     Uses _minio.s3_client() to query MinIO via boto3. Parses LastModified on the
-    newest chroma-backup-*.tar.gz object — does NOT rely on filename parsing.
+    newest Qdrant backup object — does NOT rely on filename parsing.
     """
     try:
         from _minio import s3_client
@@ -265,12 +275,12 @@ def latest_backup_age_hours() -> tuple[float | None, str]:
         return None, f"boto_missing: {e}"
     try:
         s3 = s3_client()
-        resp = s3.list_objects_v2(Bucket=MINIO_BUCKET, Prefix="chroma-backup-")
+        resp = s3.list_objects_v2(Bucket=MINIO_BUCKET, Prefix="qdrant-backup-")
     except Exception as e:
         return None, f"unreachable: {e}"
     tarballs = [o for o in resp.get("Contents", []) if o["Key"].endswith(".tar.gz")]
     if not tarballs:
-        return None, "no_backups"
+        return None, "no_qdrant_backups"
     newest = max(tarballs, key=lambda o: o["LastModified"])
     age = (datetime.now(UTC) - newest["LastModified"]).total_seconds() / 3600
     return age, "ok"
@@ -293,7 +303,7 @@ def check_ollama_embedding() -> list[str]:
     import urllib.request
 
     try:
-        req = urllib.request.Request(
+        req = urllib.request.Request(  # noqa: S310
             f"{OLLAMA_URL}/api/embeddings",
             data=json.dumps(
                 {
@@ -304,7 +314,7 @@ def check_ollama_embedding() -> list[str]:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=20) as resp:
+        with urllib.request.urlopen(req, timeout=20) as resp:  # noqa: S310
             body = json.loads(resp.read())
         emb = body.get("embedding") or []
         if not emb or len(emb) < 100:
@@ -364,11 +374,11 @@ def check_recall_vector() -> list[str]:
     if not secret:
         return []  # can't probe without bearer
     try:
-        req = urllib.request.Request(
+        req = urllib.request.Request(  # noqa: S310
             f"{BRAIN_URL}/recall?q=homelab&n=3",
             headers={"Authorization": f"Bearer {secret}"},
         )
-        with urllib.request.urlopen(req, timeout=20) as resp:
+        with urllib.request.urlopen(req, timeout=20) as resp:  # noqa: S310
             body = json.loads(resp.read())
         if not body.get("results"):
             return ["⚠️ /recall returned 0 results for 'homelab' probe"]
@@ -387,11 +397,11 @@ def check_recall_vector_temporal() -> list[str]:
     today = datetime.now(UTC).strftime("%Y-%m-%d")
     week_ago = (datetime.now(UTC) - timedelta(days=7)).strftime("%Y-%m-%d")
     try:
-        req = urllib.request.Request(
+        req = urllib.request.Request(  # noqa: S310
             f"{BRAIN_URL}/recall?q=homelab&since={week_ago}&until={today}&n=3",
             headers={"Authorization": f"Bearer {secret}"},
         )
-        with urllib.request.urlopen(req, timeout=20):
+        with urllib.request.urlopen(req, timeout=20):  # noqa: S310
             pass
         return []
     except urllib.error.HTTPError as e:
@@ -414,7 +424,7 @@ def check_content_integrity() -> list[str]:
     issues = []
     try:
         sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "brain_core"))
-        from vector_store import get_vector_store  # noqa: E402
+        from vector_store import get_vector_store
 
         store = get_vector_store()
     except Exception as e:
@@ -460,14 +470,14 @@ def check_eval_regression() -> list[str]:
     if not EVAL_HISTORY.exists():
         return issues
     try:
-        lines = [l.strip() for l in EVAL_HISTORY.read_text().splitlines() if l.strip()]
+        lines = [line.strip() for line in EVAL_HISTORY.read_text().splitlines() if line.strip()]
         if not lines:
             return issues
-        recent = [json.loads(l) for l in lines[-5:]]
+        recent = [json.loads(line) for line in lines[-5:]]
         # Last entry check
         latest = recent[-1]
         hit5 = latest.get("hit_content@5") or latest.get("metrics", {}).get("hit_content@5", 100)
-        if isinstance(hit5, (int, float)) and hit5 < 85:
+        if isinstance(hit5, int | float) and hit5 < 85:
             issues.append(f"❌ Eval hit_content@5 = {hit5:.1f}% (floor 85%)")
         # Consecutive regression check
         regressions = 0
@@ -671,8 +681,8 @@ def main() -> None:
                     issues.append(
                         f"⚠️ Adapter `{adapter}` stale — last run {age_hours:.0f}h ago (max: {max_hours}h)"
                     )
-        except Exception:
-            pass
+        except Exception as exc:
+            log.debug("adapter staleness check failed for %s: %s", adapter, exc)
 
     # 6. Job staleness via scheduler_history.db
     stale_jobs = check_job_staleness()
@@ -691,8 +701,8 @@ def main() -> None:
             issues.append(f"❌ MinIO check: boto3 import failed ({reason}) — check BRAIN_PYTHON")
         elif reason == "unreachable":
             issues.append(f"❌ MinIO unreachable: {reason}")
-        elif reason == "no_backups":
-            issues.append(f"❌ MinIO bucket `{MINIO_BUCKET}` has no chroma backups")
+        elif reason == "no_qdrant_backups":
+            issues.append(f"❌ MinIO bucket `{MINIO_BUCKET}` has no vector-store backups")
         else:
             issues.append(f"⚠️ MinIO backup check failed: {reason}")
     elif age > BACKUP_STALENESS_HOURS:
@@ -742,15 +752,15 @@ def main() -> None:
         day_path = DAILY_REPORT_DIR / f"healthcheck-{datetime.now(UTC).strftime('%Y-%m-%d')}.json"
         day_path.write_text(json.dumps(report, indent=2))
     except Exception as e:
-        print(f"WARNING: failed to write daily report: {e}")
+        sys.stdout.write(f"WARNING: failed to write daily report: {e}\n")
 
     # Print summary
-    print(f"Healthcheck — {report['timestamp']}")
-    print(f"Counts: {counts}")
-    print(f"Disk free: {free_gb:.1f} GB")
-    print(f"Issues: {len(issues)}")
+    sys.stdout.write(f"Healthcheck — {report['timestamp']}\n")
+    sys.stdout.write(f"Counts: {counts}\n")
+    sys.stdout.write(f"Disk free: {free_gb:.1f} GB\n")
+    sys.stdout.write(f"Issues: {len(issues)}\n")
     for i in issues:
-        print(f"  {i}")
+        sys.stdout.write(f"  {i}\n")
 
     # Telegram
     if args.dry_run:

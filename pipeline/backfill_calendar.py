@@ -1,5 +1,5 @@
 #!/opt/homebrew/bin/python3
-"""Backfill calendar events from ChromaDB into Neo4j Event nodes.
+"""Backfill calendar events from the vector store into Neo4j Event nodes.
 
 Creates Event nodes with date properties for temporal graph queries.
 

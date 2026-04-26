@@ -18,7 +18,7 @@ from common import (
 )
 
 DOMAIN_KEYWORDS = {
-    "infra": ["deploy", "server", "docker", "nginx", "cloudflare", "chromadb", "ollama", "infra"],
+    "infra": ["deploy", "server", "docker", "nginx", "cloudflare", "qdrant", "ollama", "infra"],
     "decisions": ["decide", "decision", "deprecated", "policy", "workflow", "architecture"],
     "incidents": ["incident", "error", "failed", "failure", "outage", "stale", "bug"],
     "projects": ["project", "build", "feature", "implementation", "system", "memory"],

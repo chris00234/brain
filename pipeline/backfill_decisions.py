@@ -73,7 +73,7 @@ _HEADING_WORDS = frozenset(
 
 # Known tech entities to always capture
 _TECH_ENTITIES = re.compile(
-    r"\b(?:docker|nginx|chromadb|ollama|neo4j|cloudflare|openclaw|brain|ghost|minio|"
+    r"\b(?:docker|nginx|qdrant|ollama|neo4j|cloudflare|openclaw|brain|ghost|minio|"
     r"vaultwarden|searxng|nextjs|next\.js|fastapi|react|vite|typescript|python|"
     r"cloudflared|grafana|uptime.kuma|watchtower|couchdb|glance|orbstack|launchd)\b",
     re.I,
@@ -188,7 +188,7 @@ def backfill(apply: bool = False):
         "chris cho": ["chris", "chrischo", "wheogus98"],
         "nginx": ["reverse proxy", "nginx-proxy"],
         "mcc": ["chrischodev", "main web app"],
-        "chromadb": ["chroma", "vector db"],
+        "qdrant": ["vector db", "vector store"],
         "openclaw": ["oc", "multi-agent"],
         "brain": ["brain server", "brain api", "brain system"],
         "docker": ["container", "orbstack"],

@@ -26,7 +26,7 @@ NGINX_CONF_DIR = SERVER_DIR / "nginx" / "conf.d"
 
 # Native services (not in Docker)
 NATIVE_SERVICES = {
-    "chromadb": {"port": 8000, "host": "127.0.0.1"},
+    "qdrant": {"port": 6333, "host": "127.0.0.1"},
     "ollama": {"port": 11434, "host": "127.0.0.1"},
     "neo4j": {"port": 7687, "host": "127.0.0.1"},
     "brain-server": {"port": 8791, "host": "127.0.0.1"},
@@ -187,7 +187,7 @@ def backfill(apply: bool = False):
     # Docker services
     for compose_file in SERVER_DIR.rglob("docker-compose.yml"):
         if compose_file.parent == SERVER_DIR / "rag":
-            continue  # ChromaDB/Ollama are native now
+            continue  # legacy RAG compose is not the live native Qdrant/Ollama path
         for svc in parse_docker_compose(compose_file):
             all_services[svc["name"]] = svc
 

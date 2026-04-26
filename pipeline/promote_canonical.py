@@ -11,6 +11,7 @@ from common import (
     parse_markdown_frontmatter,
     slugify,
     utc_now,
+    warn_ontology_metadata,
     write_markdown_frontmatter,
 )
 
@@ -271,6 +272,8 @@ def main() -> int:
     if mention_count:
         print(f"  auto-linked {mention_count} entity mention(s) via relations[]")
 
+    warn_ontology_metadata(metadata, str(target))
+
     # Dedup: check if similar canonical note already exists
     existing = find_similar_canonical(metadata.get("title", ""), body)
     if existing and existing != target:
@@ -278,6 +281,7 @@ def main() -> int:
         ex_meta, ex_body = parse_markdown_frontmatter(existing)
         ex_meta["sources"] = list(set(ex_meta.get("sources", []) + metadata.get("sources", [])))
         ex_meta["updated_at"] = utc_now()
+        warn_ontology_metadata(ex_meta, str(existing))
         if len(body) > len(ex_body):
             ex_body = body
         write_markdown_frontmatter(existing, ex_meta, ex_body)
@@ -329,8 +333,6 @@ def main() -> int:
         from vector_store import get_vector_store as _get_store_pc
 
         hyp_title = metadata.get("title", "")[:100]
-        hyp_body = body[:500]
-        hyp_seed = f"{hyp_title}\n\n{hyp_body}"
         # The hyde module's generate_hypothetical already returns a cached
         # single hypothetical string per query. Build 3 different "seeds"
         # so we get 3 diverse hypothetical queries.

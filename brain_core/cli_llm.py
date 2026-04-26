@@ -38,7 +38,9 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import os
 import re
+import signal
 import sqlite3
 import subprocess
 import time
@@ -64,6 +66,32 @@ FALLBACK_CHAIN: list[tuple[str, str, str]] = [
     ("codex", "gpt-5.3-codex-spark", "ChatGPT Pro lightweight — quota fallback"),
     ("claude", "sonnet", "Claude Max x20 — provider fallback"),
 ]
+
+
+def _run_cli_process(cmd: list[str], timeout: int) -> subprocess.CompletedProcess[str]:
+    """Run a subscription CLI with a process-group timeout.
+
+    `subprocess.run(..., timeout=...)` kills only the direct child. Codex/Claude
+    CLIs can leave helper descendants behind when the parent wedges, which is
+    how stale "brain synthesis drive" processes survived for hours. A new
+    session lets us terminate the whole group deterministically.
+    """
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        stdout, stderr = proc.communicate()
+        raise subprocess.TimeoutExpired(cmd, timeout, output=stdout, stderr=stderr) from exc
+    return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+
 
 # Rate-limit / quota-exhausted patterns in stderr/stdout
 _QUOTA_PATTERNS = [
@@ -308,7 +336,7 @@ def _single_codex(prompt: str, model: str, timeout: int) -> CliResult:
     t0 = time.time()
     cmd = [CODEX_BIN, "exec", "--skip-git-repo-check", "-m", model, prompt]
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        proc = _run_cli_process(cmd, timeout=timeout)
     except subprocess.TimeoutExpired:
         dur = int((time.time() - t0) * 1000)
         _record_usage("codex", model, 0, dur, False)
@@ -343,7 +371,7 @@ def _single_claude(prompt: str, model: str, timeout: int) -> CliResult:
     t0 = time.time()
     cmd = [CLAUDE_BIN, "-p", prompt, "--model", model, "--no-session-persistence"]
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        proc = _run_cli_process(cmd, timeout=timeout)
     except subprocess.TimeoutExpired:
         dur = int((time.time() - t0) * 1000)
         _record_usage("claude", model, 0, dur, False)

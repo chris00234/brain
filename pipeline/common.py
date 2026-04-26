@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
+import sys
 from collections import defaultdict
 from datetime import UTC, datetime
 from pathlib import Path
@@ -16,6 +18,8 @@ except ImportError:
     ROOT = Path("/Users/chrischo/server/knowledge")
 SCHEMA_DIR = ROOT / "schemas"
 SCHEMAS_DIR = SCHEMA_DIR
+BRAIN_CORE_DIR = Path(__file__).resolve().parents[1] / "brain_core"
+log = logging.getLogger("brain.pipeline.common")
 FRONTMATTER_PREFIXES = ("---json", "---")
 TOKEN_RE = re.compile(r"[a-z0-9_\-]{2,}")
 _KOREAN_RE = re.compile(r"[가-힣]{2,}")
@@ -73,6 +77,30 @@ def parse_markdown_frontmatter(path: Path) -> tuple[dict[str, Any], str]:
 def write_markdown_frontmatter(path: Path, metadata: dict[str, Any], body: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(render_note(metadata, body))
+
+
+def ontology_metadata_warning_summary(metadata: dict[str, Any], origin: str = "") -> dict[str, int]:
+    """Warning-only ontology validation for canonical/distilled frontmatter.
+
+    This intentionally delegates all semantics to brain_core.ontology so the
+    canonical pipeline does not grow a second relation vocabulary.
+    """
+    try:
+        if str(BRAIN_CORE_DIR) not in sys.path:
+            sys.path.insert(0, str(BRAIN_CORE_DIR))
+        from ontology import issue_summary, validate_metadata_relations
+    except Exception as exc:
+        log.debug("ontology metadata validation unavailable: %s", exc)
+        return {}
+    issues = [issue for issue in validate_metadata_relations(metadata, origin=origin) if issue.severity != "info"]
+    return issue_summary(issues)
+
+
+def warn_ontology_metadata(metadata: dict[str, Any], origin: str = "") -> dict[str, int]:
+    summary = ontology_metadata_warning_summary(metadata, origin)
+    if summary:
+        log.warning("ontology metadata validation warnings origin=%s summary=%s", origin, summary)
+    return summary
 
 
 def validate_schema(schema: dict[str, Any], payload: Any, path: str = "root") -> None:
