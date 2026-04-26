@@ -38,9 +38,7 @@ log = logging.getLogger("brain.crag")
 # threads running when the next call created another executor. Under
 # concurrent /recall/v2 traffic threads accumulated. Single shared
 # module-level pool reuses the same two workers across all calls.
-_expand_pool = concurrent.futures.ThreadPoolExecutor(
-    max_workers=2, thread_name_prefix="crag_expand"
-)
+_expand_pool = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="crag_expand")
 atexit.register(_expand_pool.shutdown, wait=False)
 
 

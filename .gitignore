@@ -7,6 +7,7 @@ __pycache__/
 logs/
 qdrant-data/
 qdrant-backups/
+qdrant-snapshots/
 models/
 .qdrant-initialized
 brain-ui/node_modules/
@@ -14,3 +15,8 @@ brain-ui/dist/
 .DS_Store
 autonomy.db
 brain.db
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+# .omx is Codex workspace state — operational artifacts, not source
+.omx/

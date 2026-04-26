@@ -33,7 +33,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 try:
     import brain_config_store
     from breakers import peek_breaker, try_claim_probe
-    from config import AUTONOMY_DB
     from default_levels import (
         DEFAULT_LEVELS,
         DENY_PREFIXES,
@@ -41,6 +40,8 @@ try:
         QUIET_HOURS,
         notify_lag_for,
     )
+
+    from config import AUTONOMY_DB
 except ImportError:
     AUTONOMY_DB = Path("/Users/chrischo/server/brain/logs/autonomy.db")
     DEFAULT_LEVELS = {}
@@ -284,8 +285,7 @@ def _ensure_audit_schema() -> None:
                 """
             )
             conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_autonomy_decisions_ts "
-                "ON autonomy_decisions(ts_utc DESC)"
+                "CREATE INDEX IF NOT EXISTS idx_autonomy_decisions_ts " "ON autonomy_decisions(ts_utc DESC)"
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_autonomy_decisions_kind "

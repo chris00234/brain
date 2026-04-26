@@ -44,9 +44,9 @@ SEND_TIMEOUT_S = 20
 # window. Critical alerts have shorter windows than warnings.
 _RATE_LIMITS = {
     "critical": 300.0,  # 5 min
-    "urgent": 600.0,    # 10 min (brain_loop.URGENT)
-    "warn": 1800.0,     # 30 min
-    "info": 7200.0,     # 2 hours
+    "urgent": 600.0,  # 10 min (brain_loop.URGENT)
+    "warn": 1800.0,  # 30 min
+    "info": 7200.0,  # 2 hours
 }
 _last_sent: dict[tuple[str, str], float] = {}
 _lock = threading.Lock()
