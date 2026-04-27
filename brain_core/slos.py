@@ -257,6 +257,21 @@ SLOS: dict[str, SLO] = {
         metric_unit="hours",
         consecutive_breaches_required=1,
     ),
+    # 2026-04-26: brain server RSS leak detector. Pre-fix the long-running
+    # server.py grew to ~4 GB after 17h because torch.mps.empty_cache() was
+    # gated behind BRAIN_CE_MPS_EMPTY_CACHE=true (default false), so PyTorch's
+    # MPS allocator held GPU scratch buffers indefinitely. Target 3072 MB
+    # (~2 GB physical footprint) gives steady-state headroom — post-fix the
+    # process should sit at ~1.3 GB. Breaches signal the leak returned or a
+    # new accumulator landed.
+    "brain_server_rss_mb": SLO(
+        name="brain_server_rss_mb",
+        description="Brain FastAPI server RSS in MB (ps-reported, includes mmap overhead). Target 3072 = ~2 GB physical footprint. Breaches signal the MPS empty_cache leak returned or a new in-process accumulator was introduced.",
+        target=3072.0,
+        severity="warning",
+        metric_unit="MB",
+        consecutive_breaches_required=2,
+    ),
 }
 
 
@@ -748,6 +763,47 @@ def _measure_agent_session_max_mb() -> float:
         return 0.0
 
 
+def _measure_brain_server_rss_mb() -> float:
+    """RSS in MB of the brain server process.
+
+    In-process: uses resource.getrusage which is free and accurate.
+    Out-of-process (e.g. CLI invocation of slos.py): falls back to
+    pgrep+ps so the standalone runner still produces a meaningful number.
+
+    Returns 0.0 on failure so the SLO stays silent rather than firing
+    a spurious breach at 0 < 3072.
+    """
+    try:
+        import resource
+
+        in_brain_process = "brain/server.py" in " ".join(sys.argv)
+        if in_brain_process:
+            ru = resource.getrusage(resource.RUSAGE_SELF)
+            return round(ru.ru_maxrss / (1024.0 * 1024.0), 1)
+        import subprocess
+
+        pid_out = subprocess.run(
+            ["pgrep", "-f", "brain/server.py"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        pid = pid_out.stdout.strip().split("\n")[0]
+        if not pid:
+            return 0.0
+        rss_out = subprocess.run(
+            ["ps", "-o", "rss=", "-p", pid],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        kb = int(rss_out.stdout.strip())
+        return round(kb / 1024.0, 1)
+    except Exception as exc:
+        log.warning("brain_server_rss_mb measurement failed: %s", exc)
+        return 0.0
+
+
 _MEASUREMENTS: dict[str, Callable[[], float]] = {
     "recall_v2_p95_ms": _measure_recall_v2_p95,
     "recall_v2_content_hit_pct": _measure_recall_v2_content_hit,
@@ -768,6 +824,7 @@ _MEASUREMENTS: dict[str, Callable[[], float]] = {
     "self_eval_drift_7d": _measure_self_eval_drift_7d,
     "qdrant_backup_age_hours": _measure_qdrant_backup_age_hours,
     "neo4j_backup_age_hours": _measure_neo4j_backup_age_hours,
+    "brain_server_rss_mb": _measure_brain_server_rss_mb,
 }
 
 
