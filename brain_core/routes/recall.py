@@ -525,6 +525,7 @@ def recall_v2(
     include_obsolete: bool = Query(default=False),
     as_of: str | None = Query(default=None, max_length=20),
     canonical_first: bool = Query(default=False),
+    exclude_already_used: bool = Query(default=False),
     background: BackgroundTasks = None,
 ) -> RecallV2Response:
     """Enhanced recall with HyDE, query expansion, reranking, time decay.
@@ -568,6 +569,7 @@ def recall_v2(
         f"{q}:{n}:{hyde}:{expand}:{rerank}:{decay}:{iterative}:{collection}:"
         f"{domain}:{since}:{until}:{entity}:{source_type}:"
         f"{include_history}:{include_obsolete}:{as_of}:{canonical_first}:"
+        f"excl={exclude_already_used}:"
         f"sess={_sess_hdr}:agent={_agent_hdr}:emb={_adapter_marker}"
     )
     cached = _recall_cache_get(cache_key)
@@ -759,6 +761,72 @@ def recall_v2(
             r["score"] = float(r.get("score", 0)) + 35.0
 
     fused.sort(key=lambda r: r.get("score", 0), reverse=True)
+
+    # Phase G3: opt-in graph-constraint exclusion. When the caller flags
+    # exclude_already_used=true (typical: Sage doing tool-recommendation
+    # research), drop semantic_memory results whose extracted entities
+    # overlap the names returned by
+    # `(chris)-[:RELATES_TO {relationship:'uses'}]->(t)` in Neo4j.
+    #
+    # Why entity-link join (not raw text match): names like "react" (verb),
+    # "ghost" (idiom), "neo4j" (in unrelated graph-DB chatter) false-positive
+    # on word-boundary regex. The atom_entity table only links an atom to
+    # an entity when entity_graph.extract_and_store_entities (Sage LLM)
+    # judged it a real reference — that's the precision boundary we want.
+    #
+    # Other collections (canonical/obsidian/experience/...) don't run
+    # through the brain.db entity extractor, so we leave them unfiltered
+    # rather than fall back to a noisy regex.
+    if exclude_already_used:
+        t_excl = time.time()
+        excluded_count = 0
+        try:
+            from entity_graph import get_excluded_entities
+
+            excluded_names = get_excluded_entities("chris", "uses")
+        except Exception:
+            excluded_names = set()
+
+        if excluded_names:
+            try:
+                from atoms_store import _conn as _atoms_conn
+
+                # Recall returns IDs in two forms: legacy /recall keeps the
+                # collection prefix (e.g. "semantic_memory:abc"), /recall/v2
+                # strips it down to bare hex. atoms.chroma_id stores the
+                # full prefixed form. Match both with a bare-hex synonym so
+                # callers from either path get filtered.
+                result_ids = [r.get("id") for r in fused if r.get("id")]
+                excluded_lower = [n.lower() for n in excluded_names if n]
+                if result_ids and excluded_lower:
+                    rid_ph = ",".join("?" for _ in result_ids)
+                    ex_ph = ",".join("?" for _ in excluded_lower)
+                    with _atoms_conn() as _c:
+                        rows = _c.execute(
+                            "SELECT DISTINCT atoms.chroma_id "
+                            "FROM atoms "
+                            "JOIN atom_entity ON atom_entity.atom_id = atoms.id "
+                            "JOIN entities ON entities.id = atom_entity.entity_id "
+                            f"WHERE LOWER(entities.name) IN ({ex_ph}) "
+                            f"AND (atoms.chroma_id IN ({rid_ph}) OR "
+                            f"     SUBSTR(atoms.chroma_id, INSTR(atoms.chroma_id, ':') + 1) IN ({rid_ph}))",
+                            excluded_lower + result_ids + result_ids,
+                        ).fetchall()
+                    drop_set: set[str] = set()
+                    for row in rows:
+                        full = row["chroma_id"]
+                        drop_set.add(full)
+                        if ":" in full:
+                            drop_set.add(full.split(":", 1)[1])
+                    if drop_set:
+                        before = len(fused)
+                        fused = [r for r in fused if r.get("id") not in drop_set]
+                        excluded_count = before - len(fused)
+            except Exception as exc:
+                log.warning("exclude_already_used filter failed: %s", exc)
+
+        timing["exclude_already_used_ms"] = int((time.time() - t_excl) * 1000)
+        timing["exclude_already_used_dropped"] = excluded_count
 
     # Content enrichment pass: for file-backed top-N results, replace the
     # per-chunk content snippet with a longer excerpt read directly from the

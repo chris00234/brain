@@ -312,6 +312,58 @@ _expand_cache_lock = _threading.Lock()
 _EXPAND_CACHE_TTL = 300.0  # 5 minutes
 _EXPAND_CACHE_MAX = 256
 
+# Phase G3: speaker-relation exclusion set cache. Powers the
+# /recall/v2?exclude_already_used=true filter so tool-recommendation queries
+# can drop candidates that Chris already (uses|owns|installed). Keyed
+# (speaker, relationship); 5 min TTL matches _expand_cache.
+_excluded_cache: _OrderedDict[str, tuple[float, set[str]]] = _OrderedDict()
+_excluded_cache_lock = _threading.Lock()
+_EXCLUDED_CACHE_TTL = 300.0
+_EXCLUDED_CACHE_MAX = 64
+
+
+def get_excluded_entities(speaker: str = "chris", relationship: str = "uses") -> set[str]:
+    """Phase G3: canonical names where (speaker)-[:RELATES_TO {relationship}]->(target).
+
+    Used by /recall/v2?exclude_already_used=true to filter recommendations
+    against the graph of facts the brain already knows about Chris's stack.
+    Returns lowercased names so callers can do case-insensitive comparison
+    without re-normalizing per-result.
+
+    Falls back to an empty set on Neo4j unavailable or query error — the
+    feature is opt-in, so empty set just means "no filter applied".
+    """
+    cache_key = f"{(speaker or '').lower()}:{(relationship or '').lower()}"
+    if not cache_key.strip(":"):
+        return set()
+    now = _time.time()
+    with _excluded_cache_lock:
+        cached = _excluded_cache.get(cache_key)
+        if cached and (now - cached[0]) < _EXCLUDED_CACHE_TTL:
+            return set(cached[1])
+
+    result: set[str] = set()
+    if _use_neo4j():
+        try:
+            from neo4j_client import run_query
+
+            rows = run_query(
+                "MATCH (s:Entity)-[r:RELATES_TO {relationship: $rel}]->(t:Entity) "
+                "WHERE toLower(s.name) = toLower($speaker) "
+                "RETURN DISTINCT toLower(t.name) AS name",
+                {"speaker": speaker, "rel": relationship},
+            )
+            result = {row["name"] for row in rows if row.get("name")}
+        except Exception as exc:
+            log.debug("get_excluded_entities cypher failed: %s", exc)
+
+    with _excluded_cache_lock:
+        _excluded_cache[cache_key] = (now, result)
+        _excluded_cache.move_to_end(cache_key)
+        if len(_excluded_cache) > _EXCLUDED_CACHE_MAX:
+            _excluded_cache.popitem(last=False)
+    return set(result)
+
 
 def _ontology_validate_extracted_relations(entities: list, relations: list, origin: str) -> dict[str, int]:
     """Warning-only validation for LLM-extracted graph edges.

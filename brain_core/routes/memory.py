@@ -513,11 +513,21 @@ def create_memory(request: Request, req: MemoryCreateRequest) -> MemoryEntry:
         raise HTTPException(status_code=502, detail=_safe_http_detail("vector upsert", e))
 
     _metrics_buf.record_memory_write()
-    # Fire hook (Phase 6A)
+    # Fire hook (Phase 6A; extended 2026-04-27 with content/confidence/agent
+    # so hooks don't need a brain.db lookup — the atom mirror happens AFTER
+    # this fire, so brain.db lookups would race the mirror write).
     try:
         import hooks
 
-        hooks.fire("on_memory_stored", mem_id=mem_id, category=req.category, operation=operation)
+        hooks.fire(
+            "on_memory_stored",
+            mem_id=mem_id,
+            category=req.category,
+            operation=operation,
+            content=req.content,
+            confidence=float(req.confidence),
+            agent=req.agent,
+        )
     except Exception:
         pass
 
@@ -618,6 +628,19 @@ def create_memory(request: Request, req: MemoryCreateRequest) -> MemoryEntry:
                     }
                     for c in contradictions
                 ]
+                # Phase G2: pending (unresolved) contradiction → mark new atom
+                # provisional so search_unified hides it from retrieval until
+                # /memory/contradictions/{id}/resolve runs. Auto-resolved cases
+                # (keep_new / keep_old / dismiss / merge inside check_contradictions)
+                # never carry review_state="pending", so they bypass this gate.
+                if any(c.get("review_state") == "pending" for c in contradictions):
+                    try:
+                        from brain_core.atoms_store import update_provisional_flag
+
+                        if update_provisional_flag(mem_id, True):
+                            response_meta["provisional"] = True
+                    except Exception:
+                        pass
         except Exception:
             pass
 
@@ -917,10 +940,25 @@ def create_memory_batch(request: Request, req: MemoryBatchRequest) -> dict:
                 continue
 
     if batch_contradictions:
+        # Phase G2: same gate as the single /memory path — pending contradictions
+        # mark the new atom provisional so it stays out of retrieval until a
+        # resolve action runs. Auto-resolved (non-pending) cases are untouched.
+        try:
+            from brain_core.atoms_store import update_provisional_flag as _upf
+        except Exception:
+            _upf = None
         for r in results:
             rid = r.get("id")
             if rid in batch_contradictions:
                 r["contradictions"] = batch_contradictions[rid]
+                if _upf is not None and any(
+                    c.get("review_state") == "pending" for c in batch_contradictions[rid]
+                ):
+                    try:
+                        if _upf(rid, True):
+                            r["provisional"] = True
+                    except Exception:
+                        pass
 
     return {
         "stored": len(ids_to_upsert),
@@ -1103,6 +1141,14 @@ def resolve_contradiction(
             store.update_payload(sem_col, ids=[new_id], patch={"supersedes": old_id})
         except Exception as e:
             log.warning("contradiction_resolution_error", phase="supersede", error=str(e))
+        # Phase G2: winner is no longer provisional — make it visible to recall.
+        if new_id:
+            try:
+                from brain_core.atoms_store import update_provisional_flag
+
+                update_provisional_flag(new_id, False)
+            except Exception:
+                pass
     elif req.action == "keep_old" and new_id:
         try:
             store.delete(sem_col, ids=[new_id])
@@ -1148,6 +1194,15 @@ def resolve_contradiction(
             log.warning("contradiction_resolution_error", error=str(e))
             raise HTTPException(status_code=500, detail=f"resolution failed: {e}")
     # both_true / dismiss: leave both entries, just resolve the contradiction record
+    if req.action in ("both_true", "dismiss") and new_id:
+        # Phase G2: contradiction declared not blocking — clear the provisional
+        # gate on the new atom so search_unified surfaces it again.
+        try:
+            from brain_core.atoms_store import update_provisional_flag
+
+            update_provisional_flag(new_id, False)
+        except Exception:
+            pass
 
     # Audit trail
     try:
