@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -165,6 +166,99 @@ def test_drain_abandons_past_ttl_entries(monkeypatch):
     assert result["abandoned"] >= 1
     assert called == [], "abandoned entries should not invoke handler"
     assert llm_backlog.pending_count() == 0
+
+
+def test_drain_abandons_stale_session_summary_distill():
+    rid = llm_backlog.enqueue("distill", {"purpose": "session_summary", "prompt": "summarize me"})
+    assert rid is not None
+
+    import sqlite3
+
+    old_ts = "2020-01-01T00:00:00+00:00"
+    with sqlite3.connect(str(llm_backlog.AUTONOMY_DB)) as conn:
+        conn.execute("UPDATE llm_backlog SET created_at=? WHERE id=?", (old_ts, rid))
+        conn.commit()
+
+    called = []
+    llm_backlog.register_handler("distill", lambda payload: called.append(payload) or True)
+    llm_backlog._handlers_wired = True
+
+    result = llm_backlog.drain(abort_on_breaker=False)
+
+    assert result["abandoned"] >= 1
+    assert called == []
+    assert llm_backlog.pending_count() == 0
+
+
+def test_drain_bounds_large_prompt_before_handler(monkeypatch):
+    monkeypatch.setattr(llm_backlog, "MAX_PROMPT_CHARS", 100)
+    monkeypatch.setattr(llm_backlog, "PROMPT_HEAD_CHARS", 30)
+    captured = []
+    huge_prompt = "a" * 80 + "TAIL" * 30
+
+    def _handler(payload):
+        captured.append(payload)
+        return True
+
+    llm_backlog.register_handler("distill", _handler)
+    llm_backlog._handlers_wired = True
+    llm_backlog.enqueue("distill", {"purpose": "other", "prompt": huge_prompt, "timeout": 90})
+
+    result = llm_backlog.drain(abort_on_breaker=False, wall_time_s=60)
+
+    assert result["drained"] == 1
+    assert len(captured[0]["prompt"]) < len(huge_prompt)
+    assert "backlog prompt truncated" in captured[0]["prompt"]
+    assert captured[0]["prompt"].endswith("TAIL" * 17)
+    assert captured[0]["max_backends"] == llm_backlog.DEFAULT_MAX_BACKENDS
+
+
+def test_default_telegram_handler_uses_direct_alert_not_llm(monkeypatch):
+    sent = []
+
+    def _send_chris_telegram(body, source, severity, *, bypass_rate_limit, queue_on_failure):
+        sent.append(
+            {
+                "body": body,
+                "source": source,
+                "severity": severity,
+                "bypass_rate_limit": bypass_rate_limit,
+                "queue_on_failure": queue_on_failure,
+            }
+        )
+        return True
+
+    def _llm_dispatch_should_not_run(*_args, **_kwargs):
+        raise AssertionError("telegram backlog replay must not use cli_llm.dispatch")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "telegram_alert",
+        SimpleNamespace(send_chris_telegram=_send_chris_telegram),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "cli_llm",
+        SimpleNamespace(dispatch=_llm_dispatch_should_not_run),
+    )
+
+    llm_backlog.enqueue(
+        "telegram",
+        {"body": "alert", "source": "brain_loop", "severity": "urgent"},
+    )
+
+    result = llm_backlog.drain(abort_on_breaker=False)
+
+    assert result["drained"] == 1
+    assert sent == [
+        {
+            "body": "[DELAYED URGENT] alert",
+            "source": "brain_loop",
+            "severity": "urgent",
+            "bypass_rate_limit": True,
+            "queue_on_failure": False,
+        }
+    ]
 
 
 # ── Stats + helpers ───────────────────────────────────────

@@ -80,6 +80,37 @@ def test_pretool_nudge_sends_agent_session_and_tool_context(tmp_path: Path):
     assert "tool:Read" in decoded
 
 
+def test_pretool_nudge_skips_repo_plumbing_search_commands(tmp_path: Path):
+    args_file = tmp_path / "curl_args.txt"
+    env = os.environ.copy()
+    env.update(
+        {
+            "HOME": str(_home_with_secret(tmp_path)),
+            "PATH": f"{_fake_curl(tmp_path)}:{env['PATH']}",
+            "CURL_ARGS_FILE": str(args_file),
+            "BRAIN_AGENT": "codex",
+        }
+    )
+    payload = {
+        "tool_name": "Bash",
+        "tool_input": {"command": 'rg -n "active_recall|recall/active" brain_core tests -S'},
+        "session_id": "hook-session",
+        "cwd": str(ROOT),
+    }
+
+    result = subprocess.run(
+        ["bash", str(ROOT / "cli" / "pretool_brain_nudge.sh")],
+        input=json.dumps(payload),
+        text=True,
+        capture_output=True,
+        env=env,
+        check=True,
+    )
+
+    assert result.stdout == ""
+    assert not args_file.exists()
+
+
 def test_pretool_enforce_override_audits_with_agent(tmp_path: Path):
     args_file = tmp_path / "curl_args.txt"
     env = os.environ.copy()
@@ -148,6 +179,7 @@ def test_codex_boot_suppresses_empty_active_recall(tmp_path: Path):
             "HOME": str(_home_with_secret(tmp_path)),
             "PATH": f"{_fake_curl(tmp_path)}:{env['PATH']}",
             "CURL_ARGS_FILE": str(args_file),
+            "BRAIN_CODEX_HEAVY_BOOT": "off",
         }
     )
     payload = {
@@ -190,6 +222,7 @@ def test_codex_boot_suppresses_raw_doorbell_when_active_recall_empty(tmp_path: P
             "PATH": f"{_fake_curl(tmp_path)}:{env['PATH']}",
             "CURL_ARGS_FILE": str(args_file),
             "FAKE_RECALL_ACTIVE_RESPONSE": '{"blocks":[]}',
+            "BRAIN_CODEX_HEAVY_BOOT": "off",
         }
     )
     payload = {"prompt": "no recall", "session_id": session_id, "cwd": str(ROOT)}

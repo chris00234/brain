@@ -29,7 +29,10 @@ def test_slo_count(slos_module):
     # + 1 neo4j_backup_age_hours (round-3 parity fix)
     # + 2 additional watchers (2026-04-23: boot_context_degraded_1h,
     #   self_eval_drift_7d)
-    assert len(slos_module.SLOS) == 19
+    # + 1 brain_server_rss_mb (2026-04-26: FastAPI process memory watcher)
+    # + 3 source-aware entry / alert reliability watchers
+    # + 1 backup_restore_drill_age_hours (restore-readiness watcher)
+    assert len(slos_module.SLOS) == 24
     assert "atoms_write_throughput_1h" in slos_module.SLOS
     assert "calibration_brier_drift_7d" in slos_module.SLOS
     assert "dispatch_failure_rate_1h" in slos_module.SLOS
@@ -39,6 +42,11 @@ def test_slo_count(slos_module):
     assert "logs_dir_total_mb" in slos_module.SLOS
     assert "qdrant_backup_age_hours" in slos_module.SLOS
     assert "neo4j_backup_age_hours" in slos_module.SLOS
+    assert "backup_restore_drill_age_hours" in slos_module.SLOS
+    assert "brain_server_rss_mb" in slos_module.SLOS
+    assert "entry_contract_missing_pct" in slos_module.SLOS
+    assert "telegram_backlog_pending_count" in slos_module.SLOS
+    assert "telegram_direct_health" in slos_module.SLOS
 
 
 def test_recall_v2_p95_lower_is_better(slos_module):
@@ -65,6 +73,14 @@ def test_breaker_open_count_zero_target(slos_module):
     slo = slos_module.SLOS["breaker_open_count"]
     assert slo.target == 0.0
     assert slos_module._is_breach(slo, 1.0) is True
+    assert slos_module._is_breach(slo, 0.0) is False
+
+
+def test_entry_contract_missing_pct_zero_target(slos_module):
+    slo = slos_module.SLOS["entry_contract_missing_pct"]
+    assert slo.target == 0.0
+    assert slo.severity == "critical"
+    assert slos_module._is_breach(slo, 0.1) is True
     assert slos_module._is_breach(slo, 0.0) is False
 
 
@@ -121,6 +137,36 @@ def test_alert_rate_limited(slos_module, monkeypatch):
     assert sent == [slo.name]
 
 
+def test_failed_alert_does_not_persist_rate_limit(slos_module, monkeypatch):
+    sent: list[str] = []
+    fake_store: dict[tuple[str, str], float] = {}
+    outcomes = iter([False, True])
+
+    def fake_alert(slo, actual):
+        sent.append(slo.name)
+        return next(outcomes)
+
+    monkeypatch.setattr(slos_module, "_alert_telegram", fake_alert)
+    monkeypatch.setattr(
+        slos_module,
+        "_load_last_alert_at",
+        lambda name, sev: fake_store.get((name, sev), 0.0),
+    )
+    monkeypatch.setattr(
+        slos_module,
+        "_save_last_alert_at",
+        lambda name, sev, ts: fake_store.__setitem__((name, sev), ts),
+    )
+    slo = slos_module.SLOS["breaker_open_count"]
+    result = slos_module.SLOResult(slo=slo, actual=2.0, breached=True, delta=2.0)
+
+    assert slos_module.maybe_alert(result) is False
+    assert fake_store == {}
+    assert slos_module.maybe_alert(result) is True
+    assert fake_store[(slo.name, slo.severity)] > 0
+    assert sent == [slo.name, slo.name]
+
+
 def test_run_returns_summary(slos_module, monkeypatch):
     for name in slos_module.SLOS:
         monkeypatch.setitem(slos_module._MEASUREMENTS, name, lambda: 0.0)
@@ -140,3 +186,78 @@ def test_run_returns_summary(slos_module, monkeypatch):
     assert summary["checked"] == len(slos_module.SLOS)
     assert "results" in summary
     assert len(summary["results"]) == len(slos_module.SLOS)
+
+
+def test_brain_server_rss_ignores_checker_commands(slos_module, monkeypatch, tmp_path):
+    """The RSS SLO must not accidentally measure the short-lived SLO runner.
+
+    `pgrep -f brain/server.py` matched checker command text and produced 0 MB
+    or the wrong pid. The process-table parser should require the exact
+    server.py path as a Python argv entry and choose the real server RSS.
+    """
+
+    brain_dir = tmp_path / "brain"
+    brain_dir.mkdir()
+    server_py = brain_dir / "server.py"
+    server_py.write_text("# fake server\n")
+    monkeypatch.setattr(slos_module, "BRAIN_DIR", brain_dir)
+    monkeypatch.setattr(slos_module.os, "getpid", lambda: 123)
+
+    class Completed:
+        def __init__(self, stdout: str):
+            self.stdout = stdout
+
+    def fake_run(cmd, **_kwargs):
+        assert cmd[:3] == ["ps", "-axo", "pid=,rss=,command="]
+        return Completed(
+            "\n".join(
+                [
+                    # SLO checker / shell command mentions server.py but is not the server.
+                    f" 123 100000 /bin/zsh -lc pgrep -f {server_py}",
+                    f" 456 200000 /opt/homebrew/bin/python -c import sys; print('{server_py}')",
+                    # Real FastAPI server process.
+                    f" 789 3145728 /opt/homebrew/bin/python {server_py}",
+                ]
+            )
+        )
+
+    monkeypatch.setattr(slos_module.subprocess, "run", fake_run)
+    assert slos_module._brain_server_rss_kb_from_process_table() == 3145728
+
+
+def test_brain_server_rss_uses_current_process_when_in_server(slos_module, monkeypatch, tmp_path):
+    brain_dir = tmp_path / "brain"
+    brain_dir.mkdir()
+    server_py = brain_dir / "server.py"
+    server_py.write_text("# fake server\n")
+    monkeypatch.setattr(slos_module, "BRAIN_DIR", brain_dir)
+    monkeypatch.setattr(slos_module.sys, "argv", [str(server_py)])
+    monkeypatch.setattr(slos_module.os, "getpid", lambda: 789)
+    monkeypatch.setattr(slos_module, "_rss_kb_for_pid", lambda pid: 2048 if pid == 789 else 0)
+    monkeypatch.setattr(slos_module, "_brain_server_rss_kb_from_process_table", lambda: 999999)
+
+    assert slos_module._measure_brain_server_rss_mb() == 2.0
+
+
+def test_run_invokes_direct_remediation_for_breaches(slos_module, monkeypatch):
+    slo = slos_module.SLOS["outbox_pending_count"]
+    monkeypatch.setattr(
+        slos_module,
+        "check_all",
+        lambda: [slos_module.SLOResult(slo=slo, actual=50.0, breached=True, delta=30.0)],
+    )
+    monkeypatch.setattr(slos_module, "maybe_alert", lambda _result: False)
+    calls: list[list[dict]] = []
+    fake_remediation = type(sys)("slo_remediation")
+    fake_remediation.apply_direct_remediations = lambda violations: calls.append(violations) or {
+        "actions": []
+    }
+    monkeypatch.setitem(sys.modules, "slo_remediation", fake_remediation)
+
+    out = slos_module.run()
+
+    assert out["breached"] == 1
+    assert calls == [
+        [{"slo": "outbox_pending_count", "current": 50.0, "target": 20.0, "severity": "warning"}]
+    ]
+    assert out["remediation"] == {"actions": []}

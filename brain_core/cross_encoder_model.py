@@ -185,17 +185,31 @@ def _evict_idle_models() -> list[str]:
             evicted.append(name)
     if evicted:
         gc.collect()
-        try:
-            import torch
-
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            elif _MPS_EMPTY_CACHE and hasattr(torch, "mps") and hasattr(torch.mps, "empty_cache"):
-                torch.mps.empty_cache()
-        except Exception as exc:
-            log.debug("cross-encoder cache cleanup failed: %s", exc)
+        _clear_accelerator_cache()
         log.info("evicted idle cross-encoder models: %s", ", ".join(evicted))
     return evicted
+
+
+def _clear_accelerator_cache() -> None:
+    """Release allocator scratch buffers after cross-encoder GPU work.
+
+    PyTorch MPS keeps temporary Metal buffers in its caching allocator. In the
+    long-running launchd FastAPI process, repeated CrossEncoder.predict calls
+    can make RSS climb for hours even when Python object caches are bounded.
+    Clearing after prediction is intentionally gated by
+    BRAIN_CE_MPS_EMPTY_CACHE so tests/CPU paths keep the old behavior while
+    production can trade a small latency cost for stable memory.
+    """
+
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        elif _MPS_EMPTY_CACHE and hasattr(torch, "mps") and hasattr(torch.mps, "empty_cache"):
+            torch.mps.empty_cache()
+    except Exception as exc:
+        log.debug("cross-encoder cache cleanup failed: %s", exc)
 
 
 def _select_name(query: str) -> str:
@@ -247,7 +261,10 @@ def score_pairs(query: str, docs: list[str]) -> list[float]:
         if miss_indices:
             model = _load_model(name)
             pairs = [(query, (d or "")[:1500]) for d in miss_docs]
-            raw = model.predict(pairs, show_progress_bar=False, convert_to_numpy=True)
+            try:
+                raw = model.predict(pairs, show_progress_bar=False, convert_to_numpy=True)
+            finally:
+                _clear_accelerator_cache()
             _model_last_used[name] = time.monotonic()
             fresh = [float(s) for s in raw]
             with _cache_lock:

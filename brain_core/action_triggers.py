@@ -78,6 +78,30 @@ DEFAULT_TRIGGERS = [
         "condition_config": {"category": "health", "severity": "warning"},
         "action_template": {"title": "Fix: {summary}", "agent": "ellie", "priority": 3, "confidence": 0.8},
     },
+    {
+        "name": "learned_playbook_info",
+        "description": "Run safe read-only playbook when Brain recognizes a repeated Chris pattern",
+        "condition_type": "proactive_insight",
+        "condition_config": {"category": "playbook", "severity": "info"},
+        "action_template": {
+            "title": "Execute proactive playbook: {summary}",
+            "agent": "sage",
+            "priority": 4,
+            "confidence": 0.8,
+        },
+    },
+    {
+        "name": "learned_playbook_warning",
+        "description": "Run higher-priority safe playbook after risky recurring event classes",
+        "condition_type": "proactive_insight",
+        "condition_config": {"category": "playbook", "severity": "warning"},
+        "action_template": {
+            "title": "Execute proactive playbook: {summary}",
+            "agent": "sage",
+            "priority": 3,
+            "confidence": 0.85,
+        },
+    },
 ]
 
 

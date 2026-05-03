@@ -19,9 +19,9 @@ Outputs:
            └ <service>-YYYYMMDD.tar.gz + .sha256 sidecar
   minio  : s3://rag-backups/docker-volumes/
 
-Retention: 7 days local (shorter than brain-db's 14d — these are small
-but numerous), 30+ days via MinIO (MinIO has no lifecycle policy set;
-relies on _rotate() in this script for local and manual MinIO prune).
+Retention: 7 days local plus a size cap so anomalous volume growth cannot
+breach the logs_dir_total_mb SLO. The newest local backup per service is
+always preserved; MinIO holds the longer retention copy.
 """
 
 from __future__ import annotations
@@ -33,6 +33,7 @@ import sys
 import tarfile
 import time
 from datetime import UTC, datetime, timedelta
+from fnmatch import fnmatch
 from pathlib import Path
 
 log = logging.getLogger("brain.backup_docker_volumes")
@@ -40,6 +41,7 @@ log = logging.getLogger("brain.backup_docker_volumes")
 BRAIN_LOGS_DIR = Path("/Users/chrischo/server/brain/logs")
 BACKUP_DIR = BRAIN_LOGS_DIR / "backups" / "docker-volumes"
 RETENTION_DAYS = 7
+LOCAL_SIZE_CAP_MB = 512
 MINIO_BUCKET = "rag-backups"
 MINIO_PREFIX = "docker-volumes/"
 
@@ -48,7 +50,21 @@ TARGETS: list[tuple[str, Path, list[str]]] = [
     ("vaultwarden", Path("/Users/chrischo/server/vaultwarden/data"), ["*.tmp", "tmp/*"]),
     ("ghost", Path("/Users/chrischo/server/ghost/content"), ["logs/*", "*.log"]),
     ("couchdb", Path("/Users/chrischo/server/couchdb/data"), []),
-    ("uptime-kuma", Path("/Users/chrischo/server/uptime-kuma/data"), ["*.tmp"]),
+    (
+        "uptime-kuma",
+        Path("/Users/chrischo/server/uptime-kuma/data"),
+        [
+            "*.tmp",
+            "*.bak-*",
+            "*.corrupt-*",
+            "*.recover-*",
+            "*.recovered-*",
+            "*.replaced-corrupt-*",
+            "*.rebuilt-*",
+            "*.dump-*.sql",
+            "*.recover-*.sql",
+        ],
+    ),
 ]
 
 
@@ -93,7 +109,7 @@ def _backup_one(label: str, src: Path, excludes: list[str], dest_dir: Path) -> d
         def _filter(tarinfo: tarfile.TarInfo) -> tarfile.TarInfo | None:
             rel = tarinfo.name
             for pat in excludes:
-                if Path(rel).match(pat):
+                if Path(rel).match(pat) or fnmatch(Path(rel).name, pat):
                     return None
             return tarinfo
 
@@ -109,12 +125,34 @@ def _backup_one(label: str, src: Path, excludes: list[str], dest_dir: Path) -> d
     return result
 
 
-def _rotate(dest_dir: Path, keep_days: int) -> int:
+def _label_for_backup(path: Path) -> str:
+    stem = path.name
+    for suffix in (".tar.gz", ".sha256"):
+        if stem.endswith(suffix):
+            stem = stem[: -len(suffix)]
+    # <label>-YYYYMMDD; labels may contain dashes.
+    head, sep, tail = stem.rpartition("-")
+    if sep and len(tail) == 8 and tail.isdigit():
+        return head
+    return stem
+
+
+def _protected_latest_by_label(files: list[Path]) -> set[Path]:
+    latest: dict[str, Path] = {}
+    for path in files:
+        label = _label_for_backup(path)
+        current = latest.get(label)
+        if current is None or path.stat().st_mtime > current.stat().st_mtime:
+            latest[label] = path
+    return set(latest.values())
+
+
+def _rotate(dest_dir: Path, keep_days: int, *, max_total_mb: int = LOCAL_SIZE_CAP_MB) -> int:
     if not dest_dir.exists():
         return 0
     cutoff = datetime.now(UTC) - timedelta(days=keep_days)
     deleted = 0
-    for f in dest_dir.iterdir():
+    for f in list(dest_dir.iterdir()):
         if not f.is_file():
             continue
         try:
@@ -127,6 +165,28 @@ def _rotate(dest_dir: Path, keep_days: int) -> int:
                 deleted += 1
             except OSError:
                 pass
+    if max_total_mb <= 0:
+        return deleted
+
+    files = [f for f in dest_dir.iterdir() if f.is_file()]
+    protected = _protected_latest_by_label(files)
+    total = sum(f.stat().st_size for f in files)
+    cap_bytes = max_total_mb * 1024 * 1024
+    if total <= cap_bytes:
+        return deleted
+
+    for f in sorted(files, key=lambda p: p.stat().st_mtime):
+        if total <= cap_bytes:
+            break
+        if f in protected:
+            continue
+        try:
+            size = f.stat().st_size
+            f.unlink()
+            total -= size
+            deleted += 1
+        except OSError:
+            pass
     return deleted
 
 

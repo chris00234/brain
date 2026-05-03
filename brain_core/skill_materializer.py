@@ -47,6 +47,39 @@ MIN_STEPS = 3
 # Staleness + overload thresholds
 STALE_DAYS = 90  # skills backing procedures last_used > N days are archived
 MAX_AUTO_SKILLS = 50  # global cap per skill dir; lowest-success skills evicted first
+USAGE_FILE = ".brain_auto_skill_usage.json"
+
+
+# Hermes-inspired guardrail: auto-generated skills are loaded into agent context,
+# so content extracted from logs/procedures must not be allowed to smuggle prompt
+# injection or credential exfiltration instructions into SKILL.md.
+_SKILL_THREAT_PATTERNS: tuple[tuple[str, str], ...] = (
+    (r"ignore\s+(?:\w+\s+)*(?:previous|all|above|prior)\s+(?:\w+\s+)*instructions", "prompt_injection"),
+    (r"do\s+not\s+(?:\w+\s+)*tell\s+(?:\w+\s+)*the\s+user", "deception_hide"),
+    (r"system\s+prompt\s+override", "sys_prompt_override"),
+    (
+        r"disregard\s+(?:\w+\s+)*(?:your|all|any)\s+(?:\w+\s+)*(?:instructions|rules|guidelines)",
+        "disregard_rules",
+    ),
+    (r"curl\s+[^\n]*\$\{?\w*(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|API)", "exfil_curl"),
+    (r"wget\s+[^\n]*\$\{?\w*(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|API)", "exfil_wget"),
+    (r"cat\s+[^\n]*(?:\.env|credentials|\.netrc|\.pgpass|\.npmrc|\.pypirc)", "read_secrets"),
+    (r"authorized_keys", "ssh_backdoor"),
+    (r"rm\s+-rf\s+/", "destructive_root_rm"),
+)
+
+_INVISIBLE_CHARS = {
+    "\u200b",
+    "\u200c",
+    "\u200d",
+    "\u2060",
+    "\ufeff",
+    "\u202a",
+    "\u202b",
+    "\u202c",
+    "\u202d",
+    "\u202e",
+}
 
 
 def _sync_openclaw_registry() -> dict[str, Any]:
@@ -88,6 +121,89 @@ def _fetch_related_lessons(title: str, limit: int = 2) -> list[dict[str, Any]]:
         return failure_memory.get_similar_lessons(title, agent_id="system", limit=limit) or []
     except Exception:
         return []
+
+
+def _scan_generated_skill_content(text: str) -> str:
+    """Return a threat id when generated SKILL.md content should be blocked.
+
+    Auto skills are procedural memory. If a bad transcript/procedure is promoted
+    into a skill, every future agent that loads it can inherit the payload. Keep
+    the gate lightweight and deterministic so the background materializer stays
+    cheap.
+    """
+    for char in _INVISIBLE_CHARS:
+        if char in text:
+            return f"invisible_unicode:U+{ord(char):04X}"
+    for pattern, threat_id in _SKILL_THREAT_PATTERNS:
+        if re.search(pattern, text, re.IGNORECASE):
+            return threat_id
+    return ""
+
+
+def _usage_path(root: Path) -> Path:
+    return root / USAGE_FILE
+
+
+def _load_usage(root: Path) -> dict[str, dict[str, Any]]:
+    path = _usage_path(root)
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text())
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {str(k): v for k, v in data.items() if isinstance(v, dict)}
+
+
+def _save_usage(root: Path, data: dict[str, dict[str, Any]]) -> None:
+    path = _usage_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+    tmp.replace(path)
+
+
+def _latest_usage_activity(record: dict[str, Any]) -> str:
+    """Newest actual skill activity timestamp from the sidecar record."""
+    latest_dt = None
+    latest_raw = ""
+    for key in ("last_used_at", "last_viewed_at", "last_patched_at"):
+        raw = record.get(key)
+        if not raw:
+            continue
+        try:
+            parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        except Exception:  # noqa: S112 - skip malformed sidecar timestamps
+            continue
+        if latest_dt is None or parsed > latest_dt:
+            latest_dt = parsed
+            latest_raw = str(raw)
+    return latest_raw
+
+
+def _upsert_usage_record(root: Path, slug: str, proc: dict[str, Any]) -> None:
+    """Track provenance/activity for generated skills, Hermes-curator style."""
+    try:
+        data = _load_usage(root)
+        now_iso = datetime.now(UTC).isoformat(timespec="seconds")
+        existing = data.get(slug) or {}
+        existing.setdefault("created_at", now_iso)
+        existing.update(
+            {
+                "brain_procedure_id": proc.get("id") or "",
+                "task_type": proc.get("task_type") or "",
+                "success_count": int(proc.get("success_count") or 1),
+                "last_materialized_at": now_iso,
+                "state": existing.get("state") or "active",
+                "pinned": bool(existing.get("pinned", False)),
+            }
+        )
+        data[slug] = existing
+        _save_usage(root, data)
+    except Exception as exc:
+        log.debug("auto skill usage update failed for %s/%s: %s", root, slug, exc)
 
 
 def _render_claude_skill_md(proc: dict[str, Any], lessons: list[dict[str, Any]]) -> str:
@@ -229,6 +345,10 @@ def materialize(proc: dict[str, Any], *, min_success: int = MIN_SUCCESS_COUNT) -
         lessons = _fetch_related_lessons(proc.get("title") or task_type)
 
         skill_md = _render_claude_skill_md(proc, lessons)
+        threat = _scan_generated_skill_content(skill_md)
+        if threat:
+            result["reason"] = f"blocked_unsafe_skill_content:{threat}"
+            return result
         meta_json = _render_openclaw_meta(proc)
 
         # Write to each runtime skill dir. OpenClaw additionally needs _meta.json.
@@ -247,6 +367,8 @@ def materialize(proc: dict[str, Any], *, min_success: int = MIN_SUCCESS_COUNT) -
         codex_path.write_text(skill_md)
         oc_path.write_text(skill_md)
         oc_meta_path.write_text(meta_json)
+        for root in (CLAUDE_SKILLS_DIR, CODEX_SKILLS_DIR, OPENCLAW_SKILLS_DIR):
+            _upsert_usage_record(root, slug, proc)
 
         openclaw_sync = _sync_openclaw_registry()
 
@@ -420,6 +542,7 @@ def cleanup_stale_auto_skills(
         survivors_per_root: dict[Path, list[tuple[Path, dict]]] = {}
 
         for root, items in by_root.items():
+            usage = _load_usage(root)
             surviving: list[tuple[Path, dict]] = []
             for d, fm in items:
                 # SAFETY GATE: only touch skills we materialized. Human-authored
@@ -432,6 +555,14 @@ def cleanup_stale_auto_skills(
 
                 proc_id = fm.get("brain_procedure_id", "")
                 proc = proc_map.get(proc_id) if proc_id else None
+                usage_record = usage.get(d.name) or {}
+
+                # Hermes-style curator pin: an explicit sidecar pin is a hard
+                # fence against automatic archival, even when the backing
+                # procedure looks stale or temporarily missing.
+                if usage_record.get("pinned"):
+                    surviving.append((d, fm))
+                    continue
 
                 # Rule 1: orphan
                 if not proc:
@@ -446,6 +577,13 @@ def cleanup_stale_auto_skills(
                     last_ts = datetime.fromisoformat(last_used.replace("Z", "+00:00")).timestamp()
                 except Exception:
                     last_ts = 0
+                usage_activity = _latest_usage_activity(usage_record)
+                if usage_activity:
+                    try:
+                        usage_ts = datetime.fromisoformat(usage_activity.replace("Z", "+00:00")).timestamp()
+                        last_ts = max(last_ts, usage_ts)
+                    except Exception:  # noqa: S110 - ignore malformed optional usage timestamps
+                        pass
                 if last_ts and last_ts < stale_cutoff_ts:
                     if _archive_skill_dir(d, reason=f"stale:last_used={last_used}"):
                         summary["stale"] += 1

@@ -62,7 +62,7 @@ def test_urgent_scan_writes_codex_doorbell(monkeypatch, tmp_path):
     monkeypatch.setattr(
         speak_urgent,
         "collect_observations",
-        lambda: [
+        lambda **_kwargs: [
             Observation(
                 drive="synthesis_drive",
                 category="pattern",
@@ -86,7 +86,50 @@ def test_urgent_scan_writes_codex_doorbell(monkeypatch, tmp_path):
     assert emitted[0][1] == "doorbell:1sessions"
 
 
-def test_urgent_scan_uses_telegram_fallback_without_active_sessions(monkeypatch, tmp_path):
+def test_urgent_scan_uses_agent_fallback_without_active_sessions(monkeypatch, tmp_path):
+    monkeypatch.setattr(speak_urgent, "DOORBELL_DIR", tmp_path)
+    emitted = []
+    agent_calls = []
+
+    monkeypatch.setattr(speak_urgent, "ensure_schema", lambda: None)
+    monkeypatch.setattr(
+        speak_urgent,
+        "collect_observations",
+        lambda **_kwargs: [
+            Observation(
+                drive="synthesis_drive",
+                category="pattern",
+                severity=7.9,
+                message="No active sessions should route to subscription LLM.",
+                dedup_key="urgent-no-session",
+            )
+        ],
+    )
+    monkeypatch.setattr(speak_urgent, "was_sent_recently", lambda *args, **kwargs: False)
+    monkeypatch.setattr(speak_urgent, "log_emit", lambda obs, sent_via: emitted.append((obs, sent_via)))
+
+    fake_agent_messenger = type(sys)("agent_messenger")
+    fake_agent_messenger.send_message = lambda **kwargs: agent_calls.append(kwargs) or "msg-1"
+    monkeypatch.setitem(sys.modules, "agent_messenger", fake_agent_messenger)
+
+    fake_cli = type(sys)("cli_llm")
+    fake_cli.dispatch = lambda **_kwargs: (_ for _ in ()).throw(AssertionError("CLI fallback not expected"))
+    monkeypatch.setitem(sys.modules, "cli_llm", fake_cli)
+
+    result = speak_urgent.urgent_scan()
+
+    assert result == {
+        "urgent": 1,
+        "fired": 0,
+        "active_sessions": 0,
+        "fallback_via": "agent:self_handled",
+    }
+    assert len(agent_calls) == 1
+    assert agent_calls[0]["to_agent"] == "sage"
+    assert emitted[0][1] == "agent:self_handled"
+
+
+def test_urgent_scan_telegram_only_when_llm_requests_human(monkeypatch, tmp_path):
     monkeypatch.setattr(speak_urgent, "DOORBELL_DIR", tmp_path)
     emitted = []
     sent = []
@@ -95,18 +138,27 @@ def test_urgent_scan_uses_telegram_fallback_without_active_sessions(monkeypatch,
     monkeypatch.setattr(
         speak_urgent,
         "collect_observations",
-        lambda: [
+        lambda **_kwargs: [
             Observation(
                 drive="synthesis_drive",
                 category="pattern",
-                severity=7.9,
-                message="No active sessions should fall back to Telegram.",
-                dedup_key="urgent-no-session",
+                severity=8.2,
+                message="Layout preference requires private knowledge.",
+                dedup_key="urgent-human-needed",
             )
         ],
     )
     monkeypatch.setattr(speak_urgent, "was_sent_recently", lambda *args, **kwargs: False)
     monkeypatch.setattr(speak_urgent, "log_emit", lambda obs, sent_via: emitted.append((obs, sent_via)))
+
+    class _Result:
+        ok = True
+        text = "HUMAN_NEEDED: Chris must provide the missing private preference."
+
+    fake_cli = type(sys)("cli_llm")
+    fake_cli.dispatch = lambda **_kwargs: _Result()
+    fake_agent_messenger = type(sys)("agent_messenger")
+    fake_agent_messenger.send_message = lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("handoff down"))
 
     class _Telegram:
         @staticmethod
@@ -114,15 +166,12 @@ def test_urgent_scan_uses_telegram_fallback_without_active_sessions(monkeypatch,
             sent.append((body, source, severity))
             return True
 
+    monkeypatch.setitem(sys.modules, "agent_messenger", fake_agent_messenger)
+    monkeypatch.setitem(sys.modules, "cli_llm", fake_cli)
     monkeypatch.setitem(sys.modules, "telegram_alert", _Telegram)
 
     result = speak_urgent.urgent_scan()
 
-    assert result == {
-        "urgent": 1,
-        "fired": 0,
-        "active_sessions": 0,
-        "fallback_via": "telegram:fallback",
-    }
-    assert sent[0][1:] == ("brain_speak_urgent:no_active_sessions", "urgent")
+    assert result["fallback_via"] == "telegram:fallback"
+    assert sent[0][1:] == ("brain_speak_urgent:human_required", "urgent")
     assert emitted[0][1] == "telegram:fallback"

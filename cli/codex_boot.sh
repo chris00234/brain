@@ -43,6 +43,36 @@ trap 'rm -f "$HEADER_FILE" 2>/dev/null' EXIT HUP INT TERM
 { printf 'Authorization: Bearer '; cat "$SECRET_FILE"; printf '\n'; } > "$HEADER_FILE"
 chmod 600 "$HEADER_FILE"
 
+# ── Phase 3 (2026-04-27): first-turn heavy boot context for Codex ─────
+# Mirror claude_boot.sh — when this is the first turn of a Codex session,
+# spawn boot_context.py once to prepend identity/state/focus/recent sessions/
+# atoms-due/messages. Subsequent turns rely on the per-turn /recall/active
+# call already in this script. Disable via BRAIN_CODEX_HEAVY_BOOT=off if
+# Codex sessions are too short-lived to benefit.
+BRAIN_PY="${BRAIN_PYTHON:-/Users/chrischo/server/brain/.venv/bin/python}"
+HEAVY_BOOT_ENABLED="${BRAIN_CODEX_HEAVY_BOOT:-on}"
+if [ "$HEAVY_BOOT_ENABLED" != "off" ] && [ "$TURN_IDX" = "0" ] && [ -x "$BRAIN_PY" ]; then
+  PROMPT_ARGS=()
+  if [ -n "$PROMPT" ]; then
+    PROMPT_ARGS=(--prompt "$PROMPT")
+  fi
+  HEAVY_RESULT=""
+  if command -v timeout >/dev/null 2>&1; then
+    HEAVY_RESULT=$(timeout 8 "$BRAIN_PY" /Users/chrischo/server/brain/brain_core/boot_context.py codex --limit 2 "${PROMPT_ARGS[@]}" 2>/dev/null || true)
+  else
+    HEAVY_RESULT=$("$BRAIN_PY" /Users/chrischo/server/brain/brain_core/boot_context.py codex --limit 2 "${PROMPT_ARGS[@]}" 2>/dev/null &
+                   BG=$!
+                   ( sleep 8 && kill -9 $BG 2>/dev/null ) &
+                   KILLER=$!
+                   wait $BG 2>/dev/null
+                   kill $KILLER 2>/dev/null
+                   true)
+  fi
+  if [ -n "$HEAVY_RESULT" ] && [ "$HEAVY_RESULT" != "No relevant boot context found. Starting fresh." ]; then
+    printf '%s\n' "$HEAVY_RESULT"
+  fi
+fi
+
 REQ_BODY=$(jq -nc \
   --arg prompt "$PROMPT" \
   --arg session_id "$SESSION_ID" \
@@ -69,6 +99,35 @@ if [ "$BLOCK_COUNT" -gt 0 ]; then
   printf '<system-reminder>\n### Brain Active Recall — prompt-relevant context contract\n'
   printf '%s' "$RESP" | jq -r '.blocks[]? | select(((.source // "") | startswith("doorbell")) | not) | "- **\(.title)** [\(.contract_category // "direct_evidence")/\(.source)] \((.include_reason // "prompt-relevant context")) — \(.content[:280])"' 2>/dev/null
   printf '</system-reminder>\n'
+fi
+
+# Phase 2 (2026-04-27): surface pending cross-agent lessons. The
+# lesson_fanout hook (~/.brain_hooks/lesson_fanout.py) routes new
+# correction-kind / high-confidence atoms into agent_messenger; this
+# block delivers them to Codex on the next turn and acks each one.
+# Disabled if BRAIN_LESSON_FANOUT=off on the server side (hook is a no-op).
+LESSON_BUDGET_MS="${BRAIN_LESSON_BUDGET_MS:-600}"
+if [ "${BRAIN_LESSON_FANOUT:-on}" != "off" ]; then
+  LESSONS=$(curl -sS --max-time "$(awk -v ms="$LESSON_BUDGET_MS" 'BEGIN{printf "%.2f", ms/1000.0}')" \
+    -H @"$HEADER_FILE" \
+    "${BRAIN_URL}/brain/messages/codex?limit=3" 2>/dev/null || echo "")
+  LESSON_COUNT=0
+  if [ -n "$LESSONS" ]; then
+    LESSON_COUNT=$(printf '%s' "$LESSONS" | jq '[.messages[]? | select(.message_type == "lesson")] | length' 2>/dev/null || echo 0)
+  fi
+  [[ "$LESSON_COUNT" =~ ^[0-9]+$ ]] || LESSON_COUNT=0
+  if [ "$LESSON_COUNT" -gt 0 ]; then
+    printf '<system-reminder>\n### Brain — pending cross-agent lessons (deliver-once)\n'
+    printf '%s' "$LESSONS" | jq -r '.messages[]? | select(.message_type == "lesson") | "- [\((.metadata | fromjson? | .atom_kind) // "lesson")] \(.content)"' 2>/dev/null
+    printf '</system-reminder>\n'
+    # Ack each delivered lesson so it does not re-appear next turn.
+    for MSG_ID in $(printf '%s' "$LESSONS" | jq -r '.messages[]? | select(.message_type == "lesson") | .id' 2>/dev/null); do
+      curl -sS --max-time 0.5 -X POST \
+        -H @"$HEADER_FILE" \
+        "${BRAIN_URL}/brain/messages/${MSG_ID}/ack" >/dev/null 2>&1 &
+    done
+    wait 2>/dev/null
+  fi
 fi
 
 # Doorbell files are consumed by /recall/active, which now applies prompt

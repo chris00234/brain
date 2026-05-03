@@ -198,7 +198,13 @@ def _use_neo4j() -> bool:
 # ---------------------------------------------------------------------------
 
 
-def extract_and_store_entities(memory_content: str, memory_id: str = "") -> int:
+def extract_and_store_entities(
+    memory_content: str,
+    memory_id: str = "",
+    *,
+    timeout: int = 30,
+    max_backends: int | None = None,
+) -> int:
     """Extract entities + relations from memory content via Sage, store in graph.
 
     Return values:
@@ -230,7 +236,13 @@ def extract_and_store_entities(memory_content: str, memory_id: str = "") -> int:
         # silently remaps unknown string IDs to the agent's main session,
         # so isolation requires valid UUID format + deeper OpenClaw config
         # work. Leaving main-session routing until that's investigated.
-        result = dispatch(agent="sage", message=prompt, thinking="low", timeout=30)
+        result = dispatch(
+            agent="sage",
+            message=prompt,
+            thinking="low",
+            timeout=timeout,
+            max_backends=max_backends,
+        )
         # CR8 fix: distinguish LLM failure from "LLM ran, no entities".
         # result.ok=False means transport/rate-limit/breaker — retryable.
         if not result.ok:

@@ -48,6 +48,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import sqlite3
 import sys
 import time
@@ -93,7 +94,29 @@ KIND_TTL_SECONDS = {
 MAX_RETRIES = 5
 
 # Drain-time default cap so a burst drain doesn't stall for hours.
-DEFAULT_DRAIN_LIMIT = 50
+DEFAULT_DRAIN_LIMIT = max(1, int(os.getenv("BRAIN_LLM_BACKLOG_DRAIN_LIMIT", "10")))
+# Wall-time budget for one drain pass. cli_llm now caps lock-wait separately
+# from the per-call timeout, but a single drain run still iterates `limit`
+# items inside one cli_llm slot. Without a wall cap, a 25-minute drain run
+# (10 items x ~150s each on a degraded chain) can monopolise a CLI slot and
+# starve every other dispatch. Default 60s; raise via env if you'd rather
+# spend more time per drain pass.
+DEFAULT_DRAIN_WALL_S = max(5.0, float(os.getenv("BRAIN_LLM_BACKLOG_DRAIN_WALL_S", "60")))
+DEFAULT_MAX_BACKENDS = max(1, int(os.getenv("BRAIN_LLM_BACKLOG_MAX_BACKENDS", "2")))
+SESSION_SUMMARY_TTL_SECONDS = max(
+    3600,
+    int(os.getenv("BRAIN_LLM_BACKLOG_SESSION_SUMMARY_TTL_S", str(24 * 3600))),
+)
+MAX_PROMPT_CHARS = max(2000, int(os.getenv("BRAIN_LLM_BACKLOG_MAX_PROMPT_CHARS", "20000")))
+PROMPT_HEAD_CHARS = max(500, int(os.getenv("BRAIN_LLM_BACKLOG_PROMPT_HEAD_CHARS", "4000")))
+BACKLOG_KIND_DEFAULT_TIMEOUT_S = {
+    "classify": 12,
+    "entities": 12,
+    "distill": 90,
+    "synthesis": 120,
+    "reflect": 120,
+}
+BACKLOG_HANDLER_MIN_BUDGET_S = 10
 
 _handlers: dict[str, Callable[[dict], bool]] = {}
 _handlers_wired = False
@@ -244,6 +267,8 @@ def _wire_default_handlers() -> None:
                 category=payload.get("category", "fact"),
                 use_llm=True,
                 force_llm=True,
+                timeout=int(payload.get("timeout") or BACKLOG_KIND_DEFAULT_TIMEOUT_S["classify"]),
+                max_backends=int(payload.get("max_backends") or DEFAULT_MAX_BACKENDS),
             )
             if cls is None or cls.source != "llm":
                 return False  # LLM still down
@@ -290,6 +315,8 @@ def _wire_default_handlers() -> None:
             n = extract_and_store_entities(
                 payload.get("text", "")[:1500],
                 payload.get("chroma_id", ""),
+                timeout=int(payload.get("timeout") or BACKLOG_KIND_DEFAULT_TIMEOUT_S["entities"]),
+                max_backends=int(payload.get("max_backends") or DEFAULT_MAX_BACKENDS),
             )
             return n >= 0  # negative means LLM down; keep pending
         except Exception as e:
@@ -306,6 +333,7 @@ def _wire_default_handlers() -> None:
                 message=payload.get("prompt", ""),
                 thinking="low",
                 timeout=payload.get("timeout", 90),
+                max_backends=int(payload.get("max_backends") or DEFAULT_MAX_BACKENDS),
             )
             if not result.ok:
                 return False
@@ -335,6 +363,7 @@ def _wire_default_handlers() -> None:
                 message=payload.get("prompt", ""),
                 thinking=payload.get("thinking", "low"),
                 timeout=payload.get("timeout", 120),
+                max_backends=int(payload.get("max_backends") or DEFAULT_MAX_BACKENDS),
             )
             if not result.ok:
                 return False
@@ -373,9 +402,14 @@ def _wire_default_handlers() -> None:
         callers (slos.py uses 'critical'/'warning', brain_loop uses
         'urgent'/'warn', etc.) so delayed alerts don't lose their
         urgency hint by falling through to the generic default.
+
+        2026-04-28: keep delayed Telegram replay on the same LLM-free path
+        as live alerts. Alert payloads are already fully formatted; routing
+        them through cli_llm.dispatch can trip the llm.dispatch breaker while
+        merely trying to notify Chris that the breaker is open.
         """
         try:
-            from cli_llm import dispatch
+            from telegram_alert import send_chris_telegram
 
             body = payload.get("body", "")
             severity = (payload.get("severity", "info") or "info").lower()
@@ -386,13 +420,13 @@ def _wire_default_handlers() -> None:
                 prefix = "[DELAYED WARN] "
             else:
                 prefix = "[DELAYED] "
-            result = dispatch(
-                agent="jenna",
-                message=f"{prefix}{body}",
-                thinking="off",
-                timeout=60,
+            return send_chris_telegram(
+                f"{prefix}{body}",
+                source=payload.get("source", "llm_backlog.telegram"),
+                severity=severity,
+                bypass_rate_limit=True,
+                queue_on_failure=False,
             )
-            return bool(result.ok)
         except Exception as e:
             log.debug("handle_telegram failed: %s", e)
             return False
@@ -407,6 +441,7 @@ def _wire_default_handlers() -> None:
                 message=payload.get("prompt", ""),
                 thinking="medium",
                 timeout=payload.get("timeout", 120),
+                max_backends=int(payload.get("max_backends") or DEFAULT_MAX_BACKENDS),
             )
             return bool(result.ok)
         except Exception as e:
@@ -446,9 +481,48 @@ def _ttl_cutoff(kind: str) -> str:
     return datetime.fromtimestamp(cutoff, tz=UTC).isoformat(timespec="seconds")
 
 
-def drain(limit: int = DEFAULT_DRAIN_LIMIT, abort_on_breaker: bool = True) -> dict:
-    """Process up to `limit` pending entries. Returns stats dict."""
+def _payload_with_wall_budget(kind: str, payload: dict, deadline: float) -> dict | None:
+    """Bound per-item LLM timeouts by the drain pass wall clock.
+
+    The drain loop already checked the deadline before each row, but some
+    handlers carried 90-120s payload timeouts; one row could therefore run
+    minutes past a 60s drain wall cap and monopolize a CLI slot. Keep the
+    payload shape, but cap handler timeouts to remaining wall budget.
+    """
+
+    remaining = int(deadline - time.time() - 2)
+    if remaining < BACKLOG_HANDLER_MIN_BUDGET_S:
+        return None
+    bounded = dict(payload)
+    prompt = bounded.get("prompt")
+    if isinstance(prompt, str) and len(prompt) > MAX_PROMPT_CHARS:
+        head_len = min(PROMPT_HEAD_CHARS, MAX_PROMPT_CHARS // 2)
+        tail_len = MAX_PROMPT_CHARS - head_len
+        bounded["prompt"] = (
+            prompt[:head_len]
+            + f"\n\n[... backlog prompt truncated: omitted {len(prompt) - MAX_PROMPT_CHARS} chars ...]\n\n"
+            + prompt[-tail_len:]
+        )
+    bounded.setdefault("max_backends", DEFAULT_MAX_BACKENDS)
+    if kind in BACKLOG_KIND_DEFAULT_TIMEOUT_S:
+        default_timeout = BACKLOG_KIND_DEFAULT_TIMEOUT_S[kind]
+        current = int(bounded.get("timeout") or default_timeout)
+        bounded["timeout"] = max(BACKLOG_HANDLER_MIN_BUDGET_S, min(current, remaining))
+    return bounded
+
+
+def drain(
+    limit: int = DEFAULT_DRAIN_LIMIT,
+    abort_on_breaker: bool = True,
+    wall_time_s: float | None = None,
+) -> dict:
+    """Process up to `limit` pending entries within `wall_time_s`. Returns
+    stats dict with extra `stopped_for_walltime` flag when the cap fires.
+    """
     t0 = time.time()
+    if wall_time_s is None:
+        wall_time_s = DEFAULT_DRAIN_WALL_S
+    deadline = t0 + max(1.0, wall_time_s)
     _wire_default_handlers()
 
     if abort_on_breaker and _breaker_open():
@@ -457,12 +531,14 @@ def drain(limit: int = DEFAULT_DRAIN_LIMIT, abort_on_breaker: bool = True) -> di
             "drained": 0,
             "failed": 0,
             "abandoned": 0,
+            "stopped_for_walltime": False,
             "latency_ms": int((time.time() - t0) * 1000),
         }
 
     drained = 0
     failed = 0
     abandoned = 0
+    stopped_for_walltime = False
 
     try:
         with _connect(autocommit=False) as conn:
@@ -475,12 +551,32 @@ def drain(limit: int = DEFAULT_DRAIN_LIMIT, abort_on_breaker: bool = True) -> di
                     (kind, cutoff),
                 )
                 abandoned += abandon_rows.rowcount or 0
+            session_summary_cutoff = datetime.fromtimestamp(
+                datetime.now(UTC).timestamp() - SESSION_SUMMARY_TTL_SECONDS,
+                tz=UTC,
+            ).isoformat(timespec="seconds")
+            abandon_rows = conn.execute(
+                "UPDATE llm_backlog SET status='abandoned' "
+                "WHERE status='pending' AND kind='distill' AND created_at < ? "
+                'AND (payload_json LIKE \'%"purpose": "session_summary"%\' '
+                'OR payload_json LIKE \'%"purpose":"session_summary"%\')',
+                (session_summary_cutoff,),
+            )
+            abandoned += abandon_rows.rowcount or 0
             conn.commit()
 
             # Pull pending entries — order by created_at ASC so oldest wins
             rows = conn.execute(
                 "SELECT id, kind, payload_json, retry_count FROM llm_backlog "
-                "WHERE status='pending' ORDER BY created_at ASC LIMIT ?",
+                "WHERE status='pending' ORDER BY "
+                "CASE kind "
+                "WHEN 'classify' THEN 0 "
+                "WHEN 'entities' THEN 1 "
+                "WHEN 'telegram' THEN 2 "
+                "WHEN 'distill' THEN 3 "
+                "WHEN 'synthesis' THEN 4 "
+                "WHEN 'reflect' THEN 5 "
+                "ELSE 6 END, created_at ASC LIMIT ?",
                 (limit,),
             ).fetchall()
 
@@ -493,6 +589,17 @@ def drain(limit: int = DEFAULT_DRAIN_LIMIT, abort_on_breaker: bool = True) -> di
             # at entry (already done above); trust that state for this batch.
             # If the breaker opens mid-batch, at worst `limit` rows are attempted.
             for row in rows:
+                if time.time() >= deadline:
+                    stopped_for_walltime = True
+                    log.warning(
+                        "llm_backlog.drain wall-time cap fired at %.1fs "
+                        "(drained=%d failed=%d, %d items unprocessed in this pass)",
+                        wall_time_s,
+                        drained,
+                        failed,
+                        len(rows) - (drained + failed),
+                    )
+                    break
                 rid = int(row["id"])
                 kind = row["kind"]
                 try:
@@ -515,8 +622,20 @@ def drain(limit: int = DEFAULT_DRAIN_LIMIT, abort_on_breaker: bool = True) -> di
                     failed += 1
                     continue
 
+                bounded_payload = _payload_with_wall_budget(kind, payload, deadline)
+                if bounded_payload is None:
+                    stopped_for_walltime = True
+                    log.warning(
+                        "llm_backlog.drain wall-time budget too small for next %s item "
+                        "(drained=%d failed=%d)",
+                        kind,
+                        drained,
+                        failed,
+                    )
+                    break
+
                 try:
-                    ok = bool(handler(payload))
+                    ok = bool(handler(bounded_payload))
                 except Exception as e:
                     ok = False
                     err_text = str(e)[:200]
@@ -559,6 +678,7 @@ def drain(limit: int = DEFAULT_DRAIN_LIMIT, abort_on_breaker: bool = True) -> di
         "drained": drained,
         "failed": failed,
         "abandoned": abandoned,
+        "stopped_for_walltime": stopped_for_walltime,
         "latency_ms": int((time.time() - t0) * 1000),
     }
 

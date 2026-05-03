@@ -484,6 +484,7 @@ _COST_TABLE = {
     ("openai-codex", "gpt-5.3"): (15.0, 75.0),
     ("openai-codex", "gpt-5"): (15.0, 75.0),
     ("openai-codex", "gpt-4o"): (5.0, 20.0),
+    ("anthropic", "claude-opus-4-7"): (15.0, 75.0),
     ("anthropic", "claude-opus-4-6"): (15.0, 75.0),
     ("anthropic", "claude-sonnet-4-6"): (3.0, 15.0),
     ("anthropic", "claude-haiku-4-5"): (1.0, 5.0),

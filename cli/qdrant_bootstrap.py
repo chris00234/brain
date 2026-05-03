@@ -93,6 +93,23 @@ def _vector_params(size: int = VECTOR_SIZE) -> VectorParams:
 #   vectors: dict of {name: VectorParams} for named-vector collections,
 #            or a single VectorParams for the canonical unnamed case.
 #   payload_indexes: [(field, schema_type)]
+ENTRY_CONTRACT_INDEXES = [
+    ("schema_version", PayloadSchemaType.KEYWORD),
+    ("entry_schema_version", PayloadSchemaType.KEYWORD),
+    ("chunk_version", PayloadSchemaType.KEYWORD),
+    ("chunk_policy_version", PayloadSchemaType.KEYWORD),
+    ("tag_policy_version", PayloadSchemaType.KEYWORD),
+    ("source_kind", PayloadSchemaType.KEYWORD),
+    ("source_type", PayloadSchemaType.KEYWORD),
+    ("document_id", PayloadSchemaType.KEYWORD),
+    ("source_document_id", PayloadSchemaType.KEYWORD),
+    ("chunk_strategy", PayloadSchemaType.KEYWORD),
+    ("tags", PayloadSchemaType.KEYWORD),
+    ("context_tags", PayloadSchemaType.KEYWORD),
+    ("content_hash", PayloadSchemaType.KEYWORD),
+]
+
+
 SCHEMAS: dict[str, dict] = {
     "canonical": {
         "vectors": {
@@ -101,6 +118,7 @@ SCHEMAS: dict[str, dict] = {
             "raptor": _vector_params(),
         },
         "payload_indexes": [
+            *ENTRY_CONTRACT_INDEXES,
             ("agent", PayloadSchemaType.KEYWORD),
             ("type", PayloadSchemaType.KEYWORD),
             ("source", PayloadSchemaType.KEYWORD),
@@ -115,9 +133,28 @@ SCHEMAS: dict[str, dict] = {
             ("valid_until", PayloadSchemaType.DATETIME),
         ],
     },
+    "distilled": {
+        "vectors": {"dense": _vector_params()},
+        "payload_indexes": [
+            *ENTRY_CONTRACT_INDEXES,
+            ("agent", PayloadSchemaType.KEYWORD),
+            ("type", PayloadSchemaType.KEYWORD),
+            ("source", PayloadSchemaType.KEYWORD),
+            ("status", PayloadSchemaType.KEYWORD),
+            ("category", PayloadSchemaType.KEYWORD),
+            ("domain", PayloadSchemaType.KEYWORD),
+            ("subtype", PayloadSchemaType.KEYWORD),
+            ("embed_model_version", PayloadSchemaType.KEYWORD),
+            ("superseded_by", PayloadSchemaType.KEYWORD),
+            ("supersedes", PayloadSchemaType.KEYWORD),
+            ("created_at", PayloadSchemaType.DATETIME),
+            ("valid_until", PayloadSchemaType.DATETIME),
+        ],
+    },
     "semantic_memory": {
         "vectors": {"dense": _vector_params()},
         "payload_indexes": [
+            *ENTRY_CONTRACT_INDEXES,
             ("agent", PayloadSchemaType.KEYWORD),
             ("type", PayloadSchemaType.KEYWORD),
             ("category", PayloadSchemaType.KEYWORD),
@@ -142,6 +179,7 @@ SCHEMAS: dict[str, dict] = {
     "experience": {
         "vectors": {"dense": _vector_params()},
         "payload_indexes": [
+            *ENTRY_CONTRACT_INDEXES,
             ("agent", PayloadSchemaType.KEYWORD),
             ("type", PayloadSchemaType.KEYWORD),
             ("service", PayloadSchemaType.KEYWORD),
@@ -155,6 +193,7 @@ SCHEMAS: dict[str, dict] = {
     "knowledge": {
         "vectors": {"dense": _vector_params()},
         "payload_indexes": [
+            *ENTRY_CONTRACT_INDEXES,
             ("agent", PayloadSchemaType.KEYWORD),
             ("type", PayloadSchemaType.KEYWORD),
             ("service", PayloadSchemaType.KEYWORD),
@@ -170,6 +209,7 @@ SCHEMAS: dict[str, dict] = {
     "code": {
         "vectors": {"dense": _vector_params()},
         "payload_indexes": [
+            *ENTRY_CONTRACT_INDEXES,
             ("repo", PayloadSchemaType.KEYWORD),
             ("language", PayloadSchemaType.KEYWORD),
             ("kind", PayloadSchemaType.KEYWORD),
@@ -183,6 +223,7 @@ SCHEMAS: dict[str, dict] = {
     "personal": {
         "vectors": {"dense": _vector_params()},
         "payload_indexes": [
+            *ENTRY_CONTRACT_INDEXES,
             ("type", PayloadSchemaType.KEYWORD),
             ("service", PayloadSchemaType.KEYWORD),
             ("status", PayloadSchemaType.KEYWORD),
@@ -197,6 +238,7 @@ SCHEMAS: dict[str, dict] = {
     "obsidian": {
         "vectors": {"dense": _vector_params()},
         "payload_indexes": [
+            *ENTRY_CONTRACT_INDEXES,
             ("type", PayloadSchemaType.KEYWORD),
             ("source", PayloadSchemaType.KEYWORD),
             ("vault_subdir", PayloadSchemaType.KEYWORD),

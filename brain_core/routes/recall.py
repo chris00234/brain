@@ -733,7 +733,10 @@ def recall_v2(
         if ce_enabled:
             t_ce = time.time()
             try:
-                from brain_core.cross_encoder_rerank import rerank_with_cross_encoder
+                from brain_core.cross_encoder_rerank import (
+                    choose_cross_encoder_top_k,
+                    rerank_with_cross_encoder,
+                )
 
                 # Only rerank the top window — tail stays ordered by stage 1.
                 # cross_encoder_rerank overwrites `score` with a blend of the
@@ -742,7 +745,9 @@ def recall_v2(
                 # almost never reshuffle the final top, and MPS batch time scales
                 # linearly with pair count — ~30ms p95 saved on single queries and
                 # a lot more under concurrent load where .predict() serializes.
-                fused = rerank_with_cross_encoder(q, fused, top_k=14)
+                ce_top_k = choose_cross_encoder_top_k(q, fused, default_top_k=14)
+                fused = rerank_with_cross_encoder(q, fused, top_k=ce_top_k)
+                timing["cross_encoder_top_k"] = ce_top_k
                 timing["cross_encoder_ms"] = int((time.time() - t_ce) * 1000)
             except Exception as _ce_err:
                 log.warning("cross-encoder rerank failed, stage-1 result stands: %s", _ce_err)
@@ -761,6 +766,8 @@ def recall_v2(
             r["score"] = float(r.get("score", 0)) + 35.0
 
     fused.sort(key=lambda r: r.get("score", 0), reverse=True)
+    with contextlib.suppress(Exception):
+        fused = _rerank.diversify_sources(fused, top_window=n, max_per_source=2, max_per_collection=None)
 
     # Phase G3: opt-in graph-constraint exclusion. When the caller flags
     # exclude_already_used=true (typical: Sage doing tool-recommendation

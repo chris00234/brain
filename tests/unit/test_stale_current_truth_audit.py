@@ -49,6 +49,19 @@ def test_allows_historical_chromadb_mentions(tmp_path: Path) -> None:
     assert report["historical_mentions_allowed"] == 1
 
 
+def test_allows_decommissioned_era_over_mentions(tmp_path: Path) -> None:
+    knowledge = tmp_path / "knowledge"
+    _write_note(
+        knowledge / "canonical" / "weekly" / "2026-W17.md",
+        body="Qdrant is the retrieval substrate for the stack and the ChromaDB era is effectively over.",
+    )
+
+    report = build_report(knowledge)
+
+    assert report["passed"]
+    assert report["historical_mentions_allowed"] == 1
+
+
 def test_skips_superseded_and_archived_notes(tmp_path: Path) -> None:
     knowledge = tmp_path / "knowledge"
     _write_note(

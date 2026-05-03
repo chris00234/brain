@@ -60,9 +60,8 @@ def rotate_logs() -> dict:
                 stat = f.stat()
                 too_old = datetime.fromtimestamp(stat.st_mtime, tz=UTC) < cutoff
                 too_big = stat.st_size > MAX_LOG_SIZE
-                if too_old or too_big:
-                    if _atomic_tail_rewrite(f, 100):
-                        rotated += 1
+                if (too_old or too_big) and _atomic_tail_rewrite(f, 100):
+                    rotated += 1
             except Exception:
                 pass
 
@@ -79,9 +78,8 @@ def rotate_logs() -> dict:
     # Also rotate error logs
     for f in LOGS_DIR.glob("*.err.log"):
         try:
-            if f.stat().st_size > MAX_LOG_SIZE:
-                if _atomic_tail_rewrite(f, 50):
-                    rotated += 1
+            if f.stat().st_size > MAX_LOG_SIZE and _atomic_tail_rewrite(f, 50):
+                rotated += 1
         except Exception:
             pass
 
@@ -114,11 +112,14 @@ def vacuum_embed_cache(max_size_mb: int = 100, max_age_days: int = 14) -> dict:
         has_ts = conn.execute(
             "SELECT COUNT(*) FROM embeddings WHERE created_at != '' AND created_at IS NOT NULL"
         ).fetchone()[0]
+        deleted_by_ttl = 0
         if has_ts > count_before * 0.5:
+            before_ttl = conn.total_changes
             conn.execute(
                 "DELETE FROM embeddings WHERE created_at != '' AND julianday('now') - julianday(created_at) > ?",
                 (max_age_days,),
             )
+            deleted_by_ttl = conn.total_changes - before_ttl
         else:
             # Fallback: rowid-based for legacy entries without timestamps
             keep = int(count_before * 0.8)
@@ -126,6 +127,19 @@ def vacuum_embed_cache(max_size_mb: int = 100, max_age_days: int = 14) -> dict:
                 "DELETE FROM embeddings WHERE rowid NOT IN (SELECT rowid FROM embeddings ORDER BY rowid DESC LIMIT ?)",
                 (keep,),
             )
+        # Size cap is the actual SLO guard. TTL alone can leave a fresh ingest
+        # burst at 800MB+ for days, so after TTL pruning estimate a newest-row
+        # cap proportional to the target and trim oldest rows before VACUUM.
+        remaining = conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
+        if size_mb > max_size_mb and remaining > 0:
+            keep_ratio = min(1.0, max(0.05, (max_size_mb / size_mb) * 1.15))
+            keep_rows = max(1000, int(remaining * keep_ratio))
+            if keep_rows < remaining:
+                conn.execute(
+                    "DELETE FROM embeddings WHERE rowid NOT IN "
+                    "(SELECT rowid FROM embeddings ORDER BY created_at DESC, rowid DESC LIMIT ?)",
+                    (keep_rows,),
+                )
         conn.execute("VACUUM")
         count_after = conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
         conn.close()
@@ -137,6 +151,7 @@ def vacuum_embed_cache(max_size_mb: int = 100, max_age_days: int = 14) -> dict:
             "status": "vacuumed",
             "before": count_before,
             "after": count_after,
+            "deleted_by_ttl": deleted_by_ttl,
             "size_mb": round(new_size, 1),
         }
     except Exception as e:

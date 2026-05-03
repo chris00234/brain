@@ -17,11 +17,15 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import shlex
 import sqlite3
+import subprocess
 import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -31,8 +35,9 @@ log = logging.getLogger("brain.slos")
 try:
     from atoms_store import BRAIN_DB
 
-    from config import AUTONOMY_DB, BRAIN_LOGS_DIR
+    from config import AUTONOMY_DB, BRAIN_DIR, BRAIN_LOGS_DIR
 except ImportError:
+    BRAIN_DIR = Path("/Users/chrischo/server/brain")
     AUTONOMY_DB = Path("/Users/chrischo/server/brain/logs/autonomy.db")
     BRAIN_LOGS_DIR = Path("/Users/chrischo/server/brain/logs")
     BRAIN_DB = BRAIN_LOGS_DIR / "brain.db"
@@ -230,6 +235,30 @@ SLOS: dict[str, SLO] = {
         metric_unit="MB",
         consecutive_breaches_required=1,
     ),
+    "entry_contract_missing_pct": SLO(
+        name="entry_contract_missing_pct",
+        description="Percentage of sampled live Qdrant points missing the v2 entry contract (schema/chunk/tag/provenance fields). Any non-zero value means a write path bypassed the source-aware boundary or a backfill regressed.",
+        target=0.0,
+        severity="critical",
+        metric_unit="%",
+        consecutive_breaches_required=1,
+    ),
+    "telegram_backlog_pending_count": SLO(
+        name="telegram_backlog_pending_count",
+        description="Pending direct Telegram alert backlog rows. Any pending row means Chris-facing alert delivery failed and needs replay before it goes stale.",
+        target=0.0,
+        severity="critical",
+        metric_unit="alerts",
+        consecutive_breaches_required=1,
+    ),
+    "telegram_direct_health": SLO(
+        name="telegram_direct_health",
+        description="Direct Telegram Bot API healthcheck for Jenna token + Chris chat reachability. 0=healthy, 1=unhealthy. This verifies the alert path without sending a daily test DM.",
+        target=0.0,
+        severity="critical",
+        metric_unit="failed",
+        consecutive_breaches_required=1,
+    ),
     # 2026-04-21: qdrant-backup silent-failure watcher. The nightly
     # ai.openclaw.qdrant-backup launchd plist runs at 03:00 local time and
     # uploads to MinIO. If it silently fails (S3 creds rot, Qdrant snapshot
@@ -257,16 +286,24 @@ SLOS: dict[str, SLO] = {
         metric_unit="hours",
         consecutive_breaches_required=1,
     ),
+    "backup_restore_drill_age_hours": SLO(
+        name="backup_restore_drill_age_hours",
+        description="Age in hours of the latest successful SQLite backup restore-readiness drill. Breaches >192h so weekly drill failures surface before backups become untrusted.",
+        target=192.0,
+        severity="warning",
+        metric_unit="hours",
+        consecutive_breaches_required=1,
+    ),
     # 2026-04-26: brain server RSS leak detector. Pre-fix the long-running
     # server.py grew to ~4 GB after 17h because torch.mps.empty_cache() was
     # gated behind BRAIN_CE_MPS_EMPTY_CACHE=true (default false), so PyTorch's
     # MPS allocator held GPU scratch buffers indefinitely. Target 3072 MB
-    # (~2 GB physical footprint) gives steady-state headroom — post-fix the
+    # (~3 GB physical footprint) gives steady-state headroom — post-fix the
     # process should sit at ~1.3 GB. Breaches signal the leak returned or a
     # new accumulator landed.
     "brain_server_rss_mb": SLO(
         name="brain_server_rss_mb",
-        description="Brain FastAPI server RSS in MB (ps-reported, includes mmap overhead). Target 3072 = ~2 GB physical footprint. Breaches signal the MPS empty_cache leak returned or a new in-process accumulator was introduced.",
+        description="Brain FastAPI server RSS in MB (ps-reported, includes mmap overhead). Target 3072 = ~3 GB physical footprint. Breaches signal the MPS empty_cache leak returned or a new in-process accumulator was introduced.",
         target=3072.0,
         severity="warning",
         metric_unit="MB",
@@ -668,6 +705,27 @@ def _measure_neo4j_backup_age_hours() -> float:
         return 999.0
 
 
+def _measure_backup_restore_drill_age_hours() -> float:
+    """Age of the latest successful SQLite restore-readiness drill."""
+    try:
+        report = BRAIN_LOGS_DIR / "backup_restore_drill.json"
+        if not report.exists():
+            return 999.0
+        data = json.loads(report.read_text())
+        if not data.get("all_ok"):
+            return 999.0
+        ts_s = data.get("finished_at") or data.get("started_at")
+        if not ts_s:
+            return 999.0
+        ts = datetime.fromisoformat(str(ts_s).replace("Z", "+00:00"))
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=UTC)
+        return round((time.time() - ts.timestamp()) / 3600.0, 2)
+    except Exception as exc:
+        log.debug("backup_restore_drill_age measurement failed: %s", exc)
+        return 999.0
+
+
 def _measure_logs_dir_total_mb() -> float:
     """Sum size of all files under brain logs/ directory."""
     try:
@@ -682,6 +740,45 @@ def _measure_logs_dir_total_mb() -> float:
     except Exception as exc:
         log.debug("logs_dir_total_mb measurement failed: %s", exc)
         return 0.0
+
+
+def _measure_entry_contract_missing_pct() -> float:
+    try:
+        from entry_contract_audit import audit_collections
+
+        result = audit_collections()
+        return float(result.get("missing_pct") or 0.0)
+    except Exception as exc:
+        log.debug("entry_contract_missing_pct measurement failed: %s", exc)
+        return 0.0
+
+
+def _measure_telegram_backlog_pending_count() -> float:
+    try:
+        if not AUTONOMY_DB.exists():
+            return 0.0
+        with sqlite3.connect(str(AUTONOMY_DB)) as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM llm_backlog WHERE kind='telegram' AND status='pending'"
+            ).fetchone()
+        return float(row[0]) if row else 0.0
+    except sqlite3.Error as exc:
+        # Fresh installs may not have llm_backlog yet.
+        log.debug("telegram_backlog_pending_count measurement failed: %s", exc)
+        return 0.0
+
+
+def _measure_telegram_direct_health() -> float:
+    try:
+        from telegram_alert import direct_api_healthcheck
+
+        ok, reason = direct_api_healthcheck()
+        if not ok:
+            log.warning("telegram direct healthcheck failed: %s", reason)
+        return 0.0 if ok else 1.0
+    except Exception as exc:
+        log.debug("telegram_direct_health measurement failed: %s", exc)
+        return 1.0
 
 
 def _measure_self_eval_drift_7d() -> float:
@@ -763,42 +860,84 @@ def _measure_agent_session_max_mb() -> float:
         return 0.0
 
 
+def _rss_kb_for_pid(pid: int) -> int:
+    """Return current ps-reported RSS in KiB for pid, or 0 if unavailable."""
+
+    if pid <= 0:
+        return 0
+    rss_out = subprocess.run(
+        ["ps", "-o", "rss=", "-p", str(pid)],
+        capture_output=True,
+        text=True,
+        timeout=2,
+    )
+    try:
+        return int((rss_out.stdout or "").strip().split()[0])
+    except (IndexError, ValueError):
+        return 0
+
+
+def _brain_server_rss_kb_from_process_table() -> int:
+    """Find the real long-running FastAPI server and return its current RSS.
+
+    Do not use `pgrep -f "brain/server.py"` here: the SLO runner itself can
+    contain that literal in its command text, and pgrep may return the short-
+    lived checker before the actual server. Parse `ps` and require a Python
+    command whose argument vector includes the repo's exact `server.py` path.
+    """
+
+    server_path = str((BRAIN_DIR / "server.py").resolve())
+    ps_out = subprocess.run(
+        ["ps", "-axo", "pid=,rss=,command="],
+        capture_output=True,
+        text=True,
+        timeout=3,
+    )
+    best_rss = 0
+    for line in (ps_out.stdout or "").splitlines():
+        parts = line.strip().split(None, 2)
+        if len(parts) < 3:
+            continue
+        try:
+            pid = int(parts[0])
+            rss_kb = int(parts[1])
+        except ValueError:
+            continue
+        if pid == os.getpid():
+            continue
+        cmd = parts[2]
+        try:
+            argv = shlex.split(cmd)
+        except ValueError:
+            argv = cmd.split()
+        if len(argv) < 2:
+            continue
+        exe = Path(argv[0]).name.lower()
+        if "python" not in exe:
+            continue
+        if server_path not in argv[1:]:
+            continue
+        best_rss = max(best_rss, rss_kb)
+    return best_rss
+
+
 def _measure_brain_server_rss_mb() -> float:
     """RSS in MB of the brain server process.
 
-    In-process: uses resource.getrusage which is free and accurate.
-    Out-of-process (e.g. CLI invocation of slos.py): falls back to
-    pgrep+ps so the standalone runner still produces a meaningful number.
+    In-process: reads current RSS for this pid via ps.
+    Out-of-process (scheduler subprocess / CLI): parses the process table and
+    selects only the Python process running this repo's exact server.py path.
 
     Returns 0.0 on failure so the SLO stays silent rather than firing
     a spurious breach at 0 < 3072.
     """
     try:
-        import resource
-
-        in_brain_process = "brain/server.py" in " ".join(sys.argv)
-        if in_brain_process:
-            ru = resource.getrusage(resource.RUSAGE_SELF)
-            return round(ru.ru_maxrss / (1024.0 * 1024.0), 1)
-        import subprocess
-
-        pid_out = subprocess.run(
-            ["pgrep", "-f", "brain/server.py"],
-            capture_output=True,
-            text=True,
-            timeout=2,
-        )
-        pid = pid_out.stdout.strip().split("\n")[0]
-        if not pid:
-            return 0.0
-        rss_out = subprocess.run(
-            ["ps", "-o", "rss=", "-p", pid],
-            capture_output=True,
-            text=True,
-            timeout=2,
-        )
-        kb = int(rss_out.stdout.strip())
-        return round(kb / 1024.0, 1)
+        server_path = (BRAIN_DIR / "server.py").resolve()
+        argv0 = Path(sys.argv[0]).resolve() if sys.argv and sys.argv[0] else None
+        kb = _rss_kb_for_pid(os.getpid()) if argv0 == server_path else 0
+        if kb <= 0:
+            kb = _brain_server_rss_kb_from_process_table()
+        return round(kb / 1024.0, 1) if kb > 0 else 0.0
     except Exception as exc:
         log.warning("brain_server_rss_mb measurement failed: %s", exc)
         return 0.0
@@ -820,10 +959,14 @@ _MEASUREMENTS: dict[str, Callable[[], float]] = {
     "dispatch_failure_rate_1h": _measure_dispatch_failure_rate_1h,
     "agent_session_max_mb": _measure_agent_session_max_mb,
     "logs_dir_total_mb": _measure_logs_dir_total_mb,
+    "entry_contract_missing_pct": _measure_entry_contract_missing_pct,
+    "telegram_backlog_pending_count": _measure_telegram_backlog_pending_count,
+    "telegram_direct_health": _measure_telegram_direct_health,
     "boot_context_degraded_1h": _measure_boot_context_degraded_1h,
     "self_eval_drift_7d": _measure_self_eval_drift_7d,
     "qdrant_backup_age_hours": _measure_qdrant_backup_age_hours,
     "neo4j_backup_age_hours": _measure_neo4j_backup_age_hours,
+    "backup_restore_drill_age_hours": _measure_backup_restore_drill_age_hours,
     "brain_server_rss_mb": _measure_brain_server_rss_mb,
 }
 
@@ -991,8 +1134,10 @@ def maybe_alert(result: SLOResult) -> bool:
     last_at = _load_last_alert_at(result.slo.name, result.slo.severity)
     if now - last_at < ALERT_RATE_LIMIT_S:
         return False
-    _save_last_alert_at(result.slo.name, result.slo.severity, now)
-    return _alert_telegram(result.slo, result.actual)
+    sent = _alert_telegram(result.slo, result.actual)
+    if sent:
+        _save_last_alert_at(result.slo.name, result.slo.severity, now)
+    return sent
 
 
 def run() -> dict:
@@ -1002,6 +1147,25 @@ def run() -> dict:
     """
     results = check_all()
     breached = [r for r in results if r.breached]
+    remediation = {"actions": []}
+    if breached:
+        try:
+            from slo_remediation import apply_direct_remediations
+
+            remediation = apply_direct_remediations(
+                [
+                    {
+                        "slo": r.slo.name,
+                        "current": r.actual,
+                        "target": r.slo.target,
+                        "severity": r.slo.severity,
+                    }
+                    for r in breached
+                ]
+            )
+        except Exception as exc:
+            log.warning("SLO direct remediation failed: %s", exc)
+            remediation = {"error": str(exc)[:300], "actions": []}
     alerts_sent = 0
     for r in breached:
         if maybe_alert(r):
@@ -1010,6 +1174,7 @@ def run() -> dict:
         "checked": len(results),
         "breached": len(breached),
         "alerts_sent": alerts_sent,
+        "remediation": remediation,
         "results": [
             {
                 "name": r.slo.name,

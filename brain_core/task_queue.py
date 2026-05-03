@@ -474,6 +474,20 @@ class TaskQueue:
             conn.execute("UPDATE tasks SET metadata = ? WHERE id = ?", (json.dumps(meta), task_id))
             conn.commit()
 
+    def _merge_task_metadata(self, task_id: str, patch: dict) -> None:
+        """Merge metadata fields for a task without clobbering existing keys."""
+        conn = self._conn()
+        task = self.get_task(task_id)
+        if not task:
+            return
+        meta = task.get("metadata") or {}
+        meta.update(patch)
+        conn.execute(
+            "UPDATE tasks SET metadata = ?, updated_at = ? WHERE id = ?",
+            (json.dumps(meta), self._now(), task_id),
+        )
+        conn.commit()
+
     def process_pending(self) -> tuple[list[dict], list[dict]]:
         """Auto-approve pending tasks above confidence threshold, escalate the rest.
 
@@ -540,7 +554,12 @@ class TaskQueue:
         return approved, escalation_needed
 
     def _escalate_tasks(self, tasks: list[dict]) -> None:
-        """Send below-threshold tasks to Jenna for Telegram relay. 4h cooldown per task."""
+        """Review below-threshold tasks before notifying Chris.
+
+        Most low-confidence tasks are still handleable by subscription-backed
+        LLMs. Chris is notified only for concrete private-knowledge, credential,
+        authority, or irreversible-action blockers.
+        """
         from datetime import timedelta
 
         now = datetime.now(UTC)
@@ -564,13 +583,85 @@ class TaskQueue:
         if not to_escalate:
             return
 
-        lines = ["TASK ESCALATION — the following tasks need Chris's review:\n"]
-        for t in to_escalate:
-            lines.append(
-                f"- [{t['id']}] {t['title']} "
-                f"(confidence={t['confidence']:.0%}, agent={t.get('assigned_agent', '?')})"
+        human_required: list[tuple[dict, str]] = []
+        llm_review: list[dict] = []
+        try:
+            from escalation_policy import classify_escalation
+
+            for t in to_escalate:
+                route = classify_escalation(
+                    title=t.get("title", ""),
+                    content=t.get("description", ""),
+                    metadata=t.get("metadata") or {},
+                )
+                if route.notify_human:
+                    human_required.append((t, route.reason))
+                else:
+                    llm_review.append(t)
+        except Exception as exc:
+            log.debug("escalation policy unavailable, keeping tasks on LLM path: %s", exc)
+            llm_review = to_escalate
+
+        handled_ids: set[str] = set()
+        if llm_review:
+            handled_ids.update(self._review_tasks_with_subscription_llm(llm_review))
+
+        if human_required:
+            self._notify_chris_about_tasks(human_required)
+            handled_ids.update(t["id"] for t, _reason in human_required)
+
+        if handled_ids:
+            now_iso = self._now()
+            for t in to_escalate:
+                if t["id"] in handled_ids:
+                    self._set_last_escalated(t["id"], now_iso)
+
+    def _review_tasks_with_subscription_llm(self, tasks: list[dict]) -> set[str]:
+        """Ask subscription LLM whether tasks are handleable; notify only on blocker."""
+        if not tasks:
+            return set()
+
+        def _task_review_body(t: dict) -> str:
+            return "\n".join(
+                [
+                    "TASK ESCALATION REVIEW — decide if this can be handled without Chris:",
+                    "",
+                    f"- [{t['id']}] {t.get('title', '')} "
+                    f"(confidence={float(t.get('confidence', 0.0)):.0%}, "
+                    f"agent={t.get('assigned_agent') or 'sage'})",
+                    f"  description={str(t.get('description', ''))[:700]}",
+                ]
             )
-        lines.append("\nPlease relay to Chris via Telegram.")
+
+        def _approve_for_agent(t: dict, action_text: str) -> bool:
+            tid = t["id"]
+            task = self.get_task(tid)
+            if not task:
+                # Unit tests may pass synthetic task dicts directly.
+                return True
+            agent = (task.get("assigned_agent") or "").strip().lower()
+            if agent in {"", "chris", "human", "user"}:
+                conn = self._conn()
+                conn.execute(
+                    "UPDATE tasks SET assigned_agent = ?, updated_at = ? WHERE id = ?",
+                    ("sage", self._now(), tid),
+                )
+                conn.commit()
+            self._merge_task_metadata(
+                tid,
+                {
+                    "escalation_llm_route": "handleable",
+                    "escalation_llm_action": action_text[:500],
+                    "escalation_llm_routed_at": self._now(),
+                },
+            )
+            try:
+                self.approve_task(tid, by="escalation_llm")
+                log.info("task escalation self-routed %s for agent handling", tid)
+                return True
+            except ValueError as exc:
+                log.debug("task escalation self-route skipped for %s: %s", tid, exc)
+                return False
 
         try:
             import sys as _sys
@@ -580,23 +671,65 @@ class TaskQueue:
             if _bc not in _sys.path:
                 _sys.path.insert(0, _bc)
             from cli_llm import dispatch
+            from escalation_policy import llm_review_prompt, llm_says_human_needed
 
-            result = dispatch(
-                agent="jenna",
-                message="\n".join(lines),
-                thinking="low",
-                timeout=60,
-                degraded_placeholder="[Task escalation dispatch failed]",
-            )
-            if result.ok:
-                now_iso = self._now()
-                for t in to_escalate:
-                    self._set_last_escalated(t["id"], now_iso)
-                log.info("escalated %d tasks to Jenna", len(to_escalate))
-            else:
-                log.warning("task escalation dispatch failed: %s", result.error)
+            handled: set[str] = set()
+            for t in tasks:
+                body = _task_review_body(t)
+                result = dispatch(
+                    agent="sage",
+                    message=llm_review_prompt("task_queue", body),
+                    thinking="low",
+                    timeout=60,
+                    backlog_kind="proactive",
+                    backlog_payload={"source": "task_queue", "body": body},
+                    degraded_placeholder="[Task escalation dispatch failed]",
+                )
+                if not result.ok:
+                    log.warning("task escalation LLM review failed for %s: %s", t.get("id"), result.error)
+                    continue
+                if llm_says_human_needed(result.text):
+                    self._merge_task_metadata(
+                        t["id"],
+                        {
+                            "escalation_llm_route": "human_needed",
+                            "escalation_llm_reason": result.text[:500],
+                            "escalation_llm_routed_at": self._now(),
+                        },
+                    )
+                    self._notify_chris_text(
+                        f"TASK ESCALATION requires Chris for [{t['id']}] {t.get('title', '')}:\n"
+                        + result.text[:1000],
+                        source="task_queue:llm_human_needed",
+                    )
+                elif _approve_for_agent(t, result.text):
+                    handled.add(t["id"])
+                log.info("reviewed escalated task %s with subscription LLM", t.get("id"))
+            return handled
         except Exception as e:
-            log.warning("task escalation error: %s", e)
+            log.warning("task escalation LLM review error: %s", e)
+        return set()
+
+    def _notify_chris_about_tasks(self, tasks_with_reasons: list[tuple[dict, str]]) -> None:
+        """Notify Chris about tasks with known human-only blockers."""
+        if not tasks_with_reasons:
+            return
+        lines = ["TASK ESCALATION — Chris input required:\n"]
+        for t, reason in tasks_with_reasons:
+            lines.append(
+                f"- [{t['id']}] {t.get('title', '')} "
+                f"(reason={reason}, confidence={float(t.get('confidence', 0.0)):.0%})"
+            )
+        self._notify_chris_text("\n".join(lines), source="task_queue:human_required")
+
+    def _notify_chris_text(self, body: str, *, source: str) -> None:
+        """Direct Chris notification; avoids LLM path and API spend."""
+        try:
+            from telegram_alert import send_chris_telegram
+
+            send_chris_telegram(body, source=source, severity="warn")
+        except Exception as e:
+            log.warning("task escalation Chris notification failed: %s", e)
 
     def process_ready(self) -> list[dict]:
         """Dispatch ready tasks (approved, deps met) to their assigned OpenClaw agents.

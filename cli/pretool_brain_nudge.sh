@@ -48,13 +48,13 @@ case "$TOOL_NAME" in
     FIRST_TOK=$(printf '%s' "$QUERY" | awk '{print $1}')
     # Skip commands that are obviously observability / plumbing, not knowledge-lookup.
     case "$FIRST_TOK" in
-      ls|pwd|cd|echo|printf|cat|head|tail|wc|find|rm|mv|cp|mkdir|touch|chmod|chown|sleep|date|whoami|which|env|true|false|:|test|[)
+      ls|pwd|cd|echo|printf|cat|head|tail|sed|awk|grep|rg|wc|find|xargs|rm|mv|cp|mkdir|touch|chmod|chown|sleep|date|whoami|which|env|true|false|:|test|[)
         exit 0 ;;
       curl|wget|nc|ping|dig|host|nslookup|ssh|scp|rsync)
         exit 0 ;;
       ps|top|htop|kill|pkill|lsof|launchctl|systemctl|docker|brew|port|netstat|ifconfig|ip)
         exit 0 ;;
-      sqlite3|psql|mysql|redis-cli|mongo|jq|yq|python|python3|node|npm|pip|uv|cargo|go|make|bash|sh|zsh)
+      sqlite3|psql|mysql|redis-cli|mongo|jq|yq|python|python3|node|npm|pip|uv|cargo|go|make|bash|sh|zsh|perl|ruby)
         exit 0 ;;
       git)
         case "$QUERY" in

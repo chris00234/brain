@@ -134,20 +134,28 @@ def route_message(message: dict) -> str:
     to_agent = message.get("to_agent", "unknown")
     content = message.get("content", "")
 
-    # Decision messages always escalate to Chris via Jenna
+    # Decision messages need review, but most are LLM-handleable. Notify Chris
+    # only when the policy detects missing private knowledge/authority.
     if mtype == "decision":
-        _escalate(from_agent, to_agent, content)
-        return "escalated"
+        if _requires_human_notification(message):
+            _notify_chris(from_agent, to_agent, content)
+            return "escalated"
+        _handle_with_subscription_llm(from_agent, to_agent, content)
+        return "forwarded"
 
     # Handoff: create a task for the target agent
     if mtype == "handoff":
         _create_handoff_task(message)
         return "task_created"
 
-    # High-priority alerts escalate
+    # High-priority alerts are first reviewed by subscription LLM unless they
+    # contain a concrete human-only blocker.
     if mtype == "alert" and priority <= 3:
-        _escalate(from_agent, to_agent, content)
-        return "escalated"
+        if _requires_human_notification(message):
+            _notify_chris(from_agent, to_agent, content)
+            return "escalated"
+        _handle_with_subscription_llm(from_agent, to_agent, content)
+        return "forwarded"
 
     # Everything else stays pending for the target agent's next boot
     return "stored"
@@ -200,19 +208,60 @@ def dismiss_all(agent: str) -> int:
 # ── Internal ─────────────────────────────────────────────
 
 
-def _escalate(from_agent: str, to_agent: str, content: str) -> None:
-    """Dispatch escalation to Jenna for Chris notification."""
+def _requires_human_notification(message: dict) -> bool:
+    """Return True only for blockers the LLM cannot resolve itself."""
+    try:
+        from escalation_policy import classify_escalation
+
+        route = classify_escalation(
+            title=(
+                f"{message.get('message_type', 'message')} "
+                f"{message.get('from_agent', '')}->{message.get('to_agent', '')}"
+            ),
+            content=message.get("content", ""),
+            metadata=message.get("metadata") or {},
+        )
+        return route.notify_human
+    except Exception as exc:
+        log.debug("escalation policy unavailable, defaulting to LLM handling: %s", exc)
+        return False
+
+
+def _handle_with_subscription_llm(from_agent: str, to_agent: str, content: str) -> None:
+    """Ask subscription-backed LLM to handle/review before Chris is notified."""
     try:
         from cli_llm import dispatch
+        from escalation_policy import llm_review_prompt, llm_says_human_needed
 
-        dispatch(
-            agent="jenna",
-            message=f"[AGENT MSG] {from_agent}\u2192{to_agent}: {content[:300]}",
+        body = f"[AGENT MSG] {from_agent}\u2192{to_agent}: {content[:1200]}"
+        result = dispatch(
+            agent=to_agent or "sage",
+            message=llm_review_prompt("agent_messenger", body),
             thinking="off",
             timeout=30,
+            backlog_kind="proactive",
+            backlog_payload={"source": "agent_messenger", "body": body},
         )
+        if result.ok and llm_says_human_needed(result.text):
+            _notify_chris(from_agent, to_agent, result.text[:1000])
     except Exception as exc:
-        log.warning("escalation dispatch failed: %s", exc)
+        log.warning("subscription LLM escalation review failed: %s", exc)
+
+
+def _notify_chris(from_agent: str, to_agent: str, content: str) -> None:
+    """Send a Chris-facing notification without using an LLM path."""
+    body = f"[AGENT MSG] {from_agent}\u2192{to_agent}: {content[:1000]}"
+    try:
+        from telegram_alert import send_chris_telegram
+
+        send_chris_telegram(body, source="agent_messenger", severity="warn")
+    except Exception as exc:
+        log.warning("Chris notification dispatch failed: %s", exc)
+
+
+def _escalate(from_agent: str, to_agent: str, content: str) -> None:
+    """Back-compat alias for older callers/tests."""
+    _notify_chris(from_agent, to_agent, content)
 
 
 def _create_handoff_task(message: dict) -> None:

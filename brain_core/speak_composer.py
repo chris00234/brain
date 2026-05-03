@@ -26,19 +26,20 @@ from speak_synthesis import synthesis_drive
 log = logging.getLogger("brain.speak")
 
 
-DRIVES: list[Callable[[], list[Observation]]] = [
+RULE_BASED_DRIVES: list[Callable[[], list[Observation]]] = [
     contradiction_drive,
     coding_revert_drive,
     stale_thread_drive,
-    synthesis_drive,
 ]
+DRIVES: list[Callable[[], list[Observation]]] = [*RULE_BASED_DRIVES, synthesis_drive]
 
 
-def collect_observations() -> list[Observation]:
+def collect_observations(*, include_synthesis: bool = True) -> list[Observation]:
     """Fan out all drives; swallow drive-level exceptions to keep loop robust."""
     ensure_schema()
     out: list[Observation] = []
-    for drive in DRIVES:
+    drives = DRIVES if include_synthesis else RULE_BASED_DRIVES
+    for drive in drives:
         try:
             results = drive() or []
             out.extend(results)
@@ -68,6 +69,81 @@ def format_telegram(chosen: list[Observation]) -> str:
     return "\n".join(lines)
 
 
+def _observation_body(o: Observation) -> str:
+    return f"[{o.drive}/{o.category}] severity={o.severity}: {o.message}"
+
+
+def _self_handle_observation(o: Observation) -> Observation | None:
+    """Route a digest observation to subscription LLM first.
+
+    Returns a synthetic human-needed observation only when the LLM explicitly
+    says Chris is required. Otherwise the observation is considered handled and
+    omitted from Telegram.
+    """
+    body = _observation_body(o)
+    try:
+        from escalation_policy import classify_escalation, llm_review_prompt, llm_says_human_needed
+
+        route = classify_escalation(title=f"{o.drive}:{o.category}", content=o.message, metadata=o.payload)
+        if route.notify_human:
+            return o
+
+        try:
+            from agent_messenger import send_message
+
+            send_message(
+                from_agent="brain_speak_digest",
+                to_agent="sage",
+                content=(
+                    "Brain digest observation. Handle it yourself if possible; "
+                    "notify Chris only for a true human blocker.\n\n" + body
+                ),
+                message_type="handoff",
+                priority=4,
+                metadata={"source": "brain_speak_digest", "dedup_key": o.dedup_key},
+            )
+            return None
+        except Exception as exc:
+            log.debug("digest agent handoff failed, falling back to CLI review: %s", exc)
+
+        from cli_llm import dispatch
+
+        result = dispatch(
+            agent="sage",
+            message=llm_review_prompt("brain_speak_digest", body),
+            thinking="low",
+            timeout=45,
+            backlog_kind="proactive",
+            backlog_payload={"source": "brain_speak_digest", "body": body},
+        )
+        if result.ok and llm_says_human_needed(result.text):
+            return Observation(
+                drive=o.drive,
+                category="human-needed",
+                severity=max(o.severity, 8.0),
+                message=result.text[:800],
+                dedup_key=f"human_needed:{o.dedup_key}",
+                payload={**o.payload, "source_observation": o.dedup_key},
+            )
+        return None
+    except Exception as exc:
+        log.warning("digest self-handle failed for %s: %s", o.dedup_key, exc)
+        return None
+
+
+def route_digest_observations(chosen: list[Observation]) -> tuple[list[Observation], int]:
+    """Split digest observations into Chris-needed vs self-handled."""
+    notify: list[Observation] = []
+    self_handled = 0
+    for o in chosen:
+        routed = _self_handle_observation(o)
+        if routed is None:
+            self_handled += 1
+            continue
+        notify.append(routed)
+    return notify, self_handled
+
+
 def run_digest(*, dry_run: bool = False, bypass_dedup: bool = False) -> dict:
     """Main entry point — called from cron and from POST /brain/speak/run."""
     ensure_schema()
@@ -77,9 +153,14 @@ def run_digest(*, dry_run: bool = False, bypass_dedup: bool = False) -> dict:
     else:
         chosen = compose_digest(all_obs)
 
-    body = format_telegram(chosen)
+    if dry_run:
+        notify_chosen = chosen
+        self_handled = 0
+    else:
+        notify_chosen, self_handled = route_digest_observations(chosen)
+    body = format_telegram(notify_chosen)
     delivered = False
-    if chosen and body and not dry_run:
+    if notify_chosen and body and not dry_run:
         try:
             from telegram_alert import send_chris_telegram
 
@@ -94,11 +175,18 @@ def run_digest(*, dry_run: bool = False, bypass_dedup: bool = False) -> dict:
 
     logged_ids: list[str] = []
     if not dry_run:
-        for o in chosen:
+        for o in notify_chosen:
             try:
                 logged_ids.append(log_emit(o, sent_via="telegram" if delivered else "queued"))
             except Exception as exc:
                 log.debug("speak log write failed: %s", exc)
+        for o in chosen:
+            if o in notify_chosen:
+                continue
+            try:
+                logged_ids.append(log_emit(o, sent_via="self_handled"))
+            except Exception as exc:
+                log.debug("speak self-handled log write failed: %s", exc)
 
     return {
         "total_observations": len(all_obs),
@@ -109,8 +197,9 @@ def run_digest(*, dry_run: bool = False, bypass_dedup: bool = False) -> dict:
                 "severity": o.severity,
                 "message": o.message,
             }
-            for o in chosen
+            for o in notify_chosen
         ],
+        "self_handled": self_handled,
         "delivered": delivered,
         "dry_run": dry_run,
         "body": body,

@@ -118,6 +118,7 @@ def expand_to_parents(results: list[dict]) -> list[dict]:
 
     # Collect unique parent_ids from the results (and check cache first)
     uncached: list[str] = []
+    uncached_seen: set[str] = set()
     want: dict[str, list[int]] = {}  # parent_id → list of result indices
     for i, r in enumerate(results):
         meta = r.get("metadata") or {}
@@ -127,8 +128,9 @@ def expand_to_parents(results: list[dict]) -> list[dict]:
         if not pid or meta.get("is_parent"):
             continue
         want.setdefault(pid, []).append(i)
-        if _cache_get(pid) is None:
+        if pid not in uncached_seen and _cache_get(pid) is None:
             uncached.append(pid)
+            uncached_seen.add(pid)
 
     if not want:
         return results

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import sys
 from pathlib import Path
 
@@ -31,6 +32,105 @@ try:
     from brain_core.source_quality import source_quality_multiplier
 except ImportError:  # pragma: no cover - top-level import in scripts/tests
     from source_quality import source_quality_multiplier
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return max(minimum, int(raw))
+    except ValueError:
+        log.warning("invalid %s=%r; using default %s", name, raw, default)
+        return default
+
+
+def _reranker_mode() -> str:
+    mode = os.environ.get("BRAIN_RERANKER_MODE", "inprocess").strip().lower()
+    if mode not in {"inprocess", "worker"}:
+        log.warning("invalid BRAIN_RERANKER_MODE=%r; using inprocess", mode)
+        return "inprocess"
+    return mode
+
+
+def _score_pairs(query: str, docs: list[str]) -> list[float]:
+    if _reranker_mode() == "worker":
+        try:
+            from brain_core.reranker_client import score_pairs_remote
+        except Exception as exc:
+            log.warning("reranker client unavailable, skipping cross-encoder rerank: %s", exc)
+            return []
+        try:
+            return score_pairs_remote(query, docs)
+        except Exception as exc:
+            log.warning("reranker worker unavailable, stage-1 result stands: %s", exc)
+            return []
+
+    # Lazy-import the model so tests / non-/recall paths don't pay the load cost.
+    try:
+        from brain_core.cross_encoder_model import score_pairs
+    except Exception as e:
+        try:
+            from cross_encoder_model import score_pairs
+        except Exception:
+            log.warning("cross_encoder_model unavailable, skipping rerank: %s", e)
+            return []
+    return score_pairs(query, docs)
+
+
+_BROAD_QUERY_RE = (
+    "compare",
+    "contrast",
+    "summarize",
+    "summary",
+    "everything",
+    "overall",
+    "relationship",
+    "tradeoff",
+    "multi",
+    "비교",
+    "요약",
+    "전체",
+    "관계",
+)
+
+
+def choose_cross_encoder_top_k(query: str, results: list[dict], default_top_k: int = 14) -> int:
+    """Choose the cross-encoder rerank window for this request.
+
+    The cross-encoder is the hottest remaining recall phase. Most simple
+    lookups don't need a 14-row semantic rerank window, while broad/multi-hop
+    questions do. Keep this env-controlled so rollout can tune latency without
+    changing retrieval semantics elsewhere.
+    """
+    max_top_k = _env_int("BRAIN_CROSS_ENCODER_TOP_K", default_top_k)
+    if not _env_bool("BRAIN_CROSS_ENCODER_ADAPTIVE", False):
+        return min(max_top_k, len(results))
+
+    simple_top_k = _env_int("BRAIN_CROSS_ENCODER_SIMPLE_TOP_K", min(10, max_top_k))
+    query_l = (query or "").lower()
+    if any(marker in query_l for marker in _BROAD_QUERY_RE):
+        return min(max_top_k, len(results))
+
+    if len(results) >= 2:
+        try:
+            top = float(results[0].get("score", 0.0))
+            second = float(results[1].get("score", 0.0))
+            # If stage-1 already has a very strong canonical/current-truth
+            # winner, rerank fewer tail rows. We do not skip CE entirely.
+            source = str(results[0].get("source_type") or results[0].get("collection") or "").lower()
+            if source in {"canonical", "semantic_memory"} and top >= 95.0 and (top - second) >= 18.0:
+                return min(simple_top_k, len(results))
+        except (TypeError, ValueError):
+            pass
+    return min(max(simple_top_k, 1), len(results))
 
 
 def _sigmoid(x: float) -> float:
@@ -75,22 +175,12 @@ def rerank_with_cross_encoder(query: str, results: list[dict], top_k: int = 20) 
     if not BRAIN_CROSS_ENCODER_ENABLED or not results:
         return results
 
-    # Lazy-import the model so tests / non-/recall paths don't pay the load cost.
-    try:
-        from brain_core.cross_encoder_model import score_pairs
-    except Exception as e:
-        try:
-            from cross_encoder_model import score_pairs
-        except Exception:
-            log.warning("cross_encoder_model unavailable, skipping rerank: %s", e)
-            return results
-
     subset = results[:top_k]
     tail = results[top_k:]
 
     # Build (query, title+content) pairs. Content capped at 1500 chars in score_pairs.
     docs = [((r.get("title") or "") + "\n" + (r.get("content") or "")) for r in subset]
-    raw_scores = score_pairs(query, docs)
+    raw_scores = _score_pairs(query, docs)
 
     if not raw_scores or all(s == 0.0 for s in raw_scores):
         # Model failed entirely — return unchanged so the caller can fall back.

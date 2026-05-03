@@ -278,6 +278,35 @@ except Exception:
   fi
 fi
 
+# ── Step 5b: Phase 2 (2026-04-27) — pending cross-agent lessons ──
+# The lesson_fanout hook (~/.brain_hooks/lesson_fanout.py) routes new
+# correction-kind / high-confidence atoms into agent_messenger. This block
+# delivers them to Claude Code on the next turn and acks each one.
+# Disabled if BRAIN_LESSON_FANOUT=off on the server side (hook is a no-op).
+if [ "${BRAIN_LESSON_FANOUT:-on}" != "off" ] && [ -n "$HEADER_FILE_CB" ]; then
+  LESSON_BUDGET="${BRAIN_LESSON_BUDGET_MS:-600}"
+  LESSON_BUDGET_S=$(awk -v ms="$LESSON_BUDGET" 'BEGIN{printf "%.2f", ms/1000.0}')
+  LESSONS=$(curl -sS --max-time "$LESSON_BUDGET_S" \
+    -H "@$HEADER_FILE_CB" \
+    "${BRAIN_URL}/brain/messages/claude?limit=3" 2>/dev/null || echo "")
+  LESSON_COUNT=0
+  if [ -n "$LESSONS" ]; then
+    LESSON_COUNT=$(printf '%s' "$LESSONS" | jq '[.messages[]? | select(.message_type == "lesson")] | length' 2>/dev/null || echo 0)
+  fi
+  [[ "$LESSON_COUNT" =~ ^[0-9]+$ ]] || LESSON_COUNT=0
+  if [ "$LESSON_COUNT" -gt 0 ]; then
+    printf '<system-reminder>\n### Brain — pending cross-agent lessons (deliver-once)\n'
+    printf '%s' "$LESSONS" | jq -r '.messages[]? | select(.message_type == "lesson") | "- [\((.metadata | fromjson? | .atom_kind) // "lesson")] \(.content)"' 2>/dev/null
+    printf '</system-reminder>\n'
+    for MSG_ID in $(printf '%s' "$LESSONS" | jq -r '.messages[]? | select(.message_type == "lesson") | .id' 2>/dev/null); do
+      curl -sS --max-time 0.5 -X POST \
+        -H "@$HEADER_FILE_CB" \
+        "${BRAIN_URL}/brain/messages/${MSG_ID}/ack" >/dev/null 2>&1 &
+    done
+    wait 2>/dev/null
+  fi
+fi
+
 # ── Step 6: Touch wake file for brain_loop (fires within 1s) ─────
 # brain_loop's file watcher fires tick() on mtime change. This gives brain a
 # chance to react to Chris's new prompt immediately instead of waiting up to 60s.

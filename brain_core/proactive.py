@@ -531,6 +531,35 @@ def check_behavior_patterns() -> list[ProactiveInsight]:
     return insights
 
 
+def check_learned_playbooks() -> list[ProactiveInsight]:
+    """Surface learned event-class playbooks for safe proactive execution.
+
+    This closes the gap between "Brain remembered Chris's repeated question"
+    and "Brain nudges the execution layer before Chris asks." The detector is
+    read-only and feeds existing proactive/attention/brain_loop machinery.
+    """
+    insights: list[ProactiveInsight] = []
+    try:
+        from proactive_playbooks import candidates_as_insights
+
+        for row in candidates_as_insights():
+            insights.append(
+                ProactiveInsight(
+                    id=row["id"],
+                    category=row["category"],
+                    severity=row["severity"],
+                    summary=row["summary"],
+                    detail=row["detail"],
+                    evidence=row["evidence"],
+                    generated_at=_now_iso(),
+                    expires_at=_expires_iso(12),
+                )
+            )
+    except Exception as e:
+        log.warning("check_learned_playbooks failed: %s", e)
+    return insights
+
+
 # ── Main entry points ────────────────────────────────────
 
 
@@ -543,6 +572,7 @@ def run_proactive_check() -> list[ProactiveInsight]:
         check_work_patterns,
         check_scheduler_health,
         check_behavior_patterns,
+        check_learned_playbooks,
     ]
 
     new_insights: list[ProactiveInsight] = []

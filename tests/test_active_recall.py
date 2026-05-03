@@ -95,6 +95,18 @@ def test_brain_ops_prompt_still_injects_runbook_route():
     assert "brain_self" in intents
 
 
+def test_active_recall_quality_prompt_does_not_inject_ops_runbook():
+    matches = active_recall._match_canonical_routes("active recall에서 관련없는 결과값 개선 가능해?")
+    intents = [m.intent for m in matches]
+    assert "brain_self" not in intents
+
+
+def test_monitoring_ops_prompt_still_injects_runbook_route():
+    matches = active_recall._match_canonical_routes("브레인 모니터링 메트릭 상태 확인")
+    intents = [m.intent for m in matches]
+    assert "brain_self" in intents
+
+
 def test_llm_budget_intent_suppresses_broad_brain_self():
     matches = active_recall._match_canonical_routes("브레인 비용 정책 알려줘")
     intents = [m.intent for m in matches]
@@ -688,6 +700,17 @@ def test_build_injection_exposes_compiler_metadata(monkeypatch):
     assert block["contract_category"] in {"policy", "risk_constraint"}
     assert result["quality"]["compiler"]["annotated_blocks"] == len(result["blocks"])
     assert "context_contract" in result["quality"]
+
+
+def test_semantic_prompt_match_rejects_single_generic_overlap():
+    assert (
+        active_recall._semantic_result_matches_prompt(
+            "active recall에서 관련없는 결과값 개선 가능해?",
+            "2) 메모리/꿈(Dreaming)·Recall 품질",
+            "OpenClaw update notes mention broad recall quality improvements.",
+        )
+        is False
+    )
 
 
 def test_build_injection_design_query_returns_canonical(monkeypatch):

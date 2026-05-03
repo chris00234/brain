@@ -50,6 +50,31 @@ WINDOW_DAYS = 30  # only look at recent track record
 SUCCESS_OUTCOMES = {"success", "ok", "approved", "completed", "committed"}
 FAILURE_OUTCOMES = {"fail", "error", "rejected", "rollback", "timeout", "denied"}
 
+# Phase 4c (2026-04-27): conservative auto-graduation. When a kind on the
+# allowlist has truly excellent track record (98%+ over 50+ outcomes in the
+# `WINDOW_DAYS` window above), the proposer applies the promotion AND sends a
+# Telegram notification with a 24-hour rollback hint. Demotions are NEVER
+# auto-applied — a failing kind is exactly the wrong thing to let auto-quiet
+# itself.
+#
+# AUTOGRADE_COOLDOWN_S enforces ≥7 days between successive auto-promotions of
+# the same kind so a single 30-day track record can't escalate L1→L2→L3 in
+# back-to-back daily runs (2026-04-27 review fix).
+AUTOGRADE_RATIO = 0.98
+AUTOGRADE_MIN_OUTCOMES = 50
+AUTOGRADE_COOLDOWN_S = 7 * 24 * 3600
+# Initial allowlist: only kinds that are already at L3 OR are pure-read
+# advisory paths whose worst outcome is "no signal". Anything that writes
+# to canonical / scheduler / route configs stays human-gated.
+AUTOGRADE_ALLOWLIST = {
+    "heal.log_rotate",
+    "heal.vacuum_embed_cache",
+    "advise.daily_brief",
+    "advise.memory_lint",
+    "brain_loop.drain_llm_backlog",
+    "brain_loop.incremental_index",
+}
+
 
 def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
@@ -145,6 +170,16 @@ def run() -> dict:
             "note": "no_action_audit_window_data",
         }
 
+    import os as _os
+
+    autograde_enabled = _os.environ.get("BRAIN_AUTOGRADE_ENABLED", "off").lower() in (
+        "on",
+        "1",
+        "true",
+        "yes",
+    )
+    auto_applied: list[dict] = []
+
     for row in kind_rows:
         kind = row["kind"]
         total = int(row["total"] or 0)
@@ -164,6 +199,82 @@ def run() -> dict:
                 f"success_ratio={ratio:.3f} ({success}/{total}) >= {PROMOTE_RATIO}",
             )
             promotes.append({"kind": kind, "ratio": ratio, "total": total, "target": target})
+
+            # Phase 4c: auto-apply if this kind earned its way onto the allowlist
+            # AND clears the stricter AUTOGRADE_RATIO over a larger sample.
+            # Per-kind cooldown via brain_config_store: ≥7 days between successive
+            # auto-promotions so one good 30-day track record can't fast-track
+            # L1→L2→L3 across back-to-back daily runs.
+            cooldown_ok = True
+            cooldown_key = f"autograde.{kind}.last_promoted_at"
+            if (
+                autograde_enabled
+                and kind in AUTOGRADE_ALLOWLIST
+                and ratio >= AUTOGRADE_RATIO
+                and total >= AUTOGRADE_MIN_OUTCOMES
+            ):
+                try:
+                    import time as _t
+
+                    import brain_config_store
+
+                    last = brain_config_store.get(cooldown_key)
+                    if last:
+                        try:
+                            if _t.time() - float(last) < AUTOGRADE_COOLDOWN_S:
+                                cooldown_ok = False
+                        except (ValueError, TypeError):
+                            cooldown_ok = True  # corrupted value — let it through
+                except Exception as exc:
+                    log.debug("autograde cooldown lookup failed for %s: %s", kind, exc)
+            if (
+                autograde_enabled
+                and cooldown_ok
+                and kind in AUTOGRADE_ALLOWLIST
+                and ratio >= AUTOGRADE_RATIO
+                and total >= AUTOGRADE_MIN_OUTCOMES
+            ):
+                try:
+                    import time as _t
+
+                    from autonomy import set_level
+
+                    set_level(kind, target, updated_by="autonomy_proposer.autograde")
+                    try:
+                        import brain_config_store
+
+                        brain_config_store.set(
+                            cooldown_key, str(int(_t.time())), updated_by="autonomy_proposer"
+                        )
+                    except Exception as exc:
+                        log.debug("autograde cooldown write failed for %s: %s", kind, exc)
+                    auto_applied.append(
+                        {
+                            "kind": kind,
+                            "from": current_level,
+                            "to": target,
+                            "ratio": ratio,
+                            "total": total,
+                        }
+                    )
+                    # Rollback-hint Telegram. Direct send — no LLM in the path.
+                    try:
+                        from telegram_alert import send_chris_telegram
+
+                        send_chris_telegram(
+                            body=(
+                                f"BRAIN auto-graduated {kind} {current_level}→{target} "
+                                f"(success={ratio:.0%} over {total} outcomes). "
+                                f"Rollback within 24h via "
+                                f"`POST /brain/config/set` BRAIN_AUTONOMY_LEVEL.{kind}={current_level}"
+                            ),
+                            source="autonomy_proposer.autograde",
+                            severity="info",
+                        )
+                    except Exception as exc:
+                        log.debug("autograde telegram failed: %s", exc)
+                except Exception as exc:
+                    log.warning("autograde set_level for %s failed: %s", kind, exc)
         elif ratio <= DEMOTE_RATIO and current_level in ("L2", "L3"):
             target = "L2" if current_level == "L3" else "L1"
             _propose_audit(
@@ -186,6 +297,8 @@ def run() -> dict:
     return {
         "promoted_proposals": len(promotes),
         "demoted_proposals": len(demotes),
+        "auto_applied": auto_applied,
+        "auto_applied_count": len(auto_applied),
         "skipped": len(skipped),
         "promotes": promotes,
         "demotes": demotes,

@@ -75,7 +75,7 @@ class BrainScheduler:
         self._state_lock = threading.RLock()
         self._tick_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="brain_tick")
         self._tick_future: Future | None = None
-        self._resource_limits = {
+        self._base_resource_limits = {
             "heavy": _env_int("BRAIN_SCHED_MAX_HEAVY_JOBS", 1),
             "llm": _env_int("BRAIN_SCHED_MAX_LLM_JOBS", 1),
             "embedder": _env_int(
@@ -84,6 +84,8 @@ class BrainScheduler:
             ),
             "index": _env_int("BRAIN_SCHED_MAX_INDEX_JOBS", 1),
         }
+        self._resource_limits = dict(self._base_resource_limits)
+        self._resource_limits_last_refresh = 0.0
         self._resource_defer_s = _env_int("BRAIN_SCHED_RESOURCE_DEFER_S", 300)
         self._resource_defers: dict[str, dict] = {}
         # 2026-04-22: db_path injectable so tests don't leak test_job/stale_job
@@ -422,31 +424,61 @@ class BrainScheduler:
             if not self._pid_alive(pid):
                 self._running_jobs.pop(name, None)
 
+    def _refresh_resource_limits_locked(self) -> None:
+        """Apply short-lived resource throttles written by SLO remediation.
+
+        ``slo_remediation`` persists ``BRAIN_SCHED_MAX_HEAVY_JOBS=0`` plus a
+        ``BRAIN_SCHED_HEAVY_THROTTLE_UNTIL`` epoch when RSS approaches the
+        ceiling.  The scheduler is long-lived, so reading only process env at
+        construction time meant the throttle was visible in brain_config but
+        ineffective until a restart.  Refresh cheaply on the scheduling hot
+        path and automatically clear expired throttle rows.
+        """
+
+        now = time.time()
+        if now - self._resource_limits_last_refresh < 5.0:
+            return
+        self._resource_limits_last_refresh = now
+        limits = dict(self._base_resource_limits)
+        try:
+            import brain_config_store
+
+            until_raw = brain_config_store.get("BRAIN_SCHED_HEAVY_THROTTLE_UNTIL")
+            max_heavy_raw = brain_config_store.get("BRAIN_SCHED_MAX_HEAVY_JOBS")
+            if until_raw and float(until_raw) > now and max_heavy_raw is not None:
+                limits["heavy"] = max(0, int(max_heavy_raw))
+            elif until_raw and float(until_raw) <= now:
+                brain_config_store.delete("BRAIN_SCHED_HEAVY_THROTTLE_UNTIL")
+                brain_config_store.delete("BRAIN_SCHED_MAX_HEAVY_JOBS")
+        except Exception as exc:
+            log.debug("scheduler resource throttle refresh failed: %s", exc)
+        self._resource_limits = limits
+
     def _resource_blocker_locked(self, job_name: str) -> str | None:
         spec = JOB_BY_NAME.get(job_name)
         if spec is None:
             return None
+        self._refresh_resource_limits_locked()
         self._cleanup_dead_running_locked()
         running_specs = [
-            JOB_BY_NAME[name]
-            for name in self._running_jobs
-            if name != job_name and name in JOB_BY_NAME
+            JOB_BY_NAME[name] for name in self._running_jobs if name != job_name and name in JOB_BY_NAME
         ]
         if spec.resource_class == "heavy":
             limit = self._resource_limits.get("heavy", 0)
             running = sum(1 for item in running_specs if item.resource_class == "heavy")
-            if limit and running >= limit:
+            if running >= limit:
                 return f"heavy:{running}/{limit}"
         for tag in ("llm", "embedder", "index"):
             if tag not in spec.resource_tags:
                 continue
             limit = self._resource_limits.get(tag, 0)
             running = sum(1 for item in running_specs if tag in item.resource_tags)
-            if limit and running >= limit:
+            if running >= limit:
                 return f"{tag}:{running}/{limit}"
         return None
 
     def _resource_usage_locked(self) -> dict[str, dict]:
+        self._refresh_resource_limits_locked()
         self._cleanup_dead_running_locked()
         usage = {
             key: {"limit": limit, "running": 0, "running_jobs": []}
@@ -613,8 +645,14 @@ class BrainScheduler:
 
         pending_retries = {}
         for job_name, meta in defers.items():
-            aps_job = self._scheduler.get_job(f"resource_retry:{job_name}") if self._scheduler.running else None
-            next_run = aps_job.next_run_time.isoformat() if aps_job and aps_job.next_run_time else meta.get("retry_at")
+            aps_job = (
+                self._scheduler.get_job(f"resource_retry:{job_name}") if self._scheduler.running else None
+            )
+            next_run = (
+                aps_job.next_run_time.isoformat()
+                if aps_job and aps_job.next_run_time
+                else meta.get("retry_at")
+            )
             pending_retries[job_name] = {**meta, "next_run": next_run}
 
         return {

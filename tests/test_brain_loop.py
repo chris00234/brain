@@ -10,6 +10,7 @@ Run:
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -83,6 +84,41 @@ def test_seen_cooldown_default_used_for_unknown_kind():
     assert kept == [obs]  # first pass
     kept = brain_loop._filter_seen([obs])
     assert kept == []  # second pass, default cooldown blocks
+
+
+def test_backlog_drain_stuck_false_when_failures_reduce_queue(tmp_path, monkeypatch):
+    """A drain that is failing/abandoning old rows is degraded but not wedged."""
+    jobs = tmp_path / "jobs"
+    jobs.mkdir()
+    monkeypatch.setattr(brain_loop, "BRAIN_LOGS_DIR", tmp_path)
+    (jobs / "llm_backlog_drain.log").write_text(
+        "\n".join(
+            json.dumps(row)
+            for row in [
+                {"drained": 0, "failed": 0, "abandoned": 0, "pending_after": 118},
+                {"drained": 0, "failed": 5, "abandoned": 0, "pending_after": 113},
+                {"drained": 0, "failed": 0, "abandoned": 1, "pending_after": 112},
+            ]
+        )
+        + "\n"
+    )
+
+    assert brain_loop._is_backlog_drain_stuck() is False
+
+
+def test_backlog_drain_stuck_true_after_three_zero_progress_cycles(tmp_path, monkeypatch):
+    jobs = tmp_path / "jobs"
+    jobs.mkdir()
+    monkeypatch.setattr(brain_loop, "BRAIN_LOGS_DIR", tmp_path)
+    (jobs / "llm_backlog_drain.log").write_text(
+        "\n".join(
+            json.dumps({"drained": 0, "failed": 0, "abandoned": 0, "pending_after": n})
+            for n in [118, 118, 119]
+        )
+        + "\n"
+    )
+
+    assert brain_loop._is_backlog_drain_stuck() is True
 
 
 # ── Reflect tests ────────────────────────────────────────
@@ -160,17 +196,28 @@ def test_reflect_contradiction_dispatches_sage():
     assert len(agent_dispatches) == 1
 
 
-def test_reflect_llm_usage_spike_no_session_falls_to_telegram():
-    """LLM spike + no active claude → Telegram alert path."""
+def test_reflect_llm_usage_spike_no_session_observes_below_governor_threshold():
+    """LLM spike + no active claude should not page Chris when self-governor
+    threshold is not met."""
     obs = brain_loop.Observation(
         kind="llm_usage_spike",
         subject="last_hour_95",
         evidence={"hourly_rate": 95, "baseline_per_hour": 20, "ratio": 4.75, "daily_total": 480},
     )
     decisions = brain_loop._reflect([obs])
-    tele = [d for d in decisions if d.kind == brain_loop.DecisionKind.TELEGRAM_ALERT]
-    assert len(tele) == 1
-    assert "95" in tele[0].action_payload["body"]
+    assert [d.kind for d in decisions] == [brain_loop.DecisionKind.OBSERVE_ONLY]
+
+
+def test_reflect_proactive_urgent_without_session_dispatches_sage():
+    obs = brain_loop.Observation(
+        kind="proactive_urgent",
+        subject="insight-1",
+        evidence={"summary": "Potential correction loop", "detail": "Agents can resolve this."},
+    )
+    decisions = brain_loop._reflect([obs])
+    assert len(decisions) == 1
+    assert decisions[0].kind == brain_loop.DecisionKind.DISPATCH_AGENT
+    assert decisions[0].action_payload["agent"] == "sage"
 
 
 def test_reflect_empty_observations_returns_empty():
@@ -325,6 +372,49 @@ def test_act_records_decision_ledger(monkeypatch):
     assert recorded[0]["action_audit_id"] == 42
 
 
+def test_brain_loop_alert_self_handles_with_subscription_agent(monkeypatch):
+    agent_calls = []
+    telegram_calls = []
+
+    monkeypatch.setattr(
+        brain_loop, "_dispatch_agent", lambda agent, message: agent_calls.append((agent, message)) or True
+    )
+
+    class _Telegram:
+        @staticmethod
+        def send_chris_telegram(*args, **kwargs):
+            telegram_calls.append((args, kwargs))
+            return True
+
+    monkeypatch.setitem(sys.modules, "telegram_alert", _Telegram)
+
+    assert brain_loop._telegram_alert("Breaker OPEN: qdrant transient timeout") is True
+    assert len(agent_calls) == 1
+    assert agent_calls[0][0] == "sage"
+    assert telegram_calls == []
+
+
+def test_brain_loop_alert_notifies_for_human_only_blocker(monkeypatch):
+    agent_calls = []
+    telegram_calls = []
+
+    monkeypatch.setattr(
+        brain_loop, "_dispatch_agent", lambda agent, message: agent_calls.append((agent, message)) or True
+    )
+
+    class _Telegram:
+        @staticmethod
+        def send_chris_telegram(*args, **kwargs):
+            telegram_calls.append((args, kwargs))
+            return True
+
+    monkeypatch.setitem(sys.modules, "telegram_alert", _Telegram)
+
+    assert brain_loop._telegram_alert("Need Chris 2FA code for account login") is True
+    assert agent_calls == []
+    assert len(telegram_calls) == 1
+
+
 def test_tick_reentrancy_guard_skips_overlap():
     """If tick_lock can't be acquired, tick() returns 'overlap_skipped'."""
     loop = brain_loop.BrainLoop()
@@ -334,3 +424,98 @@ def test_tick_reentrancy_guard_skips_overlap():
         assert result["status"] == "overlap_skipped"
     finally:
         loop._tick_lock.release()
+
+
+# ── Phase 1: incremental canonical index sensor ─────────────────
+
+
+def test_sense_canonical_changed_disabled_returns_empty(monkeypatch):
+    monkeypatch.setattr(brain_loop, "_INCREMENTAL_INDEX_BUS_ENABLED", False)
+    assert brain_loop._sense_canonical_changed() == []
+
+
+def test_sense_canonical_changed_rate_limited(monkeypatch):
+    """Within MIN_INTERVAL_S of the last run, the sensor must NOT fire even
+    when files newer than last_ts exist. Rate limiting protects qdrant from
+    re-embed storms on rapid-fire edits.
+    """
+    import time as _t
+
+    monkeypatch.setattr(brain_loop, "_INCREMENTAL_INDEX_BUS_ENABLED", True)
+    monkeypatch.setattr(brain_loop, "_get_incremental_last_ts", lambda: _t.time() - 10)
+    monkeypatch.setattr(brain_loop, "_max_canonical_mtime", lambda: (_t.time(), 5))
+    obs = brain_loop._sense_canonical_changed()
+    assert obs == []
+
+
+def test_sense_canonical_changed_no_new_files_returns_empty(monkeypatch):
+    """If max_mtime <= last_ts, nothing is newer — don't emit."""
+    monkeypatch.setattr(brain_loop, "_INCREMENTAL_INDEX_BUS_ENABLED", True)
+    monkeypatch.setattr(brain_loop, "_get_incremental_last_ts", lambda: 1000.0)
+    monkeypatch.setattr(brain_loop, "_max_canonical_mtime", lambda: (900.0, 7))
+    monkeypatch.setattr(brain_loop, "_INCREMENTAL_INDEX_MIN_INTERVAL_S", 0.0)
+    obs = brain_loop._sense_canonical_changed()
+    assert obs == []
+
+
+def test_sense_canonical_changed_emits_when_files_newer(monkeypatch):
+    """Newer files past the rate-limit window emit the canonical_changed obs
+    that maps to the incremental_canonical_index decision in reflect.
+    """
+    import time as _t
+
+    monkeypatch.setattr(brain_loop, "_INCREMENTAL_INDEX_BUS_ENABLED", True)
+    monkeypatch.setattr(brain_loop, "_INCREMENTAL_INDEX_MIN_INTERVAL_S", 0.0)
+    monkeypatch.setattr(brain_loop, "_get_incremental_last_ts", lambda: 1000.0)
+    monkeypatch.setattr(brain_loop, "_max_canonical_mtime", lambda: (_t.time(), 12))
+    obs = brain_loop._sense_canonical_changed()
+    assert len(obs) == 1
+    assert obs[0].kind == "canonical_changed"
+    assert obs[0].evidence["scanned"] == 12
+
+
+def test_reflect_canonical_changed_produces_self_modify():
+    """Observation kind=canonical_changed → SELF_MODIFY decision with
+    modification=incremental_canonical_index.
+    """
+    obs = brain_loop.Observation(
+        kind="canonical_changed",
+        subject="canonical_or_distilled",
+        evidence={"max_mtime": 1.0, "last_ts": 0.0, "scanned": 3},
+        salience=0.4,
+    )
+    decisions = brain_loop._reflect([obs])
+    assert any(
+        d.kind == brain_loop.DecisionKind.SELF_MODIFY
+        and d.action_payload.get("modification") == "incremental_canonical_index"
+        for d in decisions
+    )
+
+
+def test_apply_self_modification_incremental_calls_indexer(monkeypatch):
+    """The apply branch must call indexer.add_documents twice (canonical+distilled)
+    with force_incremental=True and persist last_ts on success.
+    """
+    captured: list[tuple] = []
+
+    fake_indexer = type(sys)("indexer")
+    fake_indexer.add_documents = lambda name, docs, skip_stale_cleanup=False, force_incremental=False: (
+        captured.append((name, len(docs), force_incremental)) or len(docs)
+    )
+    fake_indexer.collect_canonical = lambda: [
+        {"content": "x", "type": "canonical-note"},
+        {"content": "y", "type": "distilled-note"},
+    ]
+    fake_indexer.ensure_collection = lambda _name: None
+    monkeypatch.setitem(sys.modules, "indexer", fake_indexer)
+
+    persisted: list[float] = []
+    monkeypatch.setattr(brain_loop, "_set_incremental_last_ts", lambda ts: persisted.append(ts))
+
+    ok = brain_loop._apply_self_modification({"modification": "incremental_canonical_index"})
+    assert ok is True
+
+    names_called = [c[0] for c in captured]
+    assert "canonical" in names_called and "distilled" in names_called
+    assert all(c[2] is True for c in captured)
+    assert len(persisted) == 1

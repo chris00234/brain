@@ -21,8 +21,8 @@ which is the actual contract for any RAG system.
 
 Cost: 1-4 LLM dispatches per (query, answer) pair through sage via
 openclaw_dispatch. Model is whatever sage is configured with in
-~/.openclaw/openclaw.json (gpt-5.4 primary with gpt-5.3-codex-spark /
-claude-opus-4-6 fallback chain as of 2026-04-14).
+~/.openclaw/openclaw.json (gpt-5.5 primary with gpt-5.3-codex-spark /
+claude-opus-4-7 fallback chain as of 2026-04-27).
 
 Default OFF — only fires when called explicitly from cli/eval_compare.py
 with --ragas. Not on the hot path.

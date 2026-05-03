@@ -39,6 +39,11 @@ JOB_REGISTRY: dict[str, list[str]] = {
         "--write-report",
         "--json",
     ],
+    "qdrant_write_audit": [_py, f"{_bd}/cli/audit_qdrant_writes.py"],
+    "entry_contract_audit": [_py, f"{_bd}/cli/entry_contract_audit.py", "--json"],
+    "config_secret_audit": [_py, f"{_bd}/cli/config_secret_audit.py"],
+    "release_readiness": [_py, f"{_bd}/cli/release_readiness.py"],
+    "retrieval_regression": [_py, f"{_bd}/cli/retrieval_regression.py", "--limit", "20", "--json"],
     # Self-eval: nightly sample of recent /recall calls; measures top-3
     # overlap drift when re-run. Surfaces via self_eval_drift_7d SLO.
     "self_eval": [_py, f"{_bd}/brain_core/self_eval.py"],
@@ -249,6 +254,14 @@ JOB_REGISTRY: dict[str, list[str]] = {
         "-c",
         f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from db_maintenance import run_vacuum; import json; print(json.dumps(run_vacuum()))",
     ],
+    # 2026-04-30: daily WAL checkpoint(TRUNCATE) on hot DBs. Between weekly
+    # vacuums the WAL grew unbounded (embedding_cache 224MB, autonomy 176MB)
+    # and breached logs_dir_total_mb SLO. Daily TRUNCATE keeps WAL bounded.
+    "wal_checkpoint_daily": [
+        _py,
+        "-c",
+        f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from db_maintenance import run_wal_checkpoint; import json; print(json.dumps(run_wal_checkpoint()))",
+    ],
     # 2026-04-17 long-term sustainability: action_audit retention (90d).
     # Currently ~48K rows, growing per brain_store call. Keep 90d for
     # provenance; older data summarized in canonical if significant.
@@ -448,7 +461,14 @@ JOB_REGISTRY: dict[str, list[str]] = {
     "neo4j_backup": [_py, f"{_bd}/cli/backup_neo4j.py"],
     # Backup (also runs via independent launchd plist as a failure-domain safety net)
     "backup": [_py, f"{_bd}/cli/backup_chroma.py"],
+    "qdrant_backup": [_py, f"{_bd}/cli/backup_qdrant.py"],
+    "backup_restore_drill": [_py, f"{_bd}/cli/backup_restore_drill.py"],
     "backup_verify": [_py, f"{_bd}/cli/backup_verify.py"],
+    "openclaw_telegram_target_audit": [
+        _py,
+        f"{_bd}/cli/audit_openclaw_telegram_targets.py",
+        "--json",
+    ],
     # reembed_migrator is manual-only (requires positional <collection> arg).
     # Invoke directly: python brain_core/pipeline/reembed_migrator.py <collection_name>
     "proactive_insights": [_py, f"{_bd}/brain_core/pipeline/proactive_linker.py"],
@@ -530,6 +550,17 @@ JOB_REGISTRY: dict[str, list[str]] = {
 _running_jobs: dict[str, subprocess.Popen] = {}
 _running_jobs_lock = threading.Lock()
 _CRITICAL_JOBS = {"personal_ingest", "backup", "canonical_pipeline", "reindex"}
+_JOB_TIMEOUT_SECONDS = {
+    # The brain-loop contract says ticks are short-lived. A wedged tick used to
+    # survive for the generic 1h subprocess cap, hold the process lock, and
+    # tempt wake/scheduler paths into spawning more work. Keep this well above
+    # the 30s in-process SIGALRM guard but far below the generic cap.
+    "brain_loop_tick": 45,
+    # Proactive checks are useful but non-critical. They call subscription CLI
+    # LLMs and can wedge behind provider timeouts; do not let one run pin the
+    # llm resource slot or hold ~250MB RSS for the generic 1h cap.
+    "proactive_check": 900,
+}
 
 
 def dispatch_job(job_name: str) -> int:
@@ -572,7 +603,7 @@ def dispatch_job(job_name: str) -> int:
 def _wait_for_job(job_name: str, proc: subprocess.Popen, stderr_path: Path) -> None:
     """Background thread: wait for job completion, record exit code, alert on failure."""
     try:
-        proc.wait(timeout=3600)
+        proc.wait(timeout=_JOB_TIMEOUT_SECONDS.get(job_name, 3600))
     except subprocess.TimeoutExpired:
         proc.kill()
         proc.wait()

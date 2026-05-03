@@ -191,6 +191,7 @@ def _llm_classify(
     author_agent: str,
     category: str,
     timeout: int = 15,
+    max_backends: int | None = None,
 ) -> IngestClassification | None:
     """Single Sage LLM call to classify. Returns None on any failure."""
     if _dispatch is None:
@@ -203,7 +204,13 @@ def _llm_classify(
         )
         # NOTE: main Sage session (isolation via session_id doesn't work
         # with arbitrary strings — needs valid UUID + OpenClaw config).
-        result = _dispatch(agent="sage", message=prompt, thinking="low", timeout=timeout)
+        result = _dispatch(
+            agent="sage",
+            message=prompt,
+            thinking="low",
+            timeout=timeout,
+            max_backends=max_backends,
+        )
         if not result.ok or not result.text:
             return None
         text = result.text.strip()
@@ -235,6 +242,7 @@ def classify(
     use_llm: bool = True,
     force_llm: bool = False,
     timeout: int = 15,
+    max_backends: int | None = None,
 ) -> IngestClassification:
     """Classify a memory at ingest time. Used by /memory POST Layer A gate.
 
@@ -259,7 +267,13 @@ def classify(
             return cached
 
     if use_llm:
-        llm_result = _llm_classify(content, author_agent, category, timeout=timeout)
+        llm_result = _llm_classify(
+            content,
+            author_agent,
+            category,
+            timeout=timeout,
+            max_backends=max_backends,
+        )
         if llm_result:
             _cache_put(content_h, llm_result)
             return llm_result

@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -829,6 +830,77 @@ def chunk_markdown(text, source):
     return chunks
 
 
+def chunk_source_aware_text(text: str, source: str, doc: dict[str, Any]) -> list[dict[str, Any]]:
+    """Chunk text according to the centralized source policy.
+
+    Natural-language documents use embedding-distance semantic chunking when
+    BRAIN_SEMANTIC_CHUNKING is enabled. Atomic, code, and turn-based sources
+    keep their source-native boundaries. Falls back to existing markdown/text
+    chunkers so indexing never depends on the optional semantic path.
+    """
+    try:
+        from source_policy import infer_chunk_strategy
+
+        strategy = infer_chunk_strategy(doc, content=text)
+    except Exception:
+        strategy = "paragraph"
+
+    chunks: list[dict[str, Any]]
+    if strategy == "semantic":
+        try:
+            from semantic_chunk import chunk_with_fallback
+
+            chunks = chunk_with_fallback(text)
+            if chunks:
+                return _annotate_chunk_contract(chunks, strategy=strategy)
+        except Exception:
+            pass
+
+    if str(source).lower().endswith((".md", ".markdown", ".rst")):
+        chunks = chunk_markdown(text, source)
+    else:
+        chunks = chunk_text(text)
+    return _annotate_chunk_contract(chunks, strategy=strategy)
+
+
+def _annotate_chunk_contract(chunks: list[dict[str, Any]], *, strategy: str) -> list[dict[str, Any]]:
+    """Stamp chunk-level contract fields without changing chunk content."""
+    try:
+        from source_policy import CHUNK_POLICY_VERSION
+    except Exception:
+        CHUNK_POLICY_VERSION = "source-aware-v2"
+
+    total = len(chunks)
+    out: list[dict[str, Any]] = []
+    for idx, chunk in enumerate(chunks):
+        enriched = dict(chunk)
+        enriched.setdefault("chunk_index", idx)
+        enriched.setdefault("chunk_count", total)
+        enriched.setdefault("chunk_strategy", strategy)
+        enriched.setdefault("chunk_version", CHUNK_POLICY_VERSION)
+        enriched.setdefault("chunk_policy_version", CHUNK_POLICY_VERSION)
+        out.append(enriched)
+    return out
+
+
+def _chunk_metadata_fields(chunk: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: chunk[key]
+        for key in (
+            "chunk_id",
+            "parent_id",
+            "is_parent",
+            "child_ids",
+            "chunk_index",
+            "chunk_count",
+            "chunk_strategy",
+            "chunk_version",
+            "chunk_policy_version",
+        )
+        if key in chunk and chunk[key] not in (None, "", [], {})
+    }
+
+
 def chunk_learnings(text, source):
     """Chunk by entry (date/title blocks)."""
     entries = re.split(r"\n(?=\d{4}-\d{2}-\d{2}|#{1,3}\s+)", text)
@@ -875,6 +947,28 @@ PROVENANCE_META_KEYS = (
     "source_aliases",
     "status",
     "subtype",
+    "chunk_id",
+    "parent_id",
+    "is_parent",
+    "child_ids",
+    "chunk_index",
+    "chunk_count",
+    "chunk_strategy",
+    "chunk_version",
+    "chunk_policy_version",
+    "semantic_chunk_candidate",
+    "schema_version",
+    "entry_schema_version",
+    "tag_policy_version",
+    "content_hash",
+    "source_kind",
+    "source_type",
+    "vector_collection",
+    "tags",
+    "context_tags",
+    "topic_key",
+    "speaker_entity",
+    "scope",
 )
 
 
@@ -1041,10 +1135,50 @@ def prepare_index_document(doc: dict[str, Any]) -> tuple[str, str, dict[str, Any
         "embed_model": EMBED_MODEL,
         "embed_model_version": EMBED_MODEL_VERSION,
     }
+    try:
+        from document_provenance import document_provenance_fields, merge_source_aliases
+
+        provenance_meta = document_provenance_fields(
+            source=source,
+            content=content,
+            title=str(doc.get("title") or doc.get("note_title") or ""),
+            doc_type=doc_type,
+            section=str(section or ""),
+        )
+        provenance_meta["source_aliases"] = merge_source_aliases(
+            doc.get("source_aliases") or [],
+            provenance_meta.get("source_aliases") or [],
+        )
+        meta.update(provenance_meta)
+    except Exception:
+        # Provenance is additive; never block indexing on metadata enrichment.
+        pass
+    try:
+        from source_policy import merge_policy_metadata, metadata_for_document
+
+        meta = merge_policy_metadata(meta, metadata_for_document(doc, content=content))
+    except Exception:
+        # Policy metadata is additive; never block indexing on tagging.
+        pass
     for key in PROVENANCE_META_KEYS:
         value = doc.get(key)
         if value not in (None, "", []):
-            meta[key] = value
+            if key == "source_aliases":
+                try:
+                    from document_provenance import merge_source_aliases
+
+                    meta[key] = merge_source_aliases(meta.get(key) or [], list(value))
+                except Exception:
+                    meta[key] = value
+            elif key in {"tags", "context_tags"}:
+                try:
+                    from source_policy import normalize_tags
+
+                    meta[key] = normalize_tags([*(normalize_tags(meta.get(key))), *(normalize_tags(value))])
+                except Exception:
+                    meta[key] = value
+            else:
+                meta[key] = value
     return doc_id, content, meta, embed_text
 
 
@@ -1061,6 +1195,10 @@ def refresh_payloads(collection_name: str, docs: list[dict[str, Any]]) -> int:
         return 0
 
     patched = 0
+    failed = 0
+    consecutive_failed = 0
+    throttle_every = max(1, int(os.getenv("BRAIN_PAYLOAD_REFRESH_THROTTLE_EVERY", "250")))
+    throttle_sleep_s = max(0.0, float(os.getenv("BRAIN_PAYLOAD_REFRESH_THROTTLE_SLEEP_S", "0.25")))
     BATCH = 100
     for start in range(0, len(prepared), BATCH):
         batch = prepared[start : start + BATCH]
@@ -1081,9 +1219,24 @@ def refresh_payloads(collection_name: str, docs: list[dict[str, Any]]) -> int:
                 continue
             if all(current.get(key) == value for key, value in meta.items()):
                 continue
-            store.update_payload(collection_name, ids=[doc_id], patch=meta)
+            if not store.update_payload(collection_name, ids=[doc_id], patch=meta):
+                failed += 1
+                consecutive_failed += 1
+                if consecutive_failed >= 20:
+                    print(
+                        "    ERROR: payload refresh stopped after 20 consecutive Qdrant update failures "
+                        f"(patched={patched}, failed={failed})"
+                    )
+                    return patched
+                continue
+            consecutive_failed = 0
             patched += 1
-    print(f"    Payload-only refresh: patched {patched}/{len(prepared)} existing points")
+            if patched % throttle_every == 0 and throttle_sleep_s:
+                time.sleep(throttle_sleep_s)
+    if failed:
+        print(f"    Payload-only refresh: patched {patched}/{len(prepared)} existing points ({failed} failed)")
+    else:
+        print(f"    Payload-only refresh: patched {patched}/{len(prepared)} existing points")
     return patched
 
 
@@ -1323,6 +1476,7 @@ def collect_knowledge():
                             "service": "",
                             "agent": agent_name if md_file in PER_AGENT_FILES else "shared",
                             "section": chunk.get("section", ""),
+                            **_chunk_metadata_fields(chunk),
                         }
                     )
                 if md_file in SHARED_FILES:
@@ -1363,6 +1517,7 @@ def collect_experience():
                             "service": "",
                             "agent": agent_name,
                             "section": chunk.get("section", ""),
+                            **_chunk_metadata_fields(chunk),
                         }
                     )
 
@@ -1400,7 +1555,11 @@ def collect_experience():
             full_content = f"{header_fn(record)}\n\n{content}"
             event_time = record.get("timestamp", "")
             if len(full_content) > MAX_CHUNK_SIZE:
-                sub_chunks = chunk_text(full_content)
+                sub_chunks = chunk_source_aware_text(
+                    full_content,
+                    str(f),
+                    {"type": f"raw-{source_type}", "source_type": source_type, "source": str(f)},
+                )
                 for sc in sub_chunks:
                     docs.append(
                         {
@@ -1410,6 +1569,7 @@ def collect_experience():
                             "service": "",
                             "agent": record.get("actor", ""),
                             "section": sc.get("section", ""),
+                            **_chunk_metadata_fields(sc),
                             "event_time": event_time,
                         }
                     )
@@ -1448,7 +1608,9 @@ def collect_canonical():
             if len(text.strip()) < 100:
                 continue
             provenance = _canonical_doc_provenance_fields(_json_frontmatter(text), str(md_file))
-            chunks = enforce_max_chunk_size(chunk_markdown(text, str(md_file)))
+            chunks = enforce_max_chunk_size(
+                chunk_source_aware_text(text, str(md_file), {"type": f"{subdir}-note", "source": str(md_file), **provenance})
+            )
             for chunk in chunks:
                 docs.append(
                     {
@@ -1458,6 +1620,7 @@ def collect_canonical():
                         "service": "",
                         "agent": "",
                         "section": chunk.get("section", ""),
+                        **_chunk_metadata_fields(chunk),
                         **provenance,
                     }
                 )
@@ -1487,7 +1650,9 @@ def collect_context():
                 text = f.read_text()
                 if len(text.strip()) < 50:
                     continue
-                chunks = enforce_max_chunk_size(chunk_markdown(text, str(f)))
+                chunks = enforce_max_chunk_size(
+                    chunk_source_aware_text(text, str(f), {"type": "session-memory", "source": str(f), "agent": agent_name})
+                )
                 for chunk in chunks:
                     docs.append(
                         {
@@ -1497,6 +1662,7 @@ def collect_context():
                             "service": "",
                             "agent": agent_name,
                             "section": chunk.get("section", ""),
+                            **_chunk_metadata_fields(chunk),
                         }
                     )
 
@@ -1535,7 +1701,9 @@ def collect_obsidian():
         rel_parts = md_file.relative_to(vault_dir).parts
         vault_subdir = rel_parts[0] if len(rel_parts) > 1 else ""
 
-        chunks = enforce_max_chunk_size(chunk_markdown(text, str(md_file)))
+        chunks = enforce_max_chunk_size(
+            chunk_source_aware_text(text, str(md_file), {"type": "obsidian-note", "source": str(md_file), "vault_subdir": vault_subdir})
+        )
         for chunk in chunks:
             docs.append(
                 {
@@ -1545,6 +1713,7 @@ def collect_obsidian():
                     "service": "",
                     "agent": "",
                     "section": chunk.get("section", ""),
+                    **_chunk_metadata_fields(chunk),
                     "vault_subdir": vault_subdir,
                 }
             )

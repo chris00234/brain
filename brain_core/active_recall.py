@@ -343,11 +343,11 @@ def _looks_like_brain_ops_prompt(lowered_prompt: str) -> bool:
         "transport",
         "action_audit",
         "brain_loop",
-        "active recall",
-        "proactive insight",
         "atoms",
         "database",
         "db",
+        "monitoring",
+        "metrics",
         "스케줄러",
         "크론",
         "저장",
@@ -358,6 +358,8 @@ def _looks_like_brain_ops_prompt(lowered_prompt: str) -> bool:
         "서버",
         "장애",
         "운영",
+        "모니터링",
+        "메트릭",
         "아톰",
         "데이터베이스",
     )
@@ -689,6 +691,18 @@ _QUERY_STOPWORDS = {
     "with",
     "from",
     "into",
+    "active",
+    "recall",
+    "improve",
+    "improvement",
+    "가능",
+    "가능해",
+    "가능한지",
+    "개선",
+    "관련",
+    "관련없는",
+    "결과",
+    "결과값",
 }
 
 
@@ -702,7 +716,13 @@ def _semantic_result_matches_prompt(prompt: str, title: str, content: str) -> bo
     if not terms:
         return False
     hay_terms = _content_signature(f"{title}\n{content[:600]}")
-    return bool(terms & hay_terms)
+    overlap = terms & hay_terms
+    if not overlap:
+        return False
+    # One shared generic token is too weak for active-recall injection. This
+    # catches cases like "active recall 관련없는 결과값 개선" retrieving a broad
+    # OpenClaw memory only because it says "개선/recall" somewhere.
+    return not (len(terms) >= 4 and len(overlap) < 2)
 
 
 def _content_signature(text: str) -> set[str]:

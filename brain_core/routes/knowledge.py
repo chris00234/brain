@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from api_deps import _safe_http_detail, verify_bearer
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from rate_limit import limiter
 
@@ -80,6 +80,28 @@ def trigger_slos_check() -> dict:
         raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e)) from e
 
 
+@router.get("/brain/ops/readiness", tags=["observability"])
+def ops_readiness() -> dict:
+    """Read-only operational readiness snapshot for Brain UI/release checks."""
+    try:
+        from brain_core.ops_readiness import readiness_snapshot
+
+        return readiness_snapshot()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e)) from e
+
+
+@router.get("/brain/slo-incidents", tags=["observability"])
+def slo_incidents(limit: int = Query(default=200, ge=1, le=1000)) -> dict:
+    """Recent SLO remediation incident ledger grouped by SLO/status."""
+    try:
+        from brain_core.ops_readiness import remediation_incident_ledger
+
+        return remediation_incident_ledger(limit=limit)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e)) from e
+
+
 # ── Trace / ingest / index / canonical ────────────────
 @router.get("/brain/trace/{note_id}", tags=["autonomy"])
 def trace_provenance(note_id: str, max_depth: int = 3) -> dict:
@@ -103,11 +125,17 @@ def brain_ingest(request: Request, req: BrainIngestRequest) -> dict:
     try:
         content = req.content
         source_name = req.source
+        try:
+            from brain_core.source_policy import metadata_for_document, normalize_tags
+        except Exception:
+            from source_policy import metadata_for_document, normalize_tags  # type: ignore
+
+        request_tags = normalize_tags([*req.tags, req.category])
 
         try:
             from brain_core import test_gate
 
-            is_test, reason = test_gate.is_test_context(content, source_name)
+            is_test, reason = test_gate.is_test_context(content=content, source=source_name)
             if is_test:
                 return {"status": "test_skipped", "reason": reason}
         except ImportError:
@@ -119,6 +147,8 @@ def brain_ingest(request: Request, req: BrainIngestRequest) -> dict:
             f"Extract key facts, decisions, and insights from this content. "
             f"Write a concise summary as a knowledge note.\n\n"
             f"Source: {source_name}\n"
+            f"Category: {req.category}\n"
+            f"Tags: {', '.join(request_tags)}\n"
             f"Content:\n{content[:5000]}\n\n"
             f"Return ONLY a JSON object:\n"
             f'{{"title": "...", "summary": "...", "key_facts": ["..."], '
@@ -141,15 +171,37 @@ def brain_ingest(request: Request, req: BrainIngestRequest) -> dict:
         inbox_dir = BRAIN_DIR.parent / "knowledge" / "raw" / "inbox"
         inbox_dir.mkdir(parents=True, exist_ok=True)
         slug = hashlib.md5(content[:200].encode()).hexdigest()[:12]  # noqa: S324 — non-crypto slug
+        policy_meta = metadata_for_document(
+            {
+                "type": "manual_ingest",
+                "source": source_name,
+                "category": req.category,
+                "tags": request_tags,
+                "domain": extracted.get("domain", "decisions"),
+                "subtype": "manual_ingest",
+            },
+            content=content,
+        )
         record = {
             "id": f"raw_manual_{slug}",
             "type": "raw",
+            "source_type": "manual_ingest",
             "subtype": "manual_ingest",
             "title": extracted.get("title", source_name)[:120],
             "content": extracted.get("summary", ""),
             "key_facts": extracted.get("key_facts", []),
             "domain": extracted.get("domain", "decisions"),
             "source": source_name,
+            "category": req.category,
+            "tags": policy_meta.get("tags", request_tags),
+            "context_tags": policy_meta.get("context_tags", request_tags),
+            "chunk_strategy": policy_meta.get("chunk_strategy"),
+            "semantic_chunk_candidate": policy_meta.get("semantic_chunk_candidate"),
+            "schema_version": policy_meta.get("schema_version"),
+            "chunk_version": policy_meta.get("chunk_version"),
+            "tag_policy_version": policy_meta.get("tag_policy_version"),
+            "content_hash": policy_meta.get("content_hash"),
+            "metadata": policy_meta,
             "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
         }
         out_path = inbox_dir / f"manual_{slug}.json"
@@ -159,6 +211,8 @@ def brain_ingest(request: Request, req: BrainIngestRequest) -> dict:
             "status": "ingested",
             "id": record["id"],
             "title": record["title"],
+            "tags": record.get("tags", []),
+            "chunk_strategy": record.get("chunk_strategy"),
             "path": str(out_path.relative_to(BRAIN_DIR.parent)),
         }
     except HTTPException:

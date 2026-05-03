@@ -1,8 +1,21 @@
-"""/brain/command/* — brain originates work items to OpenClaw agents."""
+"""/brain/command/* — brain originates work items to OpenClaw agents.
+
+Phase 3 (2026-04-27) extension: claude + codex are now valid targets. For
+those, the dispatch ALSO writes an outbox file at
+~/.brain_outbox/{agent}/pending/{msg_id}.json. A launchd WatchPaths watcher
+(brain-spawn-claude / brain-spawn-codex) picks the file up and — only if
+BRAIN_AUTOSPAWN_{AGENT}=on at the OS level — spawns a fresh CLI session with
+the task as prompt. Default OFF: file just sits there as an audit trail
+unless Chris flips the flag, so this whitelist change is safe to ship before
+the spawner is wired up.
+"""
 
 from __future__ import annotations
 
+import json as _json
+import uuid as _uuid
 from datetime import UTC, datetime
+from pathlib import Path as _Path
 from typing import Annotated
 
 from api_deps import _safe_http_detail, log, verify_bearer
@@ -16,7 +29,9 @@ router = APIRouter(dependencies=[Depends(verify_bearer)])
 
 
 class BrainCommandRequest(BaseModel):
-    to_agent: str = Field(..., description="Target agent: jenna | liz | ellie | sage | market")
+    to_agent: str = Field(
+        ..., description="Target agent: jenna | liz | ellie | sage | market | claude | codex"
+    )
     content: str = Field(..., description="The instruction/work item body")
     message_type: str = Field("task", description="info | task | question | alert")
     priority: int = Field(5, ge=1, le=10, description="1=urgent, 10=background")
@@ -29,7 +44,31 @@ class BrainCommandAck(BaseModel):
     agent: str = Field(..., description="Acking agent — must match to_agent on the message")
 
 
-_BRAIN_COMMAND_AGENTS = {"jenna", "liz", "ellie", "sage", "market"}
+_BRAIN_COMMAND_AGENTS = {"jenna", "liz", "ellie", "sage", "market", "claude", "codex"}
+# Agents that consume work via filesystem outbox (no live message inbox the
+# way openclaw agents do). Each gets its own pending dir; the brain-spawn-*
+# wrapper scripts (cli/brain-spawn-{claude,codex}) watch these dirs.
+_OUTBOX_AGENTS = {"claude", "codex"}
+_OUTBOX_ROOT = _Path("~/.brain_outbox").expanduser()
+
+
+def _write_outbox_envelope(agent: str, message_id: str, payload: dict) -> _Path | None:
+    """Drop a JSON task envelope into ~/.brain_outbox/{agent}/pending/{id}.json.
+    Returns the path on success, None on failure (best-effort — never raises).
+    """
+    try:
+        pending_dir = _OUTBOX_ROOT / agent / "pending"
+        pending_dir.mkdir(parents=True, exist_ok=True)
+        # Stable filename — message_id is the dedupe key
+        path = pending_dir / f"{message_id}.json"
+        # Atomic write so a watcher reading mid-write never sees a partial file
+        tmp = pending_dir / f".{message_id}.{_uuid.uuid4().hex[:6]}.tmp"
+        tmp.write_text(_json.dumps(payload, ensure_ascii=False))
+        tmp.replace(path)
+        return path
+    except Exception as exc:
+        log.debug("brain_command outbox write failed agent=%s id=%s: %s", agent, message_id, exc)
+        return None
 
 
 @router.post("/brain/command", tags=["agency"])
@@ -42,6 +81,14 @@ def brain_command(payload: BrainCommandRequest) -> dict:
         )
     if not payload.content.strip():
         raise HTTPException(status_code=400, detail="content required")
+    # 2026-04-27 review fix: outbox-targeted content is later passed as a
+    # positional arg to `claude -p` / `codex exec`. Reject leading-dash content
+    # so a brain-generated task can never accidentally land as a CLI flag.
+    if payload.to_agent in _OUTBOX_AGENTS and payload.content.lstrip().startswith("-"):
+        raise HTTPException(
+            status_code=400,
+            detail="content for spawn-target agents must not start with '-' (flag-injection guard)",
+        )
 
     try:
         from agent_messenger import send_message
@@ -73,7 +120,28 @@ def brain_command(payload: BrainCommandRequest) -> dict:
         except Exception as exc:
             log.debug("brain_command atom write failed: %s", exc)
 
-        return {"ok": True, "message_id": msg["id"], "action": msg.get("_action", "stored")}
+        outbox_path = None
+        if payload.to_agent in _OUTBOX_AGENTS:
+            envelope = {
+                "message_id": msg["id"],
+                "to_agent": payload.to_agent,
+                "content": body,
+                "message_type": payload.message_type,
+                "priority": payload.priority,
+                "reason": payload.reason or "",
+                "created_at": msg["created_at"],
+                "origin": "brain/command",
+            }
+            written = _write_outbox_envelope(payload.to_agent, msg["id"], envelope)
+            if written is not None:
+                outbox_path = str(written)
+
+        return {
+            "ok": True,
+            "message_id": msg["id"],
+            "action": msg.get("_action", "stored"),
+            "outbox_path": outbox_path,
+        }
     except HTTPException:
         raise
     except Exception as exc:

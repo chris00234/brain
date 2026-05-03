@@ -16,7 +16,7 @@ Key properties:
   openclaw_dispatch, which is rate-limited and autonomy-gated.
 - Hard wall-clock budget per tick (TICK_BUDGET_S = 10 s). If exceeded, current
   tick completes best-effort and next tick fires at the normal interval.
-- Single-writer lock: only one tick runs at a time (file lock on the journal).
+- Single-writer lock: only one tick runs at a time (cross-process flock).
   A second tick starting while the first is active no-ops.
 - Every action goes through brain_core.autonomy.authorize(). If the gate
   returns L0, the action is downgraded to OBSERVE_ONLY. If L1, it's downgraded
@@ -41,6 +41,7 @@ import contextlib
 import json
 import logging
 import os
+import signal
 import sqlite3
 import sys
 import threading
@@ -116,6 +117,7 @@ DOORBELL_DIR = Path("/tmp")
 log = logging.getLogger("brain.brain_loop")
 
 TICK_BUDGET_S = 10.0
+TICK_PROCESS_TIMEOUT_S = 30.0
 RATE_LIMIT_WINDOW_S = 3600
 RATE_LIMIT_MAX = 3
 STALLED_GOAL_HOURS = 2.0
@@ -131,6 +133,7 @@ SEEN_COOLDOWN_S: dict[str, int] = {
     "stalled_goal": 2 * 3600,  # 2h between nudges on same goal
     "recall_miss": 3600,  # 1h between same-session miss reports
     "proactive_urgent": 6 * 3600,  # mirror proactive TTL
+    "proactive_playbook": 6 * 3600,  # learned event-class execution nudge
     "high_salience_event": 1800,
     "claude_active": 60,  # side-channel; just throttle
     "stale_atom": 7 * 24 * 3600,  # stale is slow-moving, 1 week cooldown
@@ -694,6 +697,55 @@ def _sense_proactive_pending() -> list[Observation]:
     return obs
 
 
+def _sense_proactive_playbooks() -> list[Observation]:
+    """Read learned playbook insights and turn them into executable nudges.
+
+    Urgent proactive insights are handled separately. Playbook insights are
+    lower-severity, safety-bounded "Chris usually asks for this next" packets.
+    """
+    obs = []
+    if get_current_insights is None:
+        return obs
+    try:
+        insights = get_current_insights(max_age_hours=6) or []
+    except Exception:
+        return obs
+    for ins in insights:
+        if getattr(ins, "category", "") != "playbook":
+            continue
+        evidence = getattr(ins, "evidence", []) or []
+        event_class = "unknown"
+        safe_actions: list[str] = []
+        stop_conditions: list[str] = []
+        for ev in evidence:
+            if not isinstance(ev, dict):
+                continue
+            if ev.get("kind") == "playbook":
+                event_class = str(ev.get("event_class") or event_class)
+                safe_actions = list(ev.get("safe_actions") or [])
+                stop_conditions = list(ev.get("stop_conditions") or [])
+                break
+        obs.append(
+            Observation(
+                kind="proactive_playbook",
+                subject=f"{event_class}:{getattr(ins, 'id', 'unknown')}",
+                evidence={
+                    "summary": (getattr(ins, "summary", "") or "")[:220],
+                    "detail": (getattr(ins, "detail", "") or "")[:1200],
+                    "event_class": event_class,
+                    "safe_actions": safe_actions[:8],
+                    "stop_conditions": stop_conditions[:6],
+                    "insight_id": getattr(ins, "id", "unknown"),
+                },
+                salience=0.75 if getattr(ins, "severity", "") == "warning" else 0.65,
+                ts=_now_iso(),
+            )
+        )
+        if len(obs) >= 3:
+            break
+    return obs
+
+
 # Module-level state — tracks the last-seen llm.dispatch breaker state so
 # we can fire an event when it transitions open → closed.
 _last_llm_breaker_was_open = False
@@ -799,6 +851,118 @@ def _sense_llm_backlog_pending() -> list[Observation]:
     return obs
 
 
+def _knowledge_root() -> Path:
+    """~/server/knowledge — canonical+distilled live here."""
+    return Path("~/server/knowledge").expanduser()
+
+
+_INCREMENTAL_INDEX_BUS_ENABLED = os.environ.get("BRAIN_INCREMENTAL_INDEX_BUS", "on").lower() not in (
+    "off",
+    "0",
+    "false",
+    "no",
+)
+# At least 5 min between incremental runs. With brain_loop ticking every 90 s,
+# this caps incremental indexing at ~12 runs/hour and one re-embed pass per
+# changed file ≤5 min after the file is touched.
+_INCREMENTAL_INDEX_MIN_INTERVAL_S = 270.0
+_INCREMENTAL_INDEX_LAST_TS_KEY = "brain_loop.incremental_index.last_ts"
+_incremental_index_last_ts: float | None = None
+
+
+def _get_incremental_last_ts() -> float:
+    """Read the last incremental-index run timestamp, persisted across restarts.
+    Module-level cache avoids hitting brain_config_store on every tick.
+    """
+    global _incremental_index_last_ts
+    if _incremental_index_last_ts is not None:
+        return _incremental_index_last_ts
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import brain_config_store
+
+        raw = brain_config_store.get(_INCREMENTAL_INDEX_LAST_TS_KEY)
+        _incremental_index_last_ts = float(raw) if raw else 0.0
+    except Exception as exc:
+        log.debug("brain_config_store read failed for incremental ts: %s", exc)
+        _incremental_index_last_ts = 0.0
+    return _incremental_index_last_ts
+
+
+def _set_incremental_last_ts(ts: float) -> None:
+    global _incremental_index_last_ts
+    _incremental_index_last_ts = ts
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import brain_config_store
+
+        brain_config_store.set(_INCREMENTAL_INDEX_LAST_TS_KEY, str(ts), updated_by="brain_loop")
+    except Exception as exc:
+        log.debug("brain_config_store write failed for incremental ts: %s", exc)
+
+
+def _max_canonical_mtime() -> tuple[float, int]:
+    """Return (max_mtime, file_count) across canonical + distilled .md files.
+    Bounded: only stats files; reads no contents. ~500 stat() calls is trivial.
+    """
+    max_mtime = 0.0
+    count = 0
+    root = _knowledge_root()
+    for subdir in ("canonical", "distilled"):
+        d = root / subdir
+        if not d.exists():
+            continue
+        try:
+            for p in d.rglob("*.md"):
+                try:
+                    m = p.stat().st_mtime
+                    if m > max_mtime:
+                        max_mtime = m
+                    count += 1
+                except OSError:
+                    continue
+        except Exception as exc:
+            log.debug("walk %s failed: %s", d, exc)
+    return max_mtime, count
+
+
+def _sense_canonical_changed() -> list[Observation]:
+    """Phase 1: detect canonical / distilled file changes since the last
+    incremental index run. When something newer than `last_ts` exists, emit an
+    observation that triggers `incremental_canonical_index` in ACT.
+
+    Reuses indexer.add_documents(force_incremental=True), which already
+    skips docs whose mtime + embed_model_version match the existing qdrant
+    payload — only changed docs get re-embedded.
+
+    Disabled by `BRAIN_INCREMENTAL_INDEX_BUS=off`.
+    """
+    if not _INCREMENTAL_INDEX_BUS_ENABLED:
+        return []
+    now = time.time()
+    last_ts = _get_incremental_last_ts()
+    if now - last_ts < _INCREMENTAL_INDEX_MIN_INTERVAL_S:
+        return []  # rate-limited (≤1 run per 5 min)
+    max_mtime, count = _max_canonical_mtime()
+    if count == 0:
+        return []
+    if max_mtime <= last_ts:
+        return []  # nothing newer than last run
+    return [
+        Observation(
+            kind="canonical_changed",
+            subject="canonical_or_distilled",
+            evidence={
+                "max_mtime": max_mtime,
+                "last_ts": last_ts,
+                "scanned": count,
+            },
+            salience=0.4,
+            ts=_now_iso(),
+        )
+    ]
+
+
 def _is_backlog_drain_stuck() -> bool:
     """Return True if the last 3 drain cycles processed 0 items each.
 
@@ -807,7 +971,7 @@ def _is_backlog_drain_stuck() -> bool:
     try:
         import json as _json
 
-        logs_dir = Path("/Users/chrischo/server/brain/logs/jobs")
+        logs_dir = BRAIN_LOGS_DIR / "jobs"
         log_path = logs_dir / "llm_backlog_drain.log"
         if not log_path.exists():
             return False
@@ -829,7 +993,11 @@ def _is_backlog_drain_stuck() -> bool:
         # Parse all candidates; a single parse failure no longer short-
         # circuits the whole check. We only declare "stuck" when we have
         # at least 3 successfully parsed recent records AND every one
-        # shows zero drain + positive pending.
+        # shows zero processed rows + positive pending. "Processed" includes
+        # failed/abandoned rows: that is degraded, but it is still forward
+        # progress and should not page as a wedged drain. This matters after
+        # provider incidents where old rows may need to age out or hit their
+        # retry cap before newer work can drain successfully.
         parsed = []
         for line in candidate_lines:
             try:
@@ -840,10 +1008,18 @@ def _is_backlog_drain_stuck() -> bool:
         if len(parsed) < 3:
             return False
         last_three = parsed[-3:]
-        zero_drain_streak = sum(
-            1 for r in last_three if r.get("drained", 0) == 0 and r.get("pending_after", 0) > 0
+
+        def _processed_count(record: dict) -> int:
+            return (
+                int(record.get("drained", 0) or 0)
+                + int(record.get("failed", 0) or 0)
+                + int(record.get("abandoned", 0) or 0)
+            )
+
+        zero_progress_streak = sum(
+            1 for r in last_three if _processed_count(r) == 0 and int(r.get("pending_after", 0) or 0) > 0
         )
-        return zero_drain_streak == 3
+        return zero_progress_streak == 3
     except Exception as exc:
         log.debug("_is_backlog_drain_stuck check failed: %s", exc)
         return False
@@ -857,10 +1033,12 @@ SENSORS = [
     ("contradictions", _sense_contradictions),
     ("claude_active", _sense_claude_active),
     ("proactive_pending", _sense_proactive_pending),
+    ("proactive_playbooks", _sense_proactive_playbooks),
     ("stale_atoms", _sense_stale_atoms),
     ("llm_usage_spike", _sense_llm_usage_spike),
     ("llm_breaker_closed", _sense_llm_breaker_closed),
     ("llm_backlog_health", _sense_llm_backlog_pending),
+    ("canonical_changed", _sense_canonical_changed),
 ]
 
 
@@ -1003,12 +1181,45 @@ def _reflect(observations: list[Observation]) -> list[Decision]:
             )
 
         elif o.kind == "llm_usage_spike":
-            # LLM call rate jumped 3x+ — push to Chris immediately so he can
-            # investigate which job is spamming. Especially critical if Chris
-            # is about to hit a rate-limit window.
+            # LLM call rate jumped 3x+ — self-handle first. A usage spike is
+            # normally an internal ops issue, not Chris-only knowledge. If
+            # severe and no active session exists, engage the cost governor
+            # instead of paging Chris.
             hourly = o.evidence.get("hourly_rate", 0)
             baseline = o.evidence.get("baseline_per_hour", 0)
             ratio = o.evidence.get("ratio", 0)
+
+            # Phase 4b cost governor: when the spike is severe (>=5x baseline)
+            # AND there's no active Chris session to debug from, autonomously
+            # cap CLI concurrency to 1 for the next 30 min via brain_config_store.
+            # cli_llm reads the cap dynamically; the env-var default acts as
+            # the floor when no live override is set.
+            governor_enabled = os.environ.get("BRAIN_LLM_COST_GOVERNOR", "on").lower() not in (
+                "off",
+                "0",
+                "false",
+                "no",
+            )
+            if governor_enabled and ratio >= 5 and not claude_session:
+                decisions.append(
+                    Decision(
+                        observation=o,
+                        kind=DecisionKind.SELF_MODIFY,
+                        action_payload={
+                            "modification": "engage_llm_cost_governor",
+                            "ratio": ratio,
+                            "hourly": hourly,
+                            "baseline": baseline,
+                            "ttl_s": 1800,
+                        },
+                        reasoning=(
+                            f"LLM rate {ratio}x baseline AND no active Chris session — "
+                            "cap concurrency to 1 for 30 min to bound damage"
+                        ),
+                        confidence=0.85,
+                        requires_autonomy="brain_loop.cost_governor",
+                    )
+                )
             if claude_session:
                 decisions.append(
                     Decision(
@@ -1030,22 +1241,27 @@ def _reflect(observations: list[Observation]) -> list[Decision]:
                         requires_autonomy="brain_loop.push_to_claude",
                     )
                 )
+            elif ratio >= 5:
+                decisions.append(
+                    Decision(
+                        observation=o,
+                        kind=DecisionKind.OBSERVE_ONLY,
+                        reasoning=(
+                            "LLM usage spike has no active session; cost governor "
+                            "decision handles severe cases without notifying Chris"
+                        ),
+                        confidence=0.7,
+                        requires_autonomy="brain_loop.observe",
+                    )
+                )
             else:
                 decisions.append(
                     Decision(
                         observation=o,
-                        kind=DecisionKind.TELEGRAM_ALERT,
-                        action_payload={
-                            "severity": "warning",
-                            "body": (
-                                f"LLM usage spike: {hourly} calls last hour vs "
-                                f"{baseline}/hr baseline ({ratio}x). Check "
-                                f"`brain cost agent` for culprit."
-                            ),
-                        },
-                        reasoning="No active Claude session — fallback to Telegram",
-                        confidence=0.85,
-                        requires_autonomy="brain_loop.telegram_urgent",
+                        kind=DecisionKind.OBSERVE_ONLY,
+                        reasoning="LLM usage spike below autonomous-governor threshold; observe only",
+                        confidence=0.6,
+                        requires_autonomy="brain_loop.observe",
                     )
                 )
 
@@ -1086,6 +1302,81 @@ def _reflect(observations: list[Observation]) -> list[Decision]:
                         reasoning="Urgent proactive insight + active Claude session",
                         confidence=0.9,
                         requires_autonomy="brain_loop.push_to_claude",
+                    )
+                )
+            else:
+                decisions.append(
+                    Decision(
+                        observation=o,
+                        kind=DecisionKind.DISPATCH_AGENT,
+                        action_payload={
+                            "agent": "sage",
+                            "message": (
+                                "Urgent proactive Brain insight with no active CLI session.\n"
+                                "Handle it yourself if possible. Notify Chris only if blocked by "
+                                "missing private knowledge, credentials, account access, physical "
+                                "access, irreversible authority, or human-only judgment.\n\n"
+                                f"Summary: {o.evidence.get('summary', '')[:200]}\n"
+                                f"Detail: {o.evidence.get('detail', '')[:800]}"
+                            ),
+                        },
+                        reasoning="Urgent proactive insight with no active session — Sage self-handles first",
+                        confidence=0.85,
+                        requires_autonomy="brain_loop.dispatch_agent_investigation",
+                    )
+                )
+
+        elif o.kind == "proactive_playbook":
+            actions = o.evidence.get("safe_actions") or []
+            stops = o.evidence.get("stop_conditions") or []
+            action_lines = "\n".join(f"- {a}" for a in actions[:8]) or "- gather read-only evidence"
+            stop_lines = (
+                "\n".join(f"- {s}" for s in stops[:6]) or "- stop before destructive or credentialed work"
+            )
+            body = (
+                "Brain recognized a repeated Chris pattern and prepared a safe proactive playbook.\n"
+                f"Event class: {o.evidence.get('event_class', 'unknown')}\n"
+                f"Summary: {o.evidence.get('summary', '')[:220]}\n\n"
+                f"{o.evidence.get('detail', '')[:1000]}\n\n"
+                "Execute only the safe layer now:\n"
+                f"{action_lines}\n\n"
+                "Stop conditions:\n"
+                f"{stop_lines}\n\n"
+                "Return a concise evidence-backed result before Chris has to ask."
+            )
+            if claude_session:
+                decisions.append(
+                    Decision(
+                        observation=o,
+                        kind=DecisionKind.PUSH_TO_CLAUDE,
+                        action_payload={
+                            "session_id": claude_session,
+                            "title": o.evidence.get("summary", "proactive playbook")[:80],
+                            "content": body[:1800],
+                            "priority": "high",
+                            "source": "brain_loop.proactive_playbook",
+                        },
+                        reasoning="Learned playbook insight + active Claude session",
+                        confidence=0.82,
+                        requires_autonomy="brain_loop.proactive_playbook_execute",
+                    )
+                )
+            else:
+                decisions.append(
+                    Decision(
+                        observation=o,
+                        kind=DecisionKind.DISPATCH_AGENT,
+                        action_payload={
+                            "agent": "sage",
+                            "message": (
+                                body + "\n\nHandle it yourself if possible. Notify Chris only if blocked by "
+                                "missing private knowledge, credentials/account access, irreversible "
+                                "authority, production writes, or human-only judgment."
+                            ),
+                        },
+                        reasoning="Learned playbook insight with no active session — Sage executes safe layer",
+                        confidence=0.78,
+                        requires_autonomy="brain_loop.proactive_playbook_execute",
                     )
                 )
 
@@ -1133,6 +1424,26 @@ def _reflect(observations: list[Observation]) -> list[Decision]:
                     reasoning="llm_backlog SLO breach — Chris needs to know",
                     confidence=0.85,
                     requires_autonomy="brain_loop.telegram_urgent",
+                )
+            )
+
+        elif o.kind == "canonical_changed":
+            # Phase 1: a canonical or distilled file is newer than the last
+            # incremental index run — refresh the qdrant collections so search
+            # sees the change in ≤90 s rather than waiting for the next 12-hr
+            # full reindex. Reuses indexer.add_documents(force_incremental=True)
+            # which skips unchanged docs by mtime+embed_model match.
+            decisions.append(
+                Decision(
+                    observation=o,
+                    kind=DecisionKind.SELF_MODIFY,
+                    action_payload={"modification": "incremental_canonical_index"},
+                    reasoning=(
+                        "canonical / distilled .md changed since last incremental run — "
+                        "refresh embedded views"
+                    ),
+                    confidence=0.9,
+                    requires_autonomy="brain_loop.incremental_index",
                 )
             )
 
@@ -1201,6 +1512,24 @@ def _decide(decisions: list[Decision]) -> list[Decision]:
                 }
                 d.kind = DecisionKind.PROPOSE
                 d.reasoning += " [downgraded L1]"
+
+        if d.kind == DecisionKind.DISPATCH_AGENT and os.environ.get(
+            "BRAIN_LOOP_AGENT_DISPATCH_DISABLED", ""
+        ).strip().lower() in ("1", "true", "yes", "on"):
+            original_payload = d.action_payload
+            d.action_payload = {
+                "evidence": {
+                    "observation_kind": d.observation.kind,
+                    "observation_subject": d.observation.subject,
+                    "observation_evidence": d.observation.evidence,
+                    "intended_kind": DecisionKind.DISPATCH_AGENT.value,
+                    "intended_payload": original_payload,
+                },
+                "reasoning": d.reasoning,
+                "confidence": d.confidence,
+            }
+            d.kind = DecisionKind.PROPOSE
+            d.reasoning += " [agent dispatch disabled]"
 
         # Rate limit per (kind, subject) pair
         key = f"{d.kind.value}:{d.observation.subject}"
@@ -1340,8 +1669,8 @@ def _dispatch_agent(agent: str, message: str) -> bool:
         return False
 
 
-def _telegram_alert(body: str) -> bool:
-    """Delegate URGENT alerts to the unified telegram_alert module."""
+def _send_chris_telegram(body: str) -> bool:
+    """Direct Chris notification path for confirmed human-only blockers."""
     try:
         from telegram_alert import send_chris_telegram
 
@@ -1353,6 +1682,59 @@ def _telegram_alert(body: str) -> bool:
     except Exception as exc:
         log.warning("brain_loop telegram alert failed: %s", exc)
         return False
+
+
+def _subscription_llm_handle_alert(body: str) -> bool:
+    """Route a handleable alert to subscription-backed agents before Chris.
+
+    This is the broad proactive gate: Brain alerts should become work for Sage
+    unless they require Chris-only knowledge/authority. The OpenClaw path keeps
+    tool-enabled behavior; the stateless CLI fallback is only a review/backlog
+    safety net.
+    """
+    try:
+        from escalation_policy import llm_review_prompt, llm_says_human_needed
+
+        prompt = (
+            "Brain generated an urgent alert. Handle it yourself if possible: investigate, "
+            "create or update the appropriate Brain task/proposal, or leave a concise finding. "
+            "Use Chris only for missing private knowledge, credentials/account access, physical "
+            "access, irreversible authority, or human-only judgment.\n\n"
+            f"{llm_review_prompt('brain_loop', body)}"
+        )
+        if _dispatch_agent("sage", prompt):
+            return True
+
+        from cli_llm import dispatch
+
+        result = dispatch(
+            agent="sage",
+            message=prompt,
+            thinking="low",
+            timeout=60,
+            backlog_kind="proactive",
+            backlog_payload={"source": "brain_loop", "body": body},
+        )
+        if result.ok and llm_says_human_needed(result.text):
+            return _send_chris_telegram("Subscription LLM requested Chris:\n" + result.text[:1200])
+        return bool(result.ok or result.backlogged)
+    except Exception as exc:
+        log.warning("brain_loop subscription alert handling failed: %s", exc)
+        return False
+
+
+def _telegram_alert(body: str) -> bool:
+    """Notify Chris only for alerts that cannot be handled by LLM agents."""
+    try:
+        from escalation_policy import classify_escalation
+
+        route = classify_escalation(title="brain_loop alert", content=body)
+        if route.notify_human:
+            return _send_chris_telegram(body)
+        return _subscription_llm_handle_alert(body)
+    except Exception as exc:
+        log.warning("brain_loop escalation policy failed: %s", exc)
+        return _subscription_llm_handle_alert(body)
 
 
 def _apply_self_modification(payload: dict) -> bool:
@@ -1378,6 +1760,73 @@ def _apply_self_modification(payload: dict) -> bool:
             return True
         except Exception as e:
             log.warning("brain_loop drain_llm_backlog failed: %s", e)
+            return False
+
+    # Phase 4b: engage LLM cost governor — set the dynamic concurrency cap
+    # in brain_config_store so cli_llm reads "1" instead of the env-var "2"
+    # on its next dispatch. Auto-expires via TTL key after ttl_s seconds.
+    if modification == "engage_llm_cost_governor":
+        try:
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+            import brain_config_store
+
+            ttl = int(payload.get("ttl_s", 1800))
+            brain_config_store.set("BRAIN_CLI_LLM_CONCURRENCY", "1", updated_by="brain_loop.cost_governor")
+            brain_config_store.set(
+                "BRAIN_CLI_LLM_CONCURRENCY_UNTIL",
+                str(int(time.time() + ttl)),
+                updated_by="brain_loop.cost_governor",
+            )
+            log.warning(
+                "cost_governor engaged: cli concurrency capped to 1 for %ds (ratio=%s, hourly=%s, baseline=%s)",
+                ttl,
+                payload.get("ratio"),
+                payload.get("hourly"),
+                payload.get("baseline"),
+            )
+            return True
+        except Exception as e:
+            log.warning("cost_governor engage failed: %s", e)
+            return False
+
+    # Phase 1: incremental canonical/distilled refresh. Walks the dirs once,
+    # builds the same docs collect_canonical() does, and calls add_documents
+    # with force_incremental=True. The mtime+embed_model skip path inside
+    # add_documents means only docs that actually changed get re-embedded.
+    if modification == "incremental_canonical_index":
+        try:
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+            from indexer import add_documents, collect_canonical, ensure_collection
+
+            ensure_collection("canonical")
+            ensure_collection("distilled")
+            docs = collect_canonical()
+            canonical_docs = [d for d in docs if d.get("type") == "canonical-note"]
+            distilled_docs = [d for d in docs if d.get("type") == "distilled-note"]
+            t0 = time.time()
+            n_can = add_documents(
+                "canonical",
+                canonical_docs,
+                skip_stale_cleanup=True,
+                force_incremental=True,
+            )
+            n_dist = add_documents(
+                "distilled",
+                distilled_docs,
+                skip_stale_cleanup=True,
+                force_incremental=True,
+            )
+            elapsed = time.time() - t0
+            _set_incremental_last_ts(time.time())
+            log.info(
+                "incremental_canonical_index: canonical=%d distilled=%d in %.1fs",
+                n_can,
+                n_dist,
+                elapsed,
+            )
+            return True
+        except Exception as e:
+            log.warning("incremental_canonical_index failed: %s", e)
             return False
 
     # Default: write a proposal for Chris review.
@@ -1726,6 +2175,8 @@ _WAKE_FILE = Path("/tmp/.brain_loop_wake")
 _WAKE_POLL_INTERVAL_S = 2.0  # fallback only, used when kqueue unavailable
 _WAKE_MIN_INTERVAL_S = 3.0  # debounce — no more than 1 wake-tick every 3s
 _wake_last_tick_ts: float = 0.0
+_wake_spawn_lock = threading.Lock()
+_wake_child_proc: Any | None = None
 
 
 def _wake_debounced_tick(loop: BrainLoop) -> None:
@@ -1741,20 +2192,27 @@ def _wake_debounced_tick(loop: BrainLoop) -> None:
     try:
         import subprocess
 
-        subprocess.Popen(
-            [
-                sys.executable,
-                "-c",
-                (
-                    "import sys; sys.path.insert(0, "
-                    "'/Users/chrischo/server/brain/brain_core'); "
-                    "from brain_loop import run; run()"
-                ),
-            ],
-            start_new_session=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        global _wake_child_proc
+        with _wake_spawn_lock:
+            if _wake_child_proc is not None and _wake_child_proc.poll() is None:
+                return
+            child_env = os.environ.copy()
+            child_env["BRAIN_WAKE_WATCHER_DISABLED"] = "1"
+            _wake_child_proc = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    (
+                        "import sys; sys.path.insert(0, "
+                        "'/Users/chrischo/server/brain/brain_core'); "
+                        "from brain_loop import run; run()"
+                    ),
+                ],
+                start_new_session=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                env=child_env,
+            )
     except Exception as exc:
         log.warning("wake-triggered tick spawn failed: %s", exc)
 
@@ -1832,17 +2290,86 @@ def _wake_watcher_poll(loop: BrainLoop) -> None:
 
 
 _wake_thread_started = False
+_wake_thread_lock = threading.Lock()
 
 
 def _ensure_wake_watcher() -> None:
     global _wake_thread_started
-    if _wake_thread_started:
+    with _wake_thread_lock:
+        if _wake_thread_started:
+            return
+        if os.environ.get("BRAIN_WAKE_WATCHER_DISABLED", "").strip().lower() in ("1", "true", "yes", "on"):
+            return
+        # Mark before starting the thread. The watcher immediately calls
+        # get_brain_loop(); if the flag is set only after start(), the new
+        # thread can race and recursively start more watcher threads.
+        _wake_thread_started = True
+        try:
+            t = threading.Thread(target=_wake_watcher_loop, daemon=True, name="brain_wake_watcher")
+            t.start()
+        except Exception:
+            _wake_thread_started = False
+            raise
+
+
+def _acquire_process_tick_lock() -> Any | None:
+    """Acquire a cross-process non-blocking brain-loop tick lock.
+
+    The in-memory BrainLoop lock only protects one Python interpreter. Scheduler
+    jobs and wake-file ticks run as detached subprocesses, so a hung tick from a
+    prior server generation can otherwise overlap with new ticks. flock releases
+    automatically when the process exits, avoiding stale PID cleanup logic.
+    """
+
+    try:
+        import fcntl
+
+        lock_path = BRAIN_LOGS_DIR / "brain_loop_tick.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_f = lock_path.open("w")
+        try:
+            fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            lock_f.close()
+            return None
+        return lock_f
+    except Exception as exc:
+        log.warning("brain_loop process lock unavailable: %s", exc)
+        return None
+
+
+class _BrainLoopProcessTimeout(TimeoutError):
+    pass
+
+
+def _raise_process_timeout(_signum: int, _frame: Any) -> None:
+    raise _BrainLoopProcessTimeout(f"brain_loop exceeded {TICK_PROCESS_TIMEOUT_S:.0f}s process timeout")
+
+
+@contextlib.contextmanager
+def _process_timeout_guard() -> Any:
+    """Wall-clock guard for detached scheduler/wake subprocesses.
+
+    tick() has an internal budget, but external calls inside a sensor/action can
+    still block. The brain-loop entry point runs in a subprocess, so SIGALRM is
+    acceptable here and prevents one wedged tick from holding the cross-process
+    lock for minutes or hours.
+    """
+
+    if threading.current_thread() is not threading.main_thread() or not hasattr(signal, "SIGALRM"):
+        yield
         return
-    if os.environ.get("BRAIN_WAKE_WATCHER_DISABLED", "").strip().lower() in ("1", "true", "yes", "on"):
-        return
-    t = threading.Thread(target=_wake_watcher_loop, daemon=True, name="brain_wake_watcher")
-    t.start()
-    _wake_thread_started = True
+    old_handler = signal.getsignal(signal.SIGALRM)
+    old_timer = signal.setitimer(signal.ITIMER_REAL, 0)
+    signal.signal(signal.SIGALRM, _raise_process_timeout)
+    signal.setitimer(signal.ITIMER_REAL, TICK_PROCESS_TIMEOUT_S)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old_handler)
+        if old_timer[0] > 0:
+            signal.setitimer(signal.ITIMER_REAL, *old_timer)
 
 
 # Module-level singleton — scheduler reuses one instance across ticks.
@@ -1858,14 +2385,24 @@ def get_brain_loop() -> BrainLoop:
     with _brain_loop_lock:
         if _brain_loop is None:
             _brain_loop = BrainLoop()
-            _ensure_wake_watcher()
         return _brain_loop
 
 
 def run() -> dict:
     """Scheduler entry point. Always returns a dict with tick metadata."""
-    loop = get_brain_loop()
-    return loop.tick()
+    lock_f = _acquire_process_tick_lock()
+    if lock_f is None:
+        return {"tick": 0, "status": "overlap_skipped_process"}
+    try:
+        try:
+            with _process_timeout_guard():
+                loop = get_brain_loop()
+                return loop.tick()
+        except _BrainLoopProcessTimeout as exc:
+            log.warning("brain_loop process timeout: %s", exc)
+            return {"tick": 0, "status": "timeout", "error": str(exc)}
+    finally:
+        lock_f.close()
 
 
 if __name__ == "__main__":
