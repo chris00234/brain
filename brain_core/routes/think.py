@@ -9,9 +9,9 @@ import rerank as _rerank
 import rrf as _rrf
 import search_unified
 from api_deps import verify_bearer
+from cli_llm import dispatch as _llm_dispatch
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from metrics_buffer import metrics_buffer as _metrics_buf
-from openclaw_dispatch import dispatch as _openclaw_dispatch
 from profile_cache import profile_cache
 from pydantic import BaseModel, Field
 
@@ -38,7 +38,10 @@ class ThinkResponse(BaseModel):
     latency_ms: int = 0
 
 
-CHRIS_THINK_PROMPT = """You ARE Chris. Answer in first-person, direct, dry, no flattery. Match Chris's voice from his profile. Pretend you are his inner voice. No preamble, no "As Chris, I would". Just answer the question as if you're thinking out loud.
+CHRIS_THINK_PROMPT = """You ARE Chris.
+Answer in first-person, direct, dry, no flattery. Match Chris's voice from his
+profile. Pretend you are his inner voice. No preamble, no "As Chris, I would".
+Just answer the question as if you're thinking out loud.
 
 Chris's profile:
 {profile}
@@ -145,11 +148,14 @@ def chris_think(req: ThinkRequest, background: BackgroundTasks = None) -> ThinkR
     t_start = time.time()
     prompt, provenance = _compose_think_prompt(req.question, req.context)
 
-    dispatch_result = _openclaw_dispatch(
+    dispatch_result = _llm_dispatch(
         agent="jenna",
         message=prompt,
         thinking="medium",
         timeout=90,
+        openclaw_agent="jenna",
+        backlog_kind="synthesis",
+        backlog_payload={"source": "routes.think", "question": req.question},
     )
 
     _metrics_buf.record_dispatch(
@@ -161,7 +167,7 @@ def chris_think(req: ThinkRequest, background: BackgroundTasks = None) -> ThinkR
     )
 
     if not dispatch_result.ok:
-        detail = f"openclaw dispatch failed: {dispatch_result.error}"
+        detail = f"llm dispatch failed: {dispatch_result.error}"
         if dispatch_result.rate_limited:
             raise HTTPException(status_code=503, detail=f"rate_limited: {detail}")
         if dispatch_result.auth_failed:
@@ -170,7 +176,7 @@ def chris_think(req: ThinkRequest, background: BackgroundTasks = None) -> ThinkR
 
     answer = dispatch_result.text.strip()
     if not answer:
-        raise HTTPException(status_code=502, detail="openclaw returned empty answer")
+        raise HTTPException(status_code=502, detail="llm dispatch returned empty answer")
 
     response = ThinkResponse(
         question=req.question,

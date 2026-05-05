@@ -54,3 +54,45 @@ def test_playbook_qdrant_backup_job_name_exists(monkeypatch):
     import slo_remediation
 
     assert slo_remediation.PLAYBOOK["qdrant_backup_age_hours"].action == "qdrant_backup"
+
+
+def test_playbook_starts_openclaw_gateway(monkeypatch, tmp_path):
+    import slo_remediation
+
+    monkeypatch.setenv("BRAIN_SLO_AUTOREMEDIATE", "on")
+    monkeypatch.setattr(slo_remediation, "LOG_FILE", tmp_path / "slo_remediation.jsonl")
+    monkeypatch.setattr(slo_remediation, "_should_fire", lambda _rule: True)
+    monkeypatch.setattr(slo_remediation, "_record_fire", lambda _rule: None)
+    fake_jr = type(sys)("job_registry")
+    calls: list[str] = []
+
+    def dispatch_job(name: str) -> int:
+        calls.append(name)
+        return 18789
+
+    fake_jr.dispatch_job = dispatch_job
+    monkeypatch.setitem(sys.modules, "job_registry", fake_jr)
+
+    out = slo_remediation.apply_direct_remediations([{"slo": "openclaw_gateway_health", "current": 1}])
+
+    assert calls == ["openclaw_gateway_start"]
+    assert out["actions"][0]["action"] == "trigger:openclaw_gateway_start"
+    assert "openclaw_gateway_health" in (tmp_path / "slo_remediation.jsonl").read_text()
+
+
+def test_playbook_escalates_stale_dispatch_attempts(monkeypatch, tmp_path):
+    import slo_remediation
+
+    monkeypatch.setenv("BRAIN_SLO_AUTOREMEDIATE", "on")
+    monkeypatch.setattr(slo_remediation, "LOG_FILE", tmp_path / "slo_remediation.jsonl")
+    monkeypatch.setattr(slo_remediation, "ESCALATION_LOG_FILE", tmp_path / "slo_escalations.jsonl")
+    monkeypatch.setattr(slo_remediation, "_should_fire", lambda _rule: True)
+    monkeypatch.setattr(slo_remediation, "_record_fire", lambda _rule: None)
+
+    out = slo_remediation.apply_direct_remediations(
+        [{"slo": "task_dispatch_stale_started_count", "current": 1}]
+    )
+
+    assert out["actions"][0]["status"] == "manual_required"
+    assert out["actions"][0]["escalated"] is True
+    assert "task_dispatch_stale_started_count" in (tmp_path / "slo_escalations.jsonl").read_text()

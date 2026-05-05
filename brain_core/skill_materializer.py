@@ -48,6 +48,7 @@ MIN_STEPS = 3
 STALE_DAYS = 90  # skills backing procedures last_used > N days are archived
 MAX_AUTO_SKILLS = 50  # global cap per skill dir; lowest-success skills evicted first
 USAGE_FILE = ".brain_auto_skill_usage.json"
+PROMOTION_CONTRACT_VERSION = "skill-promotion-contract-v1"
 
 
 # Hermes-inspired guardrail: auto-generated skills are loaded into agent context,
@@ -196,6 +197,10 @@ def _upsert_usage_record(root: Path, slug: str, proc: dict[str, Any]) -> None:
                 "task_type": proc.get("task_type") or "",
                 "success_count": int(proc.get("success_count") or 1),
                 "last_materialized_at": now_iso,
+                "promotion_contract_version": PROMOTION_CONTRACT_VERSION,
+                "source_episode_count": int(proc.get("success_count") or 1),
+                "validation_status": "materialized_after_threshold_and_threat_scan",
+                "rollback_strategy": "archive_or_delete_auto_skill_dir_then_regenerate_from_brain_procedure",
                 "state": existing.get("state") or "active",
                 "pinned": bool(existing.get("pinned", False)),
             }
@@ -265,7 +270,21 @@ def _render_claude_skill_md(proc: dict[str, Any], lessons: list[dict[str, Any]])
         f"brain_source: {source}\n"
         f"generated_at: {now_iso}\n"
         f"success_count: {success_count}\n"
+        f"promotion_contract_version: {PROMOTION_CONTRACT_VERSION}\n"
+        f"source_episode_count: {success_count}\n"
+        "rollback_strategy: archive_generated_auto_skill_dir\n"
         "---\n"
+    )
+
+    promotion_md = (
+        "## Promotion contract\n\n"
+        f"- **Source episodes**: {success_count} successful uses from `{source}`.\n"
+        f"- **Outcome gate**: materialized only after `success_count >= {MIN_SUCCESS_COUNT}` "
+        f"and at least {MIN_STEPS} recorded steps.\n"
+        "- **Validation gate**: generated content passed deterministic unsafe-content scan before writing.\n"
+        "- **Runtime parity**: materialized for Claude, Codex, and OpenClaw; OpenClaw registry sync runs after write.\n"
+        "- **Rollback**: archive or delete the generated `auto-*` skill directory; the backing Brain procedure "
+        "remains the source of truth and can regenerate a clean copy.\n"
     )
 
     body = (
@@ -281,6 +300,7 @@ def _render_claude_skill_md(proc: dict[str, Any], lessons: list[dict[str, Any]])
         f"## Steps\n\n{steps_md}\n\n"
         f"## Tools used\n\n{tools_md}\n\n"
         f"## Pitfalls (from related brain lessons)\n\n{pitfalls_md}\n\n"
+        f"{promotion_md}\n\n"
         f"## Source\n\n"
         f"- Procedure ID: `{proc_id}`\n"
         f"- Source: `{source}`\n"
@@ -376,6 +396,7 @@ def materialize(proc: dict[str, Any], *, min_success: int = MIN_SUCCESS_COUNT) -
         result["paths"] = [str(cc_path), str(codex_path), str(oc_path), str(oc_meta_path)]
         result["reason"] = "ok"
         result["openclaw_sync"] = openclaw_sync
+        result["promotion_contract_version"] = PROMOTION_CONTRACT_VERSION
         log.info(
             "materialized skill %s (success_count=%d, steps=%d)",
             slug,
@@ -448,6 +469,9 @@ def _parse_frontmatter(skill_md_path: Path) -> dict[str, Any]:
                 "auto_generated",
                 "generated_at",
                 "version",
+                "promotion_contract_version",
+                "source_episode_count",
+                "rollback_strategy",
             ):
                 out[key] = val
         return out

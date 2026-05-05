@@ -19,13 +19,14 @@ import json
 import logging
 import os
 import shlex
+import socket
 import sqlite3
 import subprocess
 import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -259,6 +260,30 @@ SLOS: dict[str, SLO] = {
         metric_unit="failed",
         consecutive_breaches_required=1,
     ),
+    "openclaw_gateway_health": SLO(
+        name="openclaw_gateway_health",
+        description="OpenClaw local gateway TCP health on 127.0.0.1:18789. 0=connectable, 1=unreachable. Agent handoff tasks depend on this gateway; a breach means automated OpenClaw agent work may be only queued/deferred rather than actually running.",
+        target=0.0,
+        severity="critical",
+        metric_unit="failed",
+        consecutive_breaches_required=1,
+    ),
+    "task_dispatch_stale_started_count": SLO(
+        name="task_dispatch_stale_started_count",
+        description="Count of task_dispatch_attempts stuck in started for more than 15 minutes. Non-zero means Brain may have crashed mid-agent dispatch and task execution truth needs recovery.",
+        target=0.0,
+        severity="warning",
+        metric_unit="attempts",
+        consecutive_breaches_required=1,
+    ),
+    "task_failure_lesson_missing_count": SLO(
+        name="task_failure_lesson_missing_count",
+        description="Failed/deferred task dispatch attempts older than 15 minutes without a recorded Reflexion failure lesson. Non-zero means Brain is repeating autonomous failures without durable lessons.",
+        target=0.0,
+        severity="warning",
+        metric_unit="attempts",
+        consecutive_breaches_required=1,
+    ),
     # 2026-04-21: qdrant-backup silent-failure watcher. The nightly
     # ai.openclaw.qdrant-backup launchd plist runs at 03:00 local time and
     # uploads to MinIO. If it silently fails (S3 creds rot, Qdrant snapshot
@@ -318,8 +343,37 @@ SLOS: dict[str, SLO] = {
 _RECALL_MIN_SAMPLES = 30  # guard against cold-boot snapshots with a handful of warmup hits
 
 
+def _live_recall_v2_p95() -> tuple[bool, float]:
+    """Return live in-process /recall/v2 p95 when this runs inside FastAPI.
+
+    The scheduled SLO runner can execute out-of-process, in which case the
+    metrics buffer has no route samples and we fall back to persisted
+    snapshots. When the `/brain/slos` route calls this in the server process,
+    however, live route samples are newer and more truthful than old
+    metrics_history rows. If live prod traffic exists but has not reached the
+    sample floor, return a warmup value instead of reviving a stale persisted
+    breach.
+    """
+    try:
+        from metrics_buffer import metrics_buffer
+
+        routes = metrics_buffer.snapshot().get("routes", {}) or {}
+        v2 = routes.get("/recall/v2") or {}
+        samples = int(v2.get("window_count", v2.get("count", 0)) or 0)
+        if samples <= 0:
+            return False, 0.0
+        if samples < _RECALL_MIN_SAMPLES:
+            return True, 0.0
+        p95 = v2.get("p95_ms")
+        if p95 is None:
+            return True, 0.0
+        return True, float(p95)
+    except Exception:
+        return False, 0.0
+
+
 def _measure_recall_v2_p95() -> float:
-    """Read p95 latency for /recall/v2 from metrics_snapshots.
+    """Read p95 latency for production /recall/v2 traffic.
 
     Walks snapshots newest-first and returns the first p95 backed by at least
     `_RECALL_MIN_SAMPLES` samples. Falls back to /recall (v1) within the same
@@ -327,6 +381,9 @@ def _measure_recall_v2_p95() -> float:
     snapshot exists (0 < 350 target = no spurious breach) — keeps the gauge
     silent until real warmup data lands rather than paging on 7 cold hits.
     """
+    live_available, live_p95 = _live_recall_v2_p95()
+    if live_available:
+        return live_p95
     try:
         if not METRICS_DB.exists():
             return 0.0
@@ -781,6 +838,68 @@ def _measure_telegram_direct_health() -> float:
         return 1.0
 
 
+def _measure_openclaw_gateway_health() -> float:
+    """Return 0 when the local OpenClaw gateway port accepts TCP, else 1.
+
+    Keep this probe deliberately cheap and side-effect-free. The deeper CLI
+    ``openclaw gateway status`` command is useful for operators, but the SLO
+    path runs every few minutes and should not spawn Node/Codex subprocesses or
+    compete with the agent-dispatch path it is protecting.
+    """
+
+    try:
+        with socket.create_connection(("127.0.0.1", 18789), timeout=1.0):
+            return 0.0
+    except OSError as exc:
+        log.warning("openclaw gateway healthcheck failed: %s", exc)
+        return 1.0
+
+
+def _measure_task_dispatch_stale_started_count() -> float:
+    """Count dispatch attempts that started but never closed."""
+
+    try:
+        cutoff = datetime.now(UTC) - timedelta(minutes=15)
+        with sqlite3.connect(str(AUTONOMY_DB)) as conn:
+            row = conn.execute(
+                """SELECT COUNT(*) FROM task_dispatch_attempts
+                   WHERE status = 'started' AND started_at <= ?""",
+                (cutoff.isoformat(timespec="seconds"),),
+            ).fetchone()
+        return float(row[0]) if row else 0.0
+    except sqlite3.Error as exc:
+        log.debug("task_dispatch_stale_started_count measurement failed: %s", exc)
+        return 0.0
+
+
+def _measure_task_failure_lesson_missing_count() -> float:
+    """Count closed failure/deferred attempts whose Reflexion lesson is absent."""
+
+    try:
+        cutoff = datetime.now(UTC) - timedelta(minutes=15)
+        with sqlite3.connect(str(AUTONOMY_DB)) as conn:
+            rows = conn.execute(
+                """SELECT metadata FROM task_dispatch_attempts
+                   WHERE status IN ('failed', 'deferred') AND completed_at <= ?""",
+                (cutoff.isoformat(timespec="seconds"),),
+            ).fetchall()
+        missing = 0
+        for (raw_meta,) in rows:
+            try:
+                meta = json.loads(raw_meta or "{}")
+            except (json.JSONDecodeError, TypeError):
+                meta = {}
+            if not isinstance(meta, dict):
+                meta = {}
+            status = str(meta.get("failure_lesson_status") or "")
+            if status != "recorded":
+                missing += 1
+        return float(missing)
+    except sqlite3.Error as exc:
+        log.debug("task_failure_lesson_missing_count measurement failed: %s", exc)
+        return 0.0
+
+
 def _measure_self_eval_drift_7d() -> float:
     """Read the latest self_eval drift_pct from brain_config_store.
 
@@ -962,6 +1081,9 @@ _MEASUREMENTS: dict[str, Callable[[], float]] = {
     "entry_contract_missing_pct": _measure_entry_contract_missing_pct,
     "telegram_backlog_pending_count": _measure_telegram_backlog_pending_count,
     "telegram_direct_health": _measure_telegram_direct_health,
+    "openclaw_gateway_health": _measure_openclaw_gateway_health,
+    "task_dispatch_stale_started_count": _measure_task_dispatch_stale_started_count,
+    "task_failure_lesson_missing_count": _measure_task_failure_lesson_missing_count,
     "boot_context_degraded_1h": _measure_boot_context_degraded_1h,
     "self_eval_drift_7d": _measure_self_eval_drift_7d,
     "qdrant_backup_age_hours": _measure_qdrant_backup_age_hours,

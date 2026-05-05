@@ -80,6 +80,28 @@ def test_entry_contract_fields_are_stamped_for_every_source(monkeypatch):
     assert "collection:personal" in payload["tags"]
 
 
+def test_sensitive_text_redaction_suppresses_secret_patterns():
+    redacted, findings = source_policy.redact_sensitive_text(
+        "the value is ghp_abcdefghijklmnopqrstuvwxyz123456"
+    )
+
+    assert findings == ["github_token"]
+    assert "ghp_" not in redacted
+    assert "[REDACTED:github_token]" in redacted
+
+
+def test_entry_contract_records_privacy_redaction_metadata():
+    payload = source_policy.enrich_payload_for_entry(
+        {"type": "note", "source": "apple-notes://1"},
+        content="password: definitely-secret-value",
+        collection="personal",
+    )
+
+    assert payload["privacy_redaction_version"] == source_policy.PRIVACY_REDACTION_VERSION
+    assert payload["privacy_redaction_count"] == 1
+    assert payload["privacy_redaction_codes"] == ["explicit_password"]
+
+
 def test_structured_strategy_for_config_files(monkeypatch):
     monkeypatch.setenv("BRAIN_SEMANTIC_CHUNKING", "1")
     meta = source_policy.metadata_for_document(

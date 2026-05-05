@@ -109,7 +109,11 @@ def test_iterative_recall_high_confidence_no_iteration(crag_module):
 
     def fake_recall(q: str) -> list[dict]:
         call_count["n"] += 1
-        return [_result(110, ce=0.7), _result(80, ce=0.7), _result(70, ce=0.7)]
+        return [
+            _result(110, ce=0.7, content="good query answer"),
+            _result(80, ce=0.7, content="good query support"),
+            _result(70, ce=0.7, content="good query context"),
+        ]
 
     def fake_expand(q: str, results: list[dict]) -> str:
         return "should not be called"
@@ -131,7 +135,11 @@ def test_iterative_recall_low_confidence_triggers_expansion(crag_module):
         call_count["n"] += 1
         if call_count["n"] == 1:
             return [_result(50, ce=0.5), _result(48, ce=0.5)]
-        return [_result(105, ce=0.7), _result(85, ce=0.7), _result(70, ce=0.7)]
+        return [
+            _result(105, ce=0.7, content="weak query better answer"),
+            _result(85, ce=0.7, content="weak query better support"),
+            _result(70, ce=0.7, content="weak query better context"),
+        ]
 
     def fake_expand(q: str, results: list[dict]) -> str:
         return f"{q} better"
@@ -165,3 +173,72 @@ def test_iterative_recall_returns_best_when_expansion_fails(crag_module):
     assert telemetry["hops"] == 1
     assert telemetry["iterated"] is False
     assert len(results) == 1
+
+
+def test_query_coverage_penalizes_unrelated_confident_window(crag_module):
+    results = [
+        _result(110, ce=0.8, title="deployment notes", content="service healthcheck only"),
+        _result(90, ce=0.75, title="infra", content="uptime kuma"),
+        _result(80, ce=0.72, title="ops", content="docker compose"),
+    ]
+    report = crag_module.score_confidence(results, query="agent named bartholomew")
+    assert report.components["query_coverage"] < 0.34
+    assert crag_module.should_iterate(report) is True
+
+
+def test_expand_query_uses_cli_default_chain_unless_backend_env(crag_module, monkeypatch):
+    captured: list[dict] = []
+
+    class Result:
+        ok = True
+        text = "rewritten"
+
+    def fake_dispatch(agent: str, prompt: str, **kwargs):
+        captured.append({"agent": agent, **kwargs})
+        return Result()
+
+    import types
+
+    fake_cli_llm = types.ModuleType("cli_llm")
+    fake_cli_llm.dispatch = fake_dispatch
+    monkeypatch.setitem(sys.modules, "cli_llm", fake_cli_llm)
+    monkeypatch.delenv("BRAIN_CRAG_EXPAND_BACKEND", raising=False)
+
+    rewritten = crag_module.expand_query("original", [_result(50, content="weak")])
+
+    assert rewritten == "rewritten"
+    assert captured[0]["backend"] is None
+    assert "max_backends" not in captured[0]
+
+    captured.clear()
+    monkeypatch.setenv("BRAIN_CRAG_EXPAND_BACKEND", "openclaw")
+
+    rewritten = crag_module.expand_query("original", [_result(50, content="weak")])
+
+    assert rewritten == "rewritten"
+    assert captured[0]["backend"] == "openclaw"
+    assert "max_backends" not in captured[0]
+
+
+def test_rule_based_rewrite_candidates_bridge_personal_source_terms(crag_module):
+    assert crag_module.rule_based_rewrite_candidates("영주권 갱신")[0] == "USCIS I-751 receipt notice"
+    assert "저녁 약속" in crag_module.rule_based_rewrite_candidates("dinner appointment 저녁 약속")
+    assert crag_module.rule_based_rewrite_candidates("renewal receipt")[0] == "receipt notice"
+
+
+def test_expand_query_uses_rule_candidate_before_llm(crag_module):
+    called = False
+
+    def fake_dispatch(agent: str, prompt: str) -> str:
+        nonlocal called
+        called = True
+        return "llm query"
+
+    rewritten = crag_module.expand_query(
+        "calendar dinner",
+        [],
+        dispatch_fn=fake_dispatch,
+    )
+
+    assert rewritten == "저녁 약속"
+    assert called is False

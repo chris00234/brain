@@ -271,8 +271,15 @@ def _create_handoff_task(message: dict) -> None:
 
         task_queue.create_task(
             title=f"Handoff from {message['from_agent']}: {message['content'][:120]}",
+            description=message.get("content", ""),
             assigned_agent=message["to_agent"],
             parent_goal_id=message.get("parent_task_id"),
+            metadata={
+                "source": "agent_messenger",
+                "source_message_id": message.get("id"),
+                "from_agent": message.get("from_agent"),
+                "message_type": message.get("message_type"),
+            },
         )
     except Exception as exc:
         log.warning("handoff task creation failed (task_queue may not exist yet): %s", exc)

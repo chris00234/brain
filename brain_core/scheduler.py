@@ -255,6 +255,20 @@ class BrainScheduler:
         # in _dispatch_job (check for existing _running_jobs[name]) would fail
         # because that in-memory state is rebuilt from SQLite orphans first.
         self._reconcile_orphans()
+        # Task rows marked running before this process started cannot report
+        # completion to this scheduler. Requeue them so the UI and task queue do
+        # not claim invisible background work is active after a restart.
+        try:
+            import sys as _sys
+
+            _brain_core = str(Path(__file__).resolve().parent)
+            if _brain_core not in _sys.path:
+                _sys.path.insert(0, _brain_core)
+            from task_queue import task_queue
+
+            task_queue.requeue_running_orphans(by="scheduler_startup")
+        except Exception as exc:
+            log.warning("task orphan reconciliation failed: %s", exc)
         for job in JOB_SCHEDULE:
             self._scheduler.add_job(
                 self._fire,

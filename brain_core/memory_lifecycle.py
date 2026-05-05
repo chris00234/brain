@@ -1,7 +1,7 @@
 #!/opt/homebrew/bin/python3
 """Memory file lifecycle - archive old agent memory files, extract insights first.
 
-Phase 4d: before archiving a memory file, dispatch it to Liz via openclaw agent
+Phase 4d: before archiving a memory file, dispatch it to Liz via CLI-first LLM dispatch
 for canonical-worthy fact extraction. Each extracted fact becomes a schema-compliant
 raw record in raw/inbox/, picked up by pipeline_auto.py for promotion to canonical.
 This stops the 180-day archive cliff from being a brain-damage event.
@@ -23,14 +23,13 @@ from pathlib import Path
 log = logging.getLogger("brain.memory_lifecycle")
 
 try:
-    from config import INBOX_DIR, OPENCLAW_BIN
+    from config import INBOX_DIR
     from config import OPENCLAW_DIR as AGENTS_DIR
 
     EXTRACTION_FAILURE_LOG = AGENTS_DIR / "workspace-liz" / "logs" / "memory-extraction-failures.jsonl"
 except ImportError:
     AGENTS_DIR = Path("/Users/chrischo/.openclaw")
     INBOX_DIR = Path("/Users/chrischo/server/knowledge/raw/inbox")
-    OPENCLAW_BIN = "/Users/chrischo/.local/bin/openclaw"
     EXTRACTION_FAILURE_LOG = Path(
         "/Users/chrischo/.openclaw/workspace-liz/logs/memory-extraction-failures.jsonl"
     )
@@ -127,7 +126,7 @@ def extract_via_liz(memory_file: Path) -> int:
         timeout=LIZ_DISPATCH_TIMEOUT,
     )
     if not result.ok:
-        log_extraction_failure(f"openclaw dispatch failed for {memory_file.name}: {result.error}")
+        log_extraction_failure(f"cli dispatch failed for {memory_file.name}: {result.error}")
         sys.stderr.write(
             f"DISPATCH_FAIL agent={EXTRACTION_AGENT} reason={result.error[:200]} file={memory_file.name}\n"
         )

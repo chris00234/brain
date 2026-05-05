@@ -48,7 +48,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -330,6 +330,8 @@ def _run_cli_process(
     *,
     lock_wait_s: float | None = None,
     env: dict[str, str] | None = None,
+    input_text: str | None = None,
+    use_slot: bool = True,
 ) -> tuple[subprocess.CompletedProcess[str], int]:
     """Run a subscription CLI with a process-group timeout.
 
@@ -353,27 +355,30 @@ def _run_cli_process(
     if lock_wait_s is None:
         lock_wait_s = DEFAULT_LOCK_WAIT_S
 
-    lock_t0 = time.monotonic()
-    try:
-        _slot_idx, lock_f = _acquire_slot(lock_wait_s)
-    except subprocess.TimeoutExpired as exc:
-        # Lock-wait timeout: callers want lock_wait_ms in their telemetry.
-        # Stamp it on the exception so _single_* unwrap and propagate it.
-        exc.lock_wait_ms = int((time.monotonic() - lock_t0) * 1000)  # type: ignore[attr-defined]
-        raise
-    lock_wait_ms = int((time.monotonic() - lock_t0) * 1000)
-    if lock_wait_ms >= LOCK_WAIT_WARN_S * 1000:
-        log.warning(
-            "cli_llm slot wait %dms (concurrency=%d, cap=%.1fs) — sustained "
-            "high waits indicate a slow caller is holding a slot",
-            lock_wait_ms,
-            _effective_concurrency(),
-            lock_wait_s,
-        )
+    lock_wait_ms = 0
+    lock_f = None
+    if use_slot:
+        lock_t0 = time.monotonic()
+        try:
+            _slot_idx, lock_f = _acquire_slot(lock_wait_s)
+        except subprocess.TimeoutExpired as exc:
+            # Lock-wait timeout: callers want lock_wait_ms in their telemetry.
+            # Stamp it on the exception so _single_* unwrap and propagate it.
+            exc.lock_wait_ms = int((time.monotonic() - lock_t0) * 1000)  # type: ignore[attr-defined]
+            raise
+        lock_wait_ms = int((time.monotonic() - lock_t0) * 1000)
+        if lock_wait_ms >= LOCK_WAIT_WARN_S * 1000:
+            log.warning(
+                "cli_llm slot wait %dms (concurrency=%d, cap=%.1fs) — sustained "
+                "high waits indicate a slow caller is holding a slot",
+                lock_wait_ms,
+                _effective_concurrency(),
+                lock_wait_s,
+            )
     try:
         proc = subprocess.Popen(
             cmd,
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -381,7 +386,10 @@ def _run_cli_process(
             env=env,
         )
         try:
-            stdout, stderr = proc.communicate(timeout=timeout)
+            if input_text is None:
+                stdout, stderr = proc.communicate(timeout=timeout)
+            else:
+                stdout, stderr = proc.communicate(input=input_text, timeout=timeout)
         except subprocess.TimeoutExpired as exc:
             with contextlib.suppress(ProcessLookupError):
                 os.killpg(proc.pid, signal.SIGKILL)
@@ -391,10 +399,11 @@ def _run_cli_process(
             raise new_exc from exc
         return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr), lock_wait_ms
     finally:
-        with contextlib.suppress(OSError):
-            fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
-        with contextlib.suppress(OSError):
-            lock_f.close()
+        if lock_f is not None:
+            with contextlib.suppress(OSError):
+                fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
+            with contextlib.suppress(OSError):
+                lock_f.close()
 
 
 # Rate-limit / quota-exhausted patterns in stderr/stdout
@@ -463,6 +472,18 @@ FAILOVER_REASONS = (
     "unknown",
 )
 
+FAILURE_TAXONOMY_VERSION = "cli-failure-taxonomy-v1"
+_PROVIDER_FAILURE_CLASSES = ("codex", "claude", "openclaw")
+_FAILURE_CLASS_PROBES = {
+    "auth": "not logged in",
+    "billing": "payment required",
+    "model_not_found": "model not found",
+    "context_overflow": "context length overflow",
+    "rate_limit": "rate limit exceeded",
+    "overloaded": "service unavailable 503",
+    "unknown": "unclassified provider failure",
+}
+
 
 def classify_cli_error(stderr: str, stdout: str) -> dict:
     """Return ``{"reason": str, "retryable": bool, "should_fallback": bool,
@@ -527,6 +548,36 @@ def classify_cli_error(stderr: str, stdout: str) -> dict:
         "should_fallback": True,
         "should_compress": False,
         "should_rotate_credential": False,
+    }
+
+
+def failure_taxonomy_snapshot() -> dict:
+    """Describe dispatch failure classes exposed through `/brain/usage`.
+
+    The probes reuse ``classify_cli_error`` so docs/API/UI can show the same
+    taxonomy used by backend cooldowns and fallback decisions. This is static
+    and safe; it does not call any CLI backend.
+    """
+
+    classes = []
+    for reason in FAILOVER_REASONS:
+        classified = classify_cli_error(_FAILURE_CLASS_PROBES[reason], "")
+        classes.append(
+            {
+                "reason": reason,
+                "retryable": bool(classified["retryable"]),
+                "should_fallback": bool(classified["should_fallback"]),
+                "should_compress": bool(classified["should_compress"]),
+                "should_rotate_credential": bool(classified["should_rotate_credential"]),
+                "backend_cooldown_s": int(_BACKEND_COOLDOWN_S.get(reason, 0.0)),
+            }
+        )
+    return {
+        "version": FAILURE_TAXONOMY_VERSION,
+        "provider_classes": list(_PROVIDER_FAILURE_CLASSES),
+        "class_count": len(classes),
+        "classes": classes,
+        "dashboard_surface": "/brain/usage.llm.failure_taxonomy",
     }
 
 
@@ -616,18 +667,156 @@ def _record_usage(
                 conn.close()
 
 
+def get_usage_stats(days: int = 30) -> dict:
+    """Return rolling CLI-first LLM usage stats for the last N days.
+
+    This intentionally lives in ``cli_llm`` so `/brain/usage` reports the
+    current mechanical-dispatch surface instead of the legacy OpenClaw wrapper.
+    """
+    try:
+        conn = sqlite3.connect(str(LLM_USAGE_DB))
+        try:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS llm_usage ("
+                "timestamp TEXT, agent TEXT, duration_ms INTEGER, ok INTEGER, "
+                "prompt_tokens INTEGER, response_tokens INTEGER, skipped_cb INTEGER, "
+                "provider TEXT, model TEXT, cache_read_tokens INTEGER, "
+                "cache_write_tokens INTEGER, cost_usd REAL)"
+            )
+            cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+            total = conn.execute(
+                "SELECT COUNT(*) FROM llm_usage WHERE timestamp >= ? AND skipped_cb = 0",
+                (cutoff,),
+            ).fetchone()[0]
+            today_cutoff = datetime.now(UTC).strftime("%Y-%m-%d")
+            today_count = conn.execute(
+                "SELECT COUNT(*) FROM llm_usage WHERE timestamp >= ? AND skipped_cb = 0",
+                (today_cutoff,),
+            ).fetchone()[0]
+            per_agent = dict(
+                conn.execute(
+                    "SELECT agent, COUNT(*) FROM llm_usage "
+                    "WHERE timestamp >= ? AND skipped_cb = 0 GROUP BY agent",
+                    (cutoff,),
+                ).fetchall()
+            )
+            per_backend = dict(
+                conn.execute(
+                    "SELECT provider, COUNT(*) FROM llm_usage "
+                    "WHERE timestamp >= ? AND skipped_cb = 0 GROUP BY provider",
+                    (cutoff,),
+                ).fetchall()
+            )
+            cb_skipped = conn.execute(
+                "SELECT COUNT(*) FROM llm_usage WHERE timestamp >= ? AND skipped_cb = 1",
+                (cutoff,),
+            ).fetchone()[0]
+            tokens = conn.execute(
+                "SELECT COALESCE(SUM(prompt_tokens + response_tokens + cache_read_tokens + cache_write_tokens), 0) "
+                "FROM llm_usage WHERE timestamp >= ?",
+                (cutoff,),
+            ).fetchone()[0]
+            return {
+                "total": int(total),
+                "today": int(today_count),
+                "per_agent": per_agent,
+                "per_backend": per_backend,
+                "cb_skipped": int(cb_skipped),
+                "tokens": int(tokens or 0),
+                "days": days,
+                "source": "cli_llm",
+                "primary_model": FALLBACK_CHAIN[0][1],
+                "failure_taxonomy": failure_taxonomy_snapshot(),
+            }
+        finally:
+            conn.close()
+    except Exception as exc:
+        log.debug("cli_llm get_usage_stats failed: %s", exc)
+        return {
+            "error": str(exc)[:200],
+            "total": 0,
+            "today": 0,
+            "per_agent": {},
+            "per_backend": {},
+            "cb_skipped": 0,
+            "tokens": 0,
+            "days": days,
+            "source": "cli_llm",
+            "primary_model": FALLBACK_CHAIN[0][1],
+            "failure_taxonomy": failure_taxonomy_snapshot(),
+        }
+
+
 def _is_quota_error(stderr: str, stdout: str) -> bool:
     blob = f"{stderr}\n{stdout}"
     return any(p.search(blob) for p in _QUOTA_PATTERNS)
 
 
 def _cooldown_reason(result: CliResult) -> str:
+    if _is_local_capacity_error(result.error):
+        return "local_capacity"
     if result.rate_limited:
         return "rate_limit"
     if "timeout" in (result.error or "").lower():
         return "timeout"
     classified = classify_cli_error(result.error, "")
     return str(classified.get("reason") or "unknown")
+
+
+def _is_local_capacity_error(error: str | None) -> bool:
+    err = (error or "").lower()
+    return "cli slots busy" in err or ("slot" in err and "busy" in err)
+
+
+def _is_transient_throttle_error(error: str | None) -> bool:
+    """Errors that already have a local/provider retry path.
+
+    These should not trip the coarse global ``llm.dispatch`` breaker. Backend
+    cooldowns, task deferral, and OpenClaw gateway recovery handle them more
+    precisely. Counting them globally was reopening the breaker from local
+    gateway/timeouts and making Chris see "automation under the hood" that was
+    only waiting on a broad cooldown.
+    """
+    err = (error or "").lower()
+    return (
+        _is_local_capacity_error(err)
+        or "backend_cooldown" in err
+        or "rate limit" in err
+        or "rate_limit" in err
+        or "rate-limited" in err
+        or "usage limit" in err
+        or "timeout" in err
+        or "gatewaytransporterror" in err
+        or "gateway closed" in err
+        or "gateway crashed" in err
+        or "process timeout" in err
+    )
+
+
+def _timeout_error(exc: subprocess.TimeoutExpired, timeout: int) -> str:
+    """Return a truthful timeout error even when the CLI wrote a startup banner.
+
+    Codex writes session/model metadata to stderr before any real answer. When
+    a process timed out, storing only that stderr banner made breaker reasons
+    look like a normal Codex invocation instead of the real failure.
+    """
+    stderr = exc.stderr if isinstance(exc.stderr, str) else ""
+    stdout = exc.output if isinstance(exc.output, str) else ""
+    detail = (stderr or stdout or "").strip()
+    if detail:
+        return f"timeout after {timeout}s: {detail[:450]}"
+    return f"timeout after {timeout}s"
+
+
+def _empty_response_error(backend: str, stderr: str, stdout: str, *, rate_limited: bool) -> str:
+    detail = (stderr or stdout or "").strip()
+    if detail:
+        base = f"{backend} returned empty response: {detail[:450]}"
+    else:
+        base = f"{backend} returned empty response"
+    if rate_limited and "rate" not in base.lower() and "usage limit" not in base.lower():
+        return f"rate_limited: {base}"
+    return base
 
 
 def _backend_cooldown_remaining(backend: str, model: str) -> float:
@@ -677,13 +866,17 @@ def _single_codex(prompt: str, model: str, timeout: int) -> CliResult:
     fall through to claude fallback.
     """
     t0 = time.time()
-    cmd = [CODEX_BIN, "exec", "--skip-git-repo-check", "-m", model, prompt]
+    # Feed the prompt through stdin (`-`) instead of argv. Codex v0.128 can
+    # return only its "Reading additional input from stdin..." banner when a
+    # long prompt is passed positionally from a non-TTY launchd process. Stdin
+    # is also safer for large task prompts.
+    cmd = [CODEX_BIN, "exec", "--skip-git-repo-check", "-m", model, "-"]
     try:
-        proc, lock_wait_ms = _run_cli_process(cmd, timeout=timeout)
+        proc, lock_wait_ms = _run_cli_process(cmd, timeout=timeout, input_text=prompt)
     except subprocess.TimeoutExpired as exc:
         dur = int((time.time() - t0) * 1000)
         _record_usage("codex", model, 0, dur, False)
-        err = (exc.stderr or "timeout")[:500] if isinstance(exc.stderr, str) else "timeout"
+        err = _timeout_error(exc, timeout)[:500]
         return CliResult(
             ok=False,
             error=err,
@@ -710,6 +903,11 @@ def _single_codex(prompt: str, model: str, timeout: int) -> CliResult:
     return CliResult(
         ok=bool(text),
         text=text,
+        error=(
+            ""
+            if text
+            else _empty_response_error("codex", proc.stderr, proc.stdout, rate_limited=rate_limited)
+        ),
         tokens=tokens,
         duration_ms=dur,
         backend="codex",
@@ -748,7 +946,7 @@ def _single_claude(prompt: str, model: str, timeout: int) -> CliResult:
     except subprocess.TimeoutExpired as exc:
         dur = int((time.time() - t0) * 1000)
         _record_usage("claude", model, 0, dur, False)
-        err = (exc.stderr or "timeout")[:500] if isinstance(exc.stderr, str) else "timeout"
+        err = _timeout_error(exc, timeout)[:500]
         return CliResult(
             ok=False,
             error=err,
@@ -775,6 +973,11 @@ def _single_claude(prompt: str, model: str, timeout: int) -> CliResult:
     return CliResult(
         ok=bool(text),
         text=text,
+        error=(
+            ""
+            if text
+            else _empty_response_error("claude", proc.stderr, proc.stdout, rate_limited=rate_limited)
+        ),
         duration_ms=dur,
         backend="claude",
         model=model,
@@ -784,18 +987,32 @@ def _single_claude(prompt: str, model: str, timeout: int) -> CliResult:
 
 
 def _parse_openclaw_payload(stdout: str) -> tuple[str, int]:
+    raw = (stdout or "").strip()
     try:
-        envelope = json.loads(stdout)
+        envelope = json.loads(raw)
     except json.JSONDecodeError:
-        return stdout.strip(), 0
-    payloads = ((envelope.get("result") or {}).get("payloads")) or []
+        # OpenClaw may print a gateway fallback banner before the JSON envelope.
+        # Parse the first plausible envelope instead of treating the banner as
+        # the model answer.
+        start = raw.find('{\n  "payloads"')
+        if start < 0:
+            start = raw.find('{"payloads"')
+        if start >= 0:
+            try:
+                envelope = json.loads(raw[start:])
+            except json.JSONDecodeError:
+                return raw, 0
+        else:
+            return raw, 0
+    result = envelope.get("result") if isinstance(envelope.get("result"), dict) else envelope
+    payloads = result.get("payloads") or []
     text = "\n".join(str(p.get("text") or "").strip() for p in payloads if p.get("text")).strip()
-    usage = (((envelope.get("result") or {}).get("meta") or {}).get("agentMeta") or {}).get("usage") or {}
+    usage = (((result.get("meta") or {}).get("agentMeta") or {}).get("usage")) or {}
     tokens = int(usage.get("total") or usage.get("input") or 0)
     return text, tokens
 
 
-def _single_openclaw(prompt: str, model: str, timeout: int) -> CliResult:
+def _single_openclaw(prompt: str, model: str, timeout: int, *, session_id: str | None = None) -> CliResult:
     """Emergency fallback through OpenClaw's authenticated agent path.
 
     This is intentionally last in the chain because OpenClaw carries large
@@ -820,12 +1037,24 @@ def _single_openclaw(prompt: str, model: str, timeout: int) -> CliResult:
         "--timeout",
         str(openclaw_timeout),
     ]
+    if session_id:
+        cmd.extend(["--session-id", session_id])
     try:
-        proc, lock_wait_ms = _run_cli_process(cmd, timeout=max(openclaw_timeout + 10, 20))
+        # Foreground agent tasks must not lose to background learning jobs that
+        # briefly hold the shared CLI slot. OpenClaw has its own timeout
+        # budget; allow a longer lock wait so queued Liz/Ellie/Sage work waits
+        # for the slot instead of becoming a false task failure/defer.
+        openclaw_lock_wait_s = max(DEFAULT_LOCK_WAIT_S, min(float(timeout), 180.0))
+        proc, lock_wait_ms = _run_cli_process(
+            cmd,
+            timeout=max(openclaw_timeout + 10, 20),
+            lock_wait_s=openclaw_lock_wait_s,
+            use_slot=False,
+        )
     except subprocess.TimeoutExpired as exc:
         dur = int((time.time() - t0) * 1000)
         _record_usage("openclaw", model, 0, dur, False)
-        err = (exc.stderr or "timeout")[:500] if isinstance(exc.stderr, str) else "timeout"
+        err = _timeout_error(exc, max(openclaw_timeout + 10, 20))[:500]
         return CliResult(
             ok=False,
             error=err,
@@ -848,10 +1077,20 @@ def _single_openclaw(prompt: str, model: str, timeout: int) -> CliResult:
             lock_wait_ms=lock_wait_ms,
         )
     text, tokens = _parse_openclaw_payload(proc.stdout)
+    if text:
+        # OpenClaw can print a gateway-fallback warning while still returning a
+        # valid embedded-agent answer. A successful answer must not poison the
+        # backend cooldown state as a rate limit.
+        rate_limited = False
     _record_usage("openclaw", model, tokens, dur, bool(text), rate_limited)
     return CliResult(
         ok=bool(text),
         text=text,
+        error=(
+            ""
+            if text
+            else _empty_response_error("openclaw", proc.stderr, proc.stdout, rate_limited=rate_limited)
+        ),
         tokens=tokens,
         duration_ms=dur,
         backend="openclaw",
@@ -861,13 +1100,20 @@ def _single_openclaw(prompt: str, model: str, timeout: int) -> CliResult:
     )
 
 
-def _try_backend(backend: str, model: str, prompt: str, timeout: int) -> CliResult:
+def _try_backend(
+    backend: str,
+    model: str,
+    prompt: str,
+    timeout: int,
+    *,
+    openclaw_session_id: str | None = None,
+) -> CliResult:
     if backend == "codex":
         return _single_codex(prompt, model, timeout)
     if backend == "claude":
         return _single_claude(prompt, model, timeout)
     if backend == "openclaw":
-        return _single_openclaw(prompt, model, timeout)
+        return _single_openclaw(prompt, model, timeout, session_id=openclaw_session_id)
     return CliResult(ok=False, error=f"unknown backend {backend}", backend=backend, model=model)
 
 
@@ -877,6 +1123,7 @@ def cli_dispatch(
     timeout: int = 30,
     backend: str | None = None,
     openclaw_agent: str | None = None,
+    openclaw_session_id: str | None = None,
     backlog_kind: str | None = None,
     backlog_payload: dict | None = None,
     max_backends: int | None = None,
@@ -985,7 +1232,16 @@ def cli_dispatch(
             )
         else:
             real_attempts += 1
-            r = _try_backend(backend, model, prompt, timeout)
+            if openclaw_session_id:
+                r = _try_backend(
+                    backend,
+                    model,
+                    prompt,
+                    timeout,
+                    openclaw_session_id=openclaw_session_id,
+                )
+            else:
+                r = _try_backend(backend, model, prompt, timeout)
             _record_backend_outcome(r)
             last_real_result = r
         tried.append((backend, model))
@@ -1019,7 +1275,13 @@ def cli_dispatch(
             last_err = (
                 (last_real_result or result).error if (last_real_result or result) else "all backends failed"
             )[:200]
-            _record_breaker(BREAKER_KIND, ok=False, error=last_err)
+            if _is_transient_throttle_error(last_err):
+                log.info(
+                    "cli_dispatch transient/provider throttle (%s); not tripping global LLM breaker",
+                    last_err[:100],
+                )
+            else:
+                _record_breaker(BREAKER_KIND, ok=False, error=last_err)
         except Exception as exc:
             log.warning("breaker record_result(ok=False) failed: %s", exc)
     elif cooldown_skips:
@@ -1105,11 +1367,13 @@ def dispatch_compat(
     agent: str,
     message: str,
     *,
+    backend: str | None = None,
     thinking: str = "low",
     timeout: int = 30,
     backlog_kind: str | None = None,
     backlog_payload: dict | None = None,
     max_backends: int | None = None,
+    openclaw_session_id: str | None = None,
     **_: Any,
 ) -> CliResult:
     """Drop-in replacement for openclaw_dispatch.dispatch. Ignores `agent`
@@ -1117,19 +1381,16 @@ def dispatch_compat(
     CliResult which exposes the same .ok/.text/.error/.duration_ms/
     .provider/.model fields as DispatchResult.
 
-    Migration pattern:
-        from openclaw_dispatch import dispatch
-        result = dispatch(agent="jenna", message=prompt, thinking="low", timeout=60)
-    becomes:
-        from cli_llm import dispatch_compat as dispatch
-        result = dispatch(agent="jenna", message=prompt, thinking="low", timeout=60)
-
-    (Or more cleanly: `from cli_llm import cli_dispatch`; drop the agent/thinking args.)
+    Migration pattern: legacy callers that used the OpenClaw dispatch wrapper
+    should import this shim as ``dispatch`` instead, or more cleanly use
+    ``cli_dispatch`` and drop the persona-only arguments.
     """
     return cli_dispatch(
         message,
         timeout=timeout,
+        backend=backend,
         openclaw_agent=agent,
+        openclaw_session_id=openclaw_session_id,
         backlog_kind=backlog_kind,
         backlog_payload=backlog_payload,
         max_backends=max_backends,
@@ -1137,9 +1398,9 @@ def dispatch_compat(
 
 
 # ── Drop-in aliases for minimal-churn migration ────────────
-# Call-sites using `from openclaw_dispatch import dispatch` can swap to
-# `from cli_llm import dispatch` with zero other changes. `agent=` and
-# `thinking=` are accepted but ignored (CLI doesn't need persona).
+# Legacy OpenClaw-wrapper call sites can swap to this module with zero other
+# changes. `agent=` and `thinking=` are accepted but ignored (CLI does not
+# need persona).
 dispatch = dispatch_compat
 DispatchResult = CliResult  # for call-sites that import the type
 

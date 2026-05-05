@@ -20,6 +20,39 @@ def test_run_cli_process_returns_completed_process(monkeypatch, tmp_path):
     assert lock_wait_ms >= 0
 
 
+def test_run_cli_process_can_write_stdin(monkeypatch, tmp_path):
+    monkeypatch.setattr(cli_llm, "CLI_LLM_LOCK", tmp_path / "cli_llm.lock")
+
+    proc, _lock_wait_ms = cli_llm._run_cli_process(
+        [sys.executable, "-c", "import sys; print(sys.stdin.read())"],
+        timeout=5,
+        input_text="hello stdin",
+    )
+
+    assert proc.returncode == 0
+    assert proc.stdout.strip() == "hello stdin"
+
+
+def test_single_codex_sends_prompt_via_stdin(monkeypatch):
+    captured: dict = {}
+
+    def fake_run(cmd, timeout, **kwargs):
+        captured["cmd"] = cmd
+        captured["input_text"] = kwargs.get("input_text")
+        return subprocess.CompletedProcess(cmd, 0, "OK\n", "tokens used: 12"), 0
+
+    monkeypatch.setattr(cli_llm, "_run_cli_process", fake_run)
+    monkeypatch.setattr(cli_llm, "_record_usage", lambda *a, **k: None)
+
+    r = cli_llm._single_codex("do the task", "gpt-test", timeout=5)
+
+    assert r.ok is True
+    assert r.text == "OK"
+    assert captured["cmd"][-1] == "-"
+    assert "do the task" not in captured["cmd"]
+    assert captured["input_text"] == "do the task"
+
+
 def test_run_cli_process_kills_process_group_on_timeout(monkeypatch, tmp_path):
     killed: list[tuple[int, int]] = []
     monkeypatch.setattr(cli_llm, "CLI_LLM_LOCK", tmp_path / "cli_llm.lock")
@@ -307,6 +340,107 @@ def test_cli_dispatch_cooldown_only_does_not_trip_global_breaker(monkeypatch):
     cli_llm._BACKEND_COOLDOWN_UNTIL.clear()
 
 
+def test_cli_dispatch_slot_capacity_does_not_trip_global_breaker(monkeypatch):
+    monkeypatch.setattr(cli_llm, "_peek_breaker", lambda kind: _fake_open_snapshot("closed", 0.0))
+    cli_llm._BACKEND_COOLDOWN_UNTIL.clear()
+    recorded: list[dict] = []
+    monkeypatch.setattr(cli_llm, "_record_breaker", lambda kind, **kw: recorded.append({"kind": kind, **kw}))
+    monkeypatch.setattr(
+        cli_llm,
+        "FALLBACK_CHAIN",
+        [("codex", "gpt-test", "Codex test")],
+    )
+    monkeypatch.setattr(
+        cli_llm,
+        "_try_backend",
+        lambda *args, **kwargs: cli_llm.CliResult(
+            ok=False,
+            error="all 2 CLI slots busy after 30.0s",
+            backend="codex",
+            model="gpt-test",
+        ),
+    )
+
+    r = cli_llm.cli_dispatch("hi", timeout=5)
+
+    assert r.ok is False
+    assert "slots busy" in r.error
+    assert recorded == []
+    cli_llm._BACKEND_COOLDOWN_UNTIL.clear()
+
+
+def test_cli_dispatch_timeout_does_not_trip_global_breaker(monkeypatch):
+    monkeypatch.setattr(cli_llm, "_peek_breaker", lambda kind: _fake_open_snapshot("closed", 0.0))
+    cli_llm._BACKEND_COOLDOWN_UNTIL.clear()
+    recorded: list[dict] = []
+    monkeypatch.setattr(cli_llm, "_record_breaker", lambda kind, **kw: recorded.append({"kind": kind, **kw}))
+    monkeypatch.setattr(
+        cli_llm,
+        "FALLBACK_CHAIN",
+        [("codex", "gpt-test", "Codex test")],
+    )
+    monkeypatch.setattr(
+        cli_llm,
+        "_try_backend",
+        lambda *args, **kwargs: cli_llm.CliResult(
+            ok=False,
+            error="timeout after 30s: OpenAI Codex startup banner",
+            backend="codex",
+            model="gpt-test",
+        ),
+    )
+
+    r = cli_llm.cli_dispatch("hi", timeout=5)
+
+    assert r.ok is False
+    assert "timeout after" in r.error
+    assert recorded == []
+    cli_llm._BACKEND_COOLDOWN_UNTIL.clear()
+
+
+def test_single_codex_timeout_error_names_timeout_before_banner(monkeypatch):
+    def fake_run(cmd, timeout, **kwargs):
+        raise subprocess.TimeoutExpired(
+            cmd,
+            timeout,
+            output="",
+            stderr="OpenAI Codex v0.128.0 (research preview)\nmodel: gpt-test",
+        )
+
+    monkeypatch.setattr(cli_llm, "_run_cli_process", fake_run)
+    monkeypatch.setattr(cli_llm, "_record_usage", lambda *a, **k: None)
+
+    r = cli_llm._single_codex("do the task", "gpt-test", timeout=5)
+
+    assert r.ok is False
+    assert r.error.startswith("timeout after 5s:")
+    assert "OpenAI Codex" in r.error
+
+
+def test_dispatch_compat_can_prefer_openclaw_backend(monkeypatch):
+    captured: dict = {}
+
+    def fake_cli_dispatch(message, **kwargs):
+        captured["message"] = message
+        captured.update(kwargs)
+        return cli_llm.CliResult(ok=True, text="OK", backend="openclaw", model="ellie")
+
+    monkeypatch.setattr(cli_llm, "cli_dispatch", fake_cli_dispatch)
+
+    r = cli_llm.dispatch_compat(
+        agent="ellie",
+        message="task",
+        backend="openclaw",
+        max_backends=1,
+        timeout=120,
+    )
+
+    assert r.ok is True
+    assert captured["backend"] == "openclaw"
+    assert captured["openclaw_agent"] == "ellie"
+    assert captured["max_backends"] == 1
+
+
 def test_cli_dispatch_respects_max_backends(monkeypatch):
     monkeypatch.setattr(cli_llm, "_peek_breaker", lambda kind: _fake_open_snapshot("closed", 0.0))
     cli_llm._BACKEND_COOLDOWN_UNTIL.clear()
@@ -332,6 +466,8 @@ def test_openclaw_fallback_uses_timeout_floor(monkeypatch):
     def fake_run(cmd, timeout, **kwargs):
         captured["cmd"] = cmd
         captured["timeout"] = timeout
+        captured["lock_wait_s"] = kwargs.get("lock_wait_s")
+        captured["use_slot"] = kwargs.get("use_slot")
         return (
             subprocess.CompletedProcess(
                 cmd,
@@ -353,6 +489,72 @@ def test_openclaw_fallback_uses_timeout_floor(monkeypatch):
     timeout_arg = captured["cmd"][captured["cmd"].index("--timeout") + 1]
     assert int(timeout_arg) >= cli_llm.OPENCLAW_TIMEOUT_FLOOR_S
     assert captured["timeout"] >= cli_llm.OPENCLAW_TIMEOUT_FLOOR_S + 10
+    assert captured["lock_wait_s"] >= cli_llm.DEFAULT_LOCK_WAIT_S
+    assert captured["use_slot"] is False
+
+
+def test_openclaw_fallback_parses_top_level_payload(monkeypatch):
+    def fake_run(cmd, timeout, **kwargs):
+        return (
+            subprocess.CompletedProcess(
+                cmd,
+                0,
+                json.dumps({"payloads": [{"text": "OK"}], "meta": {"agentMeta": {"usage": {"total": 7}}}}),
+                "EMBEDDED FALLBACK: Gateway agent failed",
+            ),
+            0,
+        )
+
+    monkeypatch.setattr(cli_llm, "_run_cli_process", fake_run)
+    monkeypatch.setattr(cli_llm, "_record_usage", lambda *a, **k: None)
+
+    r = cli_llm._single_openclaw("hi", "jenna", timeout=5)
+
+    assert r.ok is True
+    assert r.text == "OK"
+    assert r.tokens == 7
+    assert r.rate_limited is False
+
+
+def test_openclaw_fallback_passes_session_id(monkeypatch):
+    captured: dict = {}
+
+    def fake_run(cmd, timeout, **kwargs):
+        captured["cmd"] = cmd
+        return (
+            subprocess.CompletedProcess(cmd, 0, json.dumps({"payloads": [{"text": "OK"}], "meta": {}}), ""),
+            0,
+        )
+
+    monkeypatch.setattr(cli_llm, "_run_cli_process", fake_run)
+    monkeypatch.setattr(cli_llm, "_record_usage", lambda *a, **k: None)
+
+    r = cli_llm._single_openclaw("hi", "jenna", timeout=5, session_id="ragas-test")
+
+    assert r.ok is True
+    assert captured["cmd"][captured["cmd"].index("--session-id") + 1] == "ragas-test"
+
+
+def test_single_openclaw_empty_rate_limited_response_carries_error(monkeypatch):
+    def fake_run(cmd, timeout, **kwargs):
+        return (
+            subprocess.CompletedProcess(
+                cmd,
+                0,
+                json.dumps({"result": {"payloads": [], "meta": {}}}),
+                "rate limit reached",
+            ),
+            0,
+        )
+
+    monkeypatch.setattr(cli_llm, "_run_cli_process", fake_run)
+    monkeypatch.setattr(cli_llm, "_record_usage", lambda *a, **k: None)
+
+    r = cli_llm._single_openclaw("hi", "sage", timeout=5)
+
+    assert r.ok is False
+    assert r.rate_limited is True
+    assert "rate limit" in r.error.lower()
 
 
 def test_single_claude_uses_account_token_env(monkeypatch):
@@ -434,3 +636,47 @@ def test_run_cli_process_closes_stdin(monkeypatch, tmp_path):
 
     assert proc.returncode == 0
     assert seen["stdin"] is subprocess.DEVNULL
+
+
+def test_failure_taxonomy_snapshot_covers_all_provider_classes_without_cli_calls(monkeypatch):
+    spawned = []
+    monkeypatch.setattr(cli_llm, "_run_cli_process", lambda *args, **kwargs: spawned.append(args))
+
+    snapshot = cli_llm.failure_taxonomy_snapshot()
+
+    assert snapshot["version"] == "cli-failure-taxonomy-v1"
+    assert snapshot["dashboard_surface"] == "/brain/usage.llm.failure_taxonomy"
+    assert set(snapshot["provider_classes"]) == {"codex", "claude", "openclaw"}
+    assert [row["reason"] for row in snapshot["classes"]] == list(cli_llm.FAILOVER_REASONS)
+    assert {row["reason"] for row in snapshot["classes"]} >= {
+        "auth",
+        "billing",
+        "model_not_found",
+        "context_overflow",
+        "rate_limit",
+        "overloaded",
+        "unknown",
+    }
+    assert (
+        next(row for row in snapshot["classes"] if row["reason"] == "context_overflow")["should_compress"]
+        is True
+    )
+    assert (
+        next(row for row in snapshot["classes"] if row["reason"] == "auth")["should_rotate_credential"]
+        is True
+    )
+    assert next(row for row in snapshot["classes"] if row["reason"] == "rate_limit")["backend_cooldown_s"] > 0
+    assert spawned == []
+
+
+def test_usage_stats_exposes_failure_taxonomy(monkeypatch, tmp_path):
+    usage_db = tmp_path / "llm_usage.db"
+    monkeypatch.setattr(cli_llm, "LLM_USAGE_DB", usage_db)
+
+    cli_llm._record_usage("codex", "gpt-5.5", tokens=3, duration_ms=4, ok=True)
+
+    stats = cli_llm.get_usage_stats(days=1)
+
+    assert stats["source"] == "cli_llm"
+    assert stats["failure_taxonomy"]["version"] == "cli-failure-taxonomy-v1"
+    assert stats["failure_taxonomy"]["provider_classes"] == ["codex", "claude", "openclaw"]

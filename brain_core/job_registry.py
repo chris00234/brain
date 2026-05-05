@@ -14,7 +14,6 @@ from pathlib import Path
 
 import boot_context
 from metrics_buffer import metrics_buffer as _metrics_buf
-from openclaw_dispatch import dispatch as _openclaw_dispatch
 from scheduler import brain_scheduler
 
 from config import BRAIN_DIR, PYTHON
@@ -41,9 +40,24 @@ JOB_REGISTRY: dict[str, list[str]] = {
     ],
     "qdrant_write_audit": [_py, f"{_bd}/cli/audit_qdrant_writes.py"],
     "entry_contract_audit": [_py, f"{_bd}/cli/entry_contract_audit.py", "--json"],
+    "privacy_negative_audit": [_py, f"{_bd}/cli/privacy_negative_audit.py"],
     "config_secret_audit": [_py, f"{_bd}/cli/config_secret_audit.py"],
     "release_readiness": [_py, f"{_bd}/cli/release_readiness.py"],
+    "ui_parity_audit": [_py, f"{_bd}/cli/ui_parity_audit.py"],
     "retrieval_regression": [_py, f"{_bd}/cli/retrieval_regression.py", "--limit", "20", "--json"],
+    "crag_regression": [_py, f"{_bd}/cli/crag_regression.py", "--limit", "40", "--json"],
+    "crag_correction_regression": [_py, f"{_bd}/cli/crag_correction_regression.py", "--json"],
+    "crag_llm_correction_sample": [
+        _py,
+        f"{_bd}/cli/crag_correction_regression.py",
+        "--json",
+        "--rewrite-source",
+        "llm",
+        "--limit",
+        "7",
+        "--llm-timeout-s",
+        "8",
+    ],
     # Self-eval: nightly sample of recent /recall calls; measures top-3
     # overlap drift when re-run. Surfaces via self_eval_drift_7d SLO.
     "self_eval": [_py, f"{_bd}/brain_core/self_eval.py"],
@@ -171,6 +185,46 @@ JOB_REGISTRY: dict[str, list[str]] = {
         "loose",
         "--threshold",
         "10",
+    ],
+    "ragas_eval_gate": [
+        _py,
+        f"{_bd}/cli/eval_compare.py",
+        "--json",
+        "--ragas",
+        "--ragas-answer-source",
+        "generated",
+        "--limit",
+        "20",
+        "--eval-set",
+        f"{_bd}/cli/eval_set_ragas_answers.json",
+        "--persist-track",
+        "ragas",
+        "--content-metric",
+        "loose",
+    ],
+    "adversarial_memory_eval": [
+        _py,
+        f"{_bd}/cli/eval_compare.py",
+        "--json",
+        "--include-per-test",
+        "--eval-set",
+        f"{_bd}/cli/eval_set_adversarial.json",
+        "--persist-track",
+        "adversarial",
+        "--content-metric",
+        "loose",
+    ],
+    "holdout_rotation_eval": [
+        _py,
+        f"{_bd}/cli/eval_compare.py",
+        "--json",
+        "--include-per-test",
+        "--eval-set",
+        f"{_bd}/cli/eval_set_holdout_rotation.json",
+        "--persist-track",
+        "holdout",
+        "--content-metric",
+        "loose",
     ],
     "eval_run_full": [_py, f"{_bd}/cli/eval_gate.py", "--track", "full", "--no-heal", "--threshold", "10"],
     # Phase 4: SM-2 nightly review scheduler — seeds null next_review_at + obsoletes stale atoms
@@ -469,6 +523,7 @@ JOB_REGISTRY: dict[str, list[str]] = {
         f"{_bd}/cli/audit_openclaw_telegram_targets.py",
         "--json",
     ],
+    "openclaw_gateway_start": ["/bin/bash", f"{_bd}/cli/ensure_openclaw_gateway.sh"],
     # reembed_migrator is manual-only (requires positional <collection> arg).
     # Invoke directly: python brain_core/pipeline/reembed_migrator.py <collection_name>
     "proactive_insights": [_py, f"{_bd}/brain_core/pipeline/proactive_linker.py"],
@@ -627,14 +682,26 @@ def _wait_for_job(job_name: str, proc: subprocess.Popen, stderr_path: Path) -> N
 
     if exit_code != 0 and job_name in _CRITICAL_JOBS:
         with contextlib.suppress(Exception):
-            _openclaw_dispatch(
-                agent="jenna",
+            from cli_llm import dispatch as _cli_dispatch
+
+            _cli_dispatch(
+                agent="sage",
                 message=(
-                    f"[BRAIN ALERT] Job '{job_name}' failed with exit code "
-                    f"{exit_code}. Error: {(error_msg or '')[:200]}"
+                    "[BRAIN JOB ACTION] Critical scheduler job failed. "
+                    "Investigate or queue safe remediation; do not ask Chris unless a true "
+                    "credential/irreversible blocker remains. "
+                    f"Job='{job_name}' exit_code={exit_code}. Error: {(error_msg or '')[:200]}"
                 ),
                 thinking="off",
                 timeout=30,
+                openclaw_agent="sage",
+                backlog_kind="proactive",
+                backlog_payload={
+                    "source": "job_registry",
+                    "job_name": job_name,
+                    "exit_code": exit_code,
+                    "error": error_msg or "",
+                },
             )
 
     pending = brain_scheduler._pending_completions.pop(job_name, None)

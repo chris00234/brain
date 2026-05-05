@@ -42,11 +42,21 @@ def test_materialize_writes_claude_codex_and_openclaw(tmp_path):
     assert (codex / slug / "SKILL.md").exists()
     assert (openclaw / slug / "SKILL.md").exists()
     assert (openclaw / slug / "_meta.json").exists()
+    skill_text = (codex / slug / "SKILL.md").read_text()
+    assert "promotion_contract_version: skill-promotion-contract-v1" in skill_text
+    assert "## Promotion contract" in skill_text
+    assert "Rollback" in skill_text
     assert any(".codex" in path for path in result["paths"])
     assert result["openclaw_sync"]["ok"] is True
+    assert result["promotion_contract_version"] == skill_materializer.PROMOTION_CONTRACT_VERSION
     usage = json.loads((codex / skill_materializer.USAGE_FILE).read_text())
     assert usage[slug]["brain_procedure_id"] == "proc_codex_skill"
     assert usage[slug]["state"] == "active"
+    assert usage[slug]["promotion_contract_version"] == skill_materializer.PROMOTION_CONTRACT_VERSION
+    assert (
+        usage[slug]["rollback_strategy"]
+        == "archive_or_delete_auto_skill_dir_then_regenerate_from_brain_procedure"
+    )
 
 
 def test_list_auto_skill_dirs_includes_codex(tmp_path):

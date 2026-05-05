@@ -24,6 +24,20 @@ from urllib.parse import urlparse
 ENTRY_SCHEMA_VERSION = "brain-entry-v2"
 CHUNK_POLICY_VERSION = "source-aware-v2"
 TAG_POLICY_VERSION = "normalized-tags-v1"
+PRIVACY_REDACTION_VERSION = "secret-patterns-v1"
+
+SENSITIVE_TEXT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("private_key", re.compile(r"-----BEGIN (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----")),
+    ("aws_access_key", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
+    ("github_token", re.compile(r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{20,}\b")),
+    ("slack_token", re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{20,}\b")),
+    ("openai_key", re.compile(r"\bsk-[A-Za-z0-9_-]{24,}\b")),
+    ("ssn", re.compile(r"\b\d{3}-\d{2}-\d{4}\b")),
+    (
+        "explicit_password",
+        re.compile(r"(?i)\b(?:password|passwd|pwd|secret|api[_ -]?key|token)\s*[:=]\s*[^\s]{8,}"),
+    ),
+)
 
 _TAG_RE = re.compile(r"[^a-z0-9_:-]+")
 
@@ -108,6 +122,24 @@ def _source_kind(source: str) -> str:
 
 def content_hash(text: str) -> str:
     return hashlib.sha256((text or "").encode("utf-8", errors="ignore")).hexdigest()
+
+
+def sensitive_text_findings(text: str) -> list[str]:
+    """Return secret-like pattern ids without exposing the matched text."""
+
+    return [code for code, pattern in SENSITIVE_TEXT_PATTERNS if pattern.search(text or "")]
+
+
+def redact_sensitive_text(text: str) -> tuple[str, list[str]]:
+    """Redact secret-like patterns before storing retrievable text."""
+
+    redacted = text or ""
+    findings: list[str] = []
+    for code, pattern in SENSITIVE_TEXT_PATTERNS:
+        redacted, count = pattern.subn(f"[REDACTED:{code}]", redacted)
+        if count:
+            findings.append(code)
+    return redacted, findings
 
 
 def normalized_source_type(doc: Mapping[str, Any], *, collection: str | None = None) -> str:
@@ -294,6 +326,11 @@ def enrich_payload_for_entry(
     enriched = merge_policy_metadata(base, policy)
     if point_id and not enriched.get("vector_point_id"):
         enriched["vector_point_id"] = point_id
+    redaction_findings = sensitive_text_findings(content or "")
+    if redaction_findings:
+        enriched["privacy_redaction_version"] = PRIVACY_REDACTION_VERSION
+        enriched["privacy_redaction_count"] = len(redaction_findings)
+        enriched["privacy_redaction_codes"] = redaction_findings
     # Ensure canonical aliases are present even when callers supplied one of
     # the version keys but not the others.
     enriched.setdefault("schema_version", ENTRY_SCHEMA_VERSION)

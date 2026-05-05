@@ -1,8 +1,8 @@
 """brain_core/ragas_judge.py — LLM-as-judge RAG eval (M8.3).
 
 Implements the four core RAGAS metrics (https://docs.ragas.io) using the
-existing openclaw_dispatch path so we don't pay extra LLM cost — every call
-goes through Chris's existing OpenAI subscription via Sage.
+CLI-first LLM dispatcher. Calls try Codex gpt-5.5 first, then configured CLI
+fallbacks, with OpenClaw reserved as the emergency fallback.
 
 Metrics:
   - faithfulness        Are the claims in the answer actually supported by
@@ -19,10 +19,10 @@ These four together tell you not just "did we retrieve the right doc?"
 AND give it to the LLM correctly AND let the LLM answer correctly?" —
 which is the actual contract for any RAG system.
 
-Cost: 1-4 LLM dispatches per (query, answer) pair through sage via
-openclaw_dispatch. Model is whatever sage is configured with in
-~/.openclaw/openclaw.json (gpt-5.5 primary with gpt-5.3-codex-spark /
-claude-opus-4-7 fallback chain as of 2026-04-27).
+Cost: 1-4 LLM dispatches per (query, answer) pair through cli_llm's
+subscription-backed fallback chain: Codex gpt-5.5 primary,
+gpt-5.3-codex-spark quota fallback, configured Claude CLI accounts, then
+OpenClaw only if every CLI route fails.
 
 Default OFF — only fires when called explicitly from cli/eval_compare.py
 with --ragas. Not on the hot path.
@@ -62,7 +62,9 @@ class RagasScore:
 
 # ── Prompts (kept short — Sage handles structured output reliably) ──
 
-_FAITHFULNESS_PROMPT = """You are a RAG faithfulness judge. Given a question, an answer, and the retrieved context, decide what fraction of the answer's claims are directly supported by the context.
+_FAITHFULNESS_PROMPT = """You are a RAG faithfulness judge.
+Given a question, an answer, and the retrieved context, decide what fraction
+of the answer's claims are directly supported by the context.
 
 Question: {question}
 Context:
@@ -74,17 +76,22 @@ Output ONLY a JSON object: {{"score": <float 0.0-1.0>, "reason": "<one sentence>
 - 0.5 = roughly half the claims are supported
 - 0.0 = the answer is hallucinated or contradicts the context"""
 
-_ANSWER_RELEVANCE_PROMPT = """You are a RAG relevance judge. Decide whether the answer actually addresses the question (regardless of whether it's correct).
+_ANSWER_RELEVANCE_PROMPT = """You are a RAG relevance judge.
+Decide whether the answer actually addresses the question, regardless of
+whether it is correct.
 
 Question: {question}
+Expected answer/rubric: {expected}
 Answer: {answer}
 
 Output ONLY a JSON object: {{"score": <float 0.0-1.0>, "reason": "<one sentence>"}}
-- 1.0 = directly answers the question
-- 0.5 = partially addresses the question
-- 0.0 = ignores the question or answers a different one"""
+- 1.0 = directly answers the question and satisfies the expected rubric when provided
+- 0.5 = partially addresses the question or misses important rubric requirements
+- 0.0 = ignores the question, answers a different one, or contradicts the rubric"""
 
-_CONTEXT_PRECISION_PROMPT = """You are a RAG context precision judge. For each numbered context chunk, decide whether it was useful for answering the question.
+_CONTEXT_PRECISION_PROMPT = """You are a RAG context precision judge.
+For each numbered context chunk, decide whether it was useful for answering
+the question.
 
 Question: {question}
 Expected answer (ground truth): {expected}
@@ -92,9 +99,12 @@ Expected answer (ground truth): {expected}
 Context chunks:
 {numbered_context}
 
-Output ONLY a JSON object: {{"useful_indices": [<list of 1-indexed chunk numbers that were useful>], "reason": "<one sentence>"}}"""
+Output ONLY JSON:
+{{"useful_indices": [<1-indexed useful chunks>], "reason": "<one sentence>"}}"""
 
-_CONTEXT_RECALL_PROMPT = """You are a RAG context recall judge. Decide what fraction of the expected answer's claims could be derived from the retrieved context.
+_CONTEXT_RECALL_PROMPT = """You are a RAG context recall judge.
+Decide what fraction of the expected answer's claims could be derived from
+the retrieved context.
 
 Question: {question}
 Expected answer: {expected}
@@ -108,11 +118,19 @@ Output ONLY a JSON object: {{"score": <float 0.0-1.0>, "reason": "<one sentence>
 
 
 def _dispatch_judge(prompt: str, *, timeout: int = 30) -> str | None:
-    """Send a judge prompt to Sage via openclaw_dispatch. Returns text or None."""
+    """Send a judge prompt through the CLI-first fallback chain."""
     try:
         from cli_llm import dispatch
 
-        result = dispatch("sage", prompt, thinking="off", timeout=timeout)
+        result = dispatch(
+            "sage",
+            prompt,
+            thinking="off",
+            timeout=timeout,
+            openclaw_agent="sage",
+            backlog_kind="synthesis",
+            backlog_payload={"source": "ragas_judge", "prompt": prompt},
+        )
         if result.ok and result.text:
             return result.text.strip()
     except Exception as exc:
@@ -204,7 +222,11 @@ def score_one(
 
     if "answer_relevance" in metrics:
         raw = _dispatch_judge(
-            _ANSWER_RELEVANCE_PROMPT.format(question=question[:500], answer=answer[:1000]),
+            _ANSWER_RELEVANCE_PROMPT.format(
+                question=question[:500],
+                expected=(expected or "not provided")[:500],
+                answer=answer[:1000],
+            ),
             timeout=timeout,
         )
         s, reason = _parse_score(raw)
@@ -262,6 +284,6 @@ def aggregate(scores: list[RagasScore]) -> dict:
 def stats() -> dict:
     return {
         "metrics": ["faithfulness", "answer_relevance", "context_precision", "context_recall"],
-        "judge_model": "sage (openclaw_dispatch, configured fallback chain)",
+        "judge_model": "cli_llm fallback chain (codex/gpt-5.5 primary)",
         "default_timeout_s": 30,
     }

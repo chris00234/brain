@@ -124,7 +124,7 @@ Backup verification is automated: `cli/backup_verify.py` runs monthly (1st of mo
 
 - **Self-monitoring**: `/brain/health` returns `{status: "healthy"|"degraded"|"down", services: {qdrant, ollama, neo4j}, alerts: [...]}`. SLOs check every 5 min.
 - **External**: Add `https://brain.chrischodev.com/healthz` to Uptime Kuma. The `/healthz` route is unauth and returns `{status: "ok"}` if the FastAPI server is up; it doesn't probe storage backends — use `/brain/health` for full status.
-- **Telegram alerts**: SLO breaches dispatch via openclaw_dispatch → jenna-bot. Rate-limited per SLO+severity (1 alert per hour per breach class).
+- **Telegram alerts**: SLO breaches use `brain_core/telegram_alert.py` direct Telegram Bot API delivery with backlog replay. Deterministic remediation runs first for safe mechanical fixes; OpenClaw is not required for Chris-facing alert delivery.
 
 ## Upgrade path
 

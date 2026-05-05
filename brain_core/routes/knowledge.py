@@ -141,7 +141,10 @@ def brain_ingest(request: Request, req: BrainIngestRequest) -> dict:
         except ImportError:
             pass
 
-        from brain_core.openclaw_dispatch import dispatch
+        try:
+            from brain_core.cli_llm import dispatch
+        except Exception:
+            from cli_llm import dispatch  # type: ignore
 
         prompt = (
             f"Extract key facts, decisions, and insights from this content. "
@@ -154,7 +157,15 @@ def brain_ingest(request: Request, req: BrainIngestRequest) -> dict:
             f'{{"title": "...", "summary": "...", "key_facts": ["..."], '
             f'"domain": "decisions|infra|projects|chris"}}'
         )
-        result = dispatch(agent="sage", message=prompt, thinking="low", timeout=60)
+        result = dispatch(
+            agent="sage",
+            message=prompt,
+            thinking="low",
+            timeout=60,
+            openclaw_agent="sage",
+            backlog_kind="synthesis",
+            backlog_payload={"source": "routes.knowledge:brain_ingest", "source_name": source_name},
+        )
         if not result.ok:
             return {"status": "dispatch_failed", "error": result.error[:200]}
 

@@ -35,3 +35,16 @@ def test_metrics_marks_sample_floor_met_after_minimum_window_samples():
 
     assert snap["routes"]["/recall/v2"]["sample_floor_met"] is True
     assert snap["phase_latency"]["cross_encoder_ms"]["sample_floor_met"] is True
+
+
+def test_metrics_buffer_separates_eval_traffic_from_prod_route_latency():
+    mb = MetricsBuffer()
+    for _ in range(MIN_WINDOW_SAMPLES):
+        mb.record_request("/recall/v2", 120.0, status_code=200, traffic_class="prod")
+        mb.record_request("/recall/v2", 2400.0, status_code=200, traffic_class="eval")
+
+    snap = mb.snapshot()
+
+    assert snap["routes"]["/recall/v2"]["p95_ms"] == 120.0
+    assert snap["routes"]["/recall/v2#eval"]["p95_ms"] == 2400.0
+    assert snap["routes"]["/recall/v2"]["sample_floor_met"] is True

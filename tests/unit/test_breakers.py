@@ -204,6 +204,54 @@ def test_half_open_probing_blocks_new_callers(isolated_breakers):
     assert snap.is_probing is True
 
 
+def test_half_open_probing_failure_reopens_with_cooldown(isolated_breakers):
+    """A claimed probe that reports failure must not remain stuck as probing."""
+    import sqlite3
+
+    for _ in range(3):
+        isolated_breakers.record_result("probe_fail.kind", ok=False)
+    first = isolated_breakers.peek_breaker("probe_fail.kind")
+
+    conn = sqlite3.connect(str(isolated_breakers.AUTONOMY_DB))
+    conn.execute("UPDATE heal_breakers SET state='half_open' WHERE kind='probe_fail.kind'")
+    conn.commit()
+    conn.close()
+    isolated_breakers._snapshot_cache.clear()
+
+    assert isolated_breakers.try_claim_probe("probe_fail.kind") is True
+    isolated_breakers.record_result("probe_fail.kind", ok=False, error="still down")
+    snap = isolated_breakers.peek_breaker("probe_fail.kind")
+
+    assert snap.state == "open"
+    assert snap.trip_count == first.trip_count + 1
+    assert snap.reset_after_s > first.reset_after_s
+    assert snap.remaining_cooldown_s > 0
+
+
+def test_stale_half_open_probe_reopens(isolated_breakers):
+    """A crashed probe claimant should not leave the breaker blocked forever."""
+    import sqlite3
+    import time as _t
+
+    for _ in range(3):
+        isolated_breakers.record_result("stale_probe.kind", ok=False)
+    conn = sqlite3.connect(str(isolated_breakers.AUTONOMY_DB))
+    conn.execute(
+        "UPDATE heal_breakers SET state='half_open_probing', last_action_at=? "
+        "WHERE kind='stale_probe.kind'",
+        (_t.time() - isolated_breakers.PROBE_STALE_S - 1,),
+    )
+    conn.commit()
+    conn.close()
+    isolated_breakers._snapshot_cache.clear()
+
+    snap = isolated_breakers.peek_breaker("stale_probe.kind")
+
+    assert snap.state == "open"
+    assert snap.reason == "half_open_probe_stale"
+    assert snap.remaining_cooldown_s > 0
+
+
 def test_concurrent_record_result_failures_consistent(isolated_breakers):
     """Regression: BEGIN IMMEDIATE on record_result must serialize concurrent writers.
 

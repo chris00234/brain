@@ -1,0 +1,79 @@
+[
+  {
+    "id": "qdrant_substrate_rewrite",
+    "query": "qdrant current retrieval substrate",
+    "collection": "all",
+    "expected_source": "canonical/infra/rag-qdrant.md",
+    "expected_content": "Native Qdrant v1.17",
+    "correction_queries": [
+      "qdrant retrieval substrate canonical rag qdrant",
+      "canonical infra rag qdrant Native Qdrant v1.17"
+    ]
+  },
+  {
+    "id": "cloudflared_image_rewrite",
+    "query": "cloudflared container image",
+    "collection": "all",
+    "expected_source": "cloudflare",
+    "expected_content": "cloudflare",
+    "correction_queries": [
+      "cloudflare cloudflared image",
+      "cloudflare tunnel setup cloudflared"
+    ]
+  },
+  {
+    "id": "deployment_rule_rewrite",
+    "query": "deployment rule for new services",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "Uptime Kuma",
+    "correction_queries": [
+      "new services uptime kuma deployment rule",
+      "deployment healthcheck Uptime Kuma new service rule"
+    ]
+  },
+  {
+    "id": "immigration_korean_to_source_terms",
+    "query": "영주권 갱신",
+    "collection": "calendar",
+    "expected_source": "personal",
+    "expected_content": "USCIS",
+    "correction_queries": [
+      "USCIS I-751 receipt notice",
+      "I-751 receipt notice USCIS"
+    ]
+  },
+  {
+    "id": "dinner_korean_rewrite",
+    "query": "dinner appointment 저녁 약속",
+    "collection": "calendar",
+    "expected_source": "personal",
+    "expected_content": "저녁",
+    "correction_queries": [
+      "저녁 약속",
+      "Kim Minjun dinner plan 저녁"
+    ]
+  },
+  {
+    "id": "receipt_source_terms_rewrite",
+    "query": "renewal receipt",
+    "collection": "calendar",
+    "expected_source": "personal",
+    "expected_content": "USCIS",
+    "correction_queries": [
+      "receipt notice",
+      "USCIS I-751 receipt notice"
+    ]
+  },
+  {
+    "id": "calendar_dinner_source_terms_rewrite",
+    "query": "calendar dinner",
+    "collection": "calendar",
+    "expected_source": "personal",
+    "expected_content": "저녁",
+    "correction_queries": [
+      "Kim dinner",
+      "저녁 약속"
+    ]
+  }
+]

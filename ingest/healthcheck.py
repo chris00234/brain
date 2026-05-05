@@ -30,7 +30,6 @@ import logging
 import random
 import shutil
 import sqlite3
-import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -86,9 +85,6 @@ EXPECTED_JOB_CADENCE_HOURS = {
     "lint_memory": 192,
 }
 
-OPENCLAW_BIN = "/Users/chrischo/.local/bin/openclaw"
-TELEGRAM_CHAT_ID = "8484060831"
-TELEGRAM_ACCOUNT = "jenna-bot"
 MINIO_BUCKET = "rag-backups"
 BACKUP_STALENESS_HOURS = 36
 DISK_WARN_GB = 20
@@ -541,26 +537,15 @@ def check_job_staleness() -> list[str]:
 # ── Telegram ────────────────────────────────────────────
 def send_telegram(text: str) -> bool:
     try:
-        result = subprocess.run(
-            [
-                OPENCLAW_BIN,
-                "message",
-                "send",
-                "--channel",
-                "telegram",
-                "--target",
-                TELEGRAM_CHAT_ID,
-                "--account",
-                TELEGRAM_ACCOUNT,
-                "--message",
-                text,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=20,
+        from telegram_alert import send_chris_telegram
+
+        return send_chris_telegram(
+            text,
+            source="ingest.healthcheck",
+            severity="warn",
         )
-        return result.returncode == 0
-    except Exception:
+    except Exception as exc:
+        log.warning("telegram dispatch failed: %s", exc)
         return False
 
 

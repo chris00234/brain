@@ -118,6 +118,20 @@ PLAYBOOK: dict[str, RemediationRule] = {
         action="check TELEGRAM_JENNA_TOKEN/chat reachability",
         reason="Direct Telegram healthcheck failed; token/network/chat auth require external repair.",
     ),
+    "openclaw_gateway_health": RemediationRule(
+        slo="openclaw_gateway_health",
+        kind="trigger",
+        threshold=0,
+        action="openclaw_gateway_start",
+        reason="OpenClaw gateway is unreachable; start the local gateway so approved agent handoff tasks can actually execute.",
+    ),
+    "task_dispatch_stale_started_count": RemediationRule(
+        slo="task_dispatch_stale_started_count",
+        kind="manual",
+        threshold=0,
+        action="inspect /brain/task-dispatch-attempts and requeue or close stale dispatch evidence",
+        reason="A task dispatch attempt stayed in started too long; automatic closure would obscure execution truth.",
+    ),
 }
 
 

@@ -17,7 +17,7 @@ import sqlite3
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 log = logging.getLogger("brain.task_queue")
@@ -26,6 +26,105 @@ log = logging.getLogger("brain.task_queue")
 # Prevents unbounded thread spawning under burst load.
 _bg_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="tq_bg")
 
+
+
+def _record_failure_lesson_bg(
+    task_description: str,
+    failure_reason: str,
+    agent_id: str,
+    context: str = "",
+    *,
+    db_path: Path | str | None = None,
+    attempt_id: str = "",
+    task_id: str = "",
+) -> None:
+    """Background Reflexion lesson write for failed/deferred task execution."""
+    lesson_id = ""
+    status = "record_failed"
+    error = ""
+    try:
+        import failure_memory
+
+        lesson_id = failure_memory.record_failure_lesson(
+            task_description=task_description,
+            failure_reason=failure_reason,
+            agent_id=agent_id or "system",
+            context=context,
+        ) or ""
+        status = "recorded" if lesson_id else "record_failed"
+    except Exception as exc:
+        error = str(exc)[:200]
+        log.debug("failure lesson bg failed: %s", exc)
+    finally:
+        if db_path and attempt_id:
+            _merge_dispatch_attempt_metadata_db(
+                db_path,
+                attempt_id,
+                {
+                    "failure_lesson_status": status,
+                    "failure_lesson_id": lesson_id,
+                    "failure_lesson_completed_at": datetime.now(UTC).isoformat(timespec="seconds"),
+                    "failure_lesson_error": error,
+                },
+            )
+        if db_path and task_id:
+            _merge_task_metadata_db(
+                db_path,
+                task_id,
+                {
+                    "last_failure_lesson_status": status,
+                    "last_failure_lesson_id": lesson_id,
+                    "last_failure_lesson_completed_at": datetime.now(UTC).isoformat(timespec="seconds"),
+                },
+            )
+
+
+def _merge_json_metadata(raw: str | None, patch: dict) -> str:
+    try:
+        meta = json.loads(raw or "{}")
+    except (json.JSONDecodeError, TypeError):
+        meta = {}
+    if not isinstance(meta, dict):
+        meta = {}
+    meta.update(patch)
+    return json.dumps(meta)
+
+
+def _merge_dispatch_attempt_metadata_db(db_path: Path | str, attempt_id: str, patch: dict) -> None:
+    """Best-effort metadata patch for background dispatch-attempt updates."""
+    try:
+        with sqlite3.connect(str(db_path)) as conn:
+            row = conn.execute(
+                "SELECT metadata FROM task_dispatch_attempts WHERE id = ?",
+                (attempt_id,),
+            ).fetchone()
+            if row is None:
+                return
+            conn.execute(
+                "UPDATE task_dispatch_attempts SET metadata = ? WHERE id = ?",
+                (_merge_json_metadata(row[0], patch), attempt_id),
+            )
+    except Exception as exc:
+        log.debug("dispatch attempt metadata merge failed for %s: %s", attempt_id, exc)
+
+
+def _merge_task_metadata_db(db_path: Path | str, task_id: str, patch: dict) -> None:
+    """Best-effort metadata patch for background task updates."""
+    try:
+        with sqlite3.connect(str(db_path)) as conn:
+            row = conn.execute("SELECT metadata FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            if row is None:
+                return
+            conn.execute(
+                "UPDATE tasks SET metadata = ?, updated_at = ? WHERE id = ?",
+                (
+                    _merge_json_metadata(row[0], patch),
+                    datetime.now(UTC).isoformat(timespec="seconds"),
+                    task_id,
+                ),
+            )
+    except Exception as exc:
+        log.debug("task metadata merge failed for %s: %s", task_id, exc)
 
 def _materialize_proc_bg(proc: dict) -> None:
     """Background pool task: materialize procedure as SKILL.md files."""
@@ -44,6 +143,7 @@ TRANSITIONS = {
     "start": ({"approved", "assigned", "resumed"}, "running"),
     "complete": ({"running"}, "completed"),
     "fail": ({"pending", "approved", "assigned", "running"}, "failed"),
+    "defer": ({"running"}, "approved"),
     "pause": ({"running"}, "paused"),
     "resume": ({"paused"}, "resumed"),
 }
@@ -92,8 +192,31 @@ CREATE TABLE IF NOT EXISTS outcomes (
     chris_override INTEGER DEFAULT 0,
     override_reason TEXT DEFAULT '',
     confidence_was REAL,
+    procedure_ids TEXT DEFAULT '[]',
+    lesson_ids TEXT DEFAULT '[]',
     created_at TEXT NOT NULL,
     acked INTEGER DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS task_dispatch_attempts (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL,
+    trace_id TEXT NOT NULL,
+    attempt_no INTEGER NOT NULL,
+    agent TEXT DEFAULT '',
+    backend TEXT DEFAULT '',
+    model TEXT DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'started',
+    error_class TEXT DEFAULT '',
+    error TEXT DEFAULT '',
+    result_preview TEXT DEFAULT '',
+    prompt_chars INTEGER DEFAULT 0,
+    response_chars INTEGER DEFAULT 0,
+    duration_ms INTEGER DEFAULT 0,
+    started_at TEXT NOT NULL,
+    completed_at TEXT,
+    metadata TEXT DEFAULT '{}',
+    FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS accuracy_tracker (
@@ -156,6 +279,9 @@ class TaskQueue:
             CREATE INDEX IF NOT EXISTS idx_outcomes_domain ON outcomes(domain);
             CREATE INDEX IF NOT EXISTS idx_outcomes_task_id ON outcomes(task_id);
             CREATE INDEX IF NOT EXISTS idx_outcomes_created_at ON outcomes(created_at);
+            CREATE INDEX IF NOT EXISTS idx_dispatch_attempts_task_id ON task_dispatch_attempts(task_id);
+            CREATE INDEX IF NOT EXISTS idx_dispatch_attempts_trace_id ON task_dispatch_attempts(trace_id);
+            CREATE INDEX IF NOT EXISTS idx_dispatch_attempts_status ON task_dispatch_attempts(status);
             CREATE INDEX IF NOT EXISTS idx_procedures_task_type ON procedures(task_type);
         """)
         # v3 plan: brain_loop goal extensions. ALTER TABLE ADD COLUMN is idempotent
@@ -173,6 +299,16 @@ class TaskQueue:
             except sqlite3.OperationalError as e:
                 if "duplicate column name" not in str(e).lower():
                     log.warning("goals ALTER ADD %s failed: %s", col, e)
+        outcome_extensions = [
+            ("procedure_ids", "TEXT DEFAULT '[]'"),
+            ("lesson_ids", "TEXT DEFAULT '[]'"),
+        ]
+        for col, col_type in outcome_extensions:
+            try:
+                conn.execute(f"ALTER TABLE outcomes ADD COLUMN {col} {col_type}")
+            except sqlite3.OperationalError as e:
+                if "duplicate column name" not in str(e).lower():
+                    log.warning("outcomes ALTER ADD %s failed: %s", col, e)
         conn.commit()
 
     # ── Helpers ──────────────────────────────────────────────
@@ -198,6 +334,41 @@ class TaskQueue:
                     pass
         return d
 
+    def _merge_task_metadata(self, task_id: str, patch: dict) -> None:
+        """Best-effort merge into tasks.metadata without changing task status."""
+
+        try:
+            conn = self._conn()
+            row = conn.execute("SELECT metadata FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            if row is None:
+                return
+            try:
+                meta = json.loads(row["metadata"] or "{}")
+            except (json.JSONDecodeError, TypeError):
+                meta = {}
+            if not isinstance(meta, dict):
+                meta = {}
+            meta.update(patch)
+            conn.execute(
+                "UPDATE tasks SET metadata = ?, updated_at = ? WHERE id = ?",
+                (json.dumps(meta), self._now(), task_id),
+            )
+            conn.commit()
+        except Exception as exc:
+            log.debug("task metadata merge failed for %s: %s", task_id, exc)
+
+    @staticmethod
+    def _dispatch_row_to_dict(row: sqlite3.Row | None) -> dict | None:
+        if row is None:
+            return None
+        d = dict(row)
+        if isinstance(d.get("metadata"), str):
+            try:
+                d["metadata"] = json.loads(d["metadata"])
+            except (json.JSONDecodeError, TypeError):
+                pass
+        return d
+
     # ── Task CRUD ────────────────────────────────────────────
 
     def create_task(
@@ -215,6 +386,11 @@ class TaskQueue:
     ) -> dict:
         now = self._now()
         task_id = self._gen_id("task")
+        task_metadata = dict(metadata or {})
+        task_metadata.setdefault(
+            "trace_id",
+            task_metadata.get("source_message_id") or task_metadata.get("trace_id") or task_id,
+        )
         conn = self._conn()
         conn.execute(
             """INSERT INTO tasks
@@ -236,7 +412,7 @@ class TaskQueue:
                 created_by,
                 now,
                 now,
-                json.dumps(metadata or {}),
+                json.dumps(task_metadata),
             ),
         )
         conn.commit()
@@ -247,6 +423,12 @@ class TaskQueue:
         conn = self._conn()
         row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
         return self._row_to_dict(row)
+
+    def _trace_id_for_task(self, task: dict | None, task_id: str) -> str:
+        meta = task.get("metadata") if task else {}
+        if not isinstance(meta, dict):
+            meta = {}
+        return str(meta.get("trace_id") or meta.get("source_message_id") or task_id)
 
     def list_tasks(
         self,
@@ -310,6 +492,9 @@ class TaskQueue:
         updates = {"status": to_status, "updated_at": now, "execution_log": json.dumps(exec_log)}
         if to_status == "running":
             updates["started_at"] = now
+        if current == "running" and to_status == "approved":
+            updates["started_at"] = None
+            updates["completed_at"] = None
         if to_status in ("completed", "failed"):
             updates["completed_at"] = now
         updates.update(extra)
@@ -373,11 +558,195 @@ class TaskQueue:
             task_id, {"pending", "approved", "assigned", "running"}, "failed", by=by, error=error
         )
 
+    def defer_task(self, task_id: str, error: str = "", retry_after_s: int = 300, by: str = "system") -> dict:
+        """Move a running task back to approved after a transient dispatch outage.
+
+        Circuit-breaker and provider-cooldown fast-fails are infrastructure
+        throttles, not task failures. Keep the task ready for a later retry and
+        record the retry window in metadata so the executor does not hammer a
+        known-down upstream every 30 seconds.
+        """
+        retry_after_s = max(30, min(int(retry_after_s or 300), 14_400))
+        next_attempt_at = (datetime.now(UTC) + timedelta(seconds=retry_after_s)).isoformat(
+            timespec="seconds"
+        )
+        self._merge_task_metadata(
+            task_id,
+            {
+                "last_dispatch_error": error[:300],
+                "dispatch_retry_after_s": retry_after_s,
+                "next_attempt_at": next_attempt_at,
+            },
+        )
+        return self._transition(task_id, {"running"}, "approved", by=by, error=error[:500])
+
     def pause_task(self, task_id: str, by: str = "system") -> dict:
         return self._transition(task_id, {"running"}, "paused", by=by)
 
     def resume_task(self, task_id: str, by: str = "system") -> dict:
         return self._transition(task_id, {"paused"}, "resumed", by=by)
+
+    # ── Dispatch attempt audit ───────────────────────────────
+
+    def record_dispatch_attempt_start(
+        self,
+        task_id: str,
+        *,
+        agent: str = "",
+        backend: str = "",
+        model: str = "",
+        prompt_chars: int = 0,
+        metadata: dict | None = None,
+    ) -> dict:
+        """Create an immutable dispatch-attempt row before calling the backend."""
+
+        task = self.get_task(task_id)
+        if not task:
+            raise ValueError(f"task {task_id} not found")
+        trace_id = self._trace_id_for_task(task, task_id)
+        conn = self._conn()
+        row = conn.execute(
+            "SELECT COALESCE(MAX(attempt_no), 0) + 1 FROM task_dispatch_attempts WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()
+        attempt_no = int(row[0] or 1) if row else 1
+        attempt_id = self._gen_id("dispatch")
+        now = self._now()
+        conn.execute(
+            """INSERT INTO task_dispatch_attempts
+               (id, task_id, trace_id, attempt_no, agent, backend, model,
+                status, prompt_chars, started_at, metadata)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 'started', ?, ?, ?)""",
+            (
+                attempt_id,
+                task_id,
+                trace_id,
+                attempt_no,
+                agent,
+                backend,
+                model,
+                int(prompt_chars or 0),
+                now,
+                json.dumps(metadata or {}),
+            ),
+        )
+        conn.commit()
+        return self.get_dispatch_attempt(attempt_id)  # type: ignore[return-value]
+
+    def finish_dispatch_attempt(
+        self,
+        attempt_id: str,
+        *,
+        status: str,
+        backend: str = "",
+        model: str = "",
+        error_class: str = "",
+        error: str = "",
+        result_preview: str = "",
+        response_chars: int = 0,
+        duration_ms: int = 0,
+        metadata: dict | None = None,
+    ) -> dict | None:
+        """Close a dispatch-attempt row with backend result evidence."""
+
+        if status not in {"completed", "failed", "deferred"}:
+            raise ValueError(f"invalid dispatch attempt status: {status}")
+        conn = self._conn()
+        now = self._now()
+        existing = conn.execute(
+            "SELECT metadata FROM task_dispatch_attempts WHERE id = ?",
+            (attempt_id,),
+        ).fetchone()
+        merged_metadata = _merge_json_metadata(
+            existing["metadata"] if existing is not None else "{}",
+            metadata or {},
+        )
+        conn.execute(
+            """UPDATE task_dispatch_attempts
+               SET status = ?, backend = COALESCE(NULLIF(?, ''), backend),
+                   model = COALESCE(NULLIF(?, ''), model),
+                   error_class = ?, error = ?, result_preview = ?,
+                   response_chars = ?, duration_ms = ?, completed_at = ?,
+                   metadata = ?
+               WHERE id = ?""",
+            (
+                status,
+                backend,
+                model,
+                error_class[:80],
+                error[:500],
+                result_preview[:500],
+                int(response_chars or 0),
+                int(duration_ms or 0),
+                now,
+                merged_metadata,
+                attempt_id,
+            ),
+        )
+        conn.commit()
+        return self.get_dispatch_attempt(attempt_id)
+
+    def get_dispatch_attempt(self, attempt_id: str) -> dict | None:
+        conn = self._conn()
+        row = conn.execute("SELECT * FROM task_dispatch_attempts WHERE id = ?", (attempt_id,)).fetchone()
+        return self._dispatch_row_to_dict(row)
+
+    def list_dispatch_attempts(
+        self,
+        *,
+        task_id: str | None = None,
+        trace_id: str | None = None,
+        status: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[dict]:
+        clauses: list[str] = []
+        params: list = []
+        if task_id:
+            clauses.append("task_id = ?")
+            params.append(task_id)
+        if trace_id:
+            clauses.append("trace_id = ?")
+            params.append(trace_id)
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        params.extend([limit, offset])
+        conn = self._conn()
+        rows = conn.execute(
+            "SELECT * FROM task_dispatch_attempts"
+            f"{where} ORDER BY started_at DESC, attempt_no DESC LIMIT ? OFFSET ?",
+            params,
+        ).fetchall()
+        return [self._dispatch_row_to_dict(r) for r in rows]
+
+    def get_task_execution_truth(self, task_id: str) -> dict:
+        """Return one auditable chain: task -> dispatch attempts -> outcomes."""
+
+        task = self.get_task(task_id)
+        if not task:
+            raise ValueError(f"task {task_id} not found")
+        attempts = self.list_dispatch_attempts(task_id=task_id, limit=100)
+        outcomes = [
+            row
+            for row in self.list_outcomes(limit=100)
+            if row.get("task_id") == task_id
+        ]
+        terminal = task.get("status") in {"completed", "failed"}
+        has_closed_attempt = any(a.get("status") in {"completed", "failed", "deferred"} for a in attempts)
+        return {
+            "task": task,
+            "trace_id": self._trace_id_for_task(task, task_id),
+            "dispatch_attempts": attempts,
+            "outcomes": outcomes,
+            "evidence": {
+                "has_dispatch_attempt": bool(attempts),
+                "has_closed_dispatch_attempt": has_closed_attempt,
+                "has_outcome": bool(outcomes),
+                "terminal_has_outcome": (not terminal) or bool(outcomes),
+            },
+        }
 
     # ── Queries ──────────────────────────────────────────────
 
@@ -418,8 +787,21 @@ class TaskQueue:
         ready = []
         for task in candidates:
             deps = task.get("depends_on", [])
-            if not deps or all(d in completed_ids for d in deps):
-                ready.append(task)
+            deps_ready = not deps or all(d in completed_ids for d in deps)
+            if not deps_ready:
+                continue
+            meta = task.get("metadata") or {}
+            next_attempt_at = meta.get("next_attempt_at")
+            if next_attempt_at:
+                try:
+                    next_dt = datetime.fromisoformat(next_attempt_at)
+                    if next_dt.tzinfo is None:
+                        next_dt = next_dt.replace(tzinfo=UTC)
+                    if next_dt > datetime.now(UTC):
+                        continue
+                except Exception:
+                    pass
+            ready.append(task)
         return ready
 
     def get_goal_progress(self, goal_id: str) -> dict:
@@ -452,6 +834,49 @@ class TaskQueue:
                 count += 1
             except ValueError:
                 pass
+        return count
+
+    def requeue_running_orphans(self, by: str = "startup_reconcile") -> int:
+        """Requeue tasks left running by a prior brain-server process.
+
+        Task execution happens inside the scheduler process. After a launchd
+        restart there is no worker left that can record completion for rows
+        already marked running, so leaving them as running creates the same
+        false "under the hood" state Chris reported. Startup reconciliation
+        moves them back to approved for a fresh dispatch attempt.
+        """
+        conn = self._conn()
+        now = self._now()
+        rows = conn.execute("SELECT * FROM tasks WHERE status = 'running'").fetchall()
+        count = 0
+        for row in rows:
+            task = self._row_to_dict(row)
+            meta = task.get("metadata") or {}
+            meta["orphaned_running_requeued_at"] = now
+            meta["orphaned_running_requeued_by"] = by
+            if task.get("started_at"):
+                meta["orphaned_started_at"] = task["started_at"]
+            exec_log = task.get("execution_log", [])
+            if not isinstance(exec_log, list):
+                exec_log = []
+            exec_log.append(
+                {
+                    "from": "running",
+                    "to": "approved",
+                    "at": now,
+                    "by": by,
+                    "reason": "running task orphaned by server restart",
+                }
+            )
+            conn.execute(
+                "UPDATE tasks SET status='approved', updated_at=?, started_at=NULL, "
+                "completed_at=NULL, error='', execution_log=?, metadata=? WHERE id=?",
+                (now, json.dumps(exec_log, ensure_ascii=False), json.dumps(meta), task["id"]),
+            )
+            count += 1
+        conn.commit()
+        if count:
+            log.warning("requeued %d orphaned running task(s) on startup", count)
         return count
 
     # ── Autopilot gate ───────────────────────────────────────
@@ -607,7 +1032,17 @@ class TaskQueue:
             handled_ids.update(self._review_tasks_with_subscription_llm(llm_review))
 
         if human_required:
-            self._notify_chris_about_tasks(human_required)
+            self._notify_task_evaluation_actions(
+                [
+                    (
+                        t,
+                        "held_for_safe_followup",
+                        reason,
+                        "classifier_human_required",
+                    )
+                    for t, reason in human_required
+                ]
+            )
             handled_ids.update(t["id"] for t, _reason in human_required)
 
         if handled_ids:
@@ -689,19 +1124,17 @@ class TaskQueue:
                     log.warning("task escalation LLM review failed for %s: %s", t.get("id"), result.error)
                     continue
                 if llm_says_human_needed(result.text):
-                    self._merge_task_metadata(
-                        t["id"],
-                        {
-                            "escalation_llm_route": "human_needed",
-                            "escalation_llm_reason": result.text[:500],
-                            "escalation_llm_routed_at": self._now(),
-                        },
+                    self._notify_task_evaluation_actions(
+                        [
+                            (
+                                t,
+                                "held_for_safe_followup",
+                                result.text,
+                                "llm_human_needed",
+                            )
+                        ]
                     )
-                    self._notify_chris_text(
-                        f"TASK ESCALATION requires Chris for [{t['id']}] {t.get('title', '')}:\n"
-                        + result.text[:1000],
-                        source="task_queue:llm_human_needed",
-                    )
+                    handled.add(t["id"])
                 elif _approve_for_agent(t, result.text):
                     handled.add(t["id"])
                 log.info("reviewed escalated task %s with subscription LLM", t.get("id"))
@@ -710,26 +1143,141 @@ class TaskQueue:
             log.warning("task escalation LLM review error: %s", e)
         return set()
 
-    def _notify_chris_about_tasks(self, tasks_with_reasons: list[tuple[dict, str]]) -> None:
-        """Notify Chris about tasks with known human-only blockers."""
-        if not tasks_with_reasons:
+    def _notify_task_evaluation_actions(
+        self,
+        actions: list[tuple[dict, str, str, str]],
+    ) -> None:
+        """Tell Chris what Brain did after task evaluation, without asking for input."""
+        if not actions:
             return
-        lines = ["TASK ESCALATION — Chris input required:\n"]
-        for t, reason in tasks_with_reasons:
-            lines.append(
-                f"- [{t['id']}] {t.get('title', '')} "
-                f"(reason={reason}, confidence={float(t.get('confidence', 0.0)):.0%})"
-            )
-        self._notify_chris_text("\n".join(lines), source="task_queue:human_required")
 
-    def _notify_chris_text(self, body: str, *, source: str) -> None:
+        routed_at = self._now()
+        lines = ["TASK EVALUATION ACTION — Brain handled these without asking:", ""]
+        for t, action, reason, source in actions:
+            tid = t["id"]
+            reason_preview = " ".join(str(reason or "").split())[:500]
+            self._merge_task_metadata(
+                tid,
+                {
+                    "task_evaluation_alert_policy": "action_summary",
+                    "task_evaluation_action": action,
+                    "task_evaluation_reason": reason_preview,
+                    "task_evaluation_source": source,
+                    "task_evaluation_routed_at": routed_at,
+                    "escalation_llm_route": "human_needed" if source == "llm_human_needed" else "policy_held",
+                    "escalation_llm_reason": reason_preview,
+                    "escalation_llm_routed_at": routed_at,
+                },
+            )
+            lines.append(
+                f"- [{tid}] {t.get('title', '')} "
+                f"(action={action}, confidence={float(t.get('confidence', 0.0)):.0%})"
+            )
+            if reason_preview:
+                lines.append(f"  reason={reason_preview}")
+        self._notify_chris_text(
+            "\n".join(lines),
+            source="task_queue:evaluation_action_summary",
+            severity="info",
+        )
+
+    def _notify_chris_text(self, body: str, *, source: str, severity: str = "warn") -> None:
         """Direct Chris notification; avoids LLM path and API spend."""
         try:
             from telegram_alert import send_chris_telegram
 
-            send_chris_telegram(body, source=source, severity="warn")
+            send_chris_telegram(body, source=source, severity=severity)
         except Exception as e:
-            log.warning("task escalation Chris notification failed: %s", e)
+            log.warning("task evaluation Chris notification failed: %s", e)
+
+    def _record_failure_lesson_async(
+        self,
+        task: dict,
+        failure_reason: str,
+        agent_id: str,
+        *,
+        context: str = "",
+        attempt_id: str = "",
+    ) -> None:
+        """Capture failed/deferred task lessons without blocking dispatch ticks."""
+        title = str(task.get("title") or "").strip()
+        desc = str(task.get("description") or "").strip()
+        task_description = (title + (" — " + desc if desc else ""))[:800]
+        if not task_description or not failure_reason:
+            return
+        if attempt_id:
+            self._merge_dispatch_attempt_metadata(
+                attempt_id,
+                {
+                    "failure_lesson_status": "submitted",
+                    "failure_lesson_submitted_at": self._now(),
+                    "failure_lesson_agent": agent_id or "system",
+                },
+            )
+        task_id = str(task.get("id") or "")
+        if task_id:
+            self._merge_task_metadata(
+                task_id,
+                {
+                    "last_failure_lesson_status": "submitted",
+                    "last_failure_lesson_submitted_at": self._now(),
+                    "last_failure_lesson_agent": agent_id or "system",
+                },
+            )
+        try:
+            _bg_pool.submit(
+                _record_failure_lesson_bg,
+                task_description,
+                failure_reason[:800],
+                agent_id or "system",
+                context[:800],
+                db_path=self._db_path,
+                attempt_id=attempt_id,
+                task_id=task_id,
+            )
+        except Exception as exc:
+            log.debug("failure lesson submit failed for %s: %s", task.get("id"), exc)
+
+    def _merge_dispatch_attempt_metadata(self, attempt_id: str, patch: dict) -> None:
+        """Merge metadata fields for a dispatch attempt without clobbering existing keys."""
+        _merge_dispatch_attempt_metadata_db(self._db_path, attempt_id, patch)
+
+    @staticmethod
+    def _is_transient_dispatch_error(error: str) -> bool:
+        err = (error or "").lower()
+        return (
+            err.startswith("breaker_")
+            or "circuit breaker open" in err
+            or "backend_cooldown" in err
+            or "probe_in_flight" in err
+            or "cli slots busy" in err
+            or ("slot" in err and "busy" in err)
+            or "all cli backends exhausted" in err
+            or "gatewaytransporterror" in err
+            or "gateway closed" in err
+            or "timeout" in err
+            or "process timeout" in err
+            or "rate limit" in err
+            or "rate_limit" in err
+            or "rate-limited" in err
+        )
+
+    @staticmethod
+    def _retry_delay_for_dispatch_error(error: str) -> int:
+        err = error or ""
+        marker = "cooldown "
+        if marker in err:
+            try:
+                suffix = err.split(marker, 1)[1]
+                number = suffix.split("s", 1)[0].strip()
+                return max(300, int(float(number)))
+            except Exception:
+                pass
+        if "half_open_probing" in err or "probe_in_flight" in err:
+            return 300
+        if "backend_cooldown" in err:
+            return 300
+        return 600
 
     def process_ready(self) -> list[dict]:
         """Dispatch ready tasks (approved, deps met) to their assigned OpenClaw agents.
@@ -794,10 +1342,19 @@ class TaskQueue:
             heuristic_context, retrieved_heuristic_ids = self._get_relevant_heuristics(title + " " + desc)
 
             # Inject proven procedures (successful workflows) + lessons (past failures)
-            procedure_context = self._get_relevant_procedures(title + " " + desc)
-            lesson_context = self._get_relevant_lessons(title + " " + desc, agent)
+            procedure_context, retrieved_procedure_ids = self._get_relevant_procedures_with_ids(
+                title + " " + desc
+            )
+            lesson_context, retrieved_lesson_ids = self._get_relevant_lessons_with_ids(
+                title + " " + desc,
+                agent,
+            )
+            if retrieved_procedure_ids:
+                self._merge_task_metadata(tid, {"retrieved_procedure_ids": retrieved_procedure_ids})
+            if retrieved_lesson_ids:
+                self._merge_task_metadata(tid, {"retrieved_lesson_ids": retrieved_lesson_ids})
 
-            # Dispatch to OpenClaw agent
+            # Dispatch through subscription CLI first; OpenClaw is only a fallback/integration lane.
             prompt = f"Execute this task:\n\nTitle: {title}\nDescription: {desc}"
             if heuristic_context:
                 prompt += f"\n\nRelevant heuristics from past tasks:\n{heuristic_context}"
@@ -810,15 +1367,40 @@ class TaskQueue:
             prompt += "\n\nDo the work and report the result concisely."
 
             domain = (task.get("metadata") or {}).get("domain", "general")
-            chris_override = False
+            deferred = False
+            attempt = self.record_dispatch_attempt_start(
+                tid,
+                agent=agent,
+                backend="cli_llm",
+                prompt_chars=len(prompt),
+                metadata={
+                    "source": "process_ready",
+                    "procedure_ids": retrieved_procedure_ids,
+                    "lesson_ids": retrieved_lesson_ids,
+                },
+            )
             try:
                 result = dispatch(
                     agent=agent,
                     message=prompt,
                     thinking="medium",
                     timeout=120,
+                    openclaw_agent=agent,
                 )
                 if result.ok and result.text:
+                    self.finish_dispatch_attempt(
+                        attempt["id"],
+                        status="completed",
+                        backend=getattr(result, "backend", ""),
+                        model=getattr(result, "model", ""),
+                        result_preview=result.text[:500],
+                        response_chars=len(result.text),
+                        duration_ms=getattr(result, "duration_ms", 0),
+                        metadata={
+                            "attempts": getattr(result, "attempts", 0),
+                            "provider": getattr(result, "provider", ""),
+                        },
+                    )
                     updated = self.complete_task(tid, result=result.text[:1000], by="executor")
                     log.info("task %s completed by %s", tid, agent)
                     # Reinforce retrieved heuristics that helped (MemRL pattern)
@@ -839,18 +1421,89 @@ class TaskQueue:
                     )
                 else:
                     error_msg = result.error or "agent returned empty response"
-                    updated = self.fail_task(tid, error=error_msg[:500], by="executor")
-                    log.warning("task %s failed: %s", tid, error_msg[:200])
+                    if self._is_transient_dispatch_error(error_msg):
+                        self.finish_dispatch_attempt(
+                            attempt["id"],
+                            status="deferred",
+                            backend=getattr(result, "backend", ""),
+                            model=getattr(result, "model", ""),
+                            error_class="transient_dispatch",
+                            error=error_msg,
+                            duration_ms=getattr(result, "duration_ms", 0),
+                            metadata={
+                                "attempts": getattr(result, "attempts", 0),
+                                "rate_limited": getattr(result, "rate_limited", False),
+                            },
+                        )
+                        updated = self.defer_task(
+                            tid,
+                            error=error_msg[:500],
+                            retry_after_s=self._retry_delay_for_dispatch_error(error_msg),
+                            by="executor_defer",
+                        )
+                        deferred = True
+                        self._record_failure_lesson_async(
+                            task,
+                            error_msg,
+                            agent,
+                            context="status=deferred; error_class=transient_dispatch",
+                            attempt_id=attempt["id"],
+                        )
+                        log.warning(
+                            "task %s deferred after transient dispatch error: %s",
+                            tid,
+                            error_msg[:200],
+                        )
+                    else:
+                        self.finish_dispatch_attempt(
+                            attempt["id"],
+                            status="failed",
+                            backend=getattr(result, "backend", ""),
+                            model=getattr(result, "model", ""),
+                            error_class="terminal_dispatch",
+                            error=error_msg,
+                            duration_ms=getattr(result, "duration_ms", 0),
+                            metadata={
+                                "attempts": getattr(result, "attempts", 0),
+                                "rate_limited": getattr(result, "rate_limited", False),
+                            },
+                        )
+                        updated = self.fail_task(tid, error=error_msg[:500], by="executor")
+                        self._record_failure_lesson_async(
+                            task,
+                            error_msg,
+                            agent,
+                            context="status=failed; error_class=terminal_dispatch",
+                            attempt_id=attempt["id"],
+                        )
+                        log.warning("task %s failed: %s", tid, error_msg[:200])
             except Exception as exc:
+                self.finish_dispatch_attempt(
+                    attempt["id"],
+                    status="failed",
+                    error_class="exception",
+                    error=str(exc),
+                )
                 try:
                     updated = self.fail_task(tid, error=str(exc)[:500], by="executor")
                 except ValueError:
                     updated = self.get_task(tid) or {}
+                self._record_failure_lesson_async(
+                    task,
+                    str(exc),
+                    agent,
+                    context="status=failed; error_class=exception",
+                    attempt_id=attempt["id"],
+                )
                 log.warning("task %s dispatch error: %s", tid, exc)
 
             # Record outcome for accuracy tracking
             # Failed tasks count as incorrect (chris_override=True) since the brain's
             # delegation/confidence was wrong — the task couldn't be completed
+            if deferred:
+                results.append(updated)
+                dispatched += 1
+                continue
             task_failed = updated.get("status") != "completed"
             try:
                 self.record_outcome(
@@ -860,6 +1513,8 @@ class TaskQueue:
                     actual_action=(updated.get("result") or updated.get("error") or "")[:500],
                     chris_override=task_failed,
                     override_reason="agent execution failed" if task_failed else "",
+                    procedure_ids=retrieved_procedure_ids,
+                    lesson_ids=retrieved_lesson_ids,
                 )
             except Exception:
                 log.warning("outcome recording failed for %s", tid)
@@ -981,17 +1636,29 @@ class TaskQueue:
         actual_action: str = "",
         chris_override: bool = False,
         override_reason: str = "",
+        procedure_ids: list[str] | None = None,
+        lesson_ids: list[str] | None = None,
     ) -> None:
         task = self.get_task(task_id)
         confidence_was = task["confidence"] if task else 0.0
+        if procedure_ids is None and task:
+            meta = task.get("metadata") or {}
+            if isinstance(meta, dict) and isinstance(meta.get("retrieved_procedure_ids"), list):
+                procedure_ids = [str(v) for v in meta.get("retrieved_procedure_ids") or []]
+        if lesson_ids is None and task:
+            meta = task.get("metadata") or {}
+            if isinstance(meta, dict) and isinstance(meta.get("retrieved_lesson_ids"), list):
+                lesson_ids = [str(v) for v in meta.get("retrieved_lesson_ids") or []]
+        procedure_ids = [str(v) for v in (procedure_ids or []) if str(v)]
+        lesson_ids = [str(v) for v in (lesson_ids or []) if str(v)]
         now = self._now()
         outcome_id = self._gen_id("outcome")
         conn = self._conn()
         conn.execute(
             """INSERT INTO outcomes
                (id, task_id, domain, brain_recommendation, actual_action,
-                chris_override, override_reason, confidence_was, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                chris_override, override_reason, confidence_was, procedure_ids, lesson_ids, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 outcome_id,
                 task_id,
@@ -1001,6 +1668,8 @@ class TaskQueue:
                 int(chris_override),
                 override_reason,
                 confidence_was,
+                json.dumps(procedure_ids),
+                json.dumps(lesson_ids),
                 now,
             ),
         )
@@ -1057,7 +1726,19 @@ class TaskQueue:
                 "SELECT * FROM outcomes ORDER BY created_at DESC LIMIT ? OFFSET ?",
                 (limit, offset),
             ).fetchall()
-        return [dict(r) for r in rows]
+        out = [dict(r) for r in rows]
+        for row in out:
+            if isinstance(row.get("procedure_ids"), str):
+                try:
+                    row["procedure_ids"] = json.loads(row["procedure_ids"])
+                except (json.JSONDecodeError, TypeError):
+                    row["procedure_ids"] = []
+            if isinstance(row.get("lesson_ids"), str):
+                try:
+                    row["lesson_ids"] = json.loads(row["lesson_ids"])
+                except (json.JSONDecodeError, TypeError):
+                    row["lesson_ids"] = []
+        return out
 
     def _extract_heuristic(self, task: dict, result_text: str, dispatch_fn) -> None:
         """ERL-inspired: extract a reusable heuristic from a completed task."""
@@ -1128,6 +1809,12 @@ class TaskQueue:
             return "", []
 
     def _get_relevant_procedures(self, task_description: str, limit: int = 2) -> str:
+        context, _ids = self._get_relevant_procedures_with_ids(task_description, limit=limit)
+        return context
+
+    def _get_relevant_procedures_with_ids(
+        self, task_description: str, limit: int = 2
+    ) -> tuple[str, list[str]]:
         """Retrieve procedures whose task_type+title share meaningful words with the task.
 
         Simple word-overlap scorer (cheap, no embedding call). Procedures are ranked
@@ -1136,7 +1823,7 @@ class TaskQueue:
         try:
             words = {w.lower() for w in task_description.split() if len(w) > 3}
             if not words:
-                return ""
+                return "", []
             conn = self._conn()
             rows = conn.execute(
                 "SELECT id, task_type, title, steps, success_count FROM procedures "
@@ -1152,9 +1839,11 @@ class TaskQueue:
             scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
             top = scored[:limit]
             if not top:
-                return ""
+                return "", []
             lines = []
+            ids = []
             for _, _, r in top:
+                ids.append(str(r["id"]))
                 try:
                     steps = json.loads(r["steps"]) if isinstance(r["steps"], str) else r["steps"]
                 except (json.JSONDecodeError, TypeError):
@@ -1163,11 +1852,16 @@ class TaskQueue:
                 lines.append(
                     f"- [{r['task_type']}] {r['title']} (used {r['success_count']}x): {step_preview}"
                 )
-            return "\n".join(lines)
+            return "\n".join(lines), ids
         except Exception:
-            return ""
+            return "", []
 
-    def _get_relevant_lessons(self, task_description: str, agent_id: str, limit: int = 2) -> str:
+    def _get_relevant_lessons_with_ids(
+        self,
+        task_description: str,
+        agent_id: str,
+        limit: int = 2,
+    ) -> tuple[str, list[str]]:
         """Retrieve similar past failure lessons for this agent (Reflexion pattern).
 
         Delegates to failure_memory.get_similar_lessons which uses Jaro-Winkler
@@ -1182,9 +1876,13 @@ class TaskQueue:
                 limit=limit,
             )
             if not lessons:
-                return ""
+                return "", []
             lines = []
+            ids: list[str] = []
             for lesson in lessons:
+                lesson_id = str(lesson.get("id") or lesson.get("lesson_id") or "").strip()
+                if lesson_id:
+                    ids.append(lesson_id)
                 fragment = (lesson.get("reflection") or lesson.get("task") or "")[:140]
                 avoid = (lesson.get("avoid") or "").strip()
                 try_next = (lesson.get("try_next") or "").strip()
@@ -1194,7 +1892,20 @@ class TaskQueue:
                 if try_next:
                     line += f" [TRY_NEXT: {try_next[:100]}]"
                 lines.append(line)
-            return "\n".join(lines)
+            return "\n".join(lines), ids
+        except Exception:
+            return "", []
+
+    def _get_relevant_lessons(self, task_description: str, agent_id: str, limit: int = 2) -> str:
+        """Backward-compatible text-only Reflexion retrieval."""
+
+        try:
+            context, _ids = self._get_relevant_lessons_with_ids(
+                task_description,
+                agent_id,
+                limit=limit,
+            )
+            return context
         except Exception:
             return ""
 
@@ -1329,9 +2040,11 @@ class TaskQueue:
             prompt = (
                 f"A multi-step task was completed successfully.\n"
                 f"Task: {title}\nAgent: {agent}\nResult: {result_text[:800]}\n\n"
-                f"If this result describes a multi-step procedure (3+ steps), extract it as a reusable template.\n"
+                "If this result describes a multi-step procedure (3+ steps), "
+                "extract it as a reusable template.\n"
                 f"Return ONLY a JSON object (or null if no procedure):\n"
-                f'{{"task_type": "...", "steps": ["step 1", "step 2", ...], "preconditions": "...", "tools_used": ["..."]}}'
+                '{"task_type": "...", "steps": ["step 1", "step 2", ...], '
+                '"preconditions": "...", "tools_used": ["..."]}'
             )
             resp = dispatch_fn(agent="sage", message=prompt, thinking="low", timeout=30)
             if not resp.ok or not resp.text or resp.text.strip()[:4] == "null":
@@ -1424,7 +2137,10 @@ class TaskQueue:
                 return {
                     "agent": best_agent,
                     "confidence": min(0.9, 0.5 + best_score),
-                    "reasoning": f"Learned routing: similar past task succeeded with agent={best_agent} (overlap={best_score:.0%})",
+                    "reasoning": (
+                        "Learned routing: similar past task succeeded with "
+                        f"agent={best_agent} (overlap={best_score:.0%})"
+                    ),
                 }
         except Exception:
             pass

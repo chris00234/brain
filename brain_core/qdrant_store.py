@@ -526,31 +526,48 @@ class QdrantStore:
         manifest_payloads: list[dict[str, Any]] = []
         for i, (sid, vec, payload) in enumerate(zip(ids, vectors, payloads, strict=True)):
             document = documents[i] if documents is not None else ""
+            stored_document = document
+            safe_payload = dict(payload or {})
             try:
-                from source_policy import enrich_payload_for_entry
+                from source_policy import (
+                    PRIVACY_REDACTION_VERSION,
+                    enrich_payload_for_entry,
+                    redact_sensitive_text,
+                )
 
+                stored_document, redaction_findings = redact_sensitive_text(document or "")
+                for key in ("title", "summary", "snippet", "document_title", "source_name"):
+                    value = safe_payload.get(key)
+                    if isinstance(value, str):
+                        safe_payload[key], codes = redact_sensitive_text(value)
+                        redaction_findings.extend(codes)
+                if redaction_findings:
+                    safe_payload["privacy_redaction_version"] = PRIVACY_REDACTION_VERSION
+                    safe_payload["privacy_redaction_count"] = len(set(redaction_findings))
+                    safe_payload["privacy_redaction_codes"] = sorted(set(redaction_findings))
                 merged = enrich_payload_for_entry(
-                    payload,
-                    content=document or "",
+                    safe_payload,
+                    content=stored_document or "",
                     collection=real,
                     point_id=sid,
                 )
             except Exception:
-                merged = dict(payload or {})
+                merged = safe_payload
+                stored_document = document
             merged.update(alias_patch)
             # Reserved keys so get()/query() can return original string id and document.
             merged["_original_id"] = sid
             point_vectors: dict[str, Any] = {"dense": vec}
             if documents is not None:
-                merged["_document"] = document
+                merged["_document"] = stored_document
                 if sparse_encode is not None:
-                    sparse_text = document or ""
+                    sparse_text = stored_document or ""
                     try:
                         from source_policy import sparse_index_text
 
-                        sparse_text = sparse_index_text(document or "", merged)
+                        sparse_text = sparse_index_text(stored_document or "", merged)
                     except Exception:
-                        sparse_text = document or ""
+                        sparse_text = stored_document or ""
                     indices, values = sparse_encode(sparse_text)
                     if indices:
                         from qdrant_client.models import SparseVector
@@ -573,7 +590,9 @@ class QdrantStore:
                 collection=real,
                 ids=ids,
                 payloads=manifest_payloads,
-                documents=documents,
+                documents=[p.get("_document", "") for p in manifest_payloads]
+                if documents is not None
+                else None,
             )
         except Exception as exc:
             log.debug("entry manifest write skipped for %s: %s", real, exc)

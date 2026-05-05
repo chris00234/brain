@@ -427,9 +427,15 @@ async def _request_id_and_metrics_middleware(request, call_next):
         # metrics buffer can distinguish 4xx from 5xx after the fact.
         # Falls back to positional call when the buffer hasn't been
         # migrated yet — forward-compatible with older buffers.
+        x_agent = (request.headers.get("x-agent") or "").strip().lower()
+        traffic_class = "eval" if x_agent in {"eval", "benchmark", "loadtest"} else "prod"
         try:
             _metrics_buf.record_request(
-                str(request.url.path), latency_ms, error=error, status_code=status_code
+                str(request.url.path),
+                latency_ms,
+                error=error,
+                status_code=status_code,
+                traffic_class=traffic_class,
             )
         except TypeError:
             _metrics_buf.record_request(str(request.url.path), latency_ms, error=error)

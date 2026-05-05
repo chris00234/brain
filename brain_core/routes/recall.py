@@ -1028,7 +1028,7 @@ def recall_v2(
             )
 
             t_crag = time.time()
-            confidence_report = _crag_score(fused[: max(n, 5)])
+            confidence_report = _crag_score(fused[: max(n, 5)], query=q)
             # 2026-04-16 Tier 3 #11: Self-RAG (Asai 2023) semantic critique
             # layer. When BRAIN_SELF_RAG_ENABLED=true, we dispatch Jenna to
             # score result relevance semantically and blend with the

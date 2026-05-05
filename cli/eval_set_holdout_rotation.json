@@ -1,0 +1,106 @@
+[
+  {
+    "query": "ghost nginx proxy",
+    "collection": "knowledge",
+    "expected_source": "canonical",
+    "expected_content": "proxy",
+    "category": "stable_holdout_infra",
+    "holdout_group": "rotation_a"
+  },
+  {
+    "query": "vaultwarden docker compose",
+    "collection": "knowledge",
+    "expected_source": "knowledge",
+    "expected_content": "vaultwarden",
+    "category": "stable_holdout_infra",
+    "holdout_group": "rotation_a"
+  },
+  {
+    "query": "searxng server block",
+    "collection": "all",
+    "expected_source": "searxng",
+    "expected_content": "searxng",
+    "category": "stable_holdout_infra",
+    "holdout_group": "rotation_a"
+  },
+  {
+    "query": "Ellie role and responsibilities",
+    "collection": "all",
+    "expected_source": "ellie",
+    "expected_content": "Ellie",
+    "category": "stable_holdout_preference_agent",
+    "holdout_group": "rotation_a"
+  },
+  {
+    "query": "Jenna responsibilities",
+    "collection": "all",
+    "expected_source": "jenna",
+    "expected_content": "Jenna",
+    "category": "stable_holdout_preference_agent",
+    "holdout_group": "rotation_a"
+  },
+  {
+    "query": "nginx rate limiting configuration",
+    "collection": "knowledge",
+    "expected_source": "canonical",
+    "expected_content": "rate limit",
+    "category": "stable_holdout_infra",
+    "holdout_group": "rotation_a"
+  },
+  {
+    "query": "what frontend stack does Chris prefer",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "React",
+    "category": "stable_holdout_preference_agent",
+    "holdout_group": "rotation_a"
+  },
+  {
+    "query": "Chris는 자동화 성공을 증거 없이 말하면 안 된다",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "actual submit and result confirmation",
+    "expected_alternates": [
+      "success without proof",
+      "safe execution paths",
+      "progress reporting"
+    ],
+    "forbidden_content": [
+      "no verification needed"
+    ],
+    "category": "multilingual_korean_automation_rule",
+    "holdout_group": "rotation_a"
+  },
+  {
+    "query": "source ingestion high value personal Obsidian OpenClaw avoid pollution",
+    "collection": "all",
+    "expected_source": "distilled",
+    "expected_content": "does not want indiscriminate ingestion",
+    "expected_alternates": [
+      "high-value notes",
+      "selected personal sources",
+      "personal knowledge pipeline"
+    ],
+    "forbidden_content": [
+      "ingest everything indiscriminately"
+    ],
+    "category": "source_pollution_negative",
+    "holdout_group": "rotation_a"
+  },
+  {
+    "query": "OpenClaw gateway running proof before escalation",
+    "collection": "all",
+    "expected_source": "distilled",
+    "expected_content": "loopback port 18789",
+    "expected_alternates": [
+      "http://127.0.0.1:18789",
+      "ws://127.0.0.1:18789",
+      "OpenClaw gateway is expected"
+    ],
+    "forbidden_content": [
+      "gateway is impossible to verify"
+    ],
+    "category": "gateway_escalation_truth",
+    "holdout_group": "rotation_a"
+  }
+]

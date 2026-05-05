@@ -7,7 +7,7 @@ ceiling where retrieval returns the right chunk but the strict substring
 check fails because the chunk paraphrases or varies in capitalization/spacing.
 
 This script batches the eval cases in groups of 20, sends each batch to Sage
-via openclaw_dispatch, and asks for semantic-equivalent rewrites of the
+via cli_llm, and asks for semantic-equivalent rewrites of the
 expected_content that are:
   - Still specific enough to uniquely identify the right chunk
   - Robust to paraphrase (key entities + concepts, not exact phrasing)
@@ -49,14 +49,20 @@ BATCH_SIZE = 10
 SAGE_TIMEOUT = 60
 
 
-_PROMPT = """You are relabeling a RAG evaluation dataset. Each item has a query and an `expected_content` field that's used to verify whether retrieval found the right chunk via strict substring match. The current substrings are too literal — they fail when the retrieved chunk paraphrases or varies wording.
+_PROMPT = """You are relabeling a RAG evaluation dataset. Each item has a query and an
+`expected_content` field used to verify whether retrieval found the right chunk
+via strict substring match. The current substrings are too literal — they fail
+when the retrieved chunk paraphrases or varies wording.
 
-For each item below, rewrite `expected_content` to be concept-level semantic: a short phrase (15-40 chars) that captures the core fact or decision the correct chunk MUST contain, regardless of exact wording. Also provide 2-3 `alternate_forms` that are equally valid substring matches.
+For each item below, rewrite `expected_content` to be concept-level semantic: a
+short phrase (15-40 chars) that captures the core fact or decision the correct
+chunk MUST contain, regardless of exact wording. Also provide 2-3
+`alternate_forms` that are equally valid substring matches.
 
 Rules:
 - Keep it specific enough to uniquely identify the correct chunk
 - Remove quoted punctuation, dates with exact formatting, and rare-phrase matches
-- If the original is already generic enough (e.g. "React + Vite + TypeScript"), keep it as-is and put empty alternate_forms
+- If the original is already generic enough, keep it as-is and put empty alternate_forms
 - Output MUST be valid JSON matching the schema
 
 Input items:

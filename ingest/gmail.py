@@ -24,11 +24,11 @@ import imaplib
 import json
 import os
 import re
-import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
 from email.header import decode_header
 from pathlib import Path
+from llm_dispatch import dispatch_json
 import logging
 
 log = logging.getLogger("brain.gmail")
@@ -40,7 +40,6 @@ STATE_FILE = Path("/Users/chrischo/.openclaw/workspace-jenna/.gmail_ingest_state
 INBOX_DIR = Path("/Users/chrischo/server/knowledge/raw/inbox")
 FAILURE_LOG = Path("/Users/chrischo/.openclaw/workspace-jenna/logs/gmail-ingest-failures.jsonl")
 
-OPENCLAW_BIN = "/Users/chrischo/.local/bin/openclaw"
 AGENT = "jenna"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "brain_core"))
@@ -293,38 +292,17 @@ def build_classification_prompt(batch: list[dict]) -> str:
 
 
 def dispatch_classification(prompt: str) -> dict | None:
-    cmd = [
-        OPENCLAW_BIN,
-        "agent",
-        "--agent",
-        AGENT,
-        "--message",
-        prompt,
-        "--json",
-        "--timeout",
-        str(DISPATCH_TIMEOUT),
-        "--thinking",
-        "low",
-    ]
-    try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=DISPATCH_TIMEOUT + 30)
-    except subprocess.TimeoutExpired:
-        log_failure("openclaw agent timed out")
-        sys.stderr.write(f"DISPATCH_FAIL agent={AGENT} reason=timeout\n")
-        return None
-    if r.returncode != 0:
-        log_failure(f"openclaw agent failed: {r.stderr[:300]}")
-        sys.stderr.write(f"DISPATCH_FAIL agent={AGENT} stderr={r.stderr[:300]}\n")
-        return None
-    try:
-        response = json.loads(r.stdout)
-        text = response.get("result", {}).get("payloads", [])[0].get("text", "")
-        text = re.sub(r"^```(?:json)?\s*", "", text.strip())
-        text = re.sub(r"\s*```$", "", text)
-        return json.loads(text)
-    except (json.JSONDecodeError, KeyError, IndexError) as e:
-        log_failure(f"could not parse Jenna reply: {e}")
-        return None
+    result = dispatch_json(
+        agent=AGENT,
+        prompt=prompt,
+        timeout=DISPATCH_TIMEOUT,
+        log_failure=log_failure,
+        source="ingest.gmail",
+        thinking="low",
+    )
+    if result is None:
+        sys.stderr.write(f"DISPATCH_FAIL agent={AGENT} backend=cli_llm\n")
+    return result
 
 
 def write_kept_email(email_data: dict, classification: dict) -> Path | None:

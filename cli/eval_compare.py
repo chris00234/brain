@@ -17,6 +17,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import json
 import re as _re_eval
 import sys
@@ -360,6 +361,32 @@ def _expected_hit(
     return hit_source, hit_content_strict, rank, hit_content_loose
 
 
+def _forbidden_matches(results: list[dict], forbidden_content: list[str] | None) -> list[str]:
+    """Return forbidden substrings found in top-5 retrieved text.
+
+    This supports privacy/stale-negative eval rows. Positive expected-content
+    hits are not enough if retrieval also surfaces a forbidden stale claim or
+    sensitive raw-content marker.
+    """
+
+    forms = [str(item).strip().lower() for item in (forbidden_content or []) if str(item).strip()]
+    if not forms:
+        return []
+    haystacks: list[str] = []
+    for result in results[:5]:
+        haystacks.append(
+            "\n".join(
+                str(result.get(key) or "")
+                for key in ("content", "path", "source", "title", "source_type", "collection")
+            ).lower()
+        )
+    matches: list[str] = []
+    for form in forms:
+        if any(form in haystack for haystack in haystacks):
+            matches.append(form)
+    return matches
+
+
 def _ndcg_at_k(rank: int, k: int = 5) -> float:
     """Normalized DCG@k for a single binary-relevance item.
 
@@ -391,12 +418,14 @@ def run_eval(
     rr_sum = 0.0
     ndcg_sum = 0.0
     latencies: list[float] = []
+    forbidden_hit_count = 0
     per_test: list[dict] = []
 
     for case in cases:
         q = case["query"]
         expected_source = case.get("expected_source", "")
         expected_content = case.get("expected_content", "")
+        forbidden_content = [str(item) for item in (case.get("forbidden_content") or []) if str(item)]
 
         if use_v2:
             params = {"q": q, "n": str(n_results)}
@@ -429,11 +458,17 @@ def run_eval(
         hs, hc_strict, rank, hc_loose = _expected_hit(
             results, expected_source, expected_content, expected_alternates, query=q
         )
+        forbidden_matches = _forbidden_matches(results, forbidden_content)
+        forbidden_hit = bool(forbidden_matches)
+        if forbidden_hit:
+            forbidden_hit_count += 1
+        effective_hc_strict = hc_strict and not forbidden_hit
+        effective_hc_loose = hc_loose and not forbidden_hit
         if hs:
             hits_source += 1
-        if hc_strict:
+        if effective_hc_strict:
             hits_content_strict += 1
-        if hc_loose:
+        if effective_hc_loose:
             hits_content_loose += 1
         if rank > 0:
             ranks.append(rank)
@@ -452,9 +487,12 @@ def run_eval(
                 "expected_source": expected_source,
                 "expected_content": expected_content,
                 "expected_alternates": expected_alternates,
+                "forbidden_content": forbidden_content,
+                "forbidden_hit": forbidden_hit,
+                "forbidden_matches": forbidden_matches,
                 "hit_source": hs,
-                "hit_content": hc_strict,
-                "hit_content_loose": hc_loose,
+                "hit_content": effective_hc_strict,
+                "hit_content_loose": effective_hc_loose,
                 "rank": rank,
                 "rr": round(rr, 3),
                 "ndcg5": round(ndcg, 3),
@@ -472,6 +510,8 @@ def run_eval(
         "hit_source_pct": round(100 * hits_source / total, 1) if total else 0,
         "hit_content_pct": round(100 * hits_content_strict / total, 1) if total else 0,
         "hit_content_loose_pct": round(100 * hits_content_loose / total, 1) if total else 0,
+        "forbidden_hit_count": forbidden_hit_count,
+        "negative_pass_pct": round(100 * (total - forbidden_hit_count) / total, 1) if total else 100.0,
         "mean_rank": round(sum(ranks) / len(ranks), 2) if ranks else 0,
         "mrr": round(rr_sum / total, 3) if total else 0,
         "ndcg5": round(ndcg_sum / total, 3) if total else 0,
@@ -484,6 +524,65 @@ def _persist_report(report: dict, track: str, content_metric: str) -> None:
     from eval_gate import _persist_eval_report
 
     _persist_eval_report(report, track=track, content_metric=content_metric)
+
+
+def _generate_rag_answer(question: str, contexts: list[str], *, timeout: int = 45) -> tuple[str, str]:
+    """Generate an answer from retrieved contexts for true answer-level RAGAS.
+
+    The legacy RAGAS path used top retrieved context as the "answer", which is
+    useful for faithfulness but makes answer relevance mostly informational.
+    This helper keeps retrieval unchanged but adds a cheap synthesis step so
+    answer_relevance measures an actual generated RAG answer.
+    """
+
+    if not contexts:
+        return "", "generated_empty_context"
+    context_text = "\n\n".join(f"[{i + 1}] {chunk[:900]}" for i, chunk in enumerate(contexts[:5]))
+    prompt = (
+        "You are Chris's Brain RAG answer generator. Answer the question using ONLY the retrieved "
+        "context. Directly answer the exact query first; do not answer adjacent questions. "
+        "If the context is insufficient for a specific detail, say what is missing, then give the "
+        "most concrete supported answer. Be concise.\n\n"
+        f"Question: {question[:500]}\n\nRetrieved context:\n{context_text}\n\nAnswer:"
+    )
+    try:
+        sys.path.insert(0, "/Users/chrischo/server/brain/brain_core")
+        from cli_llm import dispatch
+
+        result = dispatch(
+            "jenna",
+            prompt,
+            thinking="low",
+            timeout=timeout,
+            openclaw_agent="jenna",
+            backlog_kind="synthesis",
+            backlog_payload={"source": "eval_compare:ragas_answer", "prompt": prompt},
+        )
+    except Exception:
+        return contexts[0] if contexts else "", "generated_error_fallback_context"
+    if result.ok and result.text and result.text.strip():
+        return result.text.strip(), "generated"
+    return contexts[0] if contexts else "", "generated_failed_fallback_context"
+
+
+def _select_ragas_answer(
+    question: str,
+    contexts: list[str],
+    payload: dict,
+    *,
+    answer_source: str,
+    timeout: int = 45,
+) -> tuple[str, str]:
+    """Select the answer text sent to RAGAS plus an auditable source label."""
+
+    if answer_source == "generated":
+        return _generate_rag_answer(question, contexts, timeout=timeout)
+    if answer_source == "hyde":
+        hypothetical = str(payload.get("hypothetical") or "").strip()
+        if hypothetical:
+            return hypothetical, "hyde"
+        return (contexts[0] if contexts else ""), "hyde_missing_fallback_context"
+    return (contexts[0] if contexts else ""), "context"
 
 
 def main() -> int:
@@ -499,8 +598,18 @@ def main() -> int:
         "--ragas",
         action="store_true",
         help="M8.3: run RAGAS LLM-as-judge scoring (faithfulness/relevance) on each case "
-        "via openclaw_dispatch to Sage. Much slower (~5s/case) and costs "
-        "~$0.0005/case. Use on --limit 50 subsets.",
+        "via CLI-first dispatch (Codex gpt-5.5 primary, OpenClaw emergency fallback). "
+        "Much slower (~5s/case). Use on --limit 50 subsets.",
+    )
+    parser.add_argument(
+        "--ragas-answer-source",
+        choices=["context", "hyde", "generated"],
+        default="context",
+        help=(
+            "Answer text to judge in --ragas mode. 'context' preserves the legacy top-chunk surrogate; "
+            "'hyde' uses recall/v2 hypothetical answer when present; 'generated' synthesizes an answer "
+            "from retrieved context so answer_relevance is a real answer-level gate."
+        ),
     )
     parser.add_argument("--limit", type=int, default=0, help="Only run first N cases (0 = all)")
     parser.add_argument("--json", action="store_true")
@@ -518,7 +627,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--persist-track",
-        choices=["default", "stable", "extended", "legacy"],
+        choices=["default", "stable", "extended", "adversarial", "ragas", "holdout", "legacy"],
         default="",
         help="Persist this run to logs/eval-report[-track].json and eval-history[-track].jsonl.",
     )
@@ -559,9 +668,11 @@ def main() -> int:
             if not args.json:
                 print(f"\nRunning RAGAS judge on {len(cases)} cases...")
             scores = []
+            answer_sources: Counter[str] = Counter()
+            ragas_cases = []
             for i, case in enumerate(cases):
                 q = case["query"]
-                expected = case.get("expected_content", "")
+                expected = case.get("answer_rubric") or case.get("expected_content", "")
                 # Re-query to capture contexts for the judge
                 params = {"q": q, "n": "5"}
                 if args.hyde:
@@ -575,9 +686,13 @@ def main() -> int:
                     payload = _get(path, token)
                     results = payload.get("results", [])[:5]
                     contexts = [r.get("content", "")[:800] for r in results if r.get("content")]
-                    # The "answer" for RAGAS is the top-1 result's content — mirrors
-                    # how a naive RAG answer would be constructed from retrieval alone
-                    answer = contexts[0] if contexts else ""
+                    answer, selected_answer_source = _select_ragas_answer(
+                        q,
+                        contexts,
+                        payload,
+                        answer_source=args.ragas_answer_source,
+                    )
+                    answer_sources[selected_answer_source] += 1
                     s = _ragas_score(
                         q,
                         answer,
@@ -587,11 +702,23 @@ def main() -> int:
                         timeout=30,
                     )
                     scores.append(s)
+                    ragas_cases.append(
+                        {
+                            "query": q,
+                            "answer_source": selected_answer_source,
+                            "answer_preview": answer[:240],
+                            "answer_rubric": str(case.get("answer_rubric") or "")[:240],
+                            "score": s.to_dict(),
+                        }
+                    )
                     if not args.json and (i + 1) % 10 == 0:
                         print(f"  {i + 1}/{len(cases)} scored")
                 except Exception as e:
                     sys.stderr.write(f"ragas_judge failed on {i}: {e}\n")
             ragas_agg = _ragas_agg(scores)
+            ragas_agg["answer_source"] = args.ragas_answer_source
+            ragas_agg["answer_source_counts"] = dict(answer_sources)
+            ragas_agg["cases"] = ragas_cases
         except Exception as e:
             sys.stderr.write(f"ragas_judge wiring failed: {e}\n")
 

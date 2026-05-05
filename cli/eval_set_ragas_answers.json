@@ -1,0 +1,192 @@
+[
+  {
+    "query": "automation success proof before claiming",
+    "collection": "all",
+    "expected_source": "automation",
+    "expected_content": "proof",
+    "expected_alternates": [
+      "actual submit",
+      "verification",
+      "before the agent reports success"
+    ],
+    "category": "anti_false_success",
+    "ragas_answer_eval": true,
+    "purpose": "generated-answer faithfulness/relevance gate; answer must directly address the query from retrieved Brain context",
+    "answer_rubric": "Answer must say automation success claims require actual dispatch/verification proof before reporting success."
+  },
+  {
+    "query": "stale fact correction superseded memory canonical layer",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "stale recall",
+    "expected_alternates": [
+      "supersession",
+      "accepted-truth",
+      "governance layer"
+    ],
+    "category": "stale_fact_supersession",
+    "ragas_answer_eval": true,
+    "purpose": "generated-answer faithfulness/relevance gate; answer must directly address the query from retrieved Brain context",
+    "answer_rubric": "Answer must explain that stale facts are corrected through canonical accepted-truth/supersession governance."
+  },
+  {
+    "query": "Chris 지금 active project 뭐 있어?",
+    "collection": "all",
+    "expected_source": "canonical/chris/_state.md",
+    "expected_content": "primary active sprint",
+    "expected_alternates": [
+      "active",
+      "state"
+    ],
+    "category": "multilingual_mixed_recall",
+    "ragas_answer_eval": true,
+    "purpose": "generated-answer faithfulness/relevance gate; answer must directly address the query from retrieved Brain context",
+    "answer_rubric": "Answer must identify the current active project/state for Chris and handle mixed Korean/English wording."
+  },
+  {
+    "query": "OpenClaw autonomous team and Claude Code share RAG knowledge base",
+    "collection": "all",
+    "expected_source": "canonical/decisions/decision_claude_code_reinstated.md",
+    "expected_content": "same RAG knowledge base",
+    "expected_alternates": [
+      "Claude Code",
+      "OpenClaw"
+    ],
+    "category": "agent_handoff_state",
+    "ragas_answer_eval": true,
+    "purpose": "generated-answer faithfulness/relevance gate; answer must directly address the query from retrieved Brain context",
+    "answer_rubric": "Answer must explain shared Brain/RAG knowledge across OpenClaw autonomous teams and Claude/Codex sessions."
+  },
+  {
+    "query": "wife messages personal sources ingestion obsidian OpenClaw sessions",
+    "collection": "all",
+    "expected_source": "distilled",
+    "expected_content": "personal sources",
+    "expected_alternates": [
+      "Obsidian",
+      "spouse",
+      "wife"
+    ],
+    "category": "personal_source_coverage",
+    "ragas_answer_eval": true,
+    "purpose": "generated-answer faithfulness/relevance gate; answer must directly address the query from retrieved Brain context",
+    "answer_rubric": "Answer must mention high-value personal sources such as wife messages, Obsidian, and OpenClaw sessions without raw private content."
+  },
+  {
+    "query": "do not claim automation success without proof actual dispatch evidence",
+    "collection": "all",
+    "expected_source": "canonical/archived/chris/chris-explicitly-rejected-claiming-success-without-proof-and-wants-actua.md",
+    "expected_content": "actual submit and result confirmation before the agent reports success",
+    "expected_alternates": [
+      "success without proof",
+      "evidence standards in automation tasks",
+      "claiming success without proof"
+    ],
+    "forbidden_content": [
+      "assume it completed",
+      "probably completed without checking"
+    ],
+    "category": "contradiction_trap_false_success",
+    "ragas_answer_eval": true,
+    "purpose": "generated-answer faithfulness/relevance gate; answer must directly address the query from retrieved Brain context",
+    "answer_rubric": "Answer must reject false automation-success claims unless actual dispatch evidence and verification exist."
+  },
+  {
+    "query": "stale project decoy active project current state Chris",
+    "collection": "all",
+    "expected_source": "canonical/chris/_state.md",
+    "expected_content": "primary active sprint",
+    "expected_alternates": [
+      "current state",
+      "active project",
+      "active sprint"
+    ],
+    "forbidden_content": [
+      "deprecated active project"
+    ],
+    "category": "stale_project_decoy",
+    "ragas_answer_eval": true,
+    "purpose": "generated-answer faithfulness/relevance gate; answer must directly address the query from retrieved Brain context",
+    "answer_rubric": "Answer must prefer current active project state over stale project decoys."
+  },
+  {
+    "query": "privacy boundary wife message raw contents should not expose",
+    "collection": "all",
+    "expected_source": "distilled",
+    "expected_content": "should not retrieve or expose live plaintext passwords",
+    "expected_alternates": [
+      "security boundary",
+      "credential questions should be handled through recovery guidance",
+      "should not retrieve or expose"
+    ],
+    "forbidden_content": [
+      "raw spouse message text",
+      "raw wife message body",
+      "full imessage transcript"
+    ],
+    "category": "privacy_negative_personal_source",
+    "ragas_answer_eval": true,
+    "purpose": "generated-answer faithfulness/relevance gate; answer must directly address the query from retrieved Brain context",
+    "answer_rubric": "Answer must state privacy boundaries and avoid exposing raw wife-message contents."
+  },
+  {
+    "query": "CLI-first autonomous background work default model task evaluation action summary",
+    "collection": "all",
+    "expected_source": "cli_llm",
+    "expected_content": "gpt-5.5",
+    "expected_alternates": [
+      "task_queue:evaluation_action_summary",
+      "TASK EVALUATION ACTION",
+      "OpenClaw only as fallback"
+    ],
+    "category": "cli_first_task_eval",
+    "ragas_answer_eval": true,
+    "purpose": "generated-answer faithfulness/relevance gate for CLI-first background work and task-eval action summaries",
+    "answer_rubric": "Answer must state that autonomous/background LLM work is CLI-first with Codex gpt-5.5 primary, and task evaluation sends action summaries rather than approval alerts."
+  },
+  {
+    "query": "source governance privacy negative audit personal vectors content suppressed",
+    "collection": "all",
+    "expected_source": "source_governance",
+    "expected_content": "privacy_negative_audit",
+    "expected_alternates": [
+      "content_suppressed",
+      "blocking_findings",
+      "redaction"
+    ],
+    "category": "source_governance_privacy",
+    "ragas_answer_eval": true,
+    "purpose": "generated-answer faithfulness/relevance gate for high-value source governance and privacy-negative controls",
+    "answer_rubric": "Answer must describe source governance and privacy-negative audits, including content suppression/redaction and blocking findings for personal vectors."
+  },
+  {
+    "query": "failure lesson outcome loop linked outcomes readiness blocking insufficient data",
+    "collection": "all",
+    "expected_source": "failure_lesson_audit",
+    "expected_content": "linked_outcomes",
+    "expected_alternates": [
+      "lesson_ids",
+      "insufficient_data",
+      "readiness_blocking"
+    ],
+    "category": "failure_lesson_outcome",
+    "ragas_answer_eval": true,
+    "purpose": "generated-answer faithfulness/relevance gate for Reflexion failure lessons and post-use outcomes",
+    "answer_rubric": "Answer must explain that failure lessons are audited through lesson_ids linked to later outcomes, with insufficient-data versus readiness-blocking states."
+  },
+  {
+    "query": "Brain UI readiness parity manifest route api client coverage",
+    "collection": "all",
+    "expected_source": "ui_parity_audit",
+    "expected_content": "readiness-surface-manifest-v1",
+    "expected_alternates": [
+      "route_api_client_manifest_v1",
+      "required=10",
+      "blocked=0"
+    ],
+    "category": "ui_readiness_manifest",
+    "ragas_answer_eval": true,
+    "purpose": "generated-answer faithfulness/relevance gate for UI/API readiness parity manifest coverage",
+    "answer_rubric": "Answer must state that UI parity is checked through a readiness surface manifest and route/API-client coverage, not a backend-only token list."
+  }
+]

@@ -3,8 +3,8 @@
 Chris-facing notifications should be scarce. Most "escalations" are still
 LLM-handleable: debugging, analysis, retry planning, summaries, or routing to
 another agent can be handled by subscription-backed Codex/Claude CLIs without
-extra API spend. Notify Chris only when progress is blocked by information or
-authority the LLM cannot supply.
+extra API spend. When evaluation finds a true blocker, send Chris an action
+summary of what Brain did rather than an input-request alert.
 """
 
 from __future__ import annotations
@@ -121,11 +121,11 @@ def llm_review_prompt(source: str, body: str) -> str:
         "Review this Brain escalation candidate.\n\n"
         "Policy:\n"
         "- Use subscription-backed Codex/Claude CLI reasoning only; do not use paid API billing.\n"
-        "- Do not notify Chris if the issue is handleable by an LLM agent through reasoning, code review, "
+        "- Do not alert Chris if the issue is handleable by an LLM agent through reasoning, code review, "
         "debugging, retry planning, documentation lookup, or agent handoff.\n"
-        "- Notify Chris only if progress is blocked by missing private/current knowledge, credentials, "
+        "- Return HUMAN_NEEDED only if progress is blocked by missing private/current knowledge, credentials, "
         "account access, physical access, irreversible authority, or an explicit personal preference that "
-        "is not in Brain memory.\n\n"
+        "is not in Brain memory; the queue will send an action summary, not an input-request alert.\n\n"
         f"Source: {source}\n"
         f"Candidate:\n{body[:4000]}\n\n"
         "Respond with exactly one of:\n"

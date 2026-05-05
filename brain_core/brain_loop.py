@@ -13,7 +13,7 @@ never *initiates*.
 
 Key properties:
 - No LLM in the hot path. LLM only fires on DISPATCH_AGENT decisions through
-  openclaw_dispatch, which is rate-limited and autonomy-gated.
+  the CLI LLM fallback chain, which is rate-limited and autonomy-gated.
 - Hard wall-clock budget per tick (TICK_BUDGET_S = 10 s). If exceeded, current
   tick completes best-effort and next tick fires at the normal interval.
 - Single-writer lock: only one tick runs at a time (cross-process flock).
@@ -29,7 +29,7 @@ Trigger: scheduler job `brain_loop_tick` at IntervalTrigger(seconds=60) +
   scheduler._alert_failure on 3-fail breaker, self_heal dispatcher).
 Consumer: journal file (observability), action_audit table (audit trail),
   eval_proposals (L1 proposals), doorbell file (L2 push to Claude),
-  openclaw_dispatch (L2 agent dispatch).
+  CLI LLM dispatch with OpenClaw fallback (L2 agent dispatch).
 Effect: goals advance without Chris asking, stalled tasks get interventions,
   breaker trips Telegram immediately, contradictions reach Sage autonomously,
   miss clusters get proposed as intent routes.
@@ -75,16 +75,9 @@ except ImportError:
     check_decision_contradictions = None  # type: ignore[assignment]
 
 try:
-    # 2026-04-17: revert to real openclaw_dispatch for agent work. cli_llm
-    # is correct for stateless LLM calls (HyDE, extraction, classification),
-    # but brain_loop.DISPATCH_AGENT hands a task to a specialist agent
-    # (Sage investigates contradictions, Jenna pushes Telegram summaries).
-    # CLI path is a stateless LLM call — it loses the agent's AGENTS.md
-    # persona, workspace memory, MCP tools, and Jenna→Telegram routing.
-    # Agent dispatches must go through the OpenClaw gateway.
-    from openclaw_dispatch import dispatch as _openclaw_dispatch
+    from cli_llm import dispatch as _cli_dispatch
 except ImportError:
-    _openclaw_dispatch = None  # type: ignore[assignment]
+    _cli_dispatch = None  # type: ignore[assignment]
 
 try:
     from autonomy import authorize as _authorize
@@ -1653,20 +1646,26 @@ def _write_eval_proposal(payload: dict) -> bool:
 
 
 def _dispatch_agent(agent: str, message: str) -> bool:
-    if _openclaw_dispatch is None:
-        return False
-    try:
-        result = _openclaw_dispatch(
-            agent=agent,
-            message=message,
-            thinking="low",
-            timeout=60,
-            degraded_placeholder=f"[brain_loop → {agent} dispatch failed]",
-        )
-        return bool(getattr(result, "ok", False))
-    except Exception as e:
-        log.warning("openclaw_dispatch failed for %s: %s", agent, e)
-        return False
+    """Dispatch autonomous background work CLI-first; OpenClaw remains fallback."""
+    if _cli_dispatch is not None:
+        try:
+            result = _cli_dispatch(
+                agent=agent,
+                message=message,
+                thinking="low",
+                timeout=60,
+                openclaw_agent=agent,
+                backlog_kind="proactive",
+                backlog_payload={"source": "brain_loop", "agent": agent, "message": message},
+                degraded_placeholder=f"[brain_loop → {agent} dispatch failed]",
+            )
+            return bool(getattr(result, "ok", False) or getattr(result, "backlogged", False))
+        except Exception as e:
+            log.warning("cli_llm dispatch failed for %s: %s", agent, e)
+
+    # Mechanical background work must not bypass cli_llm. If cli_llm cannot
+    # import, fail closed; cli_llm owns provider fallback and backlog catch-up.
+    return False
 
 
 def _send_chris_telegram(body: str) -> bool:
@@ -1688,9 +1687,8 @@ def _subscription_llm_handle_alert(body: str) -> bool:
     """Route a handleable alert to subscription-backed agents before Chris.
 
     This is the broad proactive gate: Brain alerts should become work for Sage
-    unless they require Chris-only knowledge/authority. The OpenClaw path keeps
-    tool-enabled behavior; the stateless CLI fallback is only a review/backlog
-    safety net.
+    unless they require Chris-only knowledge/authority. Background work is
+    CLI-first; OpenClaw is only a fallback/integration lane.
     """
     try:
         from escalation_policy import llm_review_prompt, llm_says_human_needed

@@ -216,12 +216,16 @@ class MetricsBuffer:
         latency_ms: float,
         error: bool = False,
         status_code: int = 0,
+        traffic_class: str = "prod",
     ) -> None:
         """Record a completed request. 2026-04-16 R-8: status_code param
         added so metrics can distinguish 2xx/4xx/5xx — previously every
         non-5xx was indistinguishable in aggregate stats."""
         with self._lock:
             key = self._normalize_path(path)
+            traffic = (traffic_class or "prod").strip().lower()
+            if traffic and traffic != "prod":
+                key = f"{key}#{traffic}"
             stats = self._routes[key]
             stats.count += 1
             stats.samples.append((time.time(), latency_ms))

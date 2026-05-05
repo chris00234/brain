@@ -113,6 +113,37 @@ def test_agent_messenger_notifies_for_explicit_human_blocker(monkeypatch):
     assert len(telegram_calls) == 1
 
 
+def test_agent_messenger_handoff_task_keeps_full_description(monkeypatch):
+    created: list[dict] = []
+
+    class _FakeTaskQueue:
+        def create_task(self, **kwargs):
+            created.append(kwargs)
+            return {"id": "task_fake", **kwargs}
+
+    fake_task_queue = type(sys)("task_queue")
+    fake_task_queue.task_queue = _FakeTaskQueue()
+    monkeypatch.setitem(sys.modules, "task_queue", fake_task_queue)
+
+    content = "Resolve/confirm the full handoff details, including repo paths and expected evidence."
+    action = agent_messenger.route_message(
+        {
+            "id": "msg_123",
+            "from_agent": "jenna",
+            "to_agent": "ellie",
+            "content": content,
+            "message_type": "handoff",
+            "priority": 4,
+            "metadata": {},
+        }
+    )
+
+    assert action == "task_created"
+    assert created[0]["description"] == content
+    assert created[0]["metadata"]["source_message_id"] == "msg_123"
+    assert created[0]["metadata"]["from_agent"] == "jenna"
+
+
 def test_task_queue_reviews_handleable_escalation_with_subscription_llm(monkeypatch, tmp_path):
     llm_calls: list[dict] = []
     telegram_calls: list[dict] = []
@@ -173,6 +204,108 @@ def test_task_queue_self_routes_handleable_real_task(monkeypatch, tmp_path):
     assert updated["status"] == "approved"
     assert updated["assigned_agent"] == "sage"
     assert updated["metadata"]["escalation_llm_route"] == "handleable"
+
+
+def test_task_queue_defers_transient_dispatch_errors(monkeypatch, tmp_path):
+    dispatch_calls: list[dict] = []
+
+    class _Gate:
+        allowed = True
+        requires_ack = False
+        reason = ""
+
+    class _Result:
+        ok = False
+        text = ""
+        error = "breaker_half_open_probing (cooldown 0s)"
+
+    fake_cli = type(sys)("cli_llm")
+    fake_cli.dispatch = lambda **kwargs: dispatch_calls.append(kwargs) or _Result()
+    fake_autonomy = type(sys)("autonomy")
+    fake_autonomy.authorize = lambda *_args, **_kwargs: _Gate()
+    monkeypatch.setitem(sys.modules, "cli_llm", fake_cli)
+    monkeypatch.setitem(sys.modules, "autonomy", fake_autonomy)
+
+    tq = TaskQueue(tmp_path / "autonomy.db")
+    task = tq.create_task(
+        title="Handoff from jenna",
+        description="Verify a brain knowledge gap.",
+        assigned_agent="ellie",
+        confidence=0.9,
+    )
+    tq.approve_task(task["id"], by="test")
+
+    results = tq.process_ready()
+    updated = tq.get_task(task["id"])
+
+    assert len(results) == 1
+    assert dispatch_calls[0].get("backend") is None
+    assert dispatch_calls[0].get("openclaw_agent") == "ellie"
+    assert "max_backends" not in dispatch_calls[0]
+    assert dispatch_calls[0]["agent"] == "ellie"
+    assert updated["status"] == "approved"
+    assert updated["started_at"] is None
+    assert updated["error"] == "breaker_half_open_probing (cooldown 0s)"
+    assert updated["metadata"]["next_attempt_at"]
+    assert updated["metadata"]["dispatch_retry_after_s"] == 300
+    assert tq.list_outcomes() == []
+
+
+def test_task_queue_defers_timeout_dispatch_errors(monkeypatch, tmp_path):
+    class _Gate:
+        allowed = True
+        requires_ack = False
+        reason = ""
+
+    class _Result:
+        ok = False
+        text = ""
+        error = "timeout after 130s: OpenClaw gateway banner"
+
+    fake_cli = type(sys)("cli_llm")
+    fake_cli.dispatch = lambda **_kwargs: _Result()
+    fake_autonomy = type(sys)("autonomy")
+    fake_autonomy.authorize = lambda *_args, **_kwargs: _Gate()
+    monkeypatch.setitem(sys.modules, "cli_llm", fake_cli)
+    monkeypatch.setitem(sys.modules, "autonomy", fake_autonomy)
+
+    tq = TaskQueue(tmp_path / "autonomy.db")
+    task = tq.create_task(
+        title="Handoff from jenna",
+        description="Verify a brain knowledge gap.",
+        assigned_agent="liz",
+        confidence=0.9,
+    )
+    tq.approve_task(task["id"], by="test")
+
+    tq.process_ready()
+    updated = tq.get_task(task["id"])
+
+    assert updated["status"] == "approved"
+    assert updated["started_at"] is None
+    assert "timeout after" in updated["error"]
+    assert updated["metadata"]["dispatch_retry_after_s"] == 600
+    assert tq.list_outcomes() == []
+
+
+def test_task_queue_requeues_running_orphans(tmp_path):
+    tq = TaskQueue(tmp_path / "autonomy.db")
+    task = tq.create_task(
+        title="Handoff from jenna",
+        description="Verify a brain knowledge gap.",
+        assigned_agent="ellie",
+        confidence=0.9,
+    )
+    tq.approve_task(task["id"], by="test")
+    tq.start_task(task["id"], by="test")
+
+    assert tq.requeue_running_orphans(by="test_startup") == 1
+    updated = tq.get_task(task["id"])
+
+    assert updated["status"] == "approved"
+    assert updated["started_at"] is None
+    assert updated["metadata"]["orphaned_running_requeued_by"] == "test_startup"
+    assert updated["execution_log"][-1]["reason"] == "running task orphaned by server restart"
 
 
 def test_task_queue_notifies_only_human_blocker(monkeypatch, tmp_path):

@@ -1,0 +1,153 @@
+[
+  {
+    "query": "automation success proof before claiming",
+    "collection": "all",
+    "expected_source": "automation",
+    "expected_content": "proof",
+    "expected_alternates": [
+      "actual submit",
+      "verification",
+      "before the agent reports success"
+    ],
+    "category": "anti_false_success"
+  },
+  {
+    "query": "stale fact correction superseded memory canonical layer",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "stale recall",
+    "expected_alternates": [
+      "supersession",
+      "accepted-truth",
+      "governance layer"
+    ],
+    "category": "stale_fact_supersession"
+  },
+  {
+    "query": "Chris 지금 active project 뭐 있어?",
+    "collection": "all",
+    "expected_source": "canonical/chris/_state.md",
+    "expected_content": "primary active sprint",
+    "expected_alternates": [
+      "active",
+      "state"
+    ],
+    "category": "multilingual_mixed_recall"
+  },
+  {
+    "query": "OpenClaw autonomous team and Claude Code share RAG knowledge base",
+    "collection": "all",
+    "expected_source": "canonical/decisions/decision_claude_code_reinstated.md",
+    "expected_content": "same RAG knowledge base",
+    "expected_alternates": [
+      "Claude Code",
+      "OpenClaw"
+    ],
+    "category": "agent_handoff_state"
+  },
+  {
+    "query": "wife messages personal sources ingestion obsidian OpenClaw sessions",
+    "collection": "all",
+    "expected_source": "distilled",
+    "expected_content": "personal sources",
+    "expected_alternates": [
+      "Obsidian",
+      "spouse",
+      "wife"
+    ],
+    "category": "personal_source_coverage"
+  },
+  {
+    "query": "do not claim automation success without proof actual dispatch evidence",
+    "collection": "all",
+    "expected_source": "canonical/archived/chris/chris-explicitly-rejected-claiming-success-without-proof-and-wants-actua.md",
+    "expected_content": "actual submit and result confirmation before the agent reports success",
+    "expected_alternates": [
+      "success without proof",
+      "evidence standards in automation tasks",
+      "claiming success without proof"
+    ],
+    "forbidden_content": [
+      "assume it completed",
+      "probably completed without checking"
+    ],
+    "category": "contradiction_trap_false_success"
+  },
+  {
+    "query": "stale project decoy active project current state Chris",
+    "collection": "all",
+    "expected_source": "canonical/chris/_state.md",
+    "expected_content": "primary active sprint",
+    "expected_alternates": [
+      "current state",
+      "active project",
+      "active sprint"
+    ],
+    "forbidden_content": [
+      "deprecated active project"
+    ],
+    "category": "stale_project_decoy"
+  },
+  {
+    "query": "privacy boundary wife message raw contents should not expose",
+    "collection": "all",
+    "expected_source": "distilled",
+    "expected_content": "should not retrieve or expose live plaintext passwords",
+    "expected_alternates": [
+      "security boundary",
+      "credential questions should be handled through recovery guidance",
+      "should not retrieve or expose"
+    ],
+    "forbidden_content": [
+      "raw spouse message text",
+      "raw wife message body",
+      "full imessage transcript"
+    ],
+    "category": "privacy_negative_personal_source"
+  },
+  {
+    "query": "Chris는 자동화 성공을 증거 없이 말하면 안 된다",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "actual submit and result confirmation",
+    "expected_alternates": [
+      "success without proof",
+      "safe execution paths",
+      "progress reporting"
+    ],
+    "forbidden_content": [
+      "no verification needed"
+    ],
+    "category": "multilingual_korean_automation_rule"
+  },
+  {
+    "query": "source ingestion high value personal Obsidian OpenClaw avoid pollution",
+    "collection": "all",
+    "expected_source": "distilled",
+    "expected_content": "does not want indiscriminate ingestion",
+    "expected_alternates": [
+      "high-value notes",
+      "selected personal sources",
+      "personal knowledge pipeline"
+    ],
+    "forbidden_content": [
+      "ingest everything indiscriminately"
+    ],
+    "category": "source_pollution_negative"
+  },
+  {
+    "query": "OpenClaw gateway running proof before escalation",
+    "collection": "all",
+    "expected_source": "distilled",
+    "expected_content": "loopback port 18789",
+    "expected_alternates": [
+      "http://127.0.0.1:18789",
+      "ws://127.0.0.1:18789",
+      "OpenClaw gateway is expected"
+    ],
+    "forbidden_content": [
+      "gateway is impossible to verify"
+    ],
+    "category": "gateway_escalation_truth"
+  }
+]

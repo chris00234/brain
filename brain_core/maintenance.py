@@ -3,28 +3,28 @@
 D3: Job log rotation — truncate logs older than 7 days, cap at 1MB.
 D4: Qdrant collections integrity check — readyz probe + points count sanity.
 
-Called by the scheduler as fire-and-forget jobs. Alerts via openclaw_dispatch
-to Jenna if integrity check fails.
+Called by the scheduler as fire-and-forget jobs. Integrity failures are
+reported through direct Telegram / scheduler alert paths, not OpenClaw.
 """
 
 from __future__ import annotations
 
+import gzip
 import json
 import re
+import shutil
 import sqlite3
 import subprocess
 import subprocess as _sp
-import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 try:
     from config import BRAIN_LOGS_DIR as LOGS_DIR
-    from config import JOBS_LOGS_DIR, OPENCLAW_BIN
+    from config import JOBS_LOGS_DIR
 except ImportError:
     LOGS_DIR = Path("/Users/chrischo/server/brain/logs")
     JOBS_LOGS_DIR = LOGS_DIR / "jobs"
-    OPENCLAW_BIN = "/Users/chrischo/.local/bin/openclaw"
 MAX_LOG_SIZE = 524_288  # 512KB
 MAX_LOG_AGE_DAYS = 3
 
@@ -116,7 +116,10 @@ def vacuum_embed_cache(max_size_mb: int = 100, max_age_days: int = 14) -> dict:
         if has_ts > count_before * 0.5:
             before_ttl = conn.total_changes
             conn.execute(
-                "DELETE FROM embeddings WHERE created_at != '' AND julianday('now') - julianday(created_at) > ?",
+                (
+                    "DELETE FROM embeddings WHERE created_at != '' "
+                    "AND julianday('now') - julianday(created_at) > ?"
+                ),
                 (max_age_days,),
             )
             deleted_by_ttl = conn.total_changes - before_ttl
@@ -124,7 +127,10 @@ def vacuum_embed_cache(max_size_mb: int = 100, max_age_days: int = 14) -> dict:
             # Fallback: rowid-based for legacy entries without timestamps
             keep = int(count_before * 0.8)
             conn.execute(
-                "DELETE FROM embeddings WHERE rowid NOT IN (SELECT rowid FROM embeddings ORDER BY rowid DESC LIMIT ?)",
+                (
+                    "DELETE FROM embeddings WHERE rowid NOT IN "
+                    "(SELECT rowid FROM embeddings ORDER BY rowid DESC LIMIT ?)"
+                ),
                 (keep,),
             )
         # Size cap is the actual SLO guard. TTL alone can leave a fresh ingest
@@ -214,6 +220,47 @@ def rotate_jsonl_logs(max_lines: int = 500) -> dict:
     return {"rotated": rotated}
 
 
+def compress_large_log_backups(min_size_mb: int = 50) -> dict:
+    """Gzip large rollback ``*.bak`` files under logs/ without deleting data.
+
+    Operators and agents create point-in-time SQLite rollback copies before
+    risky repairs. Plain ``*.bak`` database files are useful, but large enough
+    to breach ``logs_dir_total_mb`` by themselves. Compress them in-place
+    during normal cleanup so rollback evidence stays available without
+    consuming hot log budget.
+    """
+
+    compressed = 0
+    skipped = 0
+    min_size = min_size_mb * 1024 * 1024
+    for f in LOGS_DIR.glob("*.bak"):
+        tmp_path: Path | None = None
+        try:
+            if not f.is_file() or f.stat().st_size < min_size:
+                skipped += 1
+                continue
+            gz_path = f.with_name(f.name + ".gz")
+            if gz_path.exists():
+                skipped += 1
+                continue
+            tmp_path = gz_path.with_suffix(gz_path.suffix + ".tmp")
+            with f.open("rb") as src, gzip.open(tmp_path, "wb", compresslevel=9) as dst:
+                shutil.copyfileobj(src, dst)
+            tmp_path.replace(gz_path)
+            f.unlink()
+            compressed += 1
+        except Exception:
+            skipped += 1
+            try:
+                if tmp_path and tmp_path.exists():
+                    tmp_path.unlink()
+            except Exception:
+                pass
+    if compressed:
+        print(f"[compress_large_log_backups] compressed {compressed} .bak files")
+    return {"compressed": compressed, "skipped": skipped}
+
+
 def prune_scheduler_history(keep_days: int = 30) -> dict:
     """Prune rows older than keep_days from scheduler_history.db job_history table.
 
@@ -236,7 +283,10 @@ def prune_scheduler_history(keep_days: int = 30) -> dict:
         deleted = before - after
         if deleted:
             print(
-                f"[prune_scheduler_history] {before} → {after} rows (deleted {deleted} older than {keep_days}d)"
+                (
+                    f"[prune_scheduler_history] {before} → {after} rows "
+                    f"(deleted {deleted} older than {keep_days}d)"
+                )
             )
         return {"status": "ok", "before": before, "after": after, "deleted": deleted}
     except Exception as e:
@@ -263,7 +313,10 @@ def prune_raw_inbox(max_age_days: int = 30) -> dict:
         orphaned_count = sum(1 for _ in orphaned_dir.glob("*.json"))
         if moved:
             print(
-                f"[prune_raw_inbox] moved {moved} records older than {max_age_days}d to raw/orphaned/ (total orphaned: {orphaned_count})"
+                (
+                    f"[prune_raw_inbox] moved {moved} records older than {max_age_days}d "
+                    f"to raw/orphaned/ (total orphaned: {orphaned_count})"
+                )
             )
         return {"status": "ok", "moved": moved, "orphaned_total": orphaned_count}
     except Exception as e:
@@ -294,7 +347,10 @@ def prune_raw_orphaned(max_age_days: int = 180) -> dict:
         remaining = sum(1 for _ in orphaned.glob("*.json"))
         if deleted:
             print(
-                f"[prune_raw_orphaned] deleted {deleted} records older than {max_age_days}d (remaining: {remaining})"
+                (
+                    f"[prune_raw_orphaned] deleted {deleted} records older than {max_age_days}d "
+                    f"(remaining: {remaining})"
+                )
             )
         return {"status": "ok", "deleted": deleted, "remaining": remaining}
     except Exception as e:
@@ -528,6 +584,7 @@ if __name__ == "__main__":
             "vacuum_embed_cache",
             "prune_memory_access",
             "rotate_jsonl",
+            "compress_large_log_backups",
             "prune_raw_inbox",
             "prune_raw_orphaned",
             "vacuum_autonomy_db",
@@ -547,6 +604,8 @@ if __name__ == "__main__":
         print(json.dumps(prune_memory_access()))
     elif args.task == "rotate_jsonl":
         print(json.dumps(rotate_jsonl_logs()))
+    elif args.task == "compress_large_log_backups":
+        print(json.dumps(compress_large_log_backups()))
     elif args.task == "prune_raw_inbox":
         print(json.dumps(prune_raw_inbox()))
     elif args.task == "prune_raw_orphaned":
@@ -563,6 +622,7 @@ if __name__ == "__main__":
         results = {
             "rotate_logs": rotate_logs(),
             "rotate_jsonl": rotate_jsonl_logs(),
+            "compress_large_log_backups": compress_large_log_backups(),
             "prune_memory_access": prune_memory_access(),
             "prune_raw_inbox": prune_raw_inbox(),
             "vacuum_embed_cache": vacuum_embed_cache(),

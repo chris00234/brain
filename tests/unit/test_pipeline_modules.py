@@ -98,6 +98,34 @@ def test_skill_extractor_imports():
     assert skill_extractor is not None
 
 
+def test_skill_extractor_digest_uses_direct_telegram(monkeypatch):
+    import sys
+    from types import SimpleNamespace
+
+    import skill_extractor
+
+    calls = []
+    monkeypatch.setitem(
+        sys.modules,
+        "telegram_alert",
+        SimpleNamespace(
+            send_chris_telegram=lambda body, source, severity: calls.append(
+                {"body": body, "source": source, "severity": severity}
+            )
+            or True
+        ),
+    )
+
+    assert skill_extractor.send_digest_to_telegram("weekly digest") is True
+    assert calls == [
+        {
+            "body": "weekly digest",
+            "source": "skill_extractor:weekly_digest",
+            "severity": "info",
+        }
+    ]
+
+
 # ── hnsw_tuner ──────────────────────────────────────────────────
 def test_hnsw_tuner_imports():
     import hnsw_tuner

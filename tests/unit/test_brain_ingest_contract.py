@@ -16,23 +16,27 @@ def test_brain_ingest_writes_source_aware_contract(tmp_path, monkeypatch):
     brain_dir = tmp_path / "brain"
     brain_dir.mkdir()
     monkeypatch.setattr(knowledge, "BRAIN_DIR", brain_dir)
+    calls = []
 
-    import brain_core.openclaw_dispatch as openclaw_dispatch
+    import brain_core.cli_llm as cli_llm
 
     monkeypatch.setattr(
-        openclaw_dispatch,
+        cli_llm,
         "dispatch",
-        lambda **kwargs: SimpleNamespace(
-            ok=True,
-            text=json.dumps(
-                {
-                    "title": "Contract note",
-                    "summary": "Semantic chunking and tags are preserved.",
-                    "key_facts": ["fact"],
-                    "domain": "infra",
-                }
-            ),
-            error="",
+        lambda *args, **kwargs: (
+            calls.append({"args": args, **kwargs})
+            or SimpleNamespace(
+                ok=True,
+                text=json.dumps(
+                    {
+                        "title": "Contract note",
+                        "summary": "Semantic chunking and tags are preserved.",
+                        "key_facts": ["fact"],
+                        "domain": "infra",
+                    }
+                ),
+                error="",
+            )
         ),
     )
 
@@ -63,3 +67,10 @@ def test_brain_ingest_writes_source_aware_contract(tmp_path, monkeypatch):
         assert record.get(key) not in (None, "", [], {})
     assert "semantic" in record["tags"]
     assert record["source_type"] == "manual_ingest"
+    assert calls
+    assert calls[0]["agent"] == "sage"
+    assert calls[0]["openclaw_agent"] == "sage"
+    assert calls[0]["backlog_kind"] == "synthesis"
+    assert calls[0]["backlog_payload"]["source"] == "routes.knowledge:brain_ingest"
+    assert "backend" not in calls[0]
+    assert "max_backends" not in calls[0]
