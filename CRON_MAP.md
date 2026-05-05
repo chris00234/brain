@@ -3,7 +3,7 @@
 > Auto-generated from `brain_core/job_definitions.py` by `cli/render_cron_map.py`.
 > Do not hand-edit; run `.venv/bin/python cli/render_cron_map.py --write`.
 
-**Total jobs**: 123
+**Total jobs**: 139
 **Default `misfire_grace`**: 300s (5min). Heavy nightly jobs override per job.
 
 ## Jobs by owning agent
@@ -53,18 +53,20 @@
 | `screen_time_ingest` | `cron(day_of_week=sun, hour=4, minute=35)` | standard | - | 300s | Screen Time daily patterns via Sage -> raw/inbox (weekly) |
 | `weekly_synthesis` | `cron(day_of_week=sun, hour=4, minute=15)` | heavy | llm | 300s | Weekly arc (Sage, Sunday 4:15am) |
 
-### system (98 jobs)
+### system (114 jobs)
 
 | Name | Trigger | Budget | Tags | Misfire Grace | Description |
 |---|---|---|---|---|---|
 | `action_audit_retention` | `cron(hour=4, minute=20)` | standard | - | 900s | Prune action_audit rows older than 90d (daily 4:20am) |
+| `adversarial_memory_eval` | `cron(day_of_week=sun, hour=5, minute=5)` | medium | eval, memory, qdrant | 900s | Weekly adversarial memory eval for stale facts, multilingual recall, handoff state, and source coverage (Sun 05:05) |
 | `answer_canonicalize` | `cron(hour=4, minute=2)` | heavy | llm, qdrant | 900s | Nightly query->canonical promoter (04:02am - staggered off sleep_consolidate @03:55 which contends for local embedder/LLM) |
 | `apple_health_ingest` | `cron(hour=8, minute=0)` | standard | - | 900s | Apple Health daily recovery signal (sleep/HRV/RHR/kcal) -> raw/inbox (8:00am, after iPhone 7:30 Shortcut + iCloud sync) |
 | `atoms_to_skills` | `cron(day_of_week=sun, hour=4, minute=58)` | heavy | llm, sqlite | 900s | Promote high-confidence atoms -> domain Claude Code skills (Sun 04:58 - staggered off llm_usage_purge @4:55) |
 | `auto_resolve_contradictions` | `cron(hour=6, minute=0)` | standard | - | 900s | Daily auto-resolve stale/low-confidence contradictions (6:00am) - v3 bumped from weekly to daily after finding 20-item pending backlog that should have been closed overnight |
 | `autonomy_decisions_retention` | `cron(hour=4, minute=35)` | standard | - | 900s | Prune autonomy_decisions rows older than 14d (daily 4:35am) |
 | `autonomy_proposer` | `cron(hour=4, minute=45)` | standard | - | 300s | Phase 7: surface autonomy level promote/demote proposals (4:45am) |
-| `backup_verify` | `cron(day=1, hour=4, minute=45)` | heavy | backup, sqlite | 900s | Monthly backup restore smoke test (1st of month, 4:45am - staggered off llm_usage_retention @04:30 which also touches SQLite / MinIO) |
+| `backup_restore_drill` | `cron(day_of_week=sat, hour=4, minute=35)` | standard | backup, neo4j, qdrant, sqlite | 900s | Weekly backup restore-readiness drill (SQLite integrity + Qdrant temp restore + Neo4j archive validation) |
+| `backup_verify` | `cron(day=1, hour=4, minute=45)` | heavy | backup, qdrant, sqlite | 900s | Monthly Qdrant backup restore smoke test (1st of month, 4:45am - staggered off llm_usage_retention @04:30 which also touches SQLite / MinIO) |
 | `brain_loop_tick` | `interval(0:01:30)` | standard | - | 30s | v3: brain_loop executive cortex tick (every 90s — relaxed from 60s 2026-04-22 to cut 33% of ticks) |
 | `brain_speak_digest` | `cron(hour=7, minute=55)` | standard | - | 300s | Brain's morning digest to Chris — drives observe, composer ranks, top 3 via Telegram (07:55 PT, scheduler runs in local tz). |
 | `brain_speak_urgent` | `cron(minute=*/5)` | standard | - | 300s | Every 5 min: scan drives for severity>=7.5 observations, write to active Claude Code session doorbells. This is brain's interrupt channel. |
@@ -79,14 +81,19 @@
 | `canonicalize_entities_dryrun` | `cron(day_of_week=sun, hour=6, minute=45)` | heavy | embedder, neo4j | 900s | v3: weekly entity dedup proposal scan (Sun 06:45, dry-run) |
 | `code_index_refresh` | `cron(hour=3, minute=35)` | heavy | embedder, index, qdrant | 1200s | Daily incremental code function indexer (3:35am - staggered off sm2_nightly at 03:25) |
 | `confidence_calibration` | `cron(day_of_week=sun, hour=4, minute=10)` | heavy | eval, sqlite | 900s | Weekly Platt calibration of atoms.confidence vs eval outcomes (Sun 04:10) |
+| `config_secret_audit` | `cron(hour=6, minute=47)` | light | config, secrets | 900s | Daily safe audit of required Brain/OpenClaw config and secret sources without printing values (06:47 PT) |
 | `content_quality_slo` | `cron(hour=4, minute=5)` | standard | - | 300s | Daily content quality SLO check (4:00am, after eval_run) |
 | `contextual_embed_weekly` | `cron(day_of_week=sun, hour=5, minute=10)` | heavy | embedder, index, qdrant | 1800s | T2.12: re-embed canonical chunks with Anthropic-style per-doc context prefix (Sun 5:10am - staggered off community_summaries @5:00) |
+| `crag_correction_regression` | `cron(hour=7, minute=7)` | standard | crag, eval, qdrant | 900s | Daily CRAG correction-quality gate over deterministic rewrite/recovery holdout (07:07 PT) |
+| `crag_llm_correction_sample` | `cron(day_of_week=sun, hour=7, minute=12)` | heavy | crag, eval, llm, qdrant | 1800s | Weekly CRAG live LLM rewrite sample over correction holdout (Sun 07:12 PT) |
+| `crag_regression` | `cron(hour=7, minute=2)` | standard | eval, qdrant | 900s | Daily CRAG retrieval-confidence safety gate over stable eval queries (07:02 PT) |
 | `cross_agent_lessons` | `cron(hour=5, minute=10)` | standard | - | 300s | Daily 5:10am — scan atoms from last 48h for cross-agent lesson signals (failure/correction keywords + named agents). Flags atoms.lesson_candidate=1 + lesson_agents list so skill_materializer can seed procedural skills from them. |
 | `db_vacuum_weekly` | `cron(day_of_week=sun, hour=5, minute=30)` | heavy | sqlite | 1800s | Weekly VACUUM + ANALYZE on brain.db/autonomy.db/llm_usage.db (Sun 5:30am) |
 | `embed_cache_prune` | `cron(hour=4, minute=8)` | standard | - | 900s | Prune embed cache: drop legacy rows, age >60d, cap 25k (daily 4:08am - staggered off content_quality_slo @4:05) |
 | `embed_finetune` | `cron(day_of_week=sat, hour=23, minute=30)` | heavy | embedder, training | 3600s | Phase N3: weekly LoRA training on accumulated feedback pairs (Sat 23:30) |
 | `entity_reconcile` | `cron(hour=2, minute=55)` | heavy | embedder, neo4j, sqlite | 1800s | v3: nightly catch-up for atoms with missing entity extraction (02:55) |
 | `entity_resolution` | `cron(hour=3, minute=5)` | heavy | embedder, neo4j | 900s | Nightly entity merge: embedding similarity + co-occurrence (3:05am) |
+| `entry_contract_audit` | `cron(hour=6, minute=37)` | standard | qdrant | 900s | Daily live Qdrant v2 entry-contract coverage audit (06:37 PT) |
 | `episode_binder` | `cron(hour=3, minute=18)` | heavy | embedder, qdrant, sqlite | 900s | Daily episode clustering + Hebbian boost (3:18am, after entity_resolution) |
 | `eval_holdout_graduate` | `cron(day_of_week=sun, hour=7, minute=30)` | standard | - | 900s | Phase N3: auto-graduate consistently-passing holdout candidates (Sun 7:30am) |
 | `eval_holdout_promote` | `cron(day_of_week=sun, hour=8, minute=45)` | standard | - | 900s | Phase C1: novelty-score eval candidates, promote top-N to pending file (Sun 8:45am) |
@@ -102,6 +109,7 @@
 | `graph_rebuild_mentions` | `cron(day_of_week=sun, hour=3, minute=30)` | heavy | neo4j, sqlite | 1800s | Weekly rebuild of atom->entity MENTIONS edges in Neo4j (Sunday 3:30am) |
 | `habituation_prune` | `cron(hour=3, minute=20)` | standard | - | 300s | Drop attention_queue rows with shown_count >= 300 (daily 3:20am) |
 | `hnsw_adaptive` | `cron(day_of_week=sun, hour=4, minute=50)` | heavy | eval, qdrant | 900s | Weekly adaptive HNSW ef_search tuning (Sunday 4:50am) |
+| `holdout_rotation_eval` | `cron(day_of_week=sun, hour=5, minute=18)` | medium | eval, holdout, qdrant | 900s | Weekly rotating holdout retrieval eval disjoint from generated-answer RAGAS seed (Sun 05:18) |
 | `image_ingest` | `cron(hour=5, minute=45)` | heavy | embedder, qdrant | 1800s | M7-WS2b: scan ~/Pictures/brain-ingest, OCR via Docling, embed captions -> knowledge |
 | `infra_validation` | `cron(day_of_week=sun, hour=7, minute=10)` | standard | - | 300s | Weekly infra fact cross-check against live state (Sunday 7:10am - staggered off raptor_build @7:15 which is heavy LLM) |
 | `intent_miss_scan` | `cron(hour=3, minute=28)` | standard | - | 900s | v3: scan active_recall misses via correction regex (daily 3:28am) |
@@ -127,15 +135,21 @@
 | `near_dedup` | `cron(hour=3, minute=22)` | heavy | embedder, qdrant, sqlite | 300s | Daily retroactive near-duplicate scan of semantic_memory (3:22am). Bumped weekly->daily 2026-04-23 after bilingual preference atoms accumulated past the weekly gate. Moved off 3:20 to avoid collision with habituation_prune and off 3:25 to avoid sm2_nightly brain.db/Qdrant contention. |
 | `neo4j_backup` | `cron(hour=3, minute=15)` | heavy | backup, neo4j | 300s | Nightly Neo4j data backup to MinIO (14-day retention) |
 | `obsolete_expired_atoms` | `cron(hour=4, minute=50)` | standard | - | 900s | Mark superseded+expired+unaccessed atoms tier=obsolete (daily 4:50am, 60d window) |
+| `openclaw_telegram_target_audit` | `cron(hour=6, minute=42)` | light | openclaw, telegram | 900s | Daily audit that OpenClaw Telegram cron delivery uses Chris's numeric chat id (06:42 PT) |
 | `outbox_drain` | `interval(0:05:00)` | standard | - | 120s | Phase 2D: drain SessionEnd outbox envelopes (every 5 min) |
 | `pdf_ingest` | `cron(hour=5, minute=30)` | heavy | embedder, qdrant | 1800s | M7-WS2a: scan ~/Documents/PDFs, parse via Docling, embed -> knowledge |
+| `privacy_negative_audit` | `cron(hour=6, minute=39)` | standard | privacy, qdrant | 900s | Daily personal-source privacy negative sample audit without printing content (06:39 PT) |
 | `proactive_insights` | `cron(hour=8, minute=0)` | standard | - | 900s | Daily proactive insights surfacing (8:00am PST) |
 | `prompt_survival_report` | `cron(day_of_week=sun, hour=5, minute=38)` | standard | - | 300s | Weekly Sun 5:38am — per-prompt 7-day atom survival rate. Substrate for prompt A/B: produce two prompt_versions in parallel, this report shows which one's atoms the system kept. Slot picked to dodge db_vacuum_weekly (Sun 5:30am exclusive lock on brain.db). |
 | `prune_raw_orphaned` | `cron(month=1,4,7,10, day=1, hour=4, minute=25)` | standard | - | 1800s | Quarterly raw/orphaned prune (180d retention; 1st of Jan/Apr/Jul/Oct @ 04:25) |
+| `qdrant_write_audit` | `cron(hour=6, minute=32)` | light | - | 900s | Daily source audit: fail on raw qdrant_client mutating writes outside approved boundaries (06:32 PT) |
+| `ragas_eval_gate` | `cron(day_of_week=sun, hour=4, minute=45)` | heavy | eval, llm, qdrant | 1800s | Weekly generated-answer RAGAS faithfulness/relevance gate over answer-oriented eval set (Sun 04:45) |
 | `re_examine_rejected` | `cron(day=2, hour=4, minute=30)` | heavy | qdrant, sqlite | 1800s | Monthly rejected-proposal re-examination (2nd of month @ 04:30) |
 | `recall_outcome_label` | `cron(minute=17)` | standard | - | 300s | Hourly — mark action_audit recalls 'restated' when same session re-asks within 120s (cosine ≥0.85). Converts the ~24k/week pending recall signal into training data. |
 | `reindex` | `cron(hour=3,23, minute=17)` | heavy | embedder, index, qdrant | 900s | Full Qdrant reindex (2x daily, off-hours) |
+| `release_readiness` | `cron(hour=6, minute=52)` | light | git, release | 900s | Daily non-mutating release hygiene snapshot for changed-file lanes and required evidence (06:52 PT) |
 | `retrieval_inhibition` | `cron(hour=3, minute=58)` | standard | qdrant, sqlite | 600s | Nightly Bjork-style inhibition of consistent retrieval losers (03:58am) |
+| `retrieval_regression` | `cron(hour=6, minute=57)` | standard | eval, qdrant | 900s | Daily bounded retrieval regression gate over stable eval queries (06:57 PT) |
 | `schema_learner` | `cron(day_of_week=sun, hour=4, minute=40)` | heavy | llm, sqlite | 900s | CLS spectral clustering on atom coactivation -> compaction candidates (Sun 04:40) |
 | `schema_revision` | `cron(day_of_week=sun, hour=8, minute=50)` | heavy | llm, sqlite | 900s | Weekly free-energy schema revision (Sun 08:50 - staggered off eval_holdout_promote @8:45) |
 | `self_eval` | `cron(hour=3, minute=37)` | heavy | embedder, eval, qdrant | 900s | Nightly 03:37 PT: sample recent /recall queries, re-run, measure top-3 overlap drift. Populates self_eval_drift_7d SLO. |
@@ -154,6 +168,8 @@
 | `supersession_chain_cleanup` | `cron(day_of_week=sun, hour=6, minute=10)` | standard | - | 300s | Weekly cleanup of orphaned supersession chains (Sun 6:10am) |
 | `training_pairs_generate` | `cron(day_of_week=sun, hour=8, minute=0)` | standard | qdrant, training | 900s | Weekly training pair generation from feedback (Sunday 8:00am) |
 | `trust_recompute` | `cron(day_of_week=sun, hour=7, minute=5)` | heavy | embedder, qdrant | 900s | Weekly cross-source corroboration trust score refresh (Sunday 7:05am - staggered off canonical_quality_triage @7:00) |
+| `ui_parity_audit` | `cron(hour=6, minute=54)` | light | readiness, ui | 900s | Daily static API-to-UI parity audit for world-level Brain dashboard coverage (06:54 PT) |
+| `wal_checkpoint_daily` | `cron(hour=4, minute=55)` | standard | sqlite | 900s | Daily PRAGMA wal_checkpoint(TRUNCATE) on hot DBs (4:55am) |
 | `web_source_trust_recompute` | `cron(day_of_week=sun, hour=5, minute=15)` | standard | - | 900s | Phase M6: recompute per-domain web search trust scores (Sun 5:15) |
 
 ## All jobs
@@ -162,13 +178,15 @@
 |---|---|---|---|---|---|---|
 | `action_audit_retention` | `cron(hour=4, minute=20)` | system | standard | - | 900s | Prune action_audit rows older than 90d (daily 4:20am) |
 | `active_contacts_ingest` | `cron(day=1, hour=4, minute=0)` | jenna | standard | - | 300s | Active iMessage contacts via Jenna -> raw/inbox (monthly) |
+| `adversarial_memory_eval` | `cron(day_of_week=sun, hour=5, minute=5)` | system | medium | eval, memory, qdrant | 900s | Weekly adversarial memory eval for stale facts, multilingual recall, handoff state, and source coverage (Sun 05:05) |
 | `answer_canonicalize` | `cron(hour=4, minute=2)` | system | heavy | llm, qdrant | 900s | Nightly query->canonical promoter (04:02am - staggered off sleep_consolidate @03:55 which contends for local embedder/LLM) |
 | `apple_health_ingest` | `cron(hour=8, minute=0)` | system | standard | - | 900s | Apple Health daily recovery signal (sleep/HRV/RHR/kcal) -> raw/inbox (8:00am, after iPhone 7:30 Shortcut + iCloud sync) |
 | `atoms_to_skills` | `cron(day_of_week=sun, hour=4, minute=58)` | system | heavy | llm, sqlite | 900s | Promote high-confidence atoms -> domain Claude Code skills (Sun 04:58 - staggered off llm_usage_purge @4:55) |
 | `auto_resolve_contradictions` | `cron(hour=6, minute=0)` | system | standard | - | 900s | Daily auto-resolve stale/low-confidence contradictions (6:00am) - v3 bumped from weekly to daily after finding 20-item pending backlog that should have been closed overnight |
 | `autonomy_decisions_retention` | `cron(hour=4, minute=35)` | system | standard | - | 900s | Prune autonomy_decisions rows older than 14d (daily 4:35am) |
 | `autonomy_proposer` | `cron(hour=4, minute=45)` | system | standard | - | 300s | Phase 7: surface autonomy level promote/demote proposals (4:45am) |
-| `backup_verify` | `cron(day=1, hour=4, minute=45)` | system | heavy | backup, sqlite | 900s | Monthly backup restore smoke test (1st of month, 4:45am - staggered off llm_usage_retention @04:30 which also touches SQLite / MinIO) |
+| `backup_restore_drill` | `cron(day_of_week=sat, hour=4, minute=35)` | system | standard | backup, neo4j, qdrant, sqlite | 900s | Weekly backup restore-readiness drill (SQLite integrity + Qdrant temp restore + Neo4j archive validation) |
+| `backup_verify` | `cron(day=1, hour=4, minute=45)` | system | heavy | backup, qdrant, sqlite | 900s | Monthly Qdrant backup restore smoke test (1st of month, 4:45am - staggered off llm_usage_retention @04:30 which also touches SQLite / MinIO) |
 | `brain_loop_tick` | `interval(0:01:30)` | system | standard | - | 30s | v3: brain_loop executive cortex tick (every 90s — relaxed from 60s 2026-04-22 to cut 33% of ticks) |
 | `brain_reflect` | `cron(hour=2, minute=45)` | sage | heavy | llm, qdrant | 900s | Nightly Sage pattern/contradiction pass over last 7d of semantic_memory |
 | `brain_speak_digest` | `cron(hour=7, minute=55)` | system | standard | - | 300s | Brain's morning digest to Chris — drives observe, composer ranks, top 3 via Telegram (07:55 PT, scheduler runs in local tz). |
@@ -188,8 +206,12 @@
 | `code_index_refresh` | `cron(hour=3, minute=35)` | system | heavy | embedder, index, qdrant | 1200s | Daily incremental code function indexer (3:35am - staggered off sm2_nightly at 03:25) |
 | `community_summaries` | `cron(day_of_week=sun, hour=5, minute=0)` | sage | heavy | llm, neo4j | 1800s | M8.5: Louvain community detection on entity graph + Sage summary per cluster (Sun 5:00am) |
 | `confidence_calibration` | `cron(day_of_week=sun, hour=4, minute=10)` | system | heavy | eval, sqlite | 900s | Weekly Platt calibration of atoms.confidence vs eval outcomes (Sun 04:10) |
+| `config_secret_audit` | `cron(hour=6, minute=47)` | system | light | config, secrets | 900s | Daily safe audit of required Brain/OpenClaw config and secret sources without printing values (06:47 PT) |
 | `content_quality_slo` | `cron(hour=4, minute=5)` | system | standard | - | 300s | Daily content quality SLO check (4:00am, after eval_run) |
 | `contextual_embed_weekly` | `cron(day_of_week=sun, hour=5, minute=10)` | system | heavy | embedder, index, qdrant | 1800s | T2.12: re-embed canonical chunks with Anthropic-style per-doc context prefix (Sun 5:10am - staggered off community_summaries @5:00) |
+| `crag_correction_regression` | `cron(hour=7, minute=7)` | system | standard | crag, eval, qdrant | 900s | Daily CRAG correction-quality gate over deterministic rewrite/recovery holdout (07:07 PT) |
+| `crag_llm_correction_sample` | `cron(day_of_week=sun, hour=7, minute=12)` | system | heavy | crag, eval, llm, qdrant | 1800s | Weekly CRAG live LLM rewrite sample over correction holdout (Sun 07:12 PT) |
+| `crag_regression` | `cron(hour=7, minute=2)` | system | standard | eval, qdrant | 900s | Daily CRAG retrieval-confidence safety gate over stable eval queries (07:02 PT) |
 | `cross_agent_lessons` | `cron(hour=5, minute=10)` | system | standard | - | 300s | Daily 5:10am — scan atoms from last 48h for cross-agent lesson signals (failure/correction keywords + named agents). Flags atoms.lesson_candidate=1 + lesson_agents list so skill_materializer can seed procedural skills from them. |
 | `daily_synthesis` | `cron(hour=21, minute=0)` | jenna | standard | llm | 300s | Daily narrative + reflection Q (Jenna) |
 | `db_vacuum_weekly` | `cron(day_of_week=sun, hour=5, minute=30)` | system | heavy | sqlite | 1800s | Weekly VACUUM + ANALYZE on brain.db/autonomy.db/llm_usage.db (Sun 5:30am) |
@@ -199,6 +221,7 @@
 | `entity_pages` | `cron(day_of_week=sun, hour=4, minute=33)` | sage | heavy | llm, neo4j | 1800s | Weekly entity page generator - Sage synthesizes one hot entity per run (Sunday 4:33am - staggered off session_rotate @04:30) |
 | `entity_reconcile` | `cron(hour=2, minute=55)` | system | heavy | embedder, neo4j, sqlite | 1800s | v3: nightly catch-up for atoms with missing entity extraction (02:55) |
 | `entity_resolution` | `cron(hour=3, minute=5)` | system | heavy | embedder, neo4j | 900s | Nightly entity merge: embedding similarity + co-occurrence (3:05am) |
+| `entry_contract_audit` | `cron(hour=6, minute=37)` | system | standard | qdrant | 900s | Daily live Qdrant v2 entry-contract coverage audit (06:37 PT) |
 | `episode_binder` | `cron(hour=3, minute=18)` | system | heavy | embedder, qdrant, sqlite | 900s | Daily episode clustering + Hebbian boost (3:18am, after entity_resolution) |
 | `eval_holdout_audit` | `cron(day_of_week=sun, hour=9, minute=15)` | jenna | standard | - | 900s | Phase C2: Telegram digest of >=14d stuck candidates only (Sun 9:15am) |
 | `eval_holdout_graduate` | `cron(day_of_week=sun, hour=7, minute=30)` | system | standard | - | 900s | Phase N3: auto-graduate consistently-passing holdout candidates (Sun 7:30am) |
@@ -219,6 +242,7 @@
 | `habituation_prune` | `cron(hour=3, minute=20)` | system | standard | - | 300s | Drop attention_queue rows with shown_count >= 300 (daily 3:20am) |
 | `healthcheck` | `cron(hour=9, minute=0)` | ellie | standard | - | 300s | System + service health capture |
 | `hnsw_adaptive` | `cron(day_of_week=sun, hour=4, minute=50)` | system | heavy | eval, qdrant | 900s | Weekly adaptive HNSW ef_search tuning (Sunday 4:50am) |
+| `holdout_rotation_eval` | `cron(day_of_week=sun, hour=5, minute=18)` | system | medium | eval, holdout, qdrant | 900s | Weekly rotating holdout retrieval eval disjoint from generated-answer RAGAS seed (Sun 05:18) |
 | `image_ingest` | `cron(hour=5, minute=45)` | system | heavy | embedder, qdrant | 1800s | M7-WS2b: scan ~/Pictures/brain-ingest, OCR via Docling, embed captions -> knowledge |
 | `infra_validation` | `cron(day_of_week=sun, hour=7, minute=10)` | system | standard | - | 300s | Weekly infra fact cross-check against live state (Sunday 7:10am - staggered off raptor_build @7:15 which is heavy LLM) |
 | `intent_miss_scan` | `cron(hour=3, minute=28)` | system | standard | - | 900s | v3: scan active_recall misses via correction regex (daily 3:28am) |
@@ -247,20 +271,26 @@
 | `obsidian_sync` | `interval(1:00:00)` | jenna | standard | - | 300s | Obsidian vault ↔ CouchDB pull |
 | `obsolete_expired_atoms` | `cron(hour=4, minute=50)` | system | standard | - | 900s | Mark superseded+expired+unaccessed atoms tier=obsolete (daily 4:50am, 60d window) |
 | `openclaw_sessions_ingest` | `cron(hour=0,3,6,19,21,23, minute=35)` | jenna | heavy | llm, qdrant | 300s | OpenClaw agent session distillation via Jenna -> raw/inbox (6x/day off-peak, respects 9am-6pm no-local-embedder rule) |
+| `openclaw_telegram_target_audit` | `cron(hour=6, minute=42)` | system | light | openclaw, telegram | 900s | Daily audit that OpenClaw Telegram cron delivery uses Chris's numeric chat id (06:42 PT) |
 | `outbox_drain` | `interval(0:05:00)` | system | standard | - | 120s | Phase 2D: drain SessionEnd outbox envelopes (every 5 min) |
 | `pdf_ingest` | `cron(hour=5, minute=30)` | system | heavy | embedder, qdrant | 1800s | M7-WS2a: scan ~/Documents/PDFs, parse via Docling, embed -> knowledge |
 | `personal_ingest` | `cron(hour=6,14,22, minute=0)` | jenna | heavy | embedder, qdrant | 300s | Apple Notes + iMessage + Calendar + Reminders -> Qdrant personal (3x daily off-peak) |
+| `privacy_negative_audit` | `cron(hour=6, minute=39)` | system | standard | privacy, qdrant | 900s | Daily personal-source privacy negative sample audit without printing content (06:39 PT) |
 | `proactive_check` | `cron(hour=7,20,1, minute=30)` | sage | standard | llm | 300s | Proactive insights - schedule gaps, contradictions, trends (3x daily, off work hours) |
 | `proactive_insights` | `cron(hour=8, minute=0)` | system | standard | - | 900s | Daily proactive insights surfacing (8:00am PST) |
 | `profile_regen` | `cron(day_of_week=sun, hour=4, minute=0)` | sage | heavy | llm, qdrant | 300s | Sage regenerates Chris profile from canonical knowledge (Sunday 4am) |
 | `prompt_survival_report` | `cron(day_of_week=sun, hour=5, minute=38)` | system | standard | - | 300s | Weekly Sun 5:38am — per-prompt 7-day atom survival rate. Substrate for prompt A/B: produce two prompt_versions in parallel, this report shows which one's atoms the system kept. Slot picked to dodge db_vacuum_weekly (Sun 5:30am exclusive lock on brain.db). |
 | `prune_raw_orphaned` | `cron(month=1,4,7,10, day=1, hour=4, minute=25)` | system | standard | - | 1800s | Quarterly raw/orphaned prune (180d retention; 1st of Jan/Apr/Jul/Oct @ 04:25) |
+| `qdrant_write_audit` | `cron(hour=6, minute=32)` | system | light | - | 900s | Daily source audit: fail on raw qdrant_client mutating writes outside approved boundaries (06:32 PT) |
+| `ragas_eval_gate` | `cron(day_of_week=sun, hour=4, minute=45)` | system | heavy | eval, llm, qdrant | 1800s | Weekly generated-answer RAGAS faithfulness/relevance gate over answer-oriented eval set (Sun 04:45) |
 | `raptor_build` | `cron(day_of_week=sun, hour=7, minute=15)` | sage | heavy | embedder, index, qdrant | 1800s | Weekly RAPTOR hierarchical summary tree (Sun 07:15) |
 | `re_examine_rejected` | `cron(day=2, hour=4, minute=30)` | system | heavy | qdrant, sqlite | 1800s | Monthly rejected-proposal re-examination (2nd of month @ 04:30) |
 | `recall_judge` | `cron(hour=4, minute=27)` | jenna | heavy | llm, qdrant, sqlite | 900s | Daily 4:27am — sample 30 recent recalls, LLM-judges relevance/groundedness via live re-recall, writes recall_judgments + back-fills action_audit.outcome (judged_good/judged_wrong). |
 | `recall_outcome_label` | `cron(minute=17)` | system | standard | - | 300s | Hourly — mark action_audit recalls 'restated' when same session re-asks within 120s (cosine ≥0.85). Converts the ~24k/week pending recall signal into training data. |
 | `reindex` | `cron(hour=3,23, minute=17)` | system | heavy | embedder, index, qdrant | 900s | Full Qdrant reindex (2x daily, off-hours) |
+| `release_readiness` | `cron(hour=6, minute=52)` | system | light | git, release | 900s | Daily non-mutating release hygiene snapshot for changed-file lanes and required evidence (06:52 PT) |
 | `retrieval_inhibition` | `cron(hour=3, minute=58)` | system | standard | qdrant, sqlite | 600s | Nightly Bjork-style inhibition of consistent retrieval losers (03:58am) |
+| `retrieval_regression` | `cron(hour=6, minute=57)` | system | standard | eval, qdrant | 900s | Daily bounded retrieval regression gate over stable eval queries (06:57 PT) |
 | `schema_learner` | `cron(day_of_week=sun, hour=4, minute=40)` | system | heavy | llm, sqlite | 900s | CLS spectral clustering on atom coactivation -> compaction candidates (Sun 04:40) |
 | `schema_revision` | `cron(day_of_week=sun, hour=8, minute=50)` | system | heavy | llm, sqlite | 900s | Weekly free-energy schema revision (Sun 08:50 - staggered off eval_holdout_promote @8:45) |
 | `screen_time_ingest` | `cron(day_of_week=sun, hour=4, minute=35)` | sage | standard | - | 300s | Screen Time daily patterns via Sage -> raw/inbox (weekly) |
@@ -281,5 +311,7 @@
 | `supersession_chain_cleanup` | `cron(day_of_week=sun, hour=6, minute=10)` | system | standard | - | 300s | Weekly cleanup of orphaned supersession chains (Sun 6:10am) |
 | `training_pairs_generate` | `cron(day_of_week=sun, hour=8, minute=0)` | system | standard | qdrant, training | 900s | Weekly training pair generation from feedback (Sunday 8:00am) |
 | `trust_recompute` | `cron(day_of_week=sun, hour=7, minute=5)` | system | heavy | embedder, qdrant | 900s | Weekly cross-source corroboration trust score refresh (Sunday 7:05am - staggered off canonical_quality_triage @7:00) |
+| `ui_parity_audit` | `cron(hour=6, minute=54)` | system | light | readiness, ui | 900s | Daily static API-to-UI parity audit for world-level Brain dashboard coverage (06:54 PT) |
+| `wal_checkpoint_daily` | `cron(hour=4, minute=55)` | system | standard | sqlite | 900s | Daily PRAGMA wal_checkpoint(TRUNCATE) on hot DBs (4:55am) |
 | `web_source_trust_recompute` | `cron(day_of_week=sun, hour=5, minute=15)` | system | standard | - | 900s | Phase M6: recompute per-domain web search trust scores (Sun 5:15) |
 | `weekly_synthesis` | `cron(day_of_week=sun, hour=4, minute=15)` | sage | heavy | llm | 300s | Weekly arc (Sage, Sunday 4:15am) |

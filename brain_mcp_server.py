@@ -123,6 +123,16 @@ def handle_tools_list(params: dict) -> dict:
                             "type": "string",
                             "description": "Filter by collection: semantic_memory, canonical, experience, patterns",
                         },
+                        "exclude_already_used": {
+                            "type": "boolean",
+                            "description": (
+                                "Drop results that mention tools/services Chris already uses "
+                                "(per Neo4j (chris)-[:RELATES_TO {relationship:'uses'}]->(t)). "
+                                "Set true for tool-recommendation research so candidates Chris "
+                                "already runs don't surface as fresh suggestions. Default false."
+                            ),
+                            "default": False,
+                        },
                     },
                     "required": ["query"],
                 },
@@ -479,6 +489,7 @@ def handle_tools_call(params: dict) -> dict:
         q = args["query"]
         n = args.get("limit", 5)
         col = args.get("collection", "")
+        exclude_already_used = bool(args.get("exclude_already_used", False))
         # 2026-04-17 MCP timeout fix: OpenClaw's bundle-mcp has a default 5s
         # operation timeout. Previously this path passed expand=true which
         # triggers _hyde.expand_query (Jenna/codex CLI dispatch, 2-3s) +
@@ -491,6 +502,8 @@ def handle_tools_call(params: dict) -> dict:
         path = f"/recall/v2?q={urllib.parse.quote(q)}&n={n}"
         if col:
             path += f"&collection={col}"
+        if exclude_already_used:
+            path += "&exclude_already_used=true"
         result = _brain_request("GET", path, actor=actor)
 
     elif name == "brain_store":
@@ -909,6 +922,16 @@ def main() -> None:
         f"max_lifetime={MAX_LIFETIME_S}s debug={int(TRANSPORT_DEBUG)}"
     )
 
+    # Drop down to BufferedReader: select() only sees fd activity, not Python's
+    # TextIOWrapper read-ahead. When Claude Code sends initialize +
+    # notifications/initialized + tools/list back-to-back, all three land in
+    # one OS read; readline() returns the first, the rest sit in the buffer,
+    # and select() then waits the full POLL_INTERVAL_S because the fd looks
+    # idle. The 30s stall blew past Claude Code's 30s tools/list timeout, so
+    # the response always arrived as "unknown message ID". buffer.peek() lets
+    # us notice buffered bytes and drain them without a select round-trip.
+    stdin_bin = sys.stdin.buffer
+
     while True:
         exit_after_response = False
         exit_reason = _lifecycle_exit_reason(start, last_activity, original_parent)
@@ -922,14 +945,16 @@ def main() -> None:
         # that arrived on the boundary while still preventing long-lived leaks.
         timeout = 0 if exit_reason else POLL_INTERVAL_S
 
-        # Non-blocking wait on stdin. If no input within POLL_INTERVAL_S,
-        # loop around and re-check lifecycle guards.
-        try:
-            ready, _, _ = select.select([sys.stdin], [], [], timeout)
-        except (OSError, ValueError):
-            # stdin closed hard — exit cleanly.
-            _log("stdin select failed, exiting")
-            return
+        # Skip select() if BufferedReader already has bytes to drain.
+        if stdin_bin.peek(1):
+            ready: list = [stdin_bin]
+        else:
+            try:
+                ready, _, _ = select.select([stdin_bin], [], [], timeout)
+            except (OSError, ValueError):
+                # stdin closed hard — exit cleanly.
+                _log("stdin select failed, exiting")
+                return
         if exit_reason and not ready:
             _log(f"{exit_reason}, exiting")
             return
@@ -938,11 +963,11 @@ def main() -> None:
         if not ready:
             continue
 
-        line = sys.stdin.readline()
-        if not line:  # EOF — parent closed its write end
+        line_bytes = stdin_bin.readline()
+        if not line_bytes:  # EOF — parent closed its write end
             _log("stdin EOF, exiting")
             return
-        line = line.strip()
+        line = line_bytes.decode("utf-8", errors="replace").strip()
         if not line:
             continue
 

@@ -93,7 +93,12 @@ def urgent_scan() -> dict:
     """
     ensure_schema()
     _cleanup_stale_doorbells()
-    obs = collect_observations()
+    # Keep the real-time interrupt path rule-based only. The synthesis drive
+    # calls subscription CLIs and was accidentally running from every
+    # brain_loop tick, which made "urgent" checks compete with foreground work
+    # and created extra Codex/Claude helper processes. Morning digest still
+    # uses synthesis via collect_observations(include_synthesis=True).
+    obs = collect_observations(include_synthesis=False)
     urgent = [o for o in obs if o.severity >= URGENT_SEVERITY_THRESHOLD]
     urgent_fresh = [o for o in urgent if not was_sent_recently(f"doorbell:{o.dedup_key}", within_h=6)]
     if not urgent_fresh:
@@ -155,21 +160,71 @@ def urgent_scan() -> dict:
 
 
 def _telegram_fallback(observations: list[Observation]) -> str:
-    """Fallback for moments with no active CLI session to receive doorbells."""
+    """Fallback for moments with no active CLI session to receive doorbells.
+
+    Do not page Chris just because no session is active. First ask the
+    subscription-backed LLM path to handle/review. Telegram is reserved for
+    confirmed human-only blockers.
+    """
     if not observations:
         return "skipped:no_observations"
+    lines = ["[brain_speak_urgent] no active CLI sessions; urgent observations:"]
+    for o in observations[:5]:
+        lines.append(f"- [{o.severity:.1f}] {o.drive}/{o.category}: {o.message[:500]}")
+    body = "\n".join(lines)
+
+    try:
+        from escalation_policy import classify_escalation, llm_review_prompt, llm_says_human_needed
+
+        route = classify_escalation(title="brain_speak_urgent", content=body)
+        if route.notify_human:
+            return _send_telegram_fallback(body)
+
+        try:
+            from agent_messenger import send_message
+
+            send_message(
+                from_agent="brain_speak_urgent",
+                to_agent="sage",
+                content=(
+                    "Urgent Brain observation with no active CLI session. "
+                    "Handle it yourself if possible; notify Chris only for a true human blocker.\n\n" + body
+                ),
+                message_type="handoff",
+                priority=2,
+                metadata={"source": "brain_speak_urgent"},
+            )
+            return "agent:self_handled"
+        except Exception as exc:
+            log.debug("urgent agent handoff failed, falling back to CLI review: %s", exc)
+
+        from cli_llm import dispatch
+
+        result = dispatch(
+            agent="sage",
+            message=llm_review_prompt("brain_speak_urgent", body),
+            thinking="low",
+            timeout=45,
+            backlog_kind="proactive",
+            backlog_payload={"source": "brain_speak_urgent", "body": body},
+        )
+        if result.ok and llm_says_human_needed(result.text):
+            return _send_telegram_fallback("Subscription LLM requested Chris:\n" + result.text[:1200])
+        return "llm:self_handled" if result.ok else "queued:llm_review"
+    except Exception as exc:
+        log.warning("urgent LLM fallback unavailable: %s", exc)
+        return "queued:llm_unavailable"
+
+
+def _send_telegram_fallback(body: str) -> str:
     try:
         from telegram_alert import send_chris_telegram
     except Exception as exc:
         log.warning("telegram fallback unavailable: %s", exc)
         return "queued:telegram_unavailable"
-
-    lines = ["[brain_speak_urgent] no active CLI sessions; urgent observations:"]
-    for o in observations[:5]:
-        lines.append(f"- [{o.severity:.1f}] {o.drive}/{o.category}: {o.message[:500]}")
     delivered = send_chris_telegram(
-        "\n".join(lines),
-        source="brain_speak_urgent:no_active_sessions",
+        body,
+        source="brain_speak_urgent:human_required",
         severity="urgent",
     )
     return "telegram:fallback" if delivered else "queued:telegram_fallback"

@@ -161,6 +161,37 @@ def test_cross_encoder_model_does_not_clear_mps_cache_by_default(monkeypatch):
     assert calls == []
 
 
+def test_cross_encoder_model_clears_mps_after_prediction_when_enabled(monkeypatch):
+    import types
+
+    import cross_encoder_model
+
+    calls: list[str] = []
+
+    class FakeModel:
+        def predict(self, pairs, **_kwargs):
+            assert pairs == [("query", "doc")]
+            return [1.25]
+
+    fake_cuda = types.SimpleNamespace(
+        is_available=lambda: False,
+        empty_cache=lambda: calls.append("cuda"),
+    )
+    fake_mps = types.SimpleNamespace(empty_cache=lambda: calls.append("mps"))
+    monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(cuda=fake_cuda, mps=fake_mps))
+    monkeypatch.setattr(cross_encoder_model, "_MPS_EMPTY_CACHE", True)
+    monkeypatch.setattr(cross_encoder_model, "_CACHE_SIZE", 100)
+    monkeypatch.setattr(cross_encoder_model, "_evict_idle_models", lambda: [])
+    monkeypatch.setattr(cross_encoder_model, "_select_name", lambda _query: "base")
+    monkeypatch.setattr(cross_encoder_model, "_load_model", lambda _name: FakeModel())
+    cross_encoder_model._score_cache.clear()
+    cross_encoder_model._cache_hits = 0
+    cross_encoder_model._cache_misses = 0
+
+    assert cross_encoder_model.score_pairs("query", ["doc"]) == [1.25]
+    assert calls == ["mps"]
+
+
 def test_cross_encoder_model_disables_tqdm_multiprocessing_lock():
     from cross_encoder_model import _disable_tqdm_mp_lock
     from tqdm.std import TqdmDefaultWriteLock
@@ -171,6 +202,67 @@ def test_cross_encoder_model_disables_tqdm_multiprocessing_lock():
     _disable_tqdm_mp_lock()
 
     assert TqdmDefaultWriteLock.mp_lock is None
+
+
+# ── brain_loop process safety ───────────────────────────────────
+def test_brain_loop_get_brain_loop_does_not_start_watcher(monkeypatch):
+    import brain_loop
+
+    monkeypatch.setattr(brain_loop, "_brain_loop", None)
+    monkeypatch.setattr(brain_loop, "_wake_thread_started", False)
+
+    def fail_if_called():
+        raise AssertionError("scheduler subprocesses must not start wake watchers")
+
+    monkeypatch.setattr(brain_loop, "_ensure_wake_watcher", fail_if_called)
+
+    loop = brain_loop.get_brain_loop()
+
+    assert isinstance(loop, brain_loop.BrainLoop)
+
+
+def test_brain_loop_run_skips_when_process_lock_held(tmp_path, monkeypatch):
+    import fcntl
+
+    import brain_loop
+
+    monkeypatch.setattr(brain_loop, "BRAIN_LOGS_DIR", tmp_path)
+    lock_path = tmp_path / "brain_loop_tick.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_f = lock_path.open("w")
+    try:
+        fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+        assert brain_loop.run()["status"] == "overlap_skipped_process"
+    finally:
+        lock_f.close()
+
+
+def test_brain_loop_run_reports_process_timeout(tmp_path, monkeypatch):
+    import contextlib
+
+    import brain_loop
+
+    monkeypatch.setattr(brain_loop, "BRAIN_LOGS_DIR", tmp_path)
+
+    @contextlib.contextmanager
+    def timeout_guard():
+        raise brain_loop._BrainLoopProcessTimeout("boom")
+        yield
+
+    monkeypatch.setattr(brain_loop, "_process_timeout_guard", timeout_guard)
+
+    result = brain_loop.run()
+
+    assert result["status"] == "timeout"
+    assert "boom" in result["error"]
+
+
+def test_job_registry_caps_brain_loop_tick_timeout():
+    import job_registry
+
+    assert job_registry._JOB_TIMEOUT_SECONDS["brain_loop_tick"] == 45
+    assert job_registry._JOB_TIMEOUT_SECONDS["proactive_check"] == 900
 
 
 # ── retrieval_inhibition ────────────────────────────────────────
@@ -267,6 +359,21 @@ def test_failure_memory_imports():
     import failure_memory
 
     assert failure_memory is not None
+
+
+def test_failure_memory_skips_missing_lesson_schema():
+    import failure_memory
+
+    calls = []
+
+    def fake_run_query(query, params):
+        calls.append(query)
+        if "db.labels" in query:
+            return [{"labels": ["Memory", "Entity"]}]
+        raise AssertionError("lesson query should not run when Lesson labels are absent")
+
+    assert failure_memory._lessons_schema_available(fake_run_query) is False
+    assert len(calls) == 1
 
 
 # ── skill_materializer ──────────────────────────────────────────

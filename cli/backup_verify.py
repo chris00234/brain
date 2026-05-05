@@ -13,11 +13,12 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 BRAIN_ROOT = Path("/Users/chrischo/server/brain")
-OPENCLAW_BIN = "/Users/chrischo/.local/bin/openclaw"
 MINIO_BUCKET = "rag-backups"
 QDRANT_PREFIX = "qdrant-backup-"
 QDRANT_URL = "http://127.0.0.1:6333"
@@ -44,21 +45,20 @@ def _expected_collections() -> set[str]:
     try:
         with _url.urlopen(f"{QDRANT_URL}/collections", timeout=10) as resp:  # noqa: S310
             body = _json.loads(resp.read())
-        names = {
-            c.get("name")
-            for c in body.get("result", {}).get("collections", [])
-            if c.get("name")
-        }
+        names = {c.get("name") for c in body.get("result", {}).get("collections", []) if c.get("name")}
         return names or FALLBACK_COLLECTIONS
     except Exception:
         return FALLBACK_COLLECTIONS
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _minio import s3_client as _s3_client
+def _s3_client() -> Any:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _minio import s3_client as _client
+
+    return _client()
 
 
-def _list_all_keys(s3, prefix: str) -> list[str]:
+def _list_all_keys(s3: Any, prefix: str) -> list[str]:
     """Paginated list_objects_v2 — single call caps at 1000 keys."""
     keys: list[str] = []
     continuation: str | None = None
@@ -76,7 +76,7 @@ def _list_all_keys(s3, prefix: str) -> list[str]:
     return keys
 
 
-def _latest_backup_key(s3) -> str | None:
+def _latest_backup_key(s3: Any) -> str | None:
     tarballs = [k for k in _list_all_keys(s3, QDRANT_PREFIX) if k.endswith(".tar.gz")]
     if not tarballs:
         return None
@@ -86,22 +86,16 @@ def _latest_backup_key(s3) -> str | None:
 
 def _alert_failure(error_msg: str) -> None:
     try:
-        subprocess.run(
-            [
-                OPENCLAW_BIN,
-                "agent",
-                "--agent",
-                "jenna",
-                "--message",
-                f"BACKUP VERIFY FAILED: {error_msg}",
-                "--thinking",
-                "off",
-                "--timeout",
-                "30",
-            ],
-            timeout=35,
-            capture_output=True,
+        sys.path.insert(0, str(BRAIN_ROOT / "brain_core"))
+        from telegram_alert import send_chris_telegram
+
+        ok = send_chris_telegram(
+            body=f"BACKUP VERIFY FAILED: {error_msg}",
+            source="backup_verify",
+            severity="critical",
         )
+        if not ok:
+            print("  WARNING: direct Telegram alert returned false")
     except Exception as e:
         print(f"  WARNING: alert dispatch failed: {e}")
 
@@ -211,10 +205,8 @@ def verify_backup() -> int:
         )
         return 0
     finally:
-        try:
+        with suppress(Exception):
             shutil.rmtree(tmp_dir)
-        except Exception:
-            pass
 
 
 if __name__ == "__main__":

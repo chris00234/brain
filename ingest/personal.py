@@ -222,24 +222,29 @@ def add_personal_documents(collection_name, docs, skip_stale_cleanup=True):
         ids.append(doc_id)
         documents.append(content)
         embeddings.append(emb)
-        metadatas.append(
-            {
-                "source": doc.get("source", ""),
-                "type": doc_type,
-                "service": service,
-                "title": doc.get("title", ""),
-                "date": doc.get("date", ""),
-                "event_date": doc.get("event_date", ""),
-                "modified_at": doc.get("modified_at", ""),
-                "status": doc.get("status", ""),
-                "due": doc.get("due", ""),
-                "is_past": str(doc.get("is_past", "")),
-                "participant_count": str(doc.get("participant_count", "")),
-                "note_id": doc.get("note_id", ""),
-                "created_at": datetime.now(UTC).isoformat(),
-                "embed_model": EMBED_MODEL,
-            }
-        )
+        metadata = {
+            "source": doc.get("source", ""),
+            "type": doc_type,
+            "service": service,
+            "title": doc.get("title", ""),
+            "date": doc.get("date", ""),
+            "event_date": doc.get("event_date", ""),
+            "modified_at": doc.get("modified_at", ""),
+            "status": doc.get("status", ""),
+            "due": doc.get("due", ""),
+            "is_past": str(doc.get("is_past", "")),
+            "participant_count": str(doc.get("participant_count", "")),
+            "note_id": doc.get("note_id", ""),
+            "created_at": datetime.now(UTC).isoformat(),
+            "embed_model": EMBED_MODEL,
+        }
+        try:
+            from source_policy import merge_policy_metadata, metadata_for_document
+
+            metadata = merge_policy_metadata(metadata, metadata_for_document({**doc, **metadata}, content=content))
+        except Exception:
+            pass
+        metadatas.append(metadata)
 
     if not ids:
         print(f"    No valid docs after filtering for '{collection_name}'")

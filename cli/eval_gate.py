@@ -2,8 +2,8 @@
 """eval_gate.py — regression gate wrapping eval_compare.py.
 
 Runs the eval suite and compares the result to a stored baseline
-(brain/tests/eval_baseline.json). Exits non-zero + alerts via Telegram
-(Jenna) if the mean score drops more than --threshold percent.
+(brain/tests/eval_baseline.json). Exits non-zero + alerts via direct
+Telegram if the mean score drops more than --threshold percent.
 
 Wired via the `eval_run` scheduled job (Sunday 4:30am). First run bootstraps
 the baseline so subsequent runs have something to compare against.
@@ -42,10 +42,6 @@ DEFAULT_BASELINE = BRAIN_ROOT / "cli" / "eval_baseline.json"
 PENDING_HOLDOUT = BRAIN_ROOT / "cli" / "eval_holdout_pending.json"
 SECRET_FILE = Path("/Users/chrischo/.openclaw/credentials/.personal_webhook_secret")
 BRAIN_URL = "http://127.0.0.1:8791"
-OPENCLAW_BIN = "/Users/chrischo/.local/bin/openclaw"
-TELEGRAM_CHAT_ID = "8484060831"
-TELEGRAM_ACCOUNT = "jenna-bot"
-
 
 def _content_metric_value(v2: dict, metric: str) -> float:
     strict = float(v2.get("hit_content_pct", 0))
@@ -157,7 +153,9 @@ def _classify_failure_row(row: dict) -> tuple[str, str]:
     )
 
 
-def _bucket_add(buckets: dict[str, dict], bucket: str, row: dict, reason: str, *, sample_limit: int = 10) -> None:
+def _bucket_add(
+    buckets: dict[str, dict], bucket: str, row: dict, reason: str, *, sample_limit: int = 10
+) -> None:
     item = buckets.setdefault(bucket, {"count": 0, "samples": []})
     item["count"] += 1
     if len(item["samples"]) < sample_limit:
@@ -189,7 +187,8 @@ def _source_tokens(source: str) -> set[str]:
 
 def _looks_archived_or_superseded(source: str) -> bool:
     lowered = source.lower()
-    return any(marker in lowered for marker in ("archived", "archive", "superseded", "obsolete", "deprecated"))
+    markers = ("archived", "archive", "superseded", "obsolete", "deprecated")
+    return any(marker in lowered for marker in markers)
 
 
 def _safe_float(value: object, default: float = 0.0) -> float:
@@ -229,6 +228,7 @@ def _persist_eval_report(report: dict, track: str = "default", content_metric: s
     loose_pct = float(v2.get("hit_content_loose_pct", strict_pct))
     content_pct = _content_metric_value(v2, content_metric)
     source_pct = float(v2.get("hit_source_pct", 0))
+    ragas = report.get("ragas") or {}
     passed = round(total * content_pct / 100) if total else 0
     failed = total - passed
     per_test = list(v2.get("per_test") or [])
@@ -254,6 +254,7 @@ def _persist_eval_report(report: dict, track: str = "default", content_metric: s
                 "source_accuracy": round(source_pct, 1),
                 "slow_count": 0,
                 "v2": v2,
+                "ragas": ragas,
                 "failure_breakdown": failure_breakdown,
                 "failure_analysis": failure_analysis,
             },
@@ -333,28 +334,14 @@ def write_baseline(report: dict, baseline_path: Path) -> None:
 
 
 def alert_chris(message: str) -> None:
-    """Send a regression alert via OpenClaw Telegram direct message.
-    Uses `message send` with explicit channel/target (not `agent --deliver`,
-    which was failing with 'requires target <chatId>'). Bug fix 2026-04-12.
-    """
+    """Send a regression alert via the direct Telegram alert module."""
     with contextlib.suppress(Exception):
-        subprocess.run(
-            [
-                OPENCLAW_BIN,
-                "message",
-                "send",
-                "--channel",
-                "telegram",
-                "--target",
-                TELEGRAM_CHAT_ID,
-                "--account",
-                TELEGRAM_ACCOUNT,
-                "--message",
-                f"[BRAIN EVAL ALERT] {message}",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=20,
+        from telegram_alert import send_chris_telegram
+
+        send_chris_telegram(
+            f"[BRAIN EVAL ALERT] {message}",
+            source="eval_gate",
+            severity="warn",
         )
 
 

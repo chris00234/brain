@@ -1,8 +1,8 @@
 """brain_core/eval_holdout_audit.py - weekly Telegram digest of pending eval candidates (Phase C2).
 
-Reads cli/eval_holdout_pending.json, builds a Telegram digest via openclaw_dispatch
-to Jenna with approve/reject URLs (POST /brain/eval-proposals/{id}/approve|reject),
-and waits for Chris to act via the existing API endpoints. Approved items are
+Reads cli/eval_holdout_pending.json, builds a direct Telegram digest with
+approve/reject URLs (POST /brain/eval-proposals/{id}/approve|reject), and
+waits for Chris to act via the existing API endpoints. Approved items are
 NOT auto-appended to eval_set.json — that's a separate manual step the API does.
 
 Schedule: Sun 9:15am (after eval_holdout_promote at 8:45).
@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import json
 import logging
-import subprocess
 import sys
 from pathlib import Path
 
@@ -30,9 +29,6 @@ except ImportError:
 
 PENDING_PATH = BRAIN_DIR / "cli" / "eval_holdout_pending.json"
 
-OPENCLAW_BIN = "/Users/chrischo/.local/bin/openclaw"
-TELEGRAM_CHAT_ID = "8484060831"
-TELEGRAM_ACCOUNT = "jenna-bot"
 BRAIN_URL = "http://127.0.0.1:8791"
 
 
@@ -56,29 +52,14 @@ def _build_digest(items: list[dict]) -> str:
 
 
 def _send_telegram(message: str) -> bool:
-    if not Path(OPENCLAW_BIN).exists():
-        log.warning("openclaw binary missing at %s — skipping telegram", OPENCLAW_BIN)
-        return False
     try:
-        result = subprocess.run(
-            [
-                OPENCLAW_BIN,
-                "message",
-                "send",
-                "--channel",
-                "telegram",
-                "--target",
-                TELEGRAM_CHAT_ID,
-                "--account",
-                TELEGRAM_ACCOUNT,
-                "--message",
-                message,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=20,
+        from telegram_alert import send_chris_telegram
+
+        return send_chris_telegram(
+            message,
+            source="eval_holdout_audit",
+            severity="info",
         )
-        return result.returncode == 0
     except Exception as exc:
         log.warning("telegram dispatch failed: %s", exc)
         return False

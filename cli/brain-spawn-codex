@@ -1,0 +1,84 @@
+#!/bin/bash
+# Phase 3 (2026-04-27): outbox watcher for brain → Codex CLI task envelopes.
+# Mirror of brain-spawn-claude. See that file for design notes.
+# Defaults to disabled (BRAIN_AUTOSPAWN_CODEX != on → no-op).
+
+set -uo pipefail
+
+OUTBOX="$HOME/.brain_outbox/codex"
+PENDING="$OUTBOX/pending"
+DONE="$OUTBOX/done"
+FAILED="$OUTBOX/failed"
+LOG_DIR="/Users/chrischo/server/brain/logs/jobs"
+LOG_FILE="$LOG_DIR/brain_spawn_codex.log"
+SECRET_FILE="$HOME/.openclaw/credentials/.personal_webhook_secret"
+BRAIN_URL="${BRAIN_URL:-http://127.0.0.1:8791}"
+CODEX_BIN="${CODEX_BIN:-/opt/homebrew/bin/codex}"
+
+mkdir -p "$PENDING" "$DONE" "$FAILED" "$LOG_DIR"
+
+log() {
+  printf '%s %s\n' "$(date +%Y-%m-%dT%H:%M:%SZ)" "$1" >> "$LOG_FILE"
+}
+
+ENABLED="${BRAIN_AUTOSPAWN_CODEX:-off}"
+if [ "$ENABLED" != "on" ]; then
+  log "spawn disabled (BRAIN_AUTOSPAWN_CODEX=$ENABLED) — leaving outbox untouched"
+  exit 0
+fi
+
+[ -x "$CODEX_BIN" ] || { log "codex bin missing at $CODEX_BIN"; exit 0; }
+command -v jq >/dev/null 2>&1 || { log "jq missing"; exit 0; }
+[ -r "$SECRET_FILE" ] || { log "secret file missing"; exit 0; }
+
+LOCK_FILE="/tmp/.brain_spawn_codex.lock"
+exec 9>"$LOCK_FILE"
+if ! flock -n 9; then
+  log "another spawn in flight — skipping this trigger"
+  exit 0
+fi
+
+MAX_PER_RUN=3
+processed=0
+
+for envelope in "$PENDING"/*.json; do
+  [ -e "$envelope" ] || break
+  [ "$processed" -lt "$MAX_PER_RUN" ] || break
+
+  msg_id=$(jq -r '.message_id // ""' < "$envelope" 2>/dev/null)
+  task=$(jq -r '.content // ""' < "$envelope" 2>/dev/null)
+  if [ -z "$msg_id" ] || [ -z "$task" ]; then
+    log "envelope $(basename "$envelope") malformed — moving to failed/"
+    mv "$envelope" "$FAILED/"
+    continue
+  fi
+
+  log "spawning codex for msg=$msg_id task='${task:0:80}…'"
+
+  output_file=$(mktemp -t brain_spawn_codex_out_XXXXXX)
+  if timeout 600 "$CODEX_BIN" exec --skip-git-repo-check -m gpt-5.5 "$task" \
+        > "$output_file" 2>&1; then
+    log "msg=$msg_id ok ($(wc -c < "$output_file") bytes output)"
+    mv "$envelope" "$DONE/"
+    SECRET=$(cat "$SECRET_FILE")
+    curl -sS --max-time 5 -X POST \
+      -H "Authorization: Bearer $SECRET" \
+      -H 'Content-Type: application/json' \
+      -d "$(jq -nc --arg id "$msg_id" --arg note "spawn ok" '{status:"done", note:$note, agent:"codex"}')" \
+      "${BRAIN_URL}/brain/command/${msg_id}/ack" >/dev/null 2>&1 || true
+  else
+    rc=$?
+    log "msg=$msg_id FAILED rc=$rc"
+    mv "$envelope" "$FAILED/"
+    SECRET=$(cat "$SECRET_FILE")
+    curl -sS --max-time 5 -X POST \
+      -H "Authorization: Bearer $SECRET" \
+      -H 'Content-Type: application/json' \
+      -d "$(jq -nc --arg id "$msg_id" --arg note "spawn failed rc=$rc" '{status:"rejected", note:$note, agent:"codex"}')" \
+      "${BRAIN_URL}/brain/command/${msg_id}/ack" >/dev/null 2>&1 || true
+  fi
+  rm -f "$output_file"
+  processed=$((processed + 1))
+done
+
+log "run complete: processed=$processed"

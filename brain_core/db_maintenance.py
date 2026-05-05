@@ -65,6 +65,50 @@ def _sqlite_size_mb(path: Path) -> float:
     return round(path.stat().st_size / 1048576, 2)
 
 
+def run_wal_checkpoint() -> dict:
+    """Daily PRAGMA wal_checkpoint(TRUNCATE) across hot brain SQLite DBs.
+
+    Why: weekly VACUUM implicitly checkpoints, but between vacuums the WAL
+    grows unbounded under steady writes (autonomy.authorize ~48K/day,
+    embedding_cache inserts, metrics_snapshots persist). Observed
+    2026-04-30: embedding_cache.db-wal at 224 MB and autonomy.db-wal at
+    176 MB triggered the logs_dir_total_mb SLO. Daily TRUNCATE keeps WAL
+    bounded to one day of writes.
+
+    TRUNCATE is safe with active readers/writers — falls back to PASSIVE
+    when blocked rather than waiting indefinitely.
+    """
+    summary: dict = {"started_at": _now_iso(), "dbs": []}
+    for label, path in [
+        ("brain.db", BRAIN_DB),
+        ("autonomy.db", AUTONOMY_DB),
+        ("llm_usage.db", LLM_USAGE_DB),
+        ("metrics_history.db", METRICS_HISTORY_DB),
+        ("embedding_cache.db", BRAIN_LOGS_DIR / "embedding_cache.db"),
+    ]:
+        if not path.exists():
+            continue
+        wal = path.with_suffix(path.suffix + "-wal")
+        entry = {
+            "label": label,
+            "wal_size_before_mb": _sqlite_size_mb(wal),
+        }
+        try:
+            conn = sqlite3.connect(str(path), isolation_level=None, timeout=30.0)
+            try:
+                row = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+                entry["result"] = list(row) if row else None
+            finally:
+                conn.close()
+            entry["wal_size_after_mb"] = _sqlite_size_mb(wal)
+            entry["status"] = "ok"
+        except Exception as exc:
+            entry["status"] = f"error:{str(exc)[:120]}"
+        summary["dbs"].append(entry)
+    summary["finished_at"] = _now_iso()
+    return summary
+
+
 def run_vacuum() -> dict:
     """Weekly VACUUM across all brain SQLite DBs. Reclaims free pages, rebuilds
     indexes, keeps file size proportional to live data. Safe with WAL mode but
@@ -443,6 +487,7 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="cmd")
     sub.add_parser("vacuum")
+    sub.add_parser("wal_checkpoint")
     sub.add_parser("retention_audit")
     sub.add_parser("retention_usage")
     sub.add_parser("retention_decisions")
@@ -453,6 +498,8 @@ if __name__ == "__main__":
     args = p.parse_args()
     if args.cmd == "vacuum":
         print(json.dumps(run_vacuum(), indent=2))
+    elif args.cmd == "wal_checkpoint":
+        print(json.dumps(run_wal_checkpoint(), indent=2))
     elif args.cmd == "retention_audit":
         print(json.dumps(run_action_audit_retention(), indent=2))
     elif args.cmd == "retention_usage":

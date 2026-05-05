@@ -341,9 +341,8 @@ def attach_brain_skills(*, dry_run: bool = False) -> dict:
 
 
 def bump_agent_usage(agent_name: str) -> dict:
-    """Stamp last_used_at + increment use_count on every brain-learned-*
-    skill attached to the named agent. Brain-side telemetry only — never
-    touches openclaw.json."""
+    """Stamp last_used_at + increment use_count on generated skills attached
+    to the named agent. Brain-side telemetry only — never touches openclaw.json."""
     try:
         cfg = _load_config()
     except Exception:
@@ -355,7 +354,8 @@ def bump_agent_usage(agent_name: str) -> dict:
     for agent in cfg.get("agents", {}).get("list", []):
         if not isinstance(agent, dict):
             continue
-        if str(agent.get("name", "")).lower() == agent_name.lower():
+        names = {str(agent.get("name", "")).lower(), str(agent.get("id", "")).lower()}
+        if agent_name.lower() in names:
             matching = agent
             break
     if matching is None:
@@ -363,10 +363,10 @@ def bump_agent_usage(agent_name: str) -> dict:
 
     bumped = 0
     for skill_name in matching.get("skills") or []:
-        if not skill_name.startswith(BRAIN_PREFIX):
-            continue
         t = telemetry.get(skill_name)
         if t is None:
+            continue
+        if not _is_brain_generated_skill(skill_name, t):
             continue
         t["last_used_at"] = now
         t["use_count"] = int(t.get("use_count") or 0) + 1

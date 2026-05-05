@@ -182,19 +182,27 @@ def _chunk_markdown(markdown: str, source: str) -> list[dict]:
             is_parent = False
         if not content_str.strip():
             continue
+        metadata = {
+            "source": source,
+            "source_type": "pdf",
+            "type": "pdf",
+            "chunk_index": i,
+            "total_chunks": len(raw_chunks),
+            "section": section,
+            "chunk_id": chunk_id,
+            "parent_id": parent_id,
+            "is_parent": is_parent,
+        }
+        try:
+            from source_policy import merge_policy_metadata, metadata_for_document
+
+            metadata = merge_policy_metadata(metadata, metadata_for_document(metadata, content=content_str))
+        except Exception:
+            pass
         out.append(
             {
                 "content": content_str,
-                "metadata": {
-                    "source": source,
-                    "source_type": "pdf",
-                    "chunk_index": i,
-                    "total_chunks": len(raw_chunks),
-                    "section": section,
-                    "chunk_id": chunk_id,
-                    "parent_id": parent_id,
-                    "is_parent": is_parent,
-                },
+                "metadata": metadata,
             }
         )
     return out

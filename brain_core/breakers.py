@@ -39,6 +39,7 @@ except ImportError:
 CB_THRESHOLD = 3
 BACKOFF_TIERS_S = (300, 900, 3600, 14400)  # 5m -> 15m -> 1h -> 4h
 SNAPSHOT_TTL_S = 5.0
+PROBE_STALE_S = 900  # A half-open probe older than 15m is orphaned/stale.
 
 
 _init_lock = threading.Lock()
@@ -169,6 +170,34 @@ def peek_breaker(kind: str) -> BreakerSnapshot:
         row = conn.execute("SELECT * FROM heal_breakers WHERE kind = ?", (kind,)).fetchone()
         snapshot = _row_to_snapshot(kind, row)
 
+        # If the process that claimed the single-flight half-open probe dies
+        # before record_result(), the breaker can otherwise stay in
+        # half_open_probing forever. Treat stale probes as a failed recovery
+        # attempt and reopen with a fresh cooldown so callers see a real
+        # cooldown instead of "half_open_probing (cooldown 0s)" indefinitely.
+        if snapshot.is_probing and snapshot.last_action_at is not None:
+            elapsed = now - snapshot.last_action_at
+            if elapsed >= PROBE_STALE_S:
+                new_trip_count = snapshot.trip_count + 1
+                tier_idx = min(new_trip_count - 1, len(BACKOFF_TIERS_S) - 1)
+                conn.execute(
+                    "UPDATE heal_breakers SET state='open', failures=?, trip_count=?, "
+                    "opened_at=?, last_failure_at=?, reset_after_s=?, reason=? "
+                    "WHERE kind=? AND state='half_open_probing'",
+                    (
+                        max(snapshot.failures + 1, CB_THRESHOLD),
+                        new_trip_count,
+                        now,
+                        now,
+                        BACKOFF_TIERS_S[tier_idx],
+                        "half_open_probe_stale",
+                        kind,
+                    ),
+                )
+                conn.commit()
+                row = conn.execute("SELECT * FROM heal_breakers WHERE kind = ?", (kind,)).fetchone()
+                snapshot = _row_to_snapshot(kind, row)
+
         # Auto half-open promotion
         if snapshot.is_open and snapshot.opened_at is not None:
             elapsed = now - snapshot.opened_at
@@ -226,7 +255,7 @@ def record_result(kind: str, *, ok: bool, error: str = "") -> BreakerSnapshot:
             new_opened_at = None
             new_reset_after = BACKOFF_TIERS_S[0]
             new_reason = ""
-        elif snapshot.is_half_open:
+        elif snapshot.is_half_open or snapshot.is_probing:
             # Half-open probe failure: always escalate to next backoff tier.
             # This is the fix for the half_open ↔ open zero-cooldown loop —
             # previously the stale opened_at/reset_after_s were reused.

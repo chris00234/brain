@@ -73,6 +73,37 @@ def test_build_digest_includes_approve_reject_urls(isolated_audit):
     assert "novelty 0.82" in text
 
 
+def test_send_telegram_uses_direct_alert_module(isolated_audit, monkeypatch):
+    audit, _ = isolated_audit
+    calls = []
+
+    monkeypatch.setitem(
+        sys.modules,
+        "telegram_alert",
+        type(
+            "_TelegramAlert",
+            (),
+            {
+                "send_chris_telegram": staticmethod(
+                    lambda message, source, severity: calls.append(
+                        {"message": message, "source": source, "severity": severity}
+                    )
+                    or True
+                )
+            },
+        ),
+    )
+
+    assert audit._send_telegram("review candidate") is True
+    assert calls == [
+        {
+            "message": "review candidate",
+            "source": "eval_holdout_audit",
+            "severity": "info",
+        }
+    ]
+
+
 def test_run_sends_when_pending_present(isolated_audit, monkeypatch):
     # Phase N3: audit only dispatches Telegram for candidates stuck >= 14 days.
     # The fresh-pending path is handled silently by auto_graduate. This test

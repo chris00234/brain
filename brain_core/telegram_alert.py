@@ -2,8 +2,8 @@
 
 All Chris-facing alerts — SLO breaches, job failures, brain_loop URGENT
 messages, healthcheck alerts, LoRA regressions — go through this single
-entry point. Bypasses any LLM session: uses `openclaw message send
---channel telegram`, which is a direct Bot API POST at the gateway layer.
+entry point. Bypasses any LLM session and bypasses the OpenClaw gateway:
+uses Telegram Bot API ``sendMessage`` directly.
 
 Why this exists:
 - 2026-04-17: brain_loop._telegram_alert was routing through
@@ -15,7 +15,7 @@ Why this exists:
   needed; the format is fixed).
 - Fix: four separate telegram sender implementations (slos.py,
   brain_loop, scheduler._alert_failure, healthcheck, lora_ab_gate)
-  consolidated into this module. LLM-free, subprocess-only, with
+  consolidated into this module. LLM-free, OpenClaw-free, with
   llm_backlog auto-fallback.
 
 Contract:
@@ -27,16 +27,18 @@ Contract:
 from __future__ import annotations
 
 import logging
-import subprocess
+import os
 import threading
 import time
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-OPENCLAW_BIN = "/Users/chrischo/.local/bin/openclaw"
 CHRIS_TELEGRAM_CHAT_ID = "8484060831"
-TELEGRAM_ACCOUNT = "jenna-bot"
+TELEGRAM_TOKEN_ENV = "TELEGRAM_JENNA_TOKEN"  # noqa: S105 - env var name, not a secret
+OPENCLAW_ENV_FILE = Path("/Users/chrischo/.openclaw/.env")
 SEND_TIMEOUT_S = 20
 
 # ── Rate limiter ────────────────────────────────────────────
@@ -94,12 +96,87 @@ def _queue_backlog(body: str, source: str, severity: str, reason: str) -> None:
         log.warning("backlog enqueue failed for %s: %s", source, exc)
 
 
+def _read_shell_export(path: Path, name: str) -> str | None:
+    try:
+        for line in path.read_text(errors="ignore").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if stripped.startswith("export "):
+                stripped = stripped[len("export ") :].strip()
+            prefix = f"{name}="
+            if not stripped.startswith(prefix):
+                continue
+            value = stripped[len(prefix) :].strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+                value = value[1:-1]
+            return value or None
+    except OSError:
+        return None
+    return None
+
+
+def _telegram_token() -> str | None:
+    return os.getenv(TELEGRAM_TOKEN_ENV) or _read_shell_export(OPENCLAW_ENV_FILE, TELEGRAM_TOKEN_ENV)
+
+
+def _send_direct_bot_api(body: str) -> tuple[bool, str]:
+    token = _telegram_token()
+    if not token:
+        return False, "telegram_token_missing"
+    data = urllib.parse.urlencode(
+        {
+            "chat_id": CHRIS_TELEGRAM_CHAT_ID,
+            "text": body,
+            "disable_web_page_preview": "true",
+        }
+    ).encode("utf-8")
+    req = urllib.request.Request(
+        f"https://api.telegram.org/bot{token}/sendMessage",
+        data=data,
+        method="POST",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=SEND_TIMEOUT_S) as resp:  # noqa: S310 - fixed Telegram API URL.
+            status = getattr(resp, "status", 200)
+            if 200 <= int(status) < 300:
+                return True, "ok"
+            return False, f"http={status}"
+    except Exception as exc:
+        return False, f"exc:{type(exc).__name__}"
+
+
+def direct_api_healthcheck() -> tuple[bool, str]:
+    """Verify token + Chris chat reachability without sending a message."""
+
+    token = _telegram_token()
+    if not token:
+        return False, "telegram_token_missing"
+    data = urllib.parse.urlencode({"chat_id": CHRIS_TELEGRAM_CHAT_ID}).encode("utf-8")
+    req = urllib.request.Request(
+        f"https://api.telegram.org/bot{token}/getChat",
+        data=data,
+        method="POST",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=SEND_TIMEOUT_S) as resp:  # noqa: S310 - fixed Telegram API URL.
+            status = getattr(resp, "status", 200)
+            if 200 <= int(status) < 300:
+                return True, "ok"
+            return False, f"http={status}"
+    except Exception as exc:
+        return False, f"exc:{type(exc).__name__}"
+
+
 def send_chris_telegram(
     body: str,
     source: str,
     severity: str = "warn",
     *,
     bypass_rate_limit: bool = False,
+    queue_on_failure: bool = True,
 ) -> bool:
     """Send a Telegram alert to Chris.
 
@@ -110,6 +187,8 @@ def send_chris_telegram(
         severity: one of "critical", "urgent", "warn", "info" — controls
                   rate-limit window
         bypass_rate_limit: set True for probe/test sends
+        queue_on_failure: set False when replaying an existing telegram
+                  backlog row so a failed replay does not enqueue a duplicate
 
     Returns True on delivery, False on rate-limit / send failure
     (failures are auto-queued to llm_backlog kind=telegram).
@@ -122,47 +201,11 @@ def send_chris_telegram(
     if not body.strip():
         return False
 
-    if not Path(OPENCLAW_BIN).exists():
-        log.warning("openclaw binary missing — queuing telegram alert for %s", source)
-        _queue_backlog(body, source, severity, "openclaw_missing")
-        return False
-
-    try:
-        proc = subprocess.run(
-            [
-                OPENCLAW_BIN,
-                "message",
-                "send",
-                "--channel",
-                "telegram",
-                "--target",
-                CHRIS_TELEGRAM_CHAT_ID,
-                "--account",
-                TELEGRAM_ACCOUNT,
-                "--message",
-                body,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=SEND_TIMEOUT_S,
-        )
-    except subprocess.TimeoutExpired:
-        log.warning("telegram send timeout (%ds) source=%s", SEND_TIMEOUT_S, source)
-        _queue_backlog(body, source, severity, "timeout")
-        return False
-    except Exception as exc:
-        log.warning("telegram send failed source=%s: %s", source, exc)
-        _queue_backlog(body, source, severity, f"exc:{type(exc).__name__}")
-        return False
-
-    if proc.returncode != 0:
-        log.warning(
-            "telegram send rc=%d source=%s stderr=%s",
-            proc.returncode,
-            source,
-            (proc.stderr or "")[:200],
-        )
-        _queue_backlog(body, source, severity, f"rc={proc.returncode}")
+    ok, reason = _send_direct_bot_api(body)
+    if not ok:
+        log.warning("telegram direct send failed source=%s reason=%s", source, reason)
+        if queue_on_failure:
+            _queue_backlog(body, source, severity, reason)
         return False
 
     # Only stamp the rate-limit clock on confirmed delivery

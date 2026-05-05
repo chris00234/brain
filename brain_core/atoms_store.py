@@ -26,6 +26,7 @@ import hashlib
 import json
 import logging
 import math
+import os
 import sqlite3
 import sys
 import threading
@@ -260,7 +261,11 @@ _initialized = False
 # reconciliation cron (F41), so nothing is permanently lost.
 _BG_EXTRACT_POOL: concurrent.futures.ThreadPoolExecutor | None = None
 _BG_EXTRACT_POOL_LOCK = threading.Lock()
-_BG_EXTRACT_INFLIGHT_MAX = 64
+_BG_EXTRACT_WORKERS = max(1, int(os.getenv("BRAIN_ENTITY_EXTRACT_WORKERS", "1")))
+_BG_EXTRACT_INFLIGHT_MAX = max(
+    _BG_EXTRACT_WORKERS,
+    int(os.getenv("BRAIN_ENTITY_EXTRACT_INFLIGHT_MAX", "16")),
+)
 _BG_EXTRACT_SEM = threading.BoundedSemaphore(_BG_EXTRACT_INFLIGHT_MAX)
 _BG_EXTRACT_DROPPED = 0
 _BG_EXTRACT_DROPPED_LOCK = threading.Lock()
@@ -272,7 +277,7 @@ def _get_bg_extract_pool() -> concurrent.futures.ThreadPoolExecutor:
         with _BG_EXTRACT_POOL_LOCK:
             if _BG_EXTRACT_POOL is None:
                 _BG_EXTRACT_POOL = concurrent.futures.ThreadPoolExecutor(
-                    max_workers=4,
+                    max_workers=_BG_EXTRACT_WORKERS,
                     thread_name_prefix="atoms_bg_extract",
                 )
     return _BG_EXTRACT_POOL
@@ -925,6 +930,47 @@ def update_atom_confidence(
             }
     except sqlite3.Error:
         return None
+
+
+def update_provisional_flag(
+    atom_chroma_id: str,
+    provisional: bool,
+    *,
+    db_path: Path | None = None,
+) -> bool:
+    """Phase G2: flip the provisional flag on an existing atom by chroma_id.
+
+    Used by POST /memory when a write triggers an unresolved contradiction:
+    the new atom is marked provisional so search_unified.search_all excludes
+    it from retrieval (default include_provisional=False) until the conflict
+    is settled via POST /memory/contradictions/{id}/resolve. The resolve
+    handler clears the flag for keep_new / both_true / dismiss actions; for
+    keep_old / merge the row is orphaned at the vector layer (the atoms.db
+    row stays harmless because no vector matches it).
+
+    Matches by chroma_id directly (mirrors `get_atom_by_chroma_id`,
+    `mark_superseded`, `reinforce`). An earlier draft hashed the input
+    via derive_atom_id, but the resolve path receives `new_id` from the
+    contradictions metadata which can carry a different string shape than
+    the value upsert_atom was originally called with — direct match
+    avoids that silent-mismatch class.
+
+    Returns True when the row was updated, False on missing / disabled.
+    """
+    if not BRAIN_ATOMS_ENABLED:
+        return False
+    if not atom_chroma_id:
+        return False
+    try:
+        with _conn(db_path) as conn:
+            cur = conn.execute(
+                "UPDATE atoms SET provisional = ?, updated_at = ? WHERE chroma_id = ?",
+                (1 if provisional else 0, _now(), atom_chroma_id),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+    except sqlite3.Error:
+        return False
 
 
 def get_confidence_history(atom_id: str, *, limit: int = 50, db_path: Path | None = None) -> list[dict]:

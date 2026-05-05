@@ -18,13 +18,13 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
+from llm_dispatch import dispatch_json
 
 # ── Config ──────────────────────────────────────────────
 INBOX_DIR = Path("/Users/chrischo/server/knowledge/raw/inbox")
 STATE_FILE = Path("/Users/chrischo/server/brain/logs/git-activity-state.json")
 FAILURE_LOG = Path("/Users/chrischo/server/brain/logs/git-activity-failures.jsonl")
 
-OPENCLAW_BIN = "/Users/chrischo/.local/bin/openclaw"
 DISPATCH_AGENT = "ellie"
 DISPATCH_TIMEOUT = 240
 BATCH_SIZE = 5  # daily logs per dispatch
@@ -182,36 +182,14 @@ def build_distillation_prompt(daily_logs: list[dict]) -> str:
 
 
 def dispatch_distillation(prompt: str) -> dict | None:
-    cmd = [
-        OPENCLAW_BIN,
-        "agent",
-        "--agent",
-        DISPATCH_AGENT,
-        "--message",
-        prompt,
-        "--json",
-        "--timeout",
-        str(DISPATCH_TIMEOUT),
-        "--thinking",
-        "off",
-    ]
-    try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=DISPATCH_TIMEOUT + 30)
-    except subprocess.TimeoutExpired:
-        log_failure("ellie dispatch timed out")
-        return None
-    if r.returncode != 0:
-        log_failure(f"ellie dispatch failed: {r.stderr[:300]}")
-        return None
-    try:
-        response = json.loads(r.stdout)
-        text = response.get("result", {}).get("payloads", [])[0].get("text", "")
-        text = re.sub(r"^```(?:json)?\s*", "", text.strip())
-        text = re.sub(r"\s*```$", "", text)
-        return json.loads(text)
-    except (json.JSONDecodeError, KeyError, IndexError) as e:
-        log_failure(f"could not parse Ellie reply: {e}")
-        return None
+    return dispatch_json(
+        agent=DISPATCH_AGENT,
+        prompt=prompt,
+        timeout=DISPATCH_TIMEOUT,
+        log_failure=log_failure,
+        source="ingest.git_activity",
+        thinking="off",
+    )
 
 
 # ── Record Writing ──────────────────────────────────────

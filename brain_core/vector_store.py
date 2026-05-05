@@ -120,8 +120,13 @@ class VectorStore(Protocol):
         collection: str,
         ids: list[str],
         patch: dict[str, Any],
-    ) -> None:
-        """Merge ``patch`` into the payload of every listed id. Vectors untouched."""
+    ) -> bool:
+        """Merge ``patch`` into the payload of every listed id. Vectors untouched.
+
+        Returns True when the backend accepted the write. Older callers may
+        ignore the return value; bulk repair jobs use it to avoid counting
+        swallowed backend failures as successful metadata refreshes.
+        """
 
 
 # ── Factory ──────────────────────────────────────────────────────

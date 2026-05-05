@@ -18,6 +18,8 @@ OPENCLAW_DIR = Path(os.getenv("OPENCLAW_DIR", str(HOME / ".openclaw")))
 QDRANT_URL = os.getenv("QDRANT_URL", "http://127.0.0.1:6333")
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434")
 NEO4J_BOLT_URI = os.getenv("NEO4J_BOLT_URI", "bolt://127.0.0.1:7687")
+BRAIN_RERANKER_URL = os.getenv("BRAIN_RERANKER_URL", "http://127.0.0.1:8792")
+BRAIN_RERANKER_TIMEOUT_MS = int(os.getenv("BRAIN_RERANKER_TIMEOUT_MS", "1000"))
 
 # ── Derived paths: brain ──────────────────────────────────
 BRAIN_CORE_DIR = BRAIN_DIR / "brain_core"

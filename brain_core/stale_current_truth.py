@@ -64,11 +64,27 @@ HISTORICAL_CONTEXT_RE = re.compile(
     r"\b("
     r"historical|history|stale|superseded|supersedes|supersession|decommissioned?|deprecated|legacy|"
     r"decommission|replaced|replacement|migrated|migration|cutover|formerly|previously|earlier|"
-    r"away\s+from|no\s+longer|before|until|from\s+20\d\d-\d\d-\d\d\s+(?:to|until)|→|->"
+    r"away\s+from|no\s+longer|era\s+(?:is\s+)?(?:effectively\s+)?over|"
+    r"before|until|from\s+20\d\d-\d\d-\d\d\s+(?:to|until)|→|->"
     r")\b",
     re.I,
 )
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?。！？])\s+|\n+")  # noqa: RUF001 — CJK fullwidth punctuation is intentional for KR/JA/ZH sentence splits
+
+
+def _connect_brain_db(db_path: Path) -> sqlite3.Connection:
+    """Open brain.db with a write-friendly busy timeout.
+
+    The staleness job runs alongside ingest / scheduler writers. A plain
+    sqlite3.connect() can fail immediately with ``database is locked`` during
+    a harmless WAL writer overlap; waiting up to 30s keeps the maintenance job
+    reliable without adding load.
+    """
+
+    conn = sqlite3.connect(str(db_path), timeout=30.0)
+    conn.execute("PRAGMA busy_timeout=30000")
+    conn.row_factory = sqlite3.Row
+    return conn
 
 
 @lru_cache(maxsize=8)
@@ -420,8 +436,7 @@ def build_vector_report(
 def _active_atom_rows(db_path: Path) -> list[sqlite3.Row]:
     if not db_path.exists():
         return []
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
+    conn = _connect_brain_db(db_path)
     try:
         return list(
             conn.execute(
@@ -441,8 +456,7 @@ def _active_atom_rows(db_path: Path) -> list[sqlite3.Row]:
 def _superseded_atoms_missing_valid_until(db_path: Path) -> list[sqlite3.Row]:
     if not db_path.exists():
         return []
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
+    conn = _connect_brain_db(db_path)
     try:
         return list(
             conn.execute(
@@ -562,7 +576,7 @@ def build_atoms_report(
     marked_atoms = 0
     marked_vectors: dict[str, int] = {}
     if apply and ids_to_mark and db_path.exists():
-        conn = sqlite3.connect(str(db_path))
+        conn = _connect_brain_db(db_path)
         try:
             conn.executemany(
                 """
@@ -581,7 +595,7 @@ def build_atoms_report(
             conn.close()
     repaired_superseded_valid_until = 0
     if apply and superseded_lifecycle_gaps and db_path.exists():
-        conn = sqlite3.connect(str(db_path))
+        conn = _connect_brain_db(db_path)
         try:
             conn.executemany(
                 """

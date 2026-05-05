@@ -175,8 +175,23 @@ def _chunk_post(title: str, html_body: str) -> list[str]:
         return []
 
     header = f"Ghost blog post: {title}\n"
-    if len(body) + len(header) <= MAX_CHUNK_CHARS:
-        return [header + body]
+    full_text = header + body
+    try:
+        from source_policy import infer_chunk_strategy
+
+        if infer_chunk_strategy({"type": "blog_post", "source": "ghost"}, content=full_text) == "semantic":
+            from semantic_chunk import chunk_with_fallback
+
+            return [
+                str(chunk.get("content", "")).strip()
+                for chunk in chunk_with_fallback(full_text, max_size=MAX_CHUNK_CHARS)
+                if str(chunk.get("content", "")).strip()
+            ]
+    except Exception:
+        pass
+
+    if len(full_text) <= MAX_CHUNK_CHARS:
+        return [full_text]
 
     chunks: list[str] = []
     # Split on paragraph boundaries first, then pack into chunks.
@@ -210,21 +225,26 @@ def _upsert(chunks: list[dict]) -> int:
         ids.append(doc_id)
         embeddings.append(emb)
         documents.append(content)
-        metadatas.append(
-            {
-                "source": c["url"],
-                "service": SERVICE,
-                "type": "blog_post",
-                "title": c["title"],
-                "slug": c["slug"],
-                "published_at": c["published_at"],
-                "updated_at": c["updated_at"],
-                "status": c["status"],
-                "tags": ",".join(c["tags"]),
-                "agent": "market",
-                "created_at": datetime.now().isoformat(),
-            }
-        )
+        metadata = {
+            "source": c["url"],
+            "service": SERVICE,
+            "type": "blog_post",
+            "title": c["title"],
+            "slug": c["slug"],
+            "published_at": c["published_at"],
+            "updated_at": c["updated_at"],
+            "status": c["status"],
+            "tags": c["tags"],
+            "agent": "market",
+            "created_at": datetime.now().isoformat(),
+        }
+        try:
+            from source_policy import merge_policy_metadata, metadata_for_document
+
+            metadata = merge_policy_metadata(metadata, metadata_for_document(metadata, content=content))
+        except Exception:
+            pass
+        metadatas.append(metadata)
 
     if not ids:
         return 0

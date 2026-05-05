@@ -57,13 +57,13 @@ A single-user, local-first second brain that combines RAG, episodic + semantic m
        └──────────────────────────────────┘
 
                        ▲
-                       │ All LLM calls
+                       │ LLM / agent dispatch
                        │
        ┌───────────────┴──────────────────┐
-       │     openclaw_dispatch (CB+retry) │
-       │  → OpenClaw → OpenAI subscription│
-       │       Jenna · Liz · Sage         │
-       │       Ellie · Market             │
+       │ cli_llm fallback chain (CB+retry)│
+       │ Codex gpt-5.5 → Spark → Claude   │
+       │ OpenClaw gateway as integration  │
+       │ / emergency fallback lane        │
        └──────────────────────────────────┘
 
                        ▲
@@ -83,13 +83,15 @@ A single-user, local-first second brain that combines RAG, episodic + semantic m
 - **Claude Code** — primary operator. Uses 20 brain_* MCP tools (`~/.claude.json`).
 - **OpenClaw agents** (jenna/liz/ellie/sage/market) — same 20 tools via `~/.openclaw/openclaw.json`.
 - **Brain UI** — React/Vite SPA at `brain.chrischodev.com`, served via nginx, talks to `/api/*`.
-- **Telegram** — Sage and Jenna push proactive insights, alerts, weekly digests.
+- **Telegram** — final human-only blocker surface. Proactive insights, alerts, and digests are first routed through the Brain escalation policy and subscription-backed LLM/agent handling; Chris is notified only for missing private/current knowledge, credentials/account access, physical access, irreversible authority, or human-only judgment.
 
 ### 2. API gateway (`server.py`, ~5,000 LOC)
 FastAPI on `127.0.0.1:8791`. Bearer-token auth (`~/.openclaw/credentials/.personal_webhook_secret`), per-route slowapi rate limits (M5), per-actor adoption tracking via `action_audit` (M7-WS8), ~130 routes covering recall/memory/jobs/SLOs/triggers/holdout/atoms/breakers/quiet hours/denylist.
 
 ### 3. Search pipeline (`brain_core/search_unified.py`)
 Parallel fan-out across 6 sources → RRF fuse with trust weights → cross-encoder rerank (BGE-reranker-base) → token-overlap rerank → time decay (category-aware) → preference recency boost → graph entity boost → spreading activation (HippoRAG PPR) → triple_link boost (HippoRAG2, M7-WS3) → MMR diversity → source diversity cap. Optional `?iterative=true` activates CRAG (M9) for low-confidence retry.
+
+Cross-encoder scoring runs in an isolated local worker (`brain_core/reranker_worker.py`, launchd label `ai.openclaw.brain-reranker`, `127.0.0.1:8792`) when `BRAIN_RERANKER_MODE=worker`. The main API calls it via `brain_core/reranker_client.py` and keeps stage-1 retrieval results unchanged if the worker is unavailable. This prevents Torch/MPS allocator growth from accumulating in the long-running `server.py` process; the worker self-recycles on RSS/request/lifetime limits and launchd restarts it.
 
 `/recall/active` adds a lightweight judgment layer before per-turn hook injection. `brain_core/judgment_layer.py` classifies prompt shape, suppresses proceed-only/generic hook noise, sets semantic score and token budgets, and arbitrates canonical/doorbell/semantic/proactive blocks so the hook injects only evidence that is useful for the current turn. `brain_core/judgment_feedback.py` records those decisions beside `action_audit` and exposes `/brain/judgment-report` plus `/brain/judgment-tuning` for evidence-based policy tuning without adding a new daemon or LLM call.
 
@@ -102,8 +104,11 @@ Parallel fan-out across 6 sources → RRF fuse with trust weights → cross-enco
 ### 5. Atoms truth layer (`brain_core/atoms_store.py`)
 523+ canonical atoms with SM-2 spaced repetition (`easiness_factor`, `interval_days`, `next_review_at`, `reinforcement_count`), tier promotion (`episodic → semantic → core → obsolete`), supersession chains (`supersedes` / `superseded_by` / `valid_from` / `valid_until`), per-atom provenance + raw_event lineage. Gated by `BRAIN_ATOMS_ENABLED` for write-side, `BRAIN_ATOMS_READ` for read-side filtering.
 
-### 6. LLM dispatch (`brain_core/openclaw_dispatch.py`)
-Text LLM calls route through `openclaw agent --agent <name>`. Persistent circuit breaker (`brain_core/breakers.py`), exponential retry, semantic dispatch cache (opt-in), per-agent usage tracking. Hard rule from CLAUDE.md: no direct OpenAI/Anthropic SDK calls anywhere in brain code.
+### 6. LLM dispatch (`brain_core/cli_llm.py`, `brain_core/openclaw_dispatch.py`)
+Mechanical text LLM calls and autonomous Brain background work route through subscription CLIs via `brain_core/cli_llm.py`: Codex `gpt-5.5` first, then `gpt-5.3-codex-spark`, then Claude CLI fallback accounts. Tool/session-heavy agent work can still use OpenClaw through `brain_core/openclaw_dispatch.py`, but OpenClaw is the integration / emergency fallback lane rather than the default executor. Both paths use breakers/backlog so quota degradation queues catch-up work instead of paging Chris. Hard rule: no direct OpenAI/Anthropic SDK billing and no local generation model duty.
+Usage/accounting is exposed through `/brain/usage`, backed by `cli_llm.get_usage_stats`, and should report `source=cli_llm` with `primary_model=gpt-5.5` for mechanical dispatch.
+
+`brain_core/escalation_policy.py` gates all Chris-facing notification paths. The default target is LLM/agent self-handling; Telegram is reserved for blockers the LLM cannot resolve itself: missing private/current knowledge, credentials/account access, physical access, irreversible authority, or human-only judgment. If a subscription LLM review returns `HUMAN_NEEDED: ...`, the original path may notify Chris with that specific blocker; `HANDLEABLE: ...` stays inside Brain.
 
 Vision captioning defaults to the subscription CLI path: `brain_core/vision_llm.py` shells out to `codex exec --image` so image captions stay on Chris's existing GPT/Codex subscription. Gemini REST is retained only as an explicit `BRAIN_VISION_BACKEND=gemini` fallback. Both paths use the shared persistent breaker (`vision.codex_cli` / `vision.gemini`) and mirror calls into `llm_usage.db` for SLO/accounting visibility.
 
@@ -120,10 +125,10 @@ Vision captioning defaults to the subscription CLI path: `brain_core/vision_llm.
 L0–L3 levels per action_kind. Per-kind override via `POST /brain/autonomy/{kind}`. Quiet hours 23:00–07:00 PT. Soft denylist + DENY_PREFIXES. Persistent breakers (5m / 15m / 1h / 4h backoff). Top kill: `BRAIN_AUTOPILOT_DISABLED=1`.
 
 ### 9. SLO + alert loop (`brain_core/slos.py`)
-6 SLOs in code: `recall_v2_p95_ms` (≤350 warn), `recall_v2_content_hit_pct` (≥95 critical), `breaker_open_count` (=0 critical), `outbox_pending_count` (≤20 warn), `atoms_write_fail_rate_1h` (≤1% warn), `eval_holdout_growth_weekly` (info). Checked every 5 min. Rate-limited Telegram alerts via jenna-bot.
+27 SLOs in code cover recall latency/quality, breakers, queue backlogs, atom writes, eval drift, backups, logs size, entry-contract drift, Telegram delivery, OpenClaw gateway health, task-dispatch truth, Reflexion lesson coverage, and Brain process RSS. Checked every 5 min. Chris-facing alerts use `brain_core/telegram_alert.py` direct Telegram delivery with backlog replay; deterministic remediation runs first for safe mechanical fixes.
 
 ### 10. Cron infrastructure (`brain_core/scheduler.py` + APScheduler)
-118 jobs total from `brain_core/job_definitions.py`. Off-hours pipeline: 02:00 canonical → 02:45 reflect → 03:25 sm2_nightly → 03:30 eval_run → 03:50 eval_run_extended → 04:00 profile_regen → 04:45 autonomy_proposer → 05:30 pdf_ingest → 05:45 image_ingest. Sunday cluster: 04:15 hnsw_tune, 08:45 holdout_promote, 09:15 holdout_audit, 09:30 lora_ab_gate.
+139 jobs total from `brain_core/job_definitions.py` / generated `CRON_MAP.md`. Off-hours pipeline includes canonicalization, reflection, SM-2 review, eval gates, profile regeneration, autonomy proposals, ingestion, backup/restore checks, CRAG/RAGAS/adversarial/holdout gates, privacy-negative/source-governance audits, UI parity audit, and maintenance. Sunday cluster covers heavier tuning/training/backup/eval work.
 
 ## Data flow — typical query
 
@@ -158,10 +163,13 @@ operator → MCP brain_recall(q="how do we deploy ghost?")
 | `brain_core/judgment_layer.py` | Deterministic per-turn memory arbitration for `/recall/active` |
 | `brain_core/judgment_feedback.py` | Sidecar telemetry for active-recall judgment decisions |
 | `brain_core/search_unified.py` | The hot path — search_all() pipeline |
+| `brain_core/reranker_worker.py` | Isolated Torch/MPS cross-encoder worker with RSS/request/lifetime recycling |
+| `brain_core/reranker_client.py` | Main-server HTTP client for the local reranker worker |
 | `brain_core/atoms_store.py` | SQLite truth layer + action_audit |
-| `brain_core/openclaw_dispatch.py` | All LLM calls go through here |
-| `brain_core/scheduler.py` | 118 APScheduler cron jobs |
-| `brain_core/slos.py` | 6 SLOs + measurement + alert dispatch |
+| `brain_core/cli_llm.py` | CLI-first LLM fallback chain: Codex gpt-5.5 → Spark → Claude → OpenClaw fallback |
+| `brain_core/openclaw_dispatch.py` | OpenClaw gateway integration / emergency fallback for agent-session-heavy work |
+| `brain_core/scheduler.py` | 138 APScheduler cron jobs |
+| `brain_core/slos.py` | 27 SLOs + measurement + alert dispatch |
 | `brain_core/breakers.py` | Persistent circuit breakers |
 | `brain_core/crag.py` | M9 CRAG iterative retrieval (opt-in) |
 | `brain_core/web_search.py` | M6 SearXNG learning loop |
@@ -187,4 +195,4 @@ operator → MCP brain_recall(q="how do we deploy ghost?")
 - The brain runs on Chris's M4 Max Mac Studio. Single user, single tenant, single token. `~/.openclaw/credentials/.personal_webhook_secret` is the auth root.
 - All storage backends native via launchd: `ai.openclaw.qdrant-native` (source-built v1.17 binary at `~/.local/bin/qdrant`), `ai.openclaw.ollama-native`, `ai.openclaw.neo4j-native`. Brain server itself native via `ai.openclaw.brain-server.plist`. OrbStack is used only for ancillary services (not brain-critical).
 - Cloudflare tunnel exposes `brain.chrischodev.com` for remote access. Bearer auth required.
-- Text LLM dispatch uses Chris's existing OpenAI subscription via OpenClaw. Vision captioning defaults to Codex subscription CLI; Gemini REST is explicit opt-in only.
+- Text LLM dispatch uses Chris's existing subscriptions through CLI-first routing (`codex exec` gpt-5.5 primary, Spark/Claude fallback); OpenClaw remains available as an integration / emergency fallback. Vision captioning defaults to Codex subscription CLI; Gemini REST is explicit opt-in only.

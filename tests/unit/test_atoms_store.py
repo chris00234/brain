@@ -263,3 +263,44 @@ def test_concurrent_mark_superseded_atomic(enabled_atoms):
         "winning child's supersedes pointer doesn't match parent — race produced "
         "inconsistent two-row state"
     )
+
+
+def test_update_provisional_flag_roundtrip(enabled_atoms):
+    """Phase G2: write atom non-provisional, flip on, flip off, missing chroma_id."""
+    import sqlite3
+
+    enabled_atoms.upsert_atom(
+        text="Beszel monitors hosts.",
+        chroma_id="semantic_memory:prov1",
+        kind="fact",
+        confidence=0.7,
+    )
+    fetched = enabled_atoms.get_atom_by_chroma_id("semantic_memory:prov1")
+    assert fetched is not None
+    assert fetched["provisional"] == 0, "default upsert should land non-provisional"
+
+    assert enabled_atoms.update_provisional_flag("semantic_memory:prov1", True) is True
+
+    conn = sqlite3.connect(str(enabled_atoms.BRAIN_DB))
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT provisional FROM atoms WHERE chroma_id = 'semantic_memory:prov1'").fetchone()
+    conn.close()
+    assert row["provisional"] == 1, "flag did not flip ON"
+
+    assert enabled_atoms.update_provisional_flag("semantic_memory:prov1", False) is True
+
+    conn = sqlite3.connect(str(enabled_atoms.BRAIN_DB))
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT provisional FROM atoms WHERE chroma_id = 'semantic_memory:prov1'").fetchone()
+    conn.close()
+    assert row["provisional"] == 0, "flag did not flip OFF"
+
+    # Unknown chroma_id → no row updated, returns False without raising.
+    assert enabled_atoms.update_provisional_flag("semantic_memory:does_not_exist", True) is False
+    # Empty chroma_id is a no-op, returns False.
+    assert enabled_atoms.update_provisional_flag("", True) is False
+
+
+def test_update_provisional_flag_disabled_returns_false(disabled_atoms):
+    """Feature flag off → no DB I/O, returns False so callers can branch safely."""
+    assert disabled_atoms.update_provisional_flag("semantic_memory:any", True) is False

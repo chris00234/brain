@@ -38,8 +38,9 @@ except ImportError as e:
 # Always register at the latest version — migrations are idempotent and safe
 # to run on every startup. Without this, a brain restart after a manual migrate
 # would hit downgrade-refused on subsequent restarts (db v3 vs code v0).
-# 2026-04-16 Tier 3 #4: v11 adds retrieval_competition (Bjork inhibition).
-CURRENT_VERSIONS["brain_db"] = 11
+# 2026-05-01: v13 fixes entry_chunks primary key to (collection, vector_id)
+# so identical vector ids in different collections do not overwrite.
+CURRENT_VERSIONS["brain_db"] = 13
 
 
 def _safe_int(v: object, default: int = 0) -> int:
@@ -677,6 +678,55 @@ def _add_retrieval_competition() -> dict:
         )
         conn.commit()
         return {"status": "ok", "table": "retrieval_competition"}
+    finally:
+        conn.close()
+
+
+@migration("brain_db", 11, 12)
+def _add_entry_manifest() -> dict:
+    """Add the v2 entry manifest.
+
+    Qdrant remains the searchable vector store; this SQLite manifest gives the
+    system a durable source-document → chunk → vector-point ledger for audits,
+    legacy backfills, and future source-aware reindex decisions.
+    """
+
+    from entry_manifest import ENTRY_MANIFEST_DDL
+
+    conn = _connect_brain_db()
+    try:
+        conn.executescript(ENTRY_MANIFEST_DDL)
+        conn.commit()
+        tables = {
+            r[0]
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name IN ('entry_documents', 'entry_chunks')"
+            ).fetchall()
+        }
+        return {"tables": sorted(tables)}
+    finally:
+        conn.close()
+
+
+@migration("brain_db", 12, 13)
+def _fix_entry_manifest_chunk_key() -> dict:
+    """Recreate entry_chunks with collection-scoped vector ids.
+
+    The manifest is derived from Qdrant payloads, so dropping/rebuilding this
+    new audit table is safe; callers repopulate it with
+    cli/entry_contract_backfill.py --apply.
+    """
+
+    from entry_manifest import ENTRY_MANIFEST_DDL
+
+    conn = _connect_brain_db()
+    try:
+        conn.execute("DROP TABLE IF EXISTS entry_chunks")
+        conn.executescript(ENTRY_MANIFEST_DDL)
+        conn.commit()
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(entry_chunks)").fetchall()]
+        return {"recreated": "entry_chunks", "columns": cols}
     finally:
         conn.close()
 

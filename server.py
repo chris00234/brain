@@ -216,6 +216,8 @@ async def lifespan(app: FastAPI):
     """Start the in-process scheduler + pre-warm caches on boot."""
     # Configure structured JSON logging
     logging.basicConfig(format="%(message)s", level=logging.INFO)
+    for noisy_logger in ("httpx", "httpcore", "qdrant_client"):
+        logging.getLogger(noisy_logger).setLevel(logging.WARNING)
     structlog.configure(
         processors=[
             structlog.contextvars.merge_contextvars,
@@ -284,13 +286,15 @@ async def lifespan(app: FastAPI):
         log.info("brain_loop_wake_watcher_started")
     except Exception as e:
         log.warning("wake_watcher_start_failed", error=str(e))
-    # Warm the real cross-encoder (BGE-reranker-base) if enabled so the first
-    # /recall/v2 call doesn't eat the 2-5s cold model load. Runs in a background
-    # thread so startup doesn't block on model download.
+    # Warm the real cross-encoder only when it is intentionally in-process.
+    # In worker mode, importing cross_encoder_model here defeats the RSS
+    # isolation and pins Torch/MPS memory inside the long-running API process.
     try:
         from brain_core import config as _brain_config
 
-        if getattr(_brain_config, "BRAIN_CROSS_ENCODER_ENABLED", False):
+        if getattr(_brain_config, "BRAIN_CROSS_ENCODER_ENABLED", False) and os.getenv(
+            "BRAIN_RERANKER_MODE", "inprocess"
+        ).strip().lower() != "worker":
             import threading
 
             def _warm_ce():
@@ -423,9 +427,15 @@ async def _request_id_and_metrics_middleware(request, call_next):
         # metrics buffer can distinguish 4xx from 5xx after the fact.
         # Falls back to positional call when the buffer hasn't been
         # migrated yet — forward-compatible with older buffers.
+        x_agent = (request.headers.get("x-agent") or "").strip().lower()
+        traffic_class = "eval" if x_agent in {"eval", "benchmark", "loadtest"} else "prod"
         try:
             _metrics_buf.record_request(
-                str(request.url.path), latency_ms, error=error, status_code=status_code
+                str(request.url.path),
+                latency_ms,
+                error=error,
+                status_code=status_code,
+                traffic_class=traffic_class,
             )
         except TypeError:
             _metrics_buf.record_request(str(request.url.path), latency_ms, error=error)

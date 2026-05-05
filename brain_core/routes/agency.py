@@ -355,6 +355,39 @@ def get_task(task_id: str) -> dict:
         raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e)) from e
 
 
+@router.get("/brain/tasks/{task_id}/execution", tags=["autonomy"])
+def get_task_execution_truth(task_id: str) -> dict:
+    try:
+        from brain_core.task_queue import task_queue
+
+        return task_queue.get_task_execution_truth(task_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=_safe_http_detail("not_found", e)) from e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e)) from e
+
+
+@router.get("/brain/task-dispatch-attempts", tags=["autonomy"])
+def list_task_dispatch_attempts(
+    task_id: str | None = None,
+    trace_id: str | None = None,
+    status: str | None = None,
+    limit: int = Query(default=50, ge=1, le=200),
+) -> dict:
+    try:
+        from brain_core.task_queue import task_queue
+
+        attempts = task_queue.list_dispatch_attempts(
+            task_id=task_id,
+            trace_id=trace_id,
+            status=status,
+            limit=limit,
+        )
+        return {"attempts": attempts, "total": len(attempts)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e)) from e
+
+
 @router.post("/brain/tasks/{task_id}/approve", tags=["autonomy"])
 def approve_task(task_id: str) -> dict:
     try:

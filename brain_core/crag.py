@@ -26,6 +26,8 @@ from __future__ import annotations
 import atexit
 import concurrent.futures
 import logging
+import os
+import re
 import statistics
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -60,7 +62,7 @@ DEFAULT_ITERATE_THRESHOLD = 0.30  # M9.3: calibrated against 150-query extended
 # adaptive_rag also classifies the query as MULTI. adaptive_rag remains the
 # primary gate — CRAG fires only when caller_explicit OR classification is MULTI.
 DEFAULT_EXPANSION_TIMEOUT_S = 6.0  # hard wall-clock cap on the LLM dispatch
-EXPANSION_PER_ATTEMPT_TIMEOUT_S = 3  # passed to openclaw_dispatch per-attempt
+EXPANSION_PER_ATTEMPT_TIMEOUT_S = 8  # passed to cli_llm per-attempt
 
 
 @dataclass(frozen=True)
@@ -81,7 +83,7 @@ class ConfidenceReport:
     components: dict[str, float]
 
 
-def score_confidence(results: list[dict]) -> ConfidenceReport:
+def score_confidence(results: list[dict], query: str | None = None) -> ConfidenceReport:
     """Compute a 0-1 confidence score from a recall result set.
 
     Signals (each contributes a partial score):
@@ -90,8 +92,12 @@ def score_confidence(results: list[dict]) -> ConfidenceReport:
       - ce_signal_present: did the cross-encoder return non-default values
       - ce_variance: are the CE scores actually distinguishing results
       - n_results: did we get enough results to even decide
+      - optional query_coverage: do returned snippets mention the query
 
-    The five partial scores are averaged — no learned weights yet.
+    The base score is still statistics-driven. When ``query`` is supplied, a
+    lightweight lexical coverage penalty catches confident-looking but unrelated
+    windows (for example impossible-service or off-domain questions) without an
+    extra LLM call.
     Production tuning would replace this with a small classifier trained
     on (query, results, was_useful) tuples from /recall/feedback.
     """
@@ -135,6 +141,13 @@ def score_confidence(results: list[dict]) -> ConfidenceReport:
         "n_results": c_n,
     }
     score = sum(components.values()) / len(components)
+    coverage = _query_coverage(query, results)
+    if coverage is not None:
+        components["query_coverage"] = coverage
+        if coverage < 0.34:
+            score *= 0.30
+        elif coverage < 0.50:
+            score *= 0.60
 
     return ConfidenceReport(
         score=round(score, 4),
@@ -165,6 +178,126 @@ def _norm_spread(spread: float) -> float:
     return (spread - LOW_CONFIDENCE_SPREAD) / (HIGH_CONFIDENCE_SPREAD - LOW_CONFIDENCE_SPREAD)
 
 
+def _query_coverage(query: str | None, results: list[dict]) -> float | None:
+    """Return the fraction of meaningful query tokens found in result text.
+
+    This is intentionally small and deterministic. It is not a relevance model;
+    it is a guardrail for high-score windows that do not mention the actual ask.
+    """
+    if not query:
+        return None
+    stop = {
+        "the",
+        "and",
+        "for",
+        "with",
+        "from",
+        "that",
+        "this",
+        "what",
+        "when",
+        "where",
+        "which",
+        "who",
+        "how",
+        "does",
+        "did",
+        "are",
+        "was",
+        "were",
+        "tomorrow",
+        "yesterday",
+        "about",
+        "into",
+    }
+    tokens = [t for t in re.findall(r"[a-zA-Z0-9가-힣]+", query.lower()) if len(t) >= 3 and t not in stop]
+    if len(tokens) < 2:
+        return None
+    haystack = " ".join(
+        " ".join(
+            str(part)
+            for part in (
+                r.get("title"),
+                r.get("content"),
+                r.get("path"),
+                r.get("source"),
+                r.get("collection"),
+                r.get("source_type"),
+            )
+            if part
+        )
+        for r in results
+        if isinstance(r, dict)
+    ).lower()
+    if not haystack:
+        return 0.0
+    covered = sum(1 for token in tokens if token in haystack)
+    return round(covered / len(tokens), 4)
+
+
+_SOURCE_TERM_REWRITE_RULES: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
+    (
+        ("영주권", "갱신"),
+        (
+            "USCIS I-751 receipt notice",
+            "receipt notice USCIS",
+            "USCIS permanent resident receipt notice",
+        ),
+    ),
+    (
+        ("renewal", "receipt"),
+        (
+            "receipt notice",
+            "USCIS I-751 receipt notice",
+            "USCIS receipt notice renewal",
+        ),
+    ),
+    (
+        ("dinner",),
+        (
+            "저녁 약속",
+            "Kim dinner",
+            "dinner plan 저녁",
+        ),
+    ),
+    (
+        ("저녁",),
+        (
+            "저녁 약속",
+            "Kim dinner 저녁",
+            "dinner plan 저녁",
+        ),
+    ),
+)
+
+
+def rule_based_rewrite_candidates(query: str) -> list[str]:
+    """Small deterministic source-term rewrites for zero/weak-result queries."""
+    if not query or not query.strip():
+        return []
+    lowered = query.lower()
+    candidates: list[str] = []
+
+    english_words = re.findall(r"[a-zA-Z][a-zA-Z0-9_.-]+", query)
+    korean_parts = re.findall(r"[가-힣]+", query)
+    if english_words and korean_parts:
+        candidates.extend([" ".join(korean_parts), " ".join(english_words)])
+
+    for needles, rewrites in _SOURCE_TERM_REWRITE_RULES:
+        if all(needle.lower() in lowered for needle in needles):
+            candidates.extend(rewrites)
+
+    out: list[str] = []
+    seen = {query.strip().lower()}
+    for candidate in candidates:
+        normalized = " ".join(str(candidate or "").split())
+        key = normalized.lower()
+        if normalized and key not in seen:
+            out.append(normalized)
+            seen.add(key)
+    return out[:4]
+
+
 def should_iterate(report: ConfidenceReport, threshold: float = DEFAULT_ITERATE_THRESHOLD) -> bool:
     """True if confidence is below threshold AND we have at least 1 result.
 
@@ -178,30 +311,14 @@ def should_iterate(report: ConfidenceReport, threshold: float = DEFAULT_ITERATE_
     return report.score < threshold
 
 
-def expand_query(
+def _llm_rewrite_candidate(
     query: str,
     weak_results: list[dict],
     *,
-    timeout_s: float = DEFAULT_EXPANSION_TIMEOUT_S,
+    timeout_s: float,
     dispatch_fn: Callable[[str, str], str] | None = None,
 ) -> str | None:
-    """Generate an expanded query via openclaw_dispatch (best-effort).
-
-    Args:
-        query: the original query
-        weak_results: the low-confidence result set (top 3 used as context)
-        timeout_s: hard cap on the LLM dispatch
-        dispatch_fn: optional injection for tests; defaults to openclaw_dispatch.dispatch
-
-    Returns:
-        the expanded query string, or None if dispatch failed / timed out.
-        Returning None signals the caller to fall through (no retry).
-    """
-    if not query or not query.strip():
-        return None
-
-    # Use the top 3 results as context for the rewrite. Truncate hard to
-    # keep the prompt small + the LLM call cheap.
+    """Best-effort single LLM rewrite candidate."""
     context_lines = []
     for r in weak_results[:3]:
         title = (r.get("title") or "")[:100]
@@ -211,39 +328,33 @@ def expand_query(
     context = "\n".join(context_lines) if context_lines else "(no results)"
 
     prompt = (
-        f"The query below returned weak results. Rewrite it as a more specific "
-        f"or differently-worded query that might find better matches. Output ONLY "
-        f"the rewritten query, no explanation.\n\n"
+        "The query below returned weak results. Rewrite it as a sparse keyword "
+        "query for Chris's indexed personal/canonical knowledge. Preserve exact "
+        "names, source terms, and non-English terms. If results are empty, avoid "
+        "generic web-search phrases; prefer compact source vocabulary. Output ONLY "
+        "the rewritten query, no explanation.\n\n"
         f"Original query: {query}\n\n"
         f"Top weak results:\n{context}\n\n"
-        f"Rewritten query:"
+        "Rewritten query:"
     )
 
-    # Wrap the entire dispatch path in suppress so the recall hot path never
-    # crashes on a transient openclaw / model error. The whole dispatch is
-    # ALSO bounded by a wall-clock budget via concurrent.futures so callers
-    # pay at most `timeout_s` even when openclaw_dispatch's internal retry
-    # loop would otherwise fire 2-3 times for a slow model.
     import concurrent.futures
-
-    rewritten: str | None = None
 
     def _do_dispatch() -> str:
         if dispatch_fn is not None:
             return dispatch_fn("jenna", prompt) or ""
         from cli_llm import dispatch as _dispatch_real
 
+        preferred_backend = os.getenv("BRAIN_CRAG_EXPAND_BACKEND") or None
         result = _dispatch_real(
             "jenna",
             prompt,
             thinking="off",
             timeout=EXPANSION_PER_ATTEMPT_TIMEOUT_S,
+            backend=preferred_backend,
         )
         return result.text if result.ok else ""
 
-    # 2026-04-17: submit to shared module-level pool (see top of file).
-    # Timeout still unblocks the caller; the background thread finishes
-    # on its own in the shared pool without blocking us.
     fut = _expand_pool.submit(_do_dispatch)
     try:
         raw = fut.result(timeout=timeout_s)
@@ -253,13 +364,68 @@ def expand_query(
     except Exception as _exc:
         log.warning("expand_query dispatch failed: %s", _exc)
         raw = ""
-    if raw:
-        candidate = raw.strip().strip('"').strip("'").strip()
-        if candidate and candidate != query:
-            if len(candidate) > 500:
-                candidate = candidate[:500]
-            rewritten = candidate
-    return rewritten
+    if not raw:
+        return None
+    candidate = raw.strip().strip('"').strip("'").strip()
+    candidate = candidate.splitlines()[0].strip()
+    candidate = re.sub(r"^[-*\d\.)\s]+", "", candidate).strip()
+    if len(candidate) > 500:
+        candidate = candidate[:500]
+    if candidate and candidate.lower() != query.lower():
+        return candidate
+    return None
+
+
+def expand_query_candidates(
+    query: str,
+    weak_results: list[dict],
+    *,
+    timeout_s: float = DEFAULT_EXPANSION_TIMEOUT_S,
+    dispatch_fn: Callable[[str, str], str] | None = None,
+) -> list[dict[str, str]]:
+    """Return ordered CRAG rewrite candidates from rules plus the live LLM path."""
+    if not query or not query.strip():
+        return []
+
+    candidates: list[dict[str, str]] = []
+    seen = {query.strip().lower()}
+
+    def add(source: str, candidate: str | None) -> None:
+        normalized = " ".join(str(candidate or "").split())
+        key = normalized.lower()
+        if normalized and key not in seen:
+            candidates.append({"source": source, "query": normalized})
+            seen.add(key)
+
+    for candidate in rule_based_rewrite_candidates(query):
+        add("rule", candidate)
+    if candidates and os.getenv("BRAIN_CRAG_INCLUDE_LLM_AFTER_RULES", "0").lower() not in {
+        "1",
+        "true",
+        "yes",
+    }:
+        return candidates[:5]
+    add("llm", _llm_rewrite_candidate(query, weak_results, timeout_s=timeout_s, dispatch_fn=dispatch_fn))
+    return candidates[:5]
+
+
+def expand_query(
+    query: str,
+    weak_results: list[dict],
+    *,
+    timeout_s: float = DEFAULT_EXPANSION_TIMEOUT_S,
+    dispatch_fn: Callable[[str, str], str] | None = None,
+) -> str | None:
+    """Generate one expanded query via deterministic source terms + CLI LLM."""
+    rules = rule_based_rewrite_candidates(query)
+    if rules:
+        return rules[0]
+    return _llm_rewrite_candidate(
+        query,
+        weak_results,
+        timeout_s=timeout_s,
+        dispatch_fn=dispatch_fn,
+    )
 
 
 def iterative_recall(
@@ -302,7 +468,7 @@ def iterative_recall(
 
     for hop in range(max(1, max_hops)):
         results = recall_fn(current_query)
-        report = score_confidence(results)
+        report = score_confidence(results, query=current_query)
         confidence_history.append(report.score)
 
         # Track the best window seen across hops so we don't degrade

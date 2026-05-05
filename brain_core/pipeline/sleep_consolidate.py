@@ -19,7 +19,7 @@ Algorithm (from the plan file):
      provenance(relation='related'). Cap 3 new edges per atom per run.
   6. Predictive-error weighting: atoms with contradict events in last 7d
      get consolidation weight × 0.5 (high-surprise demotion).
-  7. Sage summary via openclaw_dispatch if replay_count >= 20. Only LLM call.
+  7. Sage summary via cli_llm if replay_count >= 20. Only LLM call.
   8. Log one sleep_cycles row.
 
 Schedule: daily 3:55am, after memory_consolidation (3:45) which it depends on.

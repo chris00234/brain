@@ -111,11 +111,11 @@ def brain_usage(days: int = Query(default=7, ge=1, le=365)) -> dict:
     out: dict = {"window_days": days}
 
     try:
-        import openclaw_dispatch
+        from brain_core import cli_llm
 
-        out["llm"] = openclaw_dispatch.get_usage_stats(days=days)
+        out["llm"] = cli_llm.get_usage_stats(days=days)
     except Exception as e:
-        out["llm"] = {"error": str(e)[:200]}
+        out["llm"] = {"error": str(e)[:200], "source": "cli_llm"}
 
     try:
         from brain_core.atoms_store import action_audit_usage

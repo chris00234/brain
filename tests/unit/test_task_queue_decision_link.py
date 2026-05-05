@@ -63,3 +63,31 @@ def test_record_outcome_marks_failed_decision_needs_review(tmp_path):
     rows = list_decisions(db_path=db_path)
     assert rows[0]["outcome_status"] == "failed"
     assert rows[0]["review_status"] == "needs_review"
+
+
+def test_record_outcome_persists_retrieved_procedure_ids(tmp_path):
+    db_path = tmp_path / "autonomy.db"
+    queue = TaskQueue(db_path)
+    task = queue.create_task(
+        "Run known procedure",
+        metadata={"retrieved_procedure_ids": ["proc_a", "proc_b"]},
+    )
+
+    queue.record_outcome(task["id"], actual_action="completed successfully")
+
+    rows = queue.list_outcomes()
+    assert rows[0]["procedure_ids"] == ["proc_a", "proc_b"]
+
+
+def test_record_outcome_persists_retrieved_lesson_ids(tmp_path):
+    db_path = tmp_path / "autonomy.db"
+    queue = TaskQueue(db_path)
+    task = queue.create_task(
+        "Avoid known failure",
+        metadata={"retrieved_lesson_ids": ["lesson_a", "lesson_b"]},
+    )
+
+    queue.record_outcome(task["id"], actual_action="completed successfully")
+
+    rows = queue.list_outcomes()
+    assert rows[0]["lesson_ids"] == ["lesson_a", "lesson_b"]

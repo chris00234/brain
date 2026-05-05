@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "cli"))
 
@@ -26,6 +27,32 @@ def test_distilled_matches_canonical_source_family() -> None:
     assert hit_content is True
     assert hit_loose is True
     assert rank == 1
+
+
+def test_ragas_answer_generation_uses_cli_first_dispatch(monkeypatch) -> None:
+    calls = []
+
+    def fake_dispatch(agent, message, **kwargs):
+        calls.append({"agent": agent, "message": message, **kwargs})
+        return SimpleNamespace(ok=True, text="Supported generated answer")
+
+    monkeypatch.setitem(sys.modules, "cli_llm", SimpleNamespace(dispatch=fake_dispatch))
+
+    answer, source = eval_compare._generate_rag_answer(
+        "What should Brain do?",
+        ["Brain should use CLI-first dispatch."],
+    )
+
+    assert answer == "Supported generated answer"
+    assert source == "generated"
+    call = calls[0]
+    assert call["agent"] == "jenna"
+    assert call["openclaw_agent"] == "jenna"
+    assert call["backlog_kind"] == "synthesis"
+    assert call["backlog_payload"]["source"] == "eval_compare:ragas_answer"
+    assert "backend" not in call
+    assert "max_backends" not in call
+    assert "openclaw_session_id" not in call
 
 
 def test_distilled_matches_knowledge_source_family() -> None:
@@ -85,7 +112,10 @@ def test_source_matching_uses_superseded_aliases() -> None:
             "collection": "canonical",
             "source_type": "canonical",
             "title": "Claude/OpenClaw execution rules",
-            "path": "canonical/decisions/chris-s-claude-openclaw-execution-verification-and-acp-operating-rules.md",
+            "path": (
+                "canonical/decisions/"
+                "chris-s-claude-openclaw-execution-verification-and-acp-operating-rules.md"
+            ),
             "metadata": {
                 "source_aliases": ["chris_expects_transparency_about_which_model_is_currently_active_and_per"]
             },
@@ -344,6 +374,48 @@ def test_run_eval_per_test_includes_expected_fields_and_top_sources(monkeypatch)
     assert row["top_sources"] == ["canonical/chris/_state.md"]
 
 
+def test_select_ragas_answer_uses_context_by_default() -> None:
+    answer, source = eval_compare._select_ragas_answer(
+        "question",
+        ["top context", "second context"],
+        {},
+        answer_source="context",
+    )
+
+    assert answer == "top context"
+    assert source == "context"
+
+
+def test_select_ragas_answer_prefers_hyde_when_present() -> None:
+    answer, source = eval_compare._select_ragas_answer(
+        "question",
+        ["top context"],
+        {"hypothetical": "generated hypothetical answer"},
+        answer_source="hyde",
+    )
+
+    assert answer == "generated hypothetical answer"
+    assert source == "hyde"
+
+
+def test_select_ragas_answer_generated_reports_source(monkeypatch) -> None:
+    monkeypatch.setattr(
+        eval_compare,
+        "_generate_rag_answer",
+        lambda question, contexts, timeout=45: ("synthesized answer", "generated"),
+    )
+
+    answer, source = eval_compare._select_ragas_answer(
+        "question",
+        ["top context"],
+        {},
+        answer_source="generated",
+    )
+
+    assert answer == "synthesized answer"
+    assert source == "generated"
+
+
 def test_main_can_persist_extended_track(monkeypatch, tmp_path, capsys) -> None:
     eval_set = tmp_path / "eval_set.json"
     eval_set.write_text(json.dumps([{"query": "q"}]))
@@ -391,3 +463,136 @@ def test_main_can_persist_extended_track(monkeypatch, tmp_path, capsys) -> None:
     out = json.loads(capsys.readouterr().out)
     assert out["cases"] == 1
     assert persisted == {"track": "extended", "content_metric": "loose", "accuracy": 95.0}
+
+
+def test_forbidden_matches_scan_top5_content_and_sources() -> None:
+    results = [
+        {"path": "canonical/current.md", "content": "safe answer"},
+        {"path": "distilled/raw.md", "content": "This contains stale secret marker."},
+    ]
+
+    matches = eval_compare._forbidden_matches(results, ["secret marker", "not present"])
+
+    assert matches == ["secret marker"]
+
+
+def test_run_eval_forbidden_content_turns_content_hit_into_failure(monkeypatch) -> None:
+    monkeypatch.setattr(
+        eval_compare,
+        "_get",
+        lambda _path, _token: {
+            "results": [
+                {
+                    "collection": "canonical",
+                    "source_type": "canonical",
+                    "path": "canonical/chris/privacy-policy.md",
+                    "content": (
+                        "Use privacy boundary guidance, but leaked raw spouse message text "
+                        "should not appear."
+                    ),
+                }
+            ]
+        },
+    )
+
+    report = eval_compare.run_eval(
+        use_v2=True,
+        hyde=False,
+        expand=False,
+        iterative=False,
+        token="test-token",
+        cases=[
+            {
+                "query": "show raw wife message contents",
+                "expected_source": "canonical/chris/privacy-policy.md",
+                "expected_content": "privacy boundary guidance",
+                "forbidden_content": ["raw spouse message text"],
+            }
+        ],
+    )
+
+    assert report["hit_source_pct"] == 100.0
+    assert report["hit_content_loose_pct"] == 0.0
+    assert report["forbidden_hit_count"] == 1
+    assert report["negative_pass_pct"] == 0.0
+    assert report["per_test"][0]["forbidden_hit"] is True
+
+
+def test_ragas_loop_uses_answer_rubric_for_judge_expected(monkeypatch, tmp_path, capsys) -> None:
+    eval_set = tmp_path / "eval_set.json"
+    eval_set.write_text(
+        json.dumps(
+            [
+                {
+                    "query": "q",
+                    "expected_content": "old expected",
+                    "answer_rubric": "strict answer rubric",
+                }
+            ]
+        )
+    )
+    secret = tmp_path / "secret"
+    secret.write_text("token")
+    captured = {}
+
+    monkeypatch.setattr(eval_compare, "SECRET_FILE", secret)
+    monkeypatch.setattr(
+        eval_compare,
+        "run_eval",
+        lambda **kwargs: {
+            "total": 1,
+            "hit_source_pct": 100.0,
+            "hit_content_pct": 100.0,
+            "hit_content_loose_pct": 100.0,
+            "mean_rank": 1,
+            "mrr": 1.0,
+            "ndcg5": 1.0,
+            "mean_latency_ms": 1,
+            "per_test": [],
+        },
+    )
+    monkeypatch.setattr(
+        eval_compare,
+        "_get",
+        lambda _path, _token: {"results": [{"content": "context"}]},
+    )
+    monkeypatch.setattr(
+        eval_compare,
+        "_select_ragas_answer",
+        lambda *args, **kwargs: ("answer", "generated"),
+    )
+
+    def fake_score(question, answer, contexts, expected=None, **kwargs):
+        captured["expected"] = expected
+        return SimpleNamespace(to_dict=lambda: {"faithfulness": 1.0, "answer_relevance": 1.0})
+
+    monkeypatch.setitem(
+        sys.modules,
+        "ragas_judge",
+        SimpleNamespace(
+            score_one=fake_score,
+            aggregate=lambda scores: {
+                "n": len(scores),
+                "faithfulness_mean": 1.0,
+                "answer_relevance_mean": 1.0,
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "eval_compare.py",
+            "--json",
+            "--ragas",
+            "--ragas-answer-source",
+            "generated",
+            "--eval-set",
+            str(eval_set),
+        ],
+    )
+
+    assert eval_compare.main() == 0
+    out = json.loads(capsys.readouterr().out)
+    assert captured["expected"] == "strict answer rubric"
+    assert out["ragas"]["cases"][0]["answer_rubric"] == "strict answer rubric"

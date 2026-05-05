@@ -31,9 +31,11 @@ id so lookups by string remain O(1).
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import threading
+import time
 import uuid
 from typing import Any
 
@@ -273,6 +275,13 @@ class QdrantStore:
         self._id_cache_lock = threading.Lock()
         self._sparse_cache: dict[str, bool] = {}
         self._sparse_cache_lock = threading.Lock()
+
+    def _reset_client(self) -> None:
+        from qdrant_client import QdrantClient
+
+        with contextlib.suppress(Exception):
+            self._client.close()
+        self._client = QdrantClient(url=self._url, timeout=30, check_compatibility=False)
 
     # ── helpers ──────────────────────────────────────────────────
 
@@ -514,16 +523,52 @@ class QdrantStore:
                 sparse_encode = None
 
         points: list[PointStruct] = []
+        manifest_payloads: list[dict[str, Any]] = []
         for i, (sid, vec, payload) in enumerate(zip(ids, vectors, payloads, strict=True)):
-            merged = dict(payload or {})
+            document = documents[i] if documents is not None else ""
+            stored_document = document
+            safe_payload = dict(payload or {})
+            try:
+                from source_policy import (
+                    PRIVACY_REDACTION_VERSION,
+                    enrich_payload_for_entry,
+                    redact_sensitive_text,
+                )
+
+                stored_document, redaction_findings = redact_sensitive_text(document or "")
+                for key in ("title", "summary", "snippet", "document_title", "source_name"):
+                    value = safe_payload.get(key)
+                    if isinstance(value, str):
+                        safe_payload[key], codes = redact_sensitive_text(value)
+                        redaction_findings.extend(codes)
+                if redaction_findings:
+                    safe_payload["privacy_redaction_version"] = PRIVACY_REDACTION_VERSION
+                    safe_payload["privacy_redaction_count"] = len(set(redaction_findings))
+                    safe_payload["privacy_redaction_codes"] = sorted(set(redaction_findings))
+                merged = enrich_payload_for_entry(
+                    safe_payload,
+                    content=stored_document or "",
+                    collection=real,
+                    point_id=sid,
+                )
+            except Exception:
+                merged = safe_payload
+                stored_document = document
             merged.update(alias_patch)
             # Reserved keys so get()/query() can return original string id and document.
             merged["_original_id"] = sid
             point_vectors: dict[str, Any] = {"dense": vec}
             if documents is not None:
-                merged["_document"] = documents[i]
+                merged["_document"] = stored_document
                 if sparse_encode is not None:
-                    indices, values = sparse_encode(documents[i] or "")
+                    sparse_text = stored_document or ""
+                    try:
+                        from source_policy import sparse_index_text
+
+                        sparse_text = sparse_index_text(stored_document or "", merged)
+                    except Exception:
+                        sparse_text = stored_document or ""
+                    indices, values = sparse_encode(sparse_text)
                     if indices:
                         from qdrant_client.models import SparseVector
 
@@ -532,11 +577,25 @@ class QdrantStore:
                         # reindex job can detect sparse-schema drift and
                         # regen just the stale rows, not the whole corpus.
                         merged["sparse_tokenizer_version"] = sparse_tokenizer_version
+            manifest_payloads.append(merged)
             points.append(PointStruct(id=self._qid(sid), vector=point_vectors, payload=merged))
         # wait=True: hot-path brain_store writes must be durable before the
         # POST /memory handler returns. A Qdrant restart within the ack
         # window would otherwise silently drop the write.
         self._client.upsert(collection_name=real, points=points, wait=True)
+        try:
+            from entry_manifest import record_vector_entries
+
+            record_vector_entries(
+                collection=real,
+                ids=ids,
+                payloads=manifest_payloads,
+                documents=[p.get("_document", "") for p in manifest_payloads]
+                if documents is not None
+                else None,
+            )
+        except Exception as exc:
+            log.debug("entry manifest write skipped for %s: %s", real, exc)
 
     def query(
         self,
@@ -775,16 +834,28 @@ class QdrantStore:
         collection: str,
         ids: list[str],
         patch: dict[str, Any],
-    ) -> None:
+    ) -> bool:
         if not ids or not patch:
-            return
+            return True
         real, _ = _resolve_alias(collection, None)
-        try:
-            self._client.set_payload(
-                collection_name=real,
-                payload=patch,
-                points=[self._qid(sid) for sid in ids],
-                wait=True,
-            )
-        except Exception as exc:
-            log.warning("qdrant set_payload(%s) failed: %s", collection, exc)
+        qids = [self._qid(sid) for sid in ids]
+        for attempt in range(3):
+            try:
+                self._client.set_payload(
+                    collection_name=real,
+                    payload=patch,
+                    points=qids,
+                    wait=True,
+                )
+                return True
+            except Exception as exc:
+                log.warning(
+                    "qdrant set_payload(%s) failed attempt=%d/3 ids=%d: %s",
+                    collection,
+                    attempt + 1,
+                    len(ids),
+                    exc,
+                )
+                self._reset_client()
+                time.sleep(0.25 * (attempt + 1))
+        return False

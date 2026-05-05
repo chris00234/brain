@@ -165,6 +165,36 @@ def test_load_baseline_missing_returns_none(fake_eval_gate, tmp_path):
     assert fake_eval_gate.load_baseline(tmp_path / "no_such.json") is None
 
 
+def test_alert_chris_uses_direct_telegram(fake_eval_gate, monkeypatch):
+    calls = []
+    monkeypatch.setitem(
+        sys.modules,
+        "telegram_alert",
+        type(
+            "_TelegramAlert",
+            (),
+            {
+                "send_chris_telegram": staticmethod(
+                    lambda body, source, severity: calls.append(
+                        {"body": body, "source": source, "severity": severity}
+                    )
+                    or True
+                )
+            },
+        ),
+    )
+
+    fake_eval_gate.alert_chris("regressed")
+
+    assert calls == [
+        {
+            "body": "[BRAIN EVAL ALERT] regressed",
+            "source": "eval_gate",
+            "severity": "warn",
+        }
+    ]
+
+
 def test_main_bootstrap_writes_baseline(fake_eval_gate, tmp_path, monkeypatch):
     monkeypatch.setattr(fake_eval_gate, "run_current_eval", lambda p: _stub_report(95.7))
     eval_set = tmp_path / "eval_set_stable.json"

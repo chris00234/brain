@@ -11,10 +11,9 @@ Query expansion generates 3 alternative phrasings of the query and runs each
 in parallel, then fuses with RRF. Complementary to HyDE — HyDE helps with
 vague/short queries, expansion helps with jargon/typo queries.
 
-Constraint: every LLM call here goes through `openclaw agent --agent jenna`
-which uses Chris's existing OpenAI subscription. Zero direct API calls.
-Embeddings still go through the indexer's Ollama client (embedder-only rule
-preserved).
+Constraint: every LLM call here goes through the CLI-first dispatcher
+(codex gpt-5.5 primary, then configured fallbacks). Embeddings still go
+through the indexer's Ollama client (embedder-only rule preserved).
 
 Simple in-process LRU cache with 5-minute TTL keeps repeated queries fast.
 """
@@ -32,18 +31,6 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).parent))
 from indexer import get_embedding
 
-# 2026-04-17: openclaw_dispatch import kept as last-resort fallback only
-# (triggered when `from cli_llm import cli_dispatch` fails). cli_llm is
-# the primary path for mechanical LLM work post-migration.
-try:
-    from openclaw_dispatch import dispatch as _dispatch
-except ImportError:
-    _dispatch = None  # type: ignore[assignment]
-
-try:
-    from config import OPENCLAW_BIN
-except ImportError:
-    OPENCLAW_BIN = "/Users/chrischo/.local/bin/openclaw"
 DISPATCH_TIMEOUT = 60
 CACHE_TTL_SECONDS = 300  # 5 minutes
 MAX_CACHE_ENTRIES = 256
@@ -204,26 +191,28 @@ _expand_cache = _TTLCache(CACHE_TTL_SECONDS, MAX_CACHE_ENTRIES)
 _hyde_cache = _hyde_mem_cache
 
 
-# ── CLI dispatch helper (2026-04-17) ─────────────────────────────────
-# Migrated from _dispatch(agent="jenna", ...) which hit OpenClaw and
-# dragged the 95MB interactive session into every HyDE call (~400K tokens
-# per dispatch, ~100 calls/day, $50+/day burn). cli_dispatch is stateless
-# — codex exec uses ChatGPT Pro subscription with <10K tokens/call.
+# ── CLI dispatch helper (2026-04-17, hardened 2026-05-05) ─────────────
+# Mechanical HyDE/expansion calls use the central CLI-first dispatcher:
+# codex gpt-5.5 primary, codex spark/Claude fallbacks, OpenClaw only as the
+# central emergency fallback managed by cli_llm. No direct agent shellout here.
 def _dispatch_to_jenna(prompt: str, thinking: str = "low", timeout: int = DISPATCH_TIMEOUT) -> str:
-    """Stateless LLM call via codex/claude CLI. Returns "" on any failure.
-    Kept name for minimal call-site churn; no longer goes through Jenna
-    OpenClaw session.
+    """Stateless CLI-first LLM call. Returns "" on any failure.
+    Kept name for minimal call-site churn; no longer goes through Jenna's
+    OpenClaw session directly.
     """
     try:
-        from cli_llm import cli_dispatch
+        from cli_llm import dispatch
     except ImportError:
-        # Last-resort fallback: if cli_llm itself failed to import (unusual —
-        # it's a sibling module), try openclaw dispatch if available.
-        if _dispatch is None:
-            return ""
-        result = _dispatch(agent="jenna", message=prompt, thinking=thinking, timeout=timeout)
-        return result.text if result.ok else ""
-    result = cli_dispatch(prompt, backend="codex", timeout=timeout)
+        return ""
+    result = dispatch(
+        agent="jenna",
+        message=prompt,
+        thinking=thinking,
+        timeout=timeout,
+        openclaw_agent="jenna",
+        backlog_kind="synthesis",
+        backlog_payload={"source": "hyde", "prompt": prompt},
+    )
     return result.text if result.ok else ""
 
 

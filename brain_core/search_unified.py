@@ -16,6 +16,7 @@ import argparse
 import atexit
 import json
 import logging
+import os
 import re
 import sqlite3
 import subprocess
@@ -23,6 +24,7 @@ import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor as _TPE
 from functools import lru_cache
+from typing import Any
 
 log = logging.getLogger("brain.search_unified")
 
@@ -139,6 +141,82 @@ SOURCE_TRUST = {
     "graph": 0.5,
     "obsidian": 0.6,
 }
+
+# 2026-04-27 — freshness-aware trust. Without per-row decay, a stale canonical
+# note (trust=1.0) outranks a fresh semantic_memory atom (trust=0.8) for up to
+# 12 h until the next reindex. Result: "I just told you X, why don't you remember
+# it?" The fix decays canonical/knowledge/distilled toward the semantic_memory
+# floor as documents age, so fresh facts can win the ranking fight against
+# stale curated notes that are about to be obsoleted by the new write anyway.
+# Floor at semantic_memory's 0.8 — never lower; the curation is still real.
+_TRUST_DECAY_PER_DAY = {
+    "canonical": 0.02,    # 1.0 -> 0.8 over 10 days
+    "distilled": 0.005,   # 0.9 -> 0.8 over 20 days
+    "knowledge": 0.005,
+}
+_TRUST_FLOOR = 0.8
+
+
+def _freshness_enabled() -> bool:
+    """Read BRAIN_TRUST_FRESHNESS dynamically so the kill switch works without
+    restart. Cheap: one os.getenv per recall (no I/O, just a dict lookup).
+    """
+    return os.getenv("BRAIN_TRUST_FRESHNESS", "on").lower() not in (
+        "off",
+        "0",
+        "false",
+        "no",
+    )
+
+
+# Module-level alias kept for tests + telemetry that read the original symbol.
+_FRESHNESS_ENABLED = _freshness_enabled()
+
+
+def _parse_trust_timestamp(value: Any) -> float | None:
+    """Parse mtime / created_at / written_at into epoch seconds. Accepts ISO
+    strings (with or without trailing Z), epoch floats, or None.
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        s = value.rstrip("Z").replace("+00:00", "")
+        try:
+            parsed = datetime.fromisoformat(s)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=UTC)
+            else:
+                parsed = parsed.astimezone(UTC)
+            return parsed.timestamp()
+        except ValueError:
+            try:
+                return float(value)
+            except ValueError:
+                return None
+    return None
+
+
+def _effective_trust(source_type: str, written_at: Any = None, _now_ts: float | None = None) -> float:
+    """Static SOURCE_TRUST as the ceiling; per-day decay pulls aging
+    canonical/distilled/knowledge results toward _TRUST_FLOOR (semantic_memory's
+    0.8) so freshly-written atoms aren't permanently outranked by stale notes.
+    Disable via BRAIN_TRUST_FRESHNESS=off to revert to the static dict.
+    Reads the env var dynamically — no restart required to flip the kill switch.
+    """
+    base = SOURCE_TRUST.get(source_type, 0.7)
+    if not _freshness_enabled():
+        return base
+    decay = _TRUST_DECAY_PER_DAY.get(source_type, 0.0)
+    if decay <= 0:
+        return base
+    written_ts = _parse_trust_timestamp(written_at)
+    if written_ts is None:
+        return base
+    now_ts = _now_ts if _now_ts is not None else time.time()
+    age_days = max(0.0, (now_ts - written_ts) / 86400.0)
+    return max(_TRUST_FLOOR, base - decay * age_days)
 
 try:
     from tokenizer import tokenize
@@ -537,8 +615,33 @@ def search_obsidian(query, limit):
 
 def normalize_rag_result(r):
     collection = r.get("collection", "knowledge")
+    raw_meta = r.get("metadata", {}) or {}
+    source = r.get("source", "") or raw_meta.get("source_path", "")
+    try:
+        from document_provenance import document_provenance_fields, merge_source_aliases
+
+        doc_meta = document_provenance_fields(
+            source=source,
+            content=r.get("content", ""),
+            title=r.get("title", "") or r.get("section", ""),
+            doc_type=r.get("type", "") or raw_meta.get("type", ""),
+            section=r.get("section", "") or raw_meta.get("section", ""),
+        )
+        doc_meta["source_aliases"] = merge_source_aliases(
+            raw_meta.get("source_aliases") or r.get("source_aliases") or [],
+            doc_meta.get("source_aliases") or [],
+        )
+    except Exception:
+        doc_meta = {}
     is_canonical = collection == "canonical"
-    trust = 1.0 if is_canonical else SOURCE_TRUST.get(collection, 0.7)
+    written_at = (
+        r.get("created_at")
+        or r.get("written_at")
+        or r.get("mtime")
+        or (r.get("metadata") or {}).get("created_at")
+        or (r.get("metadata") or {}).get("mtime")
+    )
+    trust = _effective_trust("canonical" if is_canonical else collection, written_at)
     tier = 3 if is_canonical else (2 if r.get("type", "") == "distilled-note" else 1)
     return {
         "id": r.get("id", ""),  # Qdrant point id — needed for reinforce-on-access (R10 C1)
@@ -547,7 +650,7 @@ def normalize_rag_result(r):
         "collection": collection,
         "title": r.get("section", "") or r.get("source", "").replace("/Users/chrischo/", "~/"),
         "content": r.get("content", "")[:800],
-        "path": r.get("source", ""),
+        "path": source,
         "trust_tier": tier,
         "created_at": r.get("created_at", ""),
         "metadata": {
@@ -562,16 +665,62 @@ def normalize_rag_result(r):
             "parent_id": r.get("parent_id") or r.get("metadata", {}).get("parent_id"),
             "is_parent": r.get("is_parent") or r.get("metadata", {}).get("is_parent", False),
             "chunk_id": r.get("chunk_id") or r.get("metadata", {}).get("chunk_id"),
+            **{
+                key: (
+                    raw_meta.get("document_id")
+                    if key == "source_document_id" and raw_meta.get("document_id")
+                    else raw_meta.get(key) or doc_meta.get(key)
+                )
+                for key in (
+                    "document_id",
+                    "source_document_id",
+                    "source_kind",
+                    "source_path",
+                    "source_name",
+                    "document_title",
+                    "document_section",
+                    "document_type",
+                    "source_aliases",
+                )
+                if raw_meta.get(key)
+                or doc_meta.get(key)
+                or (key == "source_document_id" and raw_meta.get("document_id"))
+            },
         },
     }
 
 
 def normalize_canonical_result(r, query=""):
     source_type = r.get("source_type", "canonical")
-    trust = SOURCE_TRUST.get(source_type, 0.9)
+    raw_metadata_for_ts = r.get("metadata", {}) or {}
+    written_at = (
+        r.get("written_at")
+        or r.get("mtime")
+        or r.get("created_at")
+        or raw_metadata_for_ts.get("written_at")
+        or raw_metadata_for_ts.get("mtime")
+        or raw_metadata_for_ts.get("created_at")
+    )
+    trust = _effective_trust(source_type, written_at)
     raw_score = r.get("rank_score", 0)
     normalized = min(raw_score, 200) / 200 * 100
     raw_metadata = r.get("metadata", {}) or {}
+    path = r.get("path", "")
+    try:
+        from document_provenance import document_provenance_fields, merge_source_aliases
+
+        doc_meta = document_provenance_fields(
+            source=path,
+            content=r.get("summary", ""),
+            title=r.get("title", ""),
+            doc_type=source_type,
+        )
+        doc_meta["source_aliases"] = merge_source_aliases(
+            raw_metadata.get("source_aliases") or [],
+            doc_meta.get("source_aliases") or [],
+        )
+    except Exception:
+        doc_meta = {}
 
     # Penalize canonical results that don't share tokens with the query.
     # Without this, recent high-confidence canonical notes dominate every search
@@ -596,7 +745,7 @@ def normalize_canonical_result(r, query=""):
         "collection": source_type,
         "title": r.get("title", ""),
         "content": r.get("summary", "")[:2000],
-        "path": r.get("path", ""),
+        "path": path,
         "trust_tier": 3 if source_type == "canonical" else 2,
         "metadata": {
             "id": r.get("id"),
@@ -607,22 +756,52 @@ def normalize_canonical_result(r, query=""):
             "supersedes": raw_metadata.get("supersedes") or [],
             "superseded_by": raw_metadata.get("superseded_by") or [],
             "relations": raw_metadata.get("relations") or [],
-            "source_aliases": raw_metadata.get("source_aliases") or [],
+            "source_aliases": doc_meta.get("source_aliases") or raw_metadata.get("source_aliases") or [],
+            **{
+                key: doc_meta.get(key)
+                for key in (
+                    "document_id",
+                    "source_document_id",
+                    "source_kind",
+                    "source_path",
+                    "source_name",
+                    "document_title",
+                    "document_section",
+                    "document_type",
+                )
+                if doc_meta.get(key)
+            },
         },
     }
 
 
 def normalize_obsidian_result(r):
-    trust = SOURCE_TRUST["obsidian"]
+    raw_meta = r.get("metadata", {}) or {}
+    path = r.get("path", "") or r.get("source", "")
+    try:
+        from document_provenance import document_provenance_fields
+
+        doc_meta = document_provenance_fields(
+            source=path,
+            content=r.get("content", ""),
+            title=r.get("title", ""),
+            doc_type="obsidian-note",
+        )
+    except Exception:
+        doc_meta = {}
+    trust = _effective_trust("obsidian", r.get("created_at") or r.get("mtime"))
     return {
         "score": round(r.get("score", 0) * 100 * trust, 2),
         "source_type": "obsidian",
         "collection": "obsidian",
         "title": r.get("title", ""),
         "content": r.get("content", "")[:800],
-        "path": r.get("path", ""),
+        "path": path,
         "trust_tier": 0,
-        "metadata": {},
+        "metadata": {
+            **raw_meta,
+            **{key: value for key, value in doc_meta.items() if value not in ("", [], None)},
+        },
     }
 
 
@@ -783,7 +962,8 @@ _PREFERENCE_PATTERNS = re.compile(
 _CONCRETE_INFRA_PATTERNS = re.compile(
     r"\b(?:port|container|reverse\s*prox(?:y|ies)|rate\s+limit|limit_req|"
     r"nginx\s+(?:config|conf|block|rule)|docker\s+compose|server\s+block|"
-    r"credentials?\s+(?:file|path|location)|env(?:ironment)?\s+var|"
+    r"credentials?\s+(?:file|path|location)|admin\s+password|password\s+setup|"
+    r"env(?:ironment)?\s+var|couchdb|"
     r"upstream|listen\s+\d|proxy_pass|"
     r"backup\s+retention|retention\s+policy|s3\s+backup|"
     r"notification\s+config|auto[-\s]?update|update\s+schedule)\b",
@@ -964,7 +1144,59 @@ _CANONICAL_PRIMARY_DOCS = [
         re.compile(r"\bIrvine\b.*\b(?:August\s+2024|since|residen)", re.I),
         [("/Users/chrischo/server/knowledge/canonical/archived/chris/openclaw-jenna-session-2026-04-10.md", 5000)],
     ),
+    (
+        re.compile(r"\bself[-\s]?learning\b.*\bmemory\s+extraction\b|\bmemory\s+extraction\b.*\blearn", re.I),
+        [("/Users/chrischo/server/knowledge/canonical/projects/project_personal_intelligence_system_v1.md", 5000)],
+    ),
+    (
+        re.compile(r"\bconventional\s+commits?\b|\bgit\s+workflow\b", re.I),
+        [("/Users/chrischo/server/knowledge/canonical/live_state/recent_commits.md", 5000)],
+    ),
+    (
+        re.compile(r"\bsearch\s+pipeline\b|\bretrieval\s+pipeline\b|검색.*(?:파이프라인|구조)|파이프라인.*구조", re.I),
+        [
+            ("/Users/chrischo/server/knowledge/canonical/infra/infra_rag_retrieval_stack.md", 5000),
+            ("/Users/chrischo/server/knowledge/canonical/infra/rag-stack-role.md", 5000),
+        ],
+    ),
+    (
+        re.compile(
+            r"(?:\bChris(?:'s)?\s+(?:Korean|Hangul|legal|full|preferred)\s+name\b)|"
+            r"(?:\b(?:Korean|Hangul|legal|full|preferred)\s+name\s+(?:for|of)?\s*Chris\b)|"
+            r"(?:(?:Chris|크리스).*(?:한국\s*이름|한글\s*이름))|"
+            r"(?:(?:한국\s*이름|한글\s*이름).*(?:Chris|크리스))|"
+            r"(?:조대현|Daehyun\s+Cho)",
+            re.I,
+        ),
+        [
+            ("/Users/chrischo/server/knowledge/canonical/chris/_identity.md", 5000),
+            ("/Users/chrischo/server/knowledge/canonical/archived/chris/openclaw-jenna-session-2026-04-10.md", 5000),
+        ],
+    ),
 ]
+
+_RELATIONSHIP_NAME_QUERY_PATTERNS = re.compile(
+    r"\b(?:wife|spouse|husband|partner|family|mother|father|sister|brother|child|children|dog|pet)\b|"
+    r"(?:아내|배우자|와이프|가족|어머니|아버지|엄마|아빠|강아지|반려)",
+    re.I,
+)
+_CHRIS_EXACT_IDENTITY_NAME_PATTERNS = re.compile(r"\bDaehyun\s+Cho\b|조대현", re.I)
+
+
+def _should_suppress_chris_identity_for_query(query: str) -> bool:
+    """Avoid answering relationship/family name lookups with Chris's own identity.
+
+    The identity document intentionally contains "Korean/Hangul name", so
+    lexical/vector retrieval can otherwise return Chris's name for a query like
+    "Chris's wife's Korean name". Explicit exact-name lookups still keep the
+    identity doc.
+    """
+
+    return bool(
+        query
+        and _RELATIONSHIP_NAME_QUERY_PATTERNS.search(query)
+        and not _CHRIS_EXACT_IDENTITY_NAME_PATTERNS.search(query)
+    )
 
 _AGENT_PRIMARY_DOCS = {
     "jenna": "/Users/chrischo/.openclaw/workspace-jenna/AGENTS.md",
@@ -975,6 +1207,7 @@ _AGENT_PRIMARY_DOCS = {
 }
 
 _SERVICE_PRIMARY_DOCS = {
+    "couchdb": ["/Users/chrischo/server/couchdb/docker-compose.yml"],
     "watchtower": ["/Users/chrischo/server/watchtower/docker-compose.yml"],
     "minio": [
         "/Users/chrischo/server/minio/docker-compose.yml",
@@ -994,6 +1227,10 @@ _QUERY_PRIMARY_DOCS = [
     (
         re.compile(r"\bserver-net\b", re.I),
         ["/Users/chrischo/server/docker-compose.yml"],
+    ),
+    (
+        re.compile(r"\bcouchdb\b.*\b(?:admin\s+)?password\b|\b(?:admin\s+)?password\b.*\bcouchdb\b", re.I),
+        ["/Users/chrischo/server/couchdb/docker-compose.yml"],
     ),
 ]
 
@@ -1057,6 +1294,17 @@ def _primary_doc_hit(
                 break
             title = stripped[:160]
             break
+    try:
+        from document_provenance import document_provenance_fields
+
+        doc_meta = document_provenance_fields(
+            source=path,
+            content=body,
+            title=title,
+            doc_type="primary-doc",
+        )
+    except Exception:
+        doc_meta = {}
     return {
         "id": f"primary-doc:{path}",
         "source_type": "canonical" if collection == "canonical" else "rag",
@@ -1066,7 +1314,7 @@ def _primary_doc_hit(
         "path": path,
         "score": 98.0,
         "trust_tier": trust_tier,
-        "metadata": {"primary_doc_lookup": True},
+        "metadata": {"primary_doc_lookup": True, **doc_meta},
     }
 
 
@@ -2608,6 +2856,20 @@ def search_all(
         else:
             overflow.append(r)
     unique = diverse + overflow
+    if _CONCRETE_INFRA_PATTERNS.search(relevance_query) or _CANONICAL_LOOKUP_PATTERNS.search(relevance_query):
+        try:
+            from rerank import diversify_sources as _diversify_sources
+
+            unique = _diversify_sources(unique, top_window=limit, max_per_source=2, max_per_collection=3)
+        except Exception:
+            pass
+
+    if _should_suppress_chris_identity_for_query(relevance_query):
+        unique = [
+            r
+            for r in unique
+            if not str(r.get("path") or "").endswith("canonical/chris/_identity.md")
+        ]
 
     final_results = unique[:limit]
 
@@ -2628,7 +2890,14 @@ def search_all(
     for r in final_results:
         path = r.get("path", "")
         col = r.get("collection", "")
-        provenance = {"collection": col, "sources": []}
+        metadata = r.get("metadata") or {}
+        provenance = {
+            "collection": col,
+            "sources": [],
+            "document_id": metadata.get("document_id") or metadata.get("source_document_id"),
+            "source_path": metadata.get("source_path") or path,
+            "source_name": metadata.get("source_name") or (Path(path).name if path else ""),
+        }
         if "/canonical/" in path:
             provenance["tier"] = "canonical"
             provenance["sources"] = _extract_frontmatter_sources(path)

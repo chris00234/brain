@@ -87,6 +87,51 @@ def test_attach_generated_skills_includes_brain_owned_auto_but_not_marketplace_a
     assert cfg["agents"]["list"][0]["skills"][0] == "todoist"
 
 
+def test_bump_agent_usage_counts_brain_owned_auto_skills(tmp_path):
+    config = tmp_path / "openclaw.json"
+    telemetry = tmp_path / "skill_telemetry.json"
+    config.write_text(
+        json.dumps(
+            _make_config({"jenna": ["brain-learned-infra-ops", "auto-post-migration-audit", "auto-updater"]})
+        ),
+        encoding="utf-8",
+    )
+    telemetry.write_text(
+        json.dumps(
+            {
+                "brain-learned-infra-ops": {
+                    "path": "/x",
+                    "description": "",
+                    "auto_generated": False,
+                    "use_count": 0,
+                },
+                "auto-post-migration-audit": {
+                    "path": "/x",
+                    "description": "",
+                    "auto_generated": True,
+                    "brain_procedure_id": "proc_1",
+                    "use_count": 0,
+                },
+                "auto-updater": {"path": "/x", "description": "", "auto_generated": False, "use_count": 0},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with (
+        patch.object(skill_sync, "CONFIG_PATH", config),
+        patch.object(skill_sync, "TELEMETRY_PATH", telemetry),
+    ):
+        out = skill_sync.bump_agent_usage("jenna")
+
+    assert out["ok"] is True
+    assert out["bumped"] == 2
+    tel = json.loads(telemetry.read_text())
+    assert tel["brain-learned-infra-ops"]["use_count"] == 1
+    assert tel["auto-post-migration-audit"]["use_count"] == 1
+    assert tel["auto-updater"]["use_count"] == 0
+
+
 def test_atomic_config_write_preserves_0600_permissions(tmp_path):
     skills_dir = tmp_path / "skills"
     config = tmp_path / "openclaw.json"

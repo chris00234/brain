@@ -48,6 +48,30 @@
 		<string>sidecar</string>
 		<key>BRAIN_ONTOLOGY_SIDECAR_LIMIT</key>
 		<string>2</string>
+		<key>BRAIN_LOOP_AGENT_DISPATCH_DISABLED</key>
+		<string>true</string>
+		<key>BRAIN_PARENT_CHILD_EXPAND</key>
+		<string>1</string>
+		<key>BRAIN_COMMUNITY_SUMMARIES</key>
+		<string>1</string>
+		<key>BRAIN_COMMUNITY_SUMMARIES_MAX_COMMUNITIES</key>
+		<string>3</string>
+		<key>BRAIN_COMMUNITY_SUMMARIES_TIMEOUT_S</key>
+		<string>20</string>
+		<key>BRAIN_CROSS_ENCODER_TOP_K</key>
+		<string>14</string>
+		<key>BRAIN_CROSS_ENCODER_SIMPLE_TOP_K</key>
+		<string>10</string>
+		<key>BRAIN_COMMUNITY_SUMMARIES_MAX_ENTITIES</key>
+		<string>40</string>
+		<key>BRAIN_RERANKER_MODE</key>
+		<string>worker</string>
+		<key>BRAIN_RERANKER_URL</key>
+		<string>http://127.0.0.1:8792</string>
+		<key>BRAIN_RERANKER_TIMEOUT_MS</key>
+		<string>1000</string>
+		<key>BRAIN_CE_MPS_EMPTY_CACHE</key>
+		<string>true</string>
 	</dict>
 	<key>KeepAlive</key>
 	<dict>

@@ -8,7 +8,8 @@ SQLite DBs did not — loss would destroy the durable memory layer.
 Strategy:
   - Use SQLite's online .backup API (lock-free, consistent) via Python sqlite3
   - Write to ~/server/brain/logs/backups/<db>-YYYYMMDD.db
-  - Rotate: keep last N days (default 14)
+  - Rotate: keep last N days locally (default 7); MinIO keeps the longer DR
+    window so local logs/ stays under the SLO budget.
   - Invoked daily by launchd (ai.openclaw.brain-backup.plist)
 
 Exit codes:
@@ -20,9 +21,11 @@ Log output (JSON on stdout) for observability.
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
 import logging
+import shutil
 import sqlite3
 import sys
 import time
@@ -33,7 +36,7 @@ log = logging.getLogger("brain.backup_brain_db")
 
 BRAIN_LOGS_DIR = Path("/Users/chrischo/server/brain/logs")
 BACKUP_DIR = BRAIN_LOGS_DIR / "backups"
-RETENTION_DAYS = 14
+RETENTION_DAYS = 7
 MINIO_BUCKET = "rag-backups"
 MINIO_PREFIX = "brain-db-backup/"
 
@@ -44,6 +47,17 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: f.read(1024 * 1024), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def _compress(path: Path) -> Path:
+    """Gzip in place, return .gz path, remove source. Reduces nightly brain
+    backups ~5x (e.g. 110MB → 22MB) so the daily run doesn't blow the
+    logs_dir SLO budget across the 14-day retention window."""
+    gz_path = path.with_suffix(path.suffix + ".gz")
+    with path.open("rb") as src, gzip.open(str(gz_path), "wb", compresslevel=6) as dst:
+        shutil.copyfileobj(src, dst, length=1024 * 1024)
+    path.unlink()
+    return gz_path
 
 
 def _upload_to_minio(label: str, local_path: Path) -> dict:
@@ -62,7 +76,15 @@ def _upload_to_minio(label: str, local_path: Path) -> dict:
         key = f"{MINIO_PREFIX}{local_path.name}"
         s3.upload_file(str(local_path), MINIO_BUCKET, key)
         digest = _sha256_file(local_path)
-        checksum_key = key.replace(".db", ".sha256")
+        # Strip .db.gz or .db (longest match first) before appending .sha256
+        # so the checksum key is e.g. brain-20260430.sha256 regardless of
+        # whether the upload is gzipped.
+        checksum_base = key
+        for suffix in (".db.gz", ".db"):
+            if checksum_base.endswith(suffix):
+                checksum_base = checksum_base[: -len(suffix)]
+                break
+        checksum_key = checksum_base + ".sha256"
         checksum_body = f"{digest}  {local_path.name}\n"
         s3.put_object(Bucket=MINIO_BUCKET, Key=checksum_key, Body=checksum_body.encode())
         return {"status": "ok", "key": key, "sha256": digest}
@@ -94,9 +116,13 @@ def _backup_one(label: str, src: Path, dest_dir: Path) -> dict:
                 dst_conn.close()
         finally:
             src_conn.close()
+        # Compress in-place so MinIO upload + 14-day local retention stay small.
+        raw_bytes = dest.stat().st_size
+        gz_path = _compress(dest)
         result["status"] = "ok"
-        result["dest"] = str(dest)
-        result["bytes"] = dest.stat().st_size
+        result["dest"] = str(gz_path)
+        result["bytes"] = gz_path.stat().st_size
+        result["raw_bytes"] = raw_bytes
         result["duration_s"] = round(time.time() - t0, 3)
     except Exception as exc:
         result["status"] = "error"
@@ -105,15 +131,27 @@ def _backup_one(label: str, src: Path, dest_dir: Path) -> dict:
 
 
 def _rotate(dest_dir: Path, keep_days: int) -> int:
-    """Delete backup files older than keep_days. Returns count deleted."""
+    """Delete backup files older than keep_days. Returns count deleted.
+
+    Matches both <stem>-YYYYMMDD.db and <stem>-YYYYMMDD.db.gz. The previous
+    implementation globbed only *.db, so .gz files accumulated indefinitely.
+    """
     if not dest_dir.exists():
         return 0
     cutoff = datetime.now(UTC) - timedelta(days=keep_days)
     deleted = 0
-    for f in dest_dir.glob("*.db"):
+    for f in dest_dir.iterdir():
+        if not f.is_file():
+            continue
+        name = f.name
+        if name.endswith(".db.gz"):
+            base = name[: -len(".db.gz")]
+        elif name.endswith(".db"):
+            base = name[: -len(".db")]
+        else:
+            continue
         try:
-            # Parse date from filename suffix: <stem>-YYYYMMDD.db
-            date_part = f.stem.rsplit("-", 1)[-1]
+            date_part = base.rsplit("-", 1)[-1]
             if len(date_part) != 8 or not date_part.isdigit():
                 continue
             file_date = datetime.strptime(date_part, "%Y%m%d").replace(tzinfo=UTC)

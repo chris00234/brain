@@ -3,20 +3,30 @@
 **Audience**: Claude Code, OpenClaw agents (Jenna / Liz / Ellie / Sage / Market), any
 other AI agent that needs to read from, write to, or trigger the brain.
 
-**Last updated**: 2026-04-17 after Tier-1/2/3 + data-integrity + harness passes.
+**Last updated**: 2026-05-05 after CLI-first task dispatch, execution-truth ledger, ops readiness gates, and UI parity audit.
 
 ---
 
 ## TL;DR
 
-Every agent talks to the brain through **ONE of two paths**:
+Default to MCP tools for interactive agent work. Use HTTP for batch jobs, schedulers,
+readiness checks, and endpoints that are not exposed as MCP tools yet. Both paths
+call the same FastAPI backend.
 
 | Path | Best for | Auth | Examples |
 |---|---|---|---|
 | **MCP stdio** (`brain_mcp_server.py`) | interactive tool use — Claude Code, OpenClaw sessions | Bearer read from `~/.openclaw/credentials/.personal_webhook_secret` | `brain_recall`, `brain_store`, `brain_doubt` |
-| **HTTP API** (`http://127.0.0.1:8791`) | batch jobs, schedulers, non-MCP agents | `Authorization: Bearer $(cat ~/.openclaw/credentials/.personal_webhook_secret)` | `GET /recall/v2`, `POST /memory`, `POST /recall/batch` |
+| **HTTP API** (`http://127.0.0.1:8791`) | batch jobs, schedulers, non-MCP agents, readiness and execution truth | `Authorization: Bearer $(cat ~/.openclaw/credentials/.personal_webhook_secret)` | `GET /recall/v2`, `POST /memory`, `GET /brain/ops/readiness`, `GET /brain/tasks/{id}/execution` |
 
-Either path is authoritative — they call the same FastAPI backend.
+Autonomous Brain task execution and stateless task-helper endpoints are
+CLI-first through `brain_core/cli_llm.py` (Codex `gpt-5.5` primary, then
+Spark/Claude fallbacks). OpenClaw remains an agent integration / emergency
+fallback lane and depends on the local gateway at `127.0.0.1:18789`.
+`GET /brain/usage` is the usage/accounting proof surface for this path and must
+report `llm.source=cli_llm` plus `llm.primary_model=gpt-5.5`. Task-evaluation
+notifications use `task_queue:evaluation_action_summary` with
+`TASK EVALUATION ACTION` wording so Chris sees what Brain already did, not a
+request to approve routine evaluation handling.
 
 ---
 
@@ -59,6 +69,9 @@ curl -H "Authorization: Bearer $SECRET" \
 | Web search | `brain_search_web` | `POST /web/search` | SearXNG + per-domain trust scoring. |
 | Focus/working mem | `brain_focus`, `brain_wm_*` | `POST /brain/focus`, `POST /brain/wm` | Session-scoped. |
 | Feedback | — | `POST /recall/feedback` | Report useful/wrong to train LtR + calibration. |
+| Ops readiness | — | `GET /brain/ops/readiness` | Aggregated readiness blockers: backup, retrieval/eval gates, source governance, skill promotion, OpenClaw gateway, UI parity. |
+| SLO roster | — | `GET /brain/slos` | Current SLO measurements and breaches. |
+| Task execution truth | — | `GET /brain/tasks/{task_id}/execution`, `GET /brain/task-dispatch-attempts` | Handoff → dispatch attempt → outcome evidence, including backend/model/error metadata. |
 
 Full OpenAPI: `GET /openapi.json` or `GET /docs`.
 

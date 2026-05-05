@@ -90,6 +90,15 @@ def _eval_age_hours(row: dict) -> float | None:
     return (datetime.now(UTC) - dt).total_seconds() / 3600
 
 
+def _recent_slo_remediations(limit: int = 10) -> list[dict]:
+    try:
+        from slo_remediation import recent_actions
+
+        return recent_actions(limit)
+    except Exception:
+        return []
+
+
 # ── /brain/health ─────────────────────────────────────
 @router.get("/brain/health", tags=["liveness"])
 def brain_health() -> dict:
@@ -175,6 +184,7 @@ def brain_health() -> dict:
         "alerts": alerts,
         "scheduler_failures": scheduler_failures,
         "scheduler_resources": scheduler_resources,
+        "slo_remediation": {"recent": _recent_slo_remediations(10)},
         "search_latency": _metrics_buf.search_latency_stats(),
     }
 

@@ -30,6 +30,7 @@ ENTITY_TYPES: frozenset[str] = frozenset(
         "atom",
         "concept",
         "decision",
+        "document",
         "event",
         "fact",
         "goal",
@@ -164,6 +165,7 @@ ENTITY_TYPE_ALIASES: dict[str, str] = {
     "canonical": "note",
     "canonical_note": "note",
     "codebase": "repo",
+    "doc": "document",
     "repository": "repo",
     "rule": "policy",
     "user": "person",
@@ -190,7 +192,8 @@ RELATION_CONSTRAINTS: dict[str, dict[str, frozenset[str]]] = {
         "source": frozenset({"person", "agent"}),
         "target": frozenset({"project", "repo", "service", "tool", "workflow"}),
     },
-    "mentions": {"source": frozenset({"atom", "memory", "note", "fact"}), "target": frozenset()},
+    "mentions": {"source": frozenset({"atom", "memory", "note", "fact", "document"}), "target": frozenset()},
+    "documents": {"source": frozenset({"document", "note"}), "target": frozenset()},
     "supersedes": {"source": frozenset({"atom", "memory", "note", "decision"}), "target": frozenset()},
 }
 

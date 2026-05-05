@@ -131,10 +131,13 @@ def ingest_image_route(request: Request, req: ImageIngestRequest) -> dict:
             payloads=[
                 {
                     "type": "image_caption",
+                    "source_type": "image_caption",
+                    "source": image_path_str or doc_id,
                     "image_hash": image_hash,
                     "path": image_path_str or "",
                     "mime_type": req.mime_type,
                     "agent": req.agent,
+                    "tags": ["image", "caption", f"agent:{req.agent}"],
                     "captioned_by": vision_llm.backend_name(),
                     "captioned_at": datetime.now(UTC).isoformat(timespec="seconds"),
                 }

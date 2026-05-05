@@ -44,10 +44,6 @@ LORA_ACTIVE = ADAPTERS_DIR / "lora_active"
 DEFAULT_CANDIDATE = ADAPTERS_DIR / "lora_v_candidate"
 REJECTS_DIR = TRAINING_DIR / "rejects"
 
-OPENCLAW_BIN = "/Users/chrischo/.local/bin/openclaw"
-TELEGRAM_CHAT_ID = "8484060831"
-TELEGRAM_ACCOUNT = "jenna-bot"
-
 
 def _switch_brain_adapter(path: str | None) -> dict:
     """POST /admin/embed_adapter on the running brain-server so the eval
@@ -146,26 +142,14 @@ def _per_query_worst_regression(base_report: dict, cand_report: dict) -> tuple[f
 
 
 def _alert(title: str, body: str) -> None:
-    if not Path(OPENCLAW_BIN).exists():
-        print(f"[skip alert] openclaw not at {OPENCLAW_BIN}")
-        return
     with contextlib.suppress(Exception):
-        subprocess.run(
-            [
-                OPENCLAW_BIN,
-                "message",
-                "send",
-                "--channel",
-                "telegram",
-                "--target",
-                TELEGRAM_CHAT_ID,
-                "--account",
-                TELEGRAM_ACCOUNT,
-                "--message",
-                f"[BRAIN LoRA A/B] {title}\n{body}",
-            ],
-            timeout=20,
-            capture_output=True,
+        sys.path.insert(0, str(BRAIN_ROOT / "brain_core"))
+        from telegram_alert import send_chris_telegram
+
+        send_chris_telegram(
+            f"[BRAIN LoRA A/B] {title}\n{body}",
+            source="lora_ab_gate",
+            severity="warn",
         )
 
 

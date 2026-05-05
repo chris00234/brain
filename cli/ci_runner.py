@@ -11,8 +11,8 @@ Exit codes:
   3 — pytest failed
   4 — config/setup error
 
-Failures emit a Telegram alert via the existing OpenClaw gateway so Chris sees
-the regression on his phone without polling logs.
+Failures emit a Telegram alert via the direct Bot API path so Chris sees the
+regression on his phone without depending on the OpenClaw gateway.
 
 Note (2026-04-13): bandit was removed from the gate. Bandit 1.8.0 chokes on
 Python 3.14 AST and silently skips every file ("exception while scanning
@@ -34,8 +34,6 @@ VENV_BIN = BRAIN_ROOT / ".venv/bin"
 LOG_FILE = BRAIN_ROOT / "logs/ci.log"
 LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
 
-OPENCLAW_BIN = "/opt/homebrew/bin/openclaw"
-
 
 def _log(line: str) -> None:
     ts = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -46,27 +44,14 @@ def _log(line: str) -> None:
 
 
 def _alert(title: str, body: str) -> None:
-    """Send a Telegram alert via OpenClaw gateway. Best-effort."""
-    if not Path(OPENCLAW_BIN).exists():
-        _log(f"[skip alert] openclaw not at {OPENCLAW_BIN}")
-        return
+    """Send a Telegram alert via direct Bot API. Best-effort."""
     try:
-        subprocess.run(
-            [
-                OPENCLAW_BIN,
-                "message",
-                "send",
-                "--channel",
-                "telegram",
-                "--title",
-                title,
-                "--body",
-                body,
-            ],
-            check=False,
-            timeout=10,
-            capture_output=True,
-        )
+        sys.path.insert(0, str(BRAIN_ROOT / "brain_core"))
+        from telegram_alert import send_chris_telegram
+
+        ok = send_chris_telegram(f"{title}\n{body}", source="brain_ci", severity="warn")
+        if not ok:
+            _log("[alert failed] direct telegram send returned false")
     except Exception as e:
         _log(f"[alert failed] {e}")
 
@@ -116,6 +101,46 @@ def main() -> int:
     )
     if rc != 0:
         _alert("brain CI: sqlite3 connection leak", out[-800:])
+        return 1
+
+    rc, out = run_step(
+        "audit_qdrant_writes",
+        [str(VENV_BIN / "python"), "cli/audit_qdrant_writes.py"],
+    )
+    if rc != 0:
+        _alert("brain CI: raw Qdrant write boundary failed", out[-800:])
+        return 1
+
+    rc, out = run_step(
+        "entry_contract_audit",
+        [str(VENV_BIN / "python"), "cli/entry_contract_audit.py", "--limit", "1000"],
+    )
+    if rc != 0:
+        _alert("brain CI: entry contract audit failed", out[-800:])
+        return 1
+
+    rc, out = run_step(
+        "openclaw_telegram_target_audit",
+        [str(VENV_BIN / "python"), "cli/audit_openclaw_telegram_targets.py", "--json"],
+    )
+    if rc != 0:
+        _alert("brain CI: OpenClaw Telegram target audit failed", out[-800:])
+        return 1
+
+    rc, out = run_step(
+        "config_secret_audit",
+        [str(VENV_BIN / "python"), "cli/config_secret_audit.py"],
+    )
+    if rc != 0:
+        _alert("brain CI: config/secret audit failed", out[-800:])
+        return 1
+
+    rc, out = run_step(
+        "release_readiness",
+        [str(VENV_BIN / "python"), "cli/release_readiness.py"],
+    )
+    if rc != 0:
+        _alert("brain CI: release readiness failed", out[-800:])
         return 1
 
     # Security scanning happens via ruff S-rules above (configured in ruff.toml).

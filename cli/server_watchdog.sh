@@ -1,13 +1,14 @@
 #!/bin/bash
-# Checks if brain-server is responding and alerts via Jenna if not.
+# Checks if brain-server is responding and alerts directly via Telegram if not.
 # Designed to be called by the existing ai.openclaw.watchdog launchd plist.
 
 set -u
 
+BRAIN_ROOT="/Users/chrischo/server/brain"
 BRAIN_URL="http://127.0.0.1:8791/healthz"
 SECRET_FILE="$HOME/.openclaw/credentials/.personal_webhook_secret"
-OPENCLAW_BIN="$HOME/.local/bin/openclaw"
 STATE_FILE="/tmp/.brain-watchdog-state"
+PYTHON_BIN="$BRAIN_ROOT/.venv/bin/python"
 
 if [ ! -r "$SECRET_FILE" ]; then
     echo "$(date -Iseconds) watchdog skipped: missing $SECRET_FILE" >&2
@@ -54,8 +55,16 @@ LAUNCHD_LABEL="ai.openclaw.brain-server"
 GUI_TARGET="gui/$(id -u)/${LAUNCHD_LABEL}"
 launchctl kickstart -k "$GUI_TARGET" >/dev/null 2>&1 || true
 
-"$OPENCLAW_BIN" agent --agent jenna \
-    --message "[BRAIN DOWN] brain-server at $BRAIN_URL returned HTTP $status. Watchdog issued \`launchctl kickstart -k $GUI_TARGET\`. Re-check in 30s." \
-    --deliver --json --thinking off --timeout 30 2>/dev/null
+WATCHDOG_MESSAGE="[BRAIN DOWN] brain-server at $BRAIN_URL returned HTTP $status. Watchdog issued \`launchctl kickstart -k $GUI_TARGET\`. Re-check in 30s."
+PYTHONPATH="$BRAIN_ROOT/brain_core" WATCHDOG_MESSAGE="$WATCHDOG_MESSAGE" "$PYTHON_BIN" - <<'PY' >/dev/null 2>&1 || true
+import os
+from telegram_alert import send_chris_telegram
+
+send_chris_telegram(
+    os.environ.get("WATCHDOG_MESSAGE", "[BRAIN DOWN] brain-server watchdog fired"),
+    source="server_watchdog",
+    severity="critical",
+)
+PY
 
 exit 1

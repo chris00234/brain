@@ -46,6 +46,9 @@ DEFAULT_LEVELS: dict[str, str] = {
     "brain_loop.dispatch_agent_investigation": "L2",
     # Push urgent content into active Claude Code session via doorbell file.
     "brain_loop.push_to_claude": "L2",
+    # Learned pattern playbook: safe read-only/advisory execution after
+    # recognized event classes (updates, restarts, config/model changes).
+    "brain_loop.proactive_playbook_execute": "L2",
     # Send urgent Telegram alert via Jenna dispatch (breaker, SLO, stalled goal).
     "brain_loop.telegram_urgent": "L2",
     # Self-modification: demote or promote autonomy level for an action kind.
@@ -59,6 +62,18 @@ DEFAULT_LEVELS: dict[str, str] = {
     # just closed. Safe to auto-execute — it just calls handlers that
     # already exist, no new side effects beyond what normal LLM work does.
     "brain_loop.drain_llm_backlog": "L3",
+    # Phase 1 (2026-04-27): incremental canonical/distilled re-embed when
+    # a .md file mtime exceeds the last incremental run. Wraps
+    # indexer.add_documents(force_incremental=True) which skips unchanged
+    # docs — bounded cost, no LLM calls (embed model is local Ollama),
+    # and dedup-safe by content_hash + mtime. Gate: BRAIN_INCREMENTAL_INDEX_BUS.
+    "brain_loop.incremental_index": "L3",
+    # Phase 4b (2026-04-27): autonomous LLM cost governor. Engages when
+    # spike sensor sees ratio>=5x baseline AND no active Chris session.
+    # Effect is bounded — sets BRAIN_CLI_LLM_CONCURRENCY=1 with TTL via
+    # brain_config_store, auto-expires after 30 min. Disable with
+    # BRAIN_LLM_COST_GOVERNOR=off.
+    "brain_loop.cost_governor": "L3",
     # ── Hard L0 (never auto-execute) ─────────────────────────
     "write.canonical": "L0",  # canonical promotion is human-only
 }
@@ -101,6 +116,7 @@ EXECUTION_WINDOWS: dict[str, list[str]] = {
     "brain_loop.propose_eval_candidate": ["any"],
     # Loop can nudge Chris or dispatch any time (doorbell / Telegram).
     "brain_loop.push_to_claude": ["any"],
+    "brain_loop.proactive_playbook_execute": ["any"],
     "brain_loop.telegram_urgent": ["any"],
     "brain_loop.dispatch_agent_checkin": ["any"],
     "brain_loop.dispatch_agent_investigation": ["any"],
@@ -125,6 +141,7 @@ NOTIFY_LAG_S: dict[str, int] = {
     "reasoning.multihop": 30,
     "trigger.fire": 30,
     "slo.remediate": 30,
+    "brain_loop.proactive_playbook_execute": 30,
 }
 
 

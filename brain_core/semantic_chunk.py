@@ -278,7 +278,8 @@ def chunk_with_fallback(
     flat semantic chunks only (backward compat for callers that don't want
     the parent overhead).
     """
-    if ENABLED:
+    enabled = os.environ.get("BRAIN_SEMANTIC_CHUNKING", "").lower() in {"1", "true", "yes"}
+    if enabled:
         return chunk_semantic(text, max_size=max_size, parent_size=parent_size)
     from indexer import chunk_text
 

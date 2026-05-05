@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 from typing import Any
 
@@ -35,6 +36,16 @@ class MetricsResponse(BaseModel):
     embed_cache: dict[str, Any] = Field(default_factory=dict)
     ce_cache: dict[str, Any] = Field(default_factory=dict)
     hook_adoption: dict[str, Any] = Field(default_factory=dict)
+    slo_remediation: dict[str, Any] = Field(default_factory=dict)
+
+
+def _recent_slo_remediations(limit: int = 10) -> list[dict]:
+    try:
+        from slo_remediation import recent_actions
+
+        return recent_actions(limit)
+    except Exception:
+        return []
 
 
 def _get_collection_counts() -> dict[str, int]:
@@ -78,12 +89,17 @@ def metrics() -> MetricsResponse:
     except Exception:
         embed_cache = {}
 
-    try:
-        from brain_core.cross_encoder_model import cache_stats as _ce_stats
+    if os.getenv("BRAIN_RERANKER_MODE", "inprocess").strip().lower() == "worker":
+        ce_cache = {"mode": "worker", "model_loaded_in_api": False}
+    else:
+        try:
+            from brain_core.cross_encoder_model import cache_stats as _ce_stats
 
-        ce_cache = _ce_stats()
-    except Exception:
-        ce_cache = {}
+            ce_cache = _ce_stats()
+        except Exception:
+            ce_cache = {}
+
+    slo_recent = _recent_slo_remediations(10)
 
     return MetricsResponse(
         collection_counts=counts,
@@ -103,6 +119,11 @@ def metrics() -> MetricsResponse:
         embed_cache=embed_cache,
         ce_cache=ce_cache,
         hook_adoption=buf.get("hook_adoption", {}),
+        slo_remediation={
+            "recent_count": len(slo_recent),
+            "latest": slo_recent[-1] if slo_recent else {},
+            "recent": slo_recent,
+        },
     )
 
 
@@ -142,6 +163,17 @@ def metrics_prom() -> str:
     lines.append("# TYPE brain_dispatch counter")
     for key in ("attempts", "successes", "failures", "rate_limited", "auth_failed"):
         lines.append(f'brain_dispatch{{outcome="{key}"}} {int(dispatch.get(key, 0) or 0)}')
+
+    slo_recent = _recent_slo_remediations(100)
+    lines.append("# HELP brain_slo_remediation_recent_total Recent SLO remediation records visible on disk")
+    lines.append("# TYPE brain_slo_remediation_recent_total gauge")
+    lines.append(f"brain_slo_remediation_recent_total {len(slo_recent)}")
+    latest_status = str((slo_recent[-1] if slo_recent else {}).get("status") or "none")
+    lines.append("# HELP brain_slo_remediation_latest_status Latest SLO remediation status as labeled gauge")
+    lines.append("# TYPE brain_slo_remediation_latest_status gauge")
+    lines.append(
+        f'brain_slo_remediation_latest_status{{status="{_sanitize(latest_status)}"}} {1 if slo_recent else 0}'
+    )
 
     lines.append(f"brain_uptime_seconds {int(time.time() - SERVER_START)}")
     return "\n".join(lines) + "\n"

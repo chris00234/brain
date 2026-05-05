@@ -28,6 +28,24 @@ Respond with strict JSON: {{"reflection": "...", "avoid": "...", "try_next": "..
 """
 
 
+def _lessons_schema_available(run_query) -> bool:
+    """Avoid noisy Neo4j warnings when the optional Lesson graph is absent."""
+    try:
+        label_rows = run_query("CALL db.labels() YIELD label RETURN collect(label) AS labels", {})
+        labels = set(label_rows[0].get("labels") or []) if label_rows else set()
+        if "Agent" not in labels or "Lesson" not in labels:
+            return False
+        rel_rows = run_query(
+            "CALL db.relationshipTypes() YIELD relationshipType "
+            "RETURN collect(relationshipType) AS rels",
+            {},
+        )
+        rels = set(rel_rows[0].get("rels") or []) if rel_rows else set()
+        return "HAS_LESSON" in rels
+    except Exception:
+        return True
+
+
 def record_failure_lesson(
     task_description: str,
     failure_reason: str,
@@ -113,6 +131,9 @@ def get_similar_lessons(task_description: str, agent_id: str = "system", limit: 
     """
     try:
         from neo4j_client import run_query
+
+        if not _lessons_schema_available(run_query):
+            return []
 
         # List-all mode: empty task_description returns recent lessons
         if not task_description or not task_description.strip():

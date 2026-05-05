@@ -16,10 +16,10 @@ import argparse
 import hashlib
 import json
 import re
-import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
+from llm_dispatch import dispatch_json
 import logging
 
 log = logging.getLogger("brain.openclaw_sessions")
@@ -35,7 +35,6 @@ DEAD_FILE = Path("/Users/chrischo/server/brain/logs/openclaw-sessions-dead.jsonl
 MAX_DLQ_ATTEMPTS = 5
 MAX_DLQ_ENTRIES = 10000
 
-OPENCLAW_BIN = "/Users/chrischo/.local/bin/openclaw"
 DISPATCH_AGENT = "jenna"
 DISPATCH_TIMEOUT = 300
 BATCH_SIZE = 8  # exchanges per dispatch (keep prompt short for quality)
@@ -329,36 +328,14 @@ def build_distillation_prompt(agent_name: str, exchanges: list[dict]) -> str:
 
 
 def dispatch_distillation(prompt: str) -> dict | None:
-    cmd = [
-        OPENCLAW_BIN,
-        "agent",
-        "--agent",
-        DISPATCH_AGENT,
-        "--message",
-        prompt,
-        "--json",
-        "--timeout",
-        str(DISPATCH_TIMEOUT),
-        "--thinking",
-        "off",
-    ]
-    try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=DISPATCH_TIMEOUT + 30)
-    except subprocess.TimeoutExpired:
-        log_failure("jenna dispatch timed out")
-        return None
-    if r.returncode != 0:
-        log_failure(f"jenna dispatch failed: {r.stderr[:300]}")
-        return None
-    try:
-        response = json.loads(r.stdout)
-        text = response.get("result", {}).get("payloads", [])[0].get("text", "")
-        text = re.sub(r"^```(?:json)?\s*", "", text.strip())
-        text = re.sub(r"\s*```$", "", text)
-        return json.loads(text)
-    except (json.JSONDecodeError, KeyError, IndexError) as e:
-        log_failure(f"could not parse Jenna reply: {e}")
-        return None
+    return dispatch_json(
+        agent=DISPATCH_AGENT,
+        prompt=prompt,
+        timeout=DISPATCH_TIMEOUT,
+        log_failure=log_failure,
+        source="ingest.openclaw_sessions",
+        thinking="off",
+    )
 
 
 # ── Record Writing ──────────────────────────────────────

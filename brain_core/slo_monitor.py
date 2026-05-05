@@ -317,6 +317,13 @@ def _record_alert_dispatched(alerts: list[str]) -> None:
         log.debug("slo alert dispatch marker failed: %s", exc)
 
 
+def _apply_direct_remediations(violations: list[dict]) -> dict:
+    """Compatibility wrapper for the deterministic SLO remediation playbook."""
+    from slo_remediation import apply_direct_remediations
+
+    return apply_direct_remediations(violations)
+
+
 def monitor_cycle() -> dict:
     """One monitoring cycle. Tracks consecutive violations, alerts at 3."""
     state = load_state()
@@ -326,6 +333,14 @@ def monitor_cycle() -> dict:
     # Content quality check (from latest eval report)
     content_violations = check_content_quality()
     all_violations = violations + content_violations
+
+    # Phase 4a: direct remediations BEFORE self_heal so cheap deterministic
+    # actions (drain, backup) fire immediately rather than waiting for
+    # 3-consecutive-breach + heal_dispatch escalation.
+    try:
+        _apply_direct_remediations(all_violations)
+    except Exception as exc:
+        log.warning("slo direct remediations failed: %s", exc)
 
     # Track consecutive violations per SLO
     for v in all_violations:
@@ -357,12 +372,13 @@ def monitor_cycle() -> dict:
                 # its own backlog fallback on rate-limit/outage.
                 from telegram_alert import send_chris_telegram
 
-                send_chris_telegram(
+                sent = send_chris_telegram(
                     body="BRAIN SLO ALERT:\n" + "\n".join(alerts),
                     source="slo_monitor",
                     severity="warn",
                 )
-                _record_alert_dispatched(alerts)
+                if sent:
+                    _record_alert_dispatched(alerts)
         except Exception as e:
             log.warning("alert dispatch failed: %s", e)
 

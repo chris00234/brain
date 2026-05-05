@@ -22,6 +22,7 @@ Usage:
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 try:
@@ -29,6 +30,141 @@ try:
 except ImportError:  # pragma: no cover - top-level import in scripts/tests
     from source_quality import source_quality_multiplier
 from tokenizer import tokenize as _tokenize
+
+_CONCRETE_INFRA_QUERY = re.compile(
+    r"\b(?:nginx|docker(?:-compose)?|compose|server\s+block|default\s+server|"
+    r"conf(?:ig)?|proxy_pass|upstream|listen|port|env(?:ironment)?|"
+    r"credentials?|password|admin\s+password|couchdb|postgres|redis|minio|"
+    r"watchtower|uptime[-\s]?kuma|loki)\b",
+    re.I,
+)
+_CODE_QUERY = re.compile(
+    r"\b(?:function|class|method|module|import|traceback|stacktrace|exception|"
+    r"api\s+endpoint|return\s+value|parameter|async\s+def|__init__\.py)\b",
+    re.I,
+)
+_CANONICAL_PROVENANCE_QUERY = re.compile(
+    r"\b(?:canonical|workflow|conventional\s+commits?|git\s+workflow|"
+    r"self[-\s]?learning|memory\s+extraction|search\s+pipeline|retrieval\s+pipeline|"
+    r"pipeline\s+structure|brain\s+system)\b|(?:검색.*(?:파이프라인|구조)|파이프라인.*구조)",
+    re.I,
+)
+_PRIMARY_FILE_TYPES = {
+    "docker-compose",
+    "docker_compose",
+    "nginx-conf",
+    "nginx_conf",
+    "agent-config",
+    "agent_config",
+    "config",
+    "yaml",
+    "json",
+    "toml",
+}
+
+
+def _as_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, list | tuple | set):
+        return " ".join(_as_text(v) for v in value)
+    if isinstance(value, dict):
+        return " ".join(f"{k} {_as_text(v)}" for k, v in value.items())
+    return str(value)
+
+
+def _metadata_haystack(result: dict[str, Any]) -> str:
+    meta = result.get("metadata") or {}
+    fields = [
+        result.get("title", ""),
+        result.get("path", ""),
+        result.get("collection", ""),
+        result.get("source_type", ""),
+    ]
+    for key in (
+        "source",
+        "source_path",
+        "source_name",
+        "document_title",
+        "document_section",
+        "document_type",
+        "source_type",
+        "type",
+        "service",
+        "agent",
+        "tags",
+        "context_tags",
+        "source_aliases",
+        "sources",
+        "supersedes",
+        "relations",
+        "topic_key",
+    ):
+        fields.append(meta.get(key, ""))
+    return " ".join(_as_text(v) for v in fields if v not in (None, "", [], {}))
+
+
+def _metadata_overlap_boost(
+    query: str, q_tokens: set[str], result: dict[str, Any]
+) -> tuple[float, dict[str, Any]]:
+    """Boost exact source/provenance matches without polluting dense embeddings.
+
+    Dense vector similarity remains the main semantic signal. This tie-breaker
+    lets path/title/tags/source aliases recover exact lookups like
+    ``nginx default server block`` → ``default.conf`` and canonical provenance
+    lookups after source-aware chunking shortened canonical note bodies.
+    """
+
+    if not q_tokens:
+        return 1.0, {}
+
+    meta_text = _metadata_haystack(result)
+    meta_tokens = _tokenize(meta_text)
+    overlap = len(q_tokens & meta_tokens) / max(len(q_tokens), 1)
+    boost = 1.0
+    debug: dict[str, Any] = {}
+    if overlap:
+        # Capped so metadata can break ties but cannot make irrelevant content win.
+        meta_boost = min(1.35, 1.0 + (0.45 * overlap))
+        boost *= meta_boost
+        debug["metadata_overlap"] = round(overlap, 3)
+        debug["metadata_overlap_boost"] = round(meta_boost, 3)
+
+    query_text = query or " ".join(sorted(q_tokens))
+    collection = str(result.get("collection") or "")
+    meta = result.get("metadata") or {}
+    path = str(result.get("path") or meta.get("source_path") or meta.get("source") or "").lower()
+    dtype = str(meta.get("type") or meta.get("source_type") or meta.get("document_type") or "").lower()
+
+    is_code_intent = bool(_CODE_QUERY.search(query_text))
+    is_infra_intent = bool(_CONCRETE_INFRA_QUERY.search(query_text))
+    is_primary_file = dtype in _PRIMARY_FILE_TYPES or any(
+        marker in path
+        for marker in ("/conf.d/", "docker-compose.yml", ".env", ".yaml", ".yml", ".json", ".toml")
+    )
+    if is_infra_intent:
+        if collection == "knowledge" and is_primary_file:
+            boost *= 1.45
+            debug["infra_primary_source_boost"] = 1.45
+        elif collection == "knowledge":
+            boost *= 1.15
+            debug["infra_knowledge_boost"] = 1.15
+        if collection == "code" and not is_code_intent:
+            boost *= 0.68
+            debug["non_code_infra_code_penalty"] = 0.68
+        if collection == "experience":
+            boost *= 0.88
+            debug["infra_experience_penalty"] = 0.88
+
+    if _CANONICAL_PROVENANCE_QUERY.search(query_text):
+        if collection in {"canonical", "distilled", "canonical_raptor"} or result.get("trust_tier", 0) >= 2:
+            boost *= 1.35
+            debug["canonical_provenance_boost"] = 1.35
+        if collection == "code" and not is_code_intent:
+            boost *= 0.8
+            debug["canonical_query_code_penalty"] = 0.8
+
+    return boost, debug
 
 
 def _jaccard(a: set[str], b: set[str]) -> float:
@@ -117,11 +253,12 @@ def score_result(query: str, result: dict[str, Any], debug: bool = False) -> flo
     # quality policy shared with cross_encoder_rerank so CE score overwrites do
     # not erase the same source penalty later in the route.
     source_boost *= source_quality_multiplier(result, stage="lexical")
+    metadata_boost, metadata_debug = _metadata_overlap_boost(query, q_tokens, result)
     # Removed 2026-04-12: "## Statement" penalty was hitting EVERY canonical note
     # (standard heading) not just derivative proposals, causing 5 of 7 eval
     # regressions to be canonical misses. Canonical trust_boost now carries this.
 
-    reranked = base * relevance * pos_mult * trust_boost * semantic_boost * source_boost
+    reranked = base * relevance * pos_mult * trust_boost * semantic_boost * source_boost * metadata_boost
 
     if debug:
         result.setdefault("_debug", {}).update(
@@ -132,7 +269,9 @@ def score_result(query: str, result: dict[str, Any], debug: bool = False) -> flo
                 "rerank_first_pos": first_pos,
                 "rerank_pos_mult": round(pos_mult, 3),
                 "rerank_relevance": round(relevance, 3),
+                "rerank_metadata_boost": round(metadata_boost, 3),
                 "rerank_score": round(reranked, 2),
+                **metadata_debug,
             }
         )
 
@@ -165,6 +304,53 @@ def rerank(
         scored = scored[:top_k]
 
     return scored
+
+
+def diversify_sources(
+    results: list[dict[str, Any]],
+    *,
+    top_window: int = 5,
+    max_per_source: int = 2,
+    max_per_collection: int | None = None,
+) -> list[dict[str, Any]]:
+    """Reorder near-final results to prevent one source from crowding top-k.
+
+    This is conservative: it never drops results and only moves overflow items
+    behind the first result from a different source/collection. Useful after
+    re-chunking, where a single file/session can produce many similar chunks.
+    """
+
+    if not results or top_window <= 1:
+        return results
+    selected: list[dict[str, Any]] = []
+    overflow: list[dict[str, Any]] = []
+    source_counts: dict[str, int] = {}
+    collection_counts: dict[str, int] = {}
+    for r in results:
+        meta = r.get("metadata") or {}
+        source = (
+            r.get("path")
+            or meta.get("source_path")
+            or meta.get("source")
+            or meta.get("document_id")
+            or r.get("id")
+            or ""
+        )
+        collection = str(r.get("collection") or "")
+        source_counts[source] = source_counts.get(source, 0) + 1
+        collection_counts[collection] = collection_counts.get(collection, 0) + 1
+        source_over = bool(source) and source_counts[source] > max_per_source
+        collection_over = (
+            max_per_collection is not None
+            and bool(collection)
+            and collection_counts[collection] > max_per_collection
+            and len(selected) < top_window
+        )
+        if len(selected) < top_window and (source_over or collection_over):
+            overflow.append(r)
+        else:
+            selected.append(r)
+    return selected + overflow
 
 
 if __name__ == "__main__":

@@ -7,8 +7,8 @@ Pipeline (runs via `skill_extract` scheduled job, Sundays):
  3. Cluster by embedding cosine similarity.
  4. For each cluster with ≥3 members, decide via embedding similarity to existing
     skills whether to propose a NEW skill or an UPDATE to an existing one.
- 5. Dispatch Jenna to draft the proposal, write to ~/.openclaw/skills/_proposed/.
- 6. Build a weekly digest of everything in _proposed/ and deliver via Telegram.
+ 5. Use CLI-first LLM dispatch to draft proposals, write to ~/.openclaw/skills/_proposed/.
+ 6. Build a weekly digest of everything in _proposed/ and deliver via direct Telegram.
 
 This closes the self-improvement loop that was stuck at placeholder before:
 signal was being generated (raw/inbox populated), but the proposal path was
@@ -17,7 +17,6 @@ signal was being generated (raw/inbox populated), but the proposal path was
 
 import json
 import math
-import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -40,10 +39,6 @@ MAX_CLUSTER_SIZE = 30  # cap cluster size so centroid drift can't swallow everyt
 MIN_CLUSTER_SIZE = 3  # propose only when ≥3 records cluster together
 EXISTING_SKILL_THRESHOLD = 0.82  # cluster sim to existing skill → update, not new (tightened from 0.75)
 MAX_PROPOSALS_PER_RUN = 10  # cap so one run can't flood _proposed/
-
-TELEGRAM_CHAT_ID = "8484060831"
-TELEGRAM_ACCOUNT = "jenna-bot"
-OPENCLAW_BIN = "/Users/chrischo/.local/bin/openclaw"
 
 
 def parse_skill_frontmatter(skill_file: Path) -> dict | None:
@@ -272,11 +267,11 @@ def find_closest_skill(cluster_vec: list[float], skills: list[dict]) -> tuple[di
     return best, best_sim
 
 
-# ── Step 5: Jenna-dispatched proposals ────────────────────────────────────
+# ── Step 5: CLI-first proposal drafting ───────────────────────────────────
 
 
 def _dispatch_proposal(prompt: str, schema: str) -> dict | None:
-    """Call Jenna via openclaw_dispatch.dispatch_with_schema. Returns parsed dict or None."""
+    """Draft a proposal via CLI-first dispatch. Returns parsed dict or None."""
     try:
         from cli_llm import dispatch_with_schema
 
@@ -293,11 +288,21 @@ def _dispatch_proposal(prompt: str, schema: str) -> dict | None:
         return None
 
 
+def _evidence_lines(members: list[dict], limit: int = 10) -> str:
+    lines = []
+    for m in members[:limit]:
+        label = m.get("source") or m.get("subtype") or m.get("domain") or "unknown"
+        title = (m.get("title") or m.get("text") or "?")[:80]
+        lines.append(f"- `{label}` — {title}")
+    return "\n".join(lines)
+
+
 def propose_new_skill(cluster: dict) -> Path | None:
     """Ask Jenna to draft a new skill from the cluster, write to _proposed/."""
     members = cluster["members"]
     samples = "\n\n".join(f"- {m['title'] or m['text'][:80]}\n  {m['text'][:300]}" for m in members[:6])
-    prompt = f"""Draft a new OpenClaw skill based on this cluster of {len(members)} agent learnings that cluster together by semantic similarity.
+    prompt = f"""Draft a new OpenClaw skill based on this cluster of {len(members)}
+agent learnings that cluster together by semantic similarity.
 
 Learnings in the cluster:
 {samples}
@@ -344,7 +349,7 @@ proposed_at: {datetime.now(UTC).isoformat()}
 
 ## Evidence ({len(members)} records)
 
-{chr(10).join(f"- `{m.get('source') or m.get('subtype') or m.get('domain') or 'unknown'}` — {(m.get('title') or m.get('text') or '?')[:80]}" for m in members[:10])}
+{_evidence_lines(members)}
 """
     out.write_text(body)
     print(f"  [new] proposed: {name} ({len(members)} evidence)")
@@ -360,7 +365,9 @@ def propose_skill_update(cluster: dict, existing: dict, similarity: float) -> Pa
     except Exception:
         current_body = existing.get("description", "")
 
-    prompt = f"""A cluster of {len(members)} agent learnings semantically match an existing skill '{existing['name']}' (cosine similarity {similarity:.2f}). Propose a refinement to the existing skill based on the new signal.
+    prompt = f"""A cluster of {len(members)} agent learnings semantically match
+an existing skill '{existing['name']}' (cosine similarity {similarity:.2f}).
+Propose a refinement to the existing skill based on the new signal.
 
 Existing skill body (first 2000 chars):
 {current_body}
@@ -374,7 +381,7 @@ Output ONLY this JSON (no markdown fences, no prose):
   "target_skill": "<exact name of the existing skill>",
   "summary_of_change": "<one sentence describing what should change and why>",
   "evidence_count": <int>,
-  "proposed_diff": "<markdown description of what to add/change in the skill body — reference specific sections>"
+  "proposed_diff": "<markdown change description referencing specific sections>"
 }"""
     result = _dispatch_proposal(prompt, schema)
     if not result or "target_skill" not in result:
@@ -411,7 +418,7 @@ proposed_at: {datetime.now(UTC).isoformat()}
 
 ## Evidence ({len(members)} records)
 
-{chr(10).join(f"- `{m.get('source') or m.get('subtype') or m.get('domain') or 'unknown'}` — {(m.get('title') or m.get('text') or '?')[:80]}" for m in members[:10])}
+{_evidence_lines(members)}
 """
     out.write_text(body)
     print(f"  [update] proposed refinement for: {existing['name']} ({len(members)} evidence)")
@@ -467,29 +474,17 @@ def build_weekly_proposal_digest() -> str:
 
 
 def send_digest_to_telegram(digest: str) -> bool:
-    """Deliver digest via openclaw message send. Returns True on success."""
+    """Deliver digest via direct Telegram alert module. Returns True on success."""
     if not digest.strip():
         return False
     try:
-        result = subprocess.run(
-            [
-                OPENCLAW_BIN,
-                "message",
-                "send",
-                "--channel",
-                "telegram",
-                "--target",
-                TELEGRAM_CHAT_ID,
-                "--account",
-                TELEGRAM_ACCOUNT,
-                "--message",
-                digest,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30,
+        from telegram_alert import send_chris_telegram
+
+        return send_chris_telegram(
+            digest,
+            source="skill_extractor:weekly_digest",
+            severity="info",
         )
-        return result.returncode == 0
     except Exception as e:
         print(f"  [telegram] send failed: {e}", file=sys.stderr)
         return False
