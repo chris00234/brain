@@ -50,10 +50,20 @@ def _read_creds() -> tuple[str, str, str]:
     url = os.environ.get("KUMA_URL", DEFAULT_URL)
     user = os.environ.get("KUMA_USER")
     password = os.environ.get("KUMA_PASS")
-    if not password:
-        cred_file = os.environ.get("KUMA_CRED_FILE")
-        if cred_file and Path(cred_file).exists():
-            password = Path(cred_file).read_text().strip()
+    cred_file = os.environ.get("KUMA_CRED_FILE")
+    if cred_file and Path(cred_file).exists():
+        raw = Path(cred_file).read_text().strip()
+        if raw.startswith("{"):
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                data = {}
+            if isinstance(data, dict):
+                url = str(data.get("url") or url)
+                user = str(data.get("username") or data.get("user") or user or "")
+                password = str(data.get("password") or data.get("pass") or password or "")
+        elif not password:
+            password = raw
     if not user or not password:
         print("KUMA_USER and KUMA_PASS (or KUMA_CRED_FILE) required", file=sys.stderr)
         sys.exit(2)
