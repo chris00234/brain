@@ -16,16 +16,23 @@ sys.path.insert(0, str(BRAIN_ROOT / "brain_core"))
 
 @pytest.fixture
 def isolated_autopilot(tmp_path, monkeypatch):
-    """Point autopilot + brain_config_store at tmp_path autonomy.db and JSON state file."""
-    for mod in ("autopilot", "brain_config_store", "config"):
+    """Point autopilot + brain_config_store at tmp_path autonomy.db and JSON state file.
+
+    After 2026-05-12 brain_config_store migrated to db.open_autonomy_db, so the
+    canonical AUTONOMY_DB lives on the shared db module. Monkeypatch db.AUTONOMY_DB
+    plus the schema cache so each test starts fresh.
+    """
+    for mod in ("autopilot", "brain_config_store", "config", "db"):
         if mod in sys.modules:
             del sys.modules[mod]
     import autopilot
     import brain_config_store
+    import db as _db
 
     fake_db = tmp_path / "autonomy.db"
     fake_json = tmp_path / "autopilot_state.json"
-    monkeypatch.setattr(brain_config_store, "AUTONOMY_DB", fake_db)
+    monkeypatch.setattr(_db, "AUTONOMY_DB", fake_db)
+    _db._schema_cache.clear()
     monkeypatch.setattr(autopilot, "STATE_FILE", fake_json)
     autopilot.AUTONOMY_DB = fake_db  # type: ignore[attr-defined]  # back-compat for old test reads
     yield autopilot
