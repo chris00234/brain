@@ -9,12 +9,25 @@ import pytest
 
 @pytest.fixture
 def isolated_audit(tmp_path, monkeypatch):
-    """Point audit_log at a fresh tmp_path DB so we never touch logs/audit.db."""
+    """Point audit_log at a fresh tmp_path DB so we never touch logs/audit.db.
+
+    After 2026-05-12 audit_log delegates to db.open_audit_db, so the canonical
+    AUDIT_DB lives on the shared db module. Patch db.AUDIT_DB and clear the
+    schema cache. Also clear BRAIN_AUDIT_DB env so the explicit override
+    doesn't shadow the monkeypatch.
+    """
+    import sys
+
+    for mod in ("audit_log", "db"):
+        if mod in sys.modules:
+            del sys.modules[mod]
     import audit_log
+    import db as _db
 
     fake_db = tmp_path / "audit.db"
-    monkeypatch.setattr(audit_log, "DB_PATH", fake_db)
-    monkeypatch.setattr(audit_log, "_schema_initialized", False)
+    monkeypatch.setattr(_db, "AUDIT_DB", fake_db)
+    monkeypatch.delenv("BRAIN_AUDIT_DB", raising=False)
+    _db._schema_cache.clear()
     yield audit_log
     importlib.reload(audit_log)
 

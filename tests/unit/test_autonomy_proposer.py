@@ -20,18 +20,24 @@ sys.path.insert(0, str(BRAIN_ROOT / "brain_core"))
 
 @pytest.fixture
 def isolated_proposer(tmp_path, monkeypatch):
-    """Point autonomy_proposer + audit_log at fresh tmp_path DBs."""
-    for mod in ("autonomy_proposer", "audit_log", "config", "autonomy"):
+    """Point autonomy_proposer + audit_log at fresh tmp_path DBs.
+
+    After 2026-05-12 audit_log delegates to db.open_audit_db, so the canonical
+    AUDIT_DB path lives on the shared db module.
+    """
+    for mod in ("autonomy_proposer", "audit_log", "config", "autonomy", "db"):
         if mod in sys.modules:
             del sys.modules[mod]
-    import audit_log
+    import audit_log  # noqa: F401  — register module so monkeypatch tear-down works
     import autonomy_proposer
+    import db as _db
 
     fake_brain_db = tmp_path / "brain.db"
     fake_audit = tmp_path / "audit.db"
     monkeypatch.setattr(autonomy_proposer, "BRAIN_DB", fake_brain_db)
-    monkeypatch.setattr(audit_log, "DB_PATH", fake_audit)
-    monkeypatch.setattr(audit_log, "_initialized", False, raising=False)
+    monkeypatch.setattr(_db, "AUDIT_DB", fake_audit)
+    monkeypatch.delenv("BRAIN_AUDIT_DB", raising=False)
+    _db._schema_cache.clear()
 
     # Seed action_audit schema
     fake_brain_db.parent.mkdir(parents=True, exist_ok=True)
