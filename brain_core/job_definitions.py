@@ -1211,6 +1211,16 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         agent="system",
         misfire_grace=900,
     ),
+    # 2026-05-12: D7 — per-atom recall quality aggregation from action_audit.
+    # Lightweight SQL aggregation, no LLM. Runs daily 04:35 PT after
+    # conjecture_validate.
+    ScheduledJob(
+        name="atom_recall_quality",
+        description="Daily per-atom recall accuracy aggregation (D7 predictive coding signal)",
+        trigger=CronTrigger(hour=4, minute=35),
+        agent="system",
+        misfire_grace=900,
+    ),
     # 2026-04-16 Tier 3 #5: weekly Friston schema-revision signal - emits
     # raw/inbox proposals for clusters of prediction errors instead of
     # silent per-atom punishment. Sun 08:45 (between dream_replay and

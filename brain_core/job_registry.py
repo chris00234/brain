@@ -477,6 +477,14 @@ JOB_REGISTRY: dict[str, list[str]] = {
         "-c",
         f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from conjecture_validator import run; import json; print(json.dumps(run(), ensure_ascii=False))",
     ],
+    # 2026-05-12: D7 per-atom recall quality. Aggregates action_audit
+    # (retrieved_atom_ids x outcome) into per-atom accuracy. Surfaces
+    # consistently-wrong atoms for review.
+    "atom_recall_quality": [
+        _py,
+        "-c",
+        f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from atom_recall_quality import run; import json; print(json.dumps(run(), ensure_ascii=False))",
+    ],
     # 2026-04-16 Tier 3 #5: weekly Friston free-energy schema revision —
     # clusters repeated prediction errors, emits raw/inbox proposals for
     # Sage-level schema rewrite instead of atom-level punishment.

@@ -159,6 +159,39 @@ def social_list() -> dict:
         raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e)) from e
 
 
+# ── D7 (2026-05-12): per-atom recall quality ───────────
+@router.get("/brain/atoms/recall-quality/low", tags=["brain"])
+def atoms_low_quality(
+    limit: int = Query(default=20, ge=1, le=100),
+    min_labeled: int = Query(default=3, ge=1, le=20),
+    max_accuracy: float = Query(default=0.4, ge=0.0, le=1.0),
+) -> dict:
+    """List atoms with poor recall accuracy (frequently judged wrong/restated)."""
+    try:
+        from atom_recall_quality import list_low_quality
+
+        items = list_low_quality(limit=limit, min_labeled=min_labeled, max_accuracy=max_accuracy)
+        return {"items": items, "total": len(items)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e)) from e
+
+
+@router.get("/brain/atoms/{atom_id}/recall-quality", tags=["brain"])
+def atom_quality(atom_id: str) -> dict:
+    """Return per-atom recall outcome history (n_recalls/good/wrong/restated/accuracy)."""
+    try:
+        from atom_recall_quality import get_atom_quality
+
+        result = get_atom_quality(atom_id)
+        if not result:
+            raise HTTPException(status_code=404, detail="atom_not_recalled_yet")
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e)) from e
+
+
 @router.get("/brain/social/{subject}", tags=["brain"])
 def social_get(subject: str, limit: int = Query(default=50, ge=1, le=200)) -> dict:
     """Return belief atoms the brain attributes to one subject."""
