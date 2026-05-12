@@ -34,6 +34,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from db import ensure_schema, now_iso
+
 try:
     from config import BRAIN_DB
 except ImportError:
@@ -56,20 +58,15 @@ CREATE INDEX IF NOT EXISTS idx_arq_accuracy ON atom_recall_quality(accuracy);
 CREATE INDEX IF NOT EXISTS idx_arq_recalls  ON atom_recall_quality(n_recalls);
 """
 
-_schema_done = False
-
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
-    global _schema_done
-    if _schema_done:
-        return
-    conn.executescript(_SCHEMA)
-    conn.commit()
-    _schema_done = True
+    """Idempotent schema init via shared ensure_schema."""
+    ensure_schema(conn, "atom_recall_quality", _SCHEMA)
 
 
 def _now_iso() -> str:
-    return datetime.now(UTC).isoformat(timespec="seconds")
+    """Backwards-compat shim — delegates to shared now_iso()."""
+    return now_iso()
 
 
 def run(days: int = 30) -> dict:

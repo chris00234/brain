@@ -34,6 +34,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from db import now_iso
+
 try:
     from config import BRAIN_DB, BRAIN_LOGS_DIR
 except ImportError:
@@ -53,7 +55,8 @@ MIN_ENTITY_LEN = 4
 
 
 def _now_iso() -> str:
-    return datetime.now(UTC).isoformat(timespec="seconds")
+    """Backwards-compat shim — delegates to shared now_iso()."""
+    return now_iso()
 
 
 def _audit(event: dict) -> None:

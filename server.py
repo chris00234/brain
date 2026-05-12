@@ -571,63 +571,14 @@ async def _request_id_and_metrics_middleware(request, call_next):
 
 
 # ── Mount extracted route modules ───────────────────────
-from routes.admin_ops import router as _admin_ops_router  # noqa: E402
-from routes.agency import router as _agency_router  # noqa: E402
-from routes.brain_ops import router as _brain_ops_router  # noqa: E402
-from routes.capture import router as _capture_router  # noqa: E402
-from routes.coding import router as _coding_router  # noqa: E402
-from routes.decide import router as _decide_router  # noqa: E402
-from routes.governance import router as _governance_router  # noqa: E402
-from routes.health import router as _health_router  # noqa: E402
-from routes.command import router as _command_router  # noqa: E402
-from routes.ingest import router as _ingest_router  # noqa: E402
-from routes.insights import router as _insights_router  # noqa: E402
-from routes.jobs import router as _jobs_router  # noqa: E402
-from routes.knowledge import router as _knowledge_router  # noqa: E402
-from routes.learn import router as _learn_router  # noqa: E402
-from routes.memory import router as _memory_router  # noqa: E402
-from routes.metrics import router as _metrics_router  # noqa: E402
-from routes.liveness import router as _liveness_router  # noqa: E402
-from routes.dashboard import router as _dashboard_router  # noqa: E402
-from routes.session import router as _session_router  # noqa: E402
-from routes.recall import router as _recall_router  # noqa: E402
-from routes.profile import router as _profile_router  # noqa: E402
-from routes.reasoning import router as _reasoning_router  # noqa: E402
-from routes.speak import router as _speak_router  # noqa: E402
-from routes.stores import router as _stores_router  # noqa: E402
-from routes.synthesis import router as _synthesis_router  # noqa: E402
-from routes.think import router as _think_router  # noqa: E402
-from routes.web import router as _web_router  # noqa: E402
-from routes.wm import router as _wm_router  # noqa: E402
+# 2026-05-12: was 28 hand-coordinated imports + 28 include_router calls
+# (56 lines). routes/__init__.py.iter_routers() now auto-discovers any
+# sibling module that exposes a `router` attribute. Adding a new route
+# file is a single-file change with no server.py edit required.
+from routes import iter_routers  # noqa: E402
 
-app.include_router(_liveness_router)
-app.include_router(_admin_ops_router)
-app.include_router(_profile_router)
-app.include_router(_web_router)
-app.include_router(_brain_ops_router)
-app.include_router(_stores_router)
-app.include_router(_reasoning_router)
-app.include_router(_synthesis_router)
-app.include_router(_coding_router)
-app.include_router(_learn_router)
-app.include_router(_ingest_router)
-app.include_router(_wm_router)
-app.include_router(_capture_router)
-app.include_router(_knowledge_router)
-app.include_router(_governance_router)
-app.include_router(_session_router)
-app.include_router(_dashboard_router)
-app.include_router(_health_router)
-app.include_router(_metrics_router)
-app.include_router(_insights_router)
-app.include_router(_decide_router)
-app.include_router(_jobs_router)
-app.include_router(_memory_router)
-app.include_router(_recall_router)
-app.include_router(_think_router)
-app.include_router(_agency_router)
-app.include_router(_speak_router)
-app.include_router(_command_router)
+for _name, _router in iter_routers():
+    app.include_router(_router)
 
 
 # ── Bootstrap ───────────────────────────────────────────
