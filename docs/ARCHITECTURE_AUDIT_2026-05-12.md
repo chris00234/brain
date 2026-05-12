@@ -128,14 +128,28 @@ are real on closer reading):
   FastAPI service via `ai.openclaw.brain-reranker.plist`. Audit false
   positive (process-launched, not Python-imported).
 
-### Reduced-usage modules (1-2 refs)
-- `spreading_activation.py` (378 lines, 1 ref) — HippoRAG-style PPR
-  built but not wired into hot search path
-- `late_interaction.py` (194 lines, 2 refs)
-- `lora_embedder.py` (187 lines)
-- `sparse_tokenizer.py` (109 lines, 3 refs)
+### Reduced-usage modules (2026-05-12 follow-up correction)
+The original audit characterized these as "1-2 refs" / "not wired into hot
+search path." Re-counting and reading the actual call sites shows the
+audit was wrong about wiring status for most of them:
 
-These are candidates for either deeper wiring or archival.
+- `spreading_activation.py` (378 lines) — **WIRED**: imported in
+  search_unified.py:2499, gated on `BRAIN_SPREADING_ACTIVATION_ENABLED`
+  which is `true` in production plist. HippoRAG-style PPR runs on every
+  recall_v2 query where the top-1 isn't a clear winner (top3/top1 ≥ 0.90),
+  applying a ≤5pt entity-graph boost. Not orphaned.
+- `late_interaction.py` (194 lines) — **WIRED**: imported by
+  qdrant_store, ingest_mirror, search_unified, search. 4 importers, not 2.
+- `sparse_tokenizer.py` (109 lines) — **WIRED**: imported by
+  search_unified, search, pipeline/reembed_migrator, routes/recall.
+  4 importers, not 3.
+- `lora_embedder.py` (187 lines) — single importer (indexer.py), only
+  module here that is genuinely reduced-usage. Adapter swap path used
+  during eval sweeps; rarely active in steady-state.
+
+None of these are archival candidates. The audit's framing was based on
+a shallow grep; the real wiring is solid. The only structural takeaway
+left in this section is the lora_embedder narrow-usage observation.
 
 ### Config sprawl
 99 `os.getenv()` calls across 30 files. `brain_loop.py` has 7 inline,
