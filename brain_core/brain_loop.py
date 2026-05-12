@@ -1045,401 +1045,434 @@ def _find_active_claude_session(observations: list[Observation]) -> str | None:
     return None
 
 
+def _reflect_stalled_goal(o: Observation, claude_session: str | None) -> list[Decision]:
+    """Chris-owned + active session → push doorbell. Agent-owned → dispatch
+    a checkin. Chris-owned but no session → observe only."""
+    owner = o.evidence.get("owner", "chris")
+    title = o.evidence.get("title", "")
+    age = o.evidence.get("age_hours", 0)
+    if owner == "chris" and claude_session:
+        return [
+            Decision(
+                observation=o,
+                kind=DecisionKind.PUSH_TO_CLAUDE,
+                action_payload={
+                    "session_id": claude_session,
+                    "title": f"Stalled goal: {title}",
+                    "content": (
+                        f"⚠ Goal '{title}' has been stalled for {age:.1f}h. "
+                        f"Consider next steps or mark it paused."
+                    ),
+                    "priority": "high",
+                    "source": "brain_loop.goal_monitor",
+                },
+                reasoning=f"Goal stalled >{STALLED_GOAL_HOURS}h, Chris-owned, Claude session active",
+                confidence=0.8,
+                requires_autonomy="brain_loop.push_to_claude",
+            )
+        ]
+    if owner != "chris":
+        return [
+            Decision(
+                observation=o,
+                kind=DecisionKind.DISPATCH_AGENT,
+                action_payload={
+                    "agent": owner,
+                    "message": (
+                        f"Your goal '{title}' has been stalled for {age:.1f}h. "
+                        f"Please advance it or report blockers in a reply."
+                    ),
+                },
+                reasoning=f"Goal stalled >{STALLED_GOAL_HOURS}h, agent={owner}",
+                confidence=0.7,
+                requires_autonomy="brain_loop.dispatch_agent_checkin",
+            )
+        ]
+    # Chris-owned but no active session — log only.
+    return [
+        Decision(
+            observation=o,
+            kind=DecisionKind.OBSERVE_ONLY,
+            reasoning="Chris-owned stalled goal but no active Claude session",
+            confidence=0.5,
+            requires_autonomy="brain_loop.observe",
+        )
+    ]
+
+
+def _reflect_recall_miss(o: Observation, _claude_session: str | None) -> list[Decision]:
+    return [
+        Decision(
+            observation=o,
+            kind=DecisionKind.PROPOSE,
+            action_payload={
+                "category": "intent_route_candidate",
+                "evidence": o.evidence,
+                "session_id": o.subject,
+            },
+            reasoning="Recall miss detected mid-session",
+            confidence=0.9,
+            requires_autonomy="brain_loop.propose_eval_candidate",
+        )
+    ]
+
+
+def _reflect_breaker_open(o: Observation, _claude_session: str | None) -> list[Decision]:
+    return [
+        Decision(
+            observation=o,
+            kind=DecisionKind.TELEGRAM_ALERT,
+            action_payload={
+                "severity": "urgent",
+                "body": (
+                    f"⚠ Breaker OPEN: {o.subject}\n"
+                    f"failures={o.evidence.get('failures', '?')}\n"
+                    f"reason: {o.evidence.get('reason', 'n/a')[:200]}"
+                ),
+            },
+            reasoning="Breaker open = degraded subsystem, Chris must know",
+            confidence=1.0,
+            requires_autonomy="brain_loop.telegram_urgent",
+        )
+    ]
+
+
+def _reflect_accuracy_drop(o: Observation, _claude_session: str | None) -> list[Decision]:
+    return [
+        Decision(
+            observation=o,
+            kind=DecisionKind.SELF_MODIFY,
+            action_payload={
+                "modification": "autonomy_demote",
+                "domain": o.subject,
+                "to_level": "L1",
+                "reason": f"Accuracy {o.evidence.get('accuracy', 0):.0%} < threshold {ACCURACY_DROP_THRESHOLD:.0%}",
+            },
+            reasoning=f"Accuracy {o.evidence.get('accuracy', 0):.2f} over {o.evidence.get('total', 0)} tasks",
+            confidence=0.8,
+            requires_autonomy="brain_loop.self_modify_autonomy",
+        )
+    ]
+
+
+def _reflect_contradiction(o: Observation, _claude_session: str | None) -> list[Decision]:
+    return [
+        Decision(
+            observation=o,
+            kind=DecisionKind.DISPATCH_AGENT,
+            action_payload={
+                "agent": "sage",
+                "message": (
+                    f"New contradiction detected: {o.evidence.get('summary', '')[:200]}\n"
+                    f"Please investigate and write a canonical resolution."
+                ),
+            },
+            reasoning="Sage owns contradiction resolution",
+            confidence=0.7,
+            requires_autonomy="brain_loop.dispatch_agent_investigation",
+        )
+    ]
+
+
+def _reflect_llm_usage_spike(o: Observation, claude_session: str | None) -> list[Decision]:
+    """LLM call rate jumped 3x+ — self-handle first. A usage spike is
+    normally an internal ops issue, not Chris-only knowledge. If severe
+    and no active session exists, engage the cost governor instead of
+    paging Chris.
+
+    Phase 4b cost governor: when the spike is severe (>=5x baseline) AND
+    there's no active Chris session to debug from, autonomously cap CLI
+    concurrency to 1 for the next 30 min via brain_config_store. cli_llm
+    reads the cap dynamically; the env-var default acts as the floor when
+    no live override is set.
+    """
+    hourly = o.evidence.get("hourly_rate", 0)
+    baseline = o.evidence.get("baseline_per_hour", 0)
+    ratio = o.evidence.get("ratio", 0)
+    governor_enabled = os.environ.get("BRAIN_LLM_COST_GOVERNOR", "on").lower() not in (
+        "off",
+        "0",
+        "false",
+        "no",
+    )
+    out: list[Decision] = []
+    if governor_enabled and ratio >= 5 and not claude_session:
+        out.append(
+            Decision(
+                observation=o,
+                kind=DecisionKind.SELF_MODIFY,
+                action_payload={
+                    "modification": "engage_llm_cost_governor",
+                    "ratio": ratio,
+                    "hourly": hourly,
+                    "baseline": baseline,
+                    "ttl_s": 1800,
+                },
+                reasoning=(
+                    f"LLM rate {ratio}x baseline AND no active Chris session — "
+                    "cap concurrency to 1 for 30 min to bound damage"
+                ),
+                confidence=0.85,
+                requires_autonomy="brain_loop.cost_governor",
+            )
+        )
+    if claude_session:
+        out.append(
+            Decision(
+                observation=o,
+                kind=DecisionKind.PUSH_TO_CLAUDE,
+                action_payload={
+                    "session_id": claude_session,
+                    "title": "LLM usage spike detected",
+                    "content": (
+                        f"⚠ Last hour: {hourly} LLM calls. "
+                        f"Baseline: {baseline}/hr. Ratio: {ratio}x. "
+                        f"Investigate: `brain cost agent` to see which job is spamming."
+                    ),
+                    "priority": "high",
+                    "source": "brain_loop.llm_usage_spike",
+                },
+                reasoning=f"LLM rate {ratio}x baseline — possible runaway job",
+                confidence=0.9,
+                requires_autonomy="brain_loop.push_to_claude",
+            )
+        )
+    elif ratio >= 5:
+        out.append(
+            Decision(
+                observation=o,
+                kind=DecisionKind.OBSERVE_ONLY,
+                reasoning=(
+                    "LLM usage spike has no active session; cost governor "
+                    "decision handles severe cases without notifying Chris"
+                ),
+                confidence=0.7,
+                requires_autonomy="brain_loop.observe",
+            )
+        )
+    else:
+        out.append(
+            Decision(
+                observation=o,
+                kind=DecisionKind.OBSERVE_ONLY,
+                reasoning="LLM usage spike below autonomous-governor threshold; observe only",
+                confidence=0.6,
+                requires_autonomy="brain_loop.observe",
+            )
+        )
+    return out
+
+
+def _reflect_stale_atom(o: Observation, _claude_session: str | None) -> list[Decision]:
+    return [
+        Decision(
+            observation=o,
+            kind=DecisionKind.SELF_MODIFY,
+            action_payload={
+                "modification": "atom_obsolete",
+                "atom_id": o.subject,
+                "reason": (
+                    f"atom kind={o.evidence.get('kind','?')} age={o.evidence.get('age_days','?')}d > "
+                    f"decay={o.evidence.get('decay_threshold_days','?')}d, "
+                    f"reinforcement={o.evidence.get('reinforcement_count','?')}"
+                ),
+                "preview": o.evidence.get("text_preview", ""),
+            },
+            reasoning="Stale atom past decay window with low access",
+            confidence=0.7,
+            requires_autonomy="brain_loop.self_modify_route",
+        )
+    ]
+
+
+def _reflect_proactive_urgent(o: Observation, claude_session: str | None) -> list[Decision]:
+    if claude_session:
+        return [
+            Decision(
+                observation=o,
+                kind=DecisionKind.PUSH_TO_CLAUDE,
+                action_payload={
+                    "session_id": claude_session,
+                    "title": o.evidence.get("summary", "urgent insight")[:80],
+                    "content": o.evidence.get("detail", "")[:800],
+                    "priority": "critical",
+                    "source": "brain_loop.proactive",
+                },
+                reasoning="Urgent proactive insight + active Claude session",
+                confidence=0.9,
+                requires_autonomy="brain_loop.push_to_claude",
+            )
+        ]
+    return [
+        Decision(
+            observation=o,
+            kind=DecisionKind.DISPATCH_AGENT,
+            action_payload={
+                "agent": "sage",
+                "message": (
+                    "Urgent proactive Brain insight with no active CLI session.\n"
+                    "Handle it yourself if possible. Notify Chris only if blocked by "
+                    "missing private knowledge, credentials, account access, physical "
+                    "access, irreversible authority, or human-only judgment.\n\n"
+                    f"Summary: {o.evidence.get('summary', '')[:200]}\n"
+                    f"Detail: {o.evidence.get('detail', '')[:800]}"
+                ),
+            },
+            reasoning="Urgent proactive insight with no active session — Sage self-handles first",
+            confidence=0.85,
+            requires_autonomy="brain_loop.dispatch_agent_investigation",
+        )
+    ]
+
+
+def _reflect_proactive_playbook(o: Observation, claude_session: str | None) -> list[Decision]:
+    actions = o.evidence.get("safe_actions") or []
+    stops = o.evidence.get("stop_conditions") or []
+    action_lines = "\n".join(f"- {a}" for a in actions[:8]) or "- gather read-only evidence"
+    stop_lines = "\n".join(f"- {s}" for s in stops[:6]) or "- stop before destructive or credentialed work"
+    body = (
+        "Brain recognized a repeated Chris pattern and prepared a safe proactive playbook.\n"
+        f"Event class: {o.evidence.get('event_class', 'unknown')}\n"
+        f"Summary: {o.evidence.get('summary', '')[:220]}\n\n"
+        f"{o.evidence.get('detail', '')[:1000]}\n\n"
+        "Execute only the safe layer now:\n"
+        f"{action_lines}\n\n"
+        "Stop conditions:\n"
+        f"{stop_lines}\n\n"
+        "Return a concise evidence-backed result before Chris has to ask."
+    )
+    if claude_session:
+        return [
+            Decision(
+                observation=o,
+                kind=DecisionKind.PUSH_TO_CLAUDE,
+                action_payload={
+                    "session_id": claude_session,
+                    "title": o.evidence.get("summary", "proactive playbook")[:80],
+                    "content": body[:1800],
+                    "priority": "high",
+                    "source": "brain_loop.proactive_playbook",
+                },
+                reasoning="Learned playbook insight + active Claude session",
+                confidence=0.82,
+                requires_autonomy="brain_loop.proactive_playbook_execute",
+            )
+        ]
+    return [
+        Decision(
+            observation=o,
+            kind=DecisionKind.DISPATCH_AGENT,
+            action_payload={
+                "agent": "sage",
+                "message": (
+                    body + "\n\nHandle it yourself if possible. Notify Chris only if blocked by "
+                    "missing private knowledge, credentials/account access, irreversible "
+                    "authority, production writes, or human-only judgment."
+                ),
+            },
+            reasoning="Learned playbook insight with no active session — Sage executes safe layer",
+            confidence=0.78,
+            requires_autonomy="brain_loop.proactive_playbook_execute",
+        )
+    ]
+
+
+def _reflect_claude_active(_o: Observation, _claude_session: str | None) -> list[Decision]:
+    """Side-channel signal — not a standalone decision."""
+    return []
+
+
+def _reflect_llm_breaker_closed(o: Observation, _claude_session: str | None) -> list[Decision]:
+    """Quota just came back — immediately drain the backlog so missed work
+    catches up within 60s rather than waiting for the 30-min cron."""
+    return [
+        Decision(
+            observation=o,
+            kind=DecisionKind.SELF_MODIFY,
+            action_payload={
+                "modification": "drain_llm_backlog",
+                "pending_backlog": o.evidence.get("pending_backlog", 0),
+            },
+            reasoning="llm.dispatch breaker closed with pending backlog — immediate drain",
+            confidence=0.95,
+            requires_autonomy="brain_loop.drain_llm_backlog",
+        )
+    ]
+
+
+def _reflect_llm_backlog_breach(o: Observation, _claude_session: str | None) -> list[Decision]:
+    """Shared handler for llm_backlog_overflow and llm_backlog_stale —
+    queue is piling up, surface to Chris. Urgent if overflow, warn if
+    just stale."""
+    severity = "urgent" if o.kind == "llm_backlog_overflow" else "warn"
+    pending = o.evidence.get("pending", 0)
+    age_h = o.evidence.get("oldest_age_s", 0) / 3600
+    return [
+        Decision(
+            observation=o,
+            kind=DecisionKind.TELEGRAM_ALERT,
+            action_payload={
+                "severity": severity,
+                "body": (
+                    f"⚠ llm_backlog {o.kind.split('_', 2)[-1]}: "
+                    f"pending={pending}, oldest={age_h:.1f}h. "
+                    f"Drain cron may be stuck or LLM still degraded."
+                ),
+            },
+            reasoning="llm_backlog SLO breach — Chris needs to know",
+            confidence=0.85,
+            requires_autonomy="brain_loop.telegram_urgent",
+        )
+    ]
+
+
+def _reflect_canonical_changed(o: Observation, _claude_session: str | None) -> list[Decision]:
+    """A canonical or distilled file is newer than the last incremental
+    index run — refresh the qdrant collections so search sees the change
+    in ≤90s rather than waiting for the next 12-hr full reindex."""
+    return [
+        Decision(
+            observation=o,
+            kind=DecisionKind.SELF_MODIFY,
+            action_payload={"modification": "incremental_canonical_index"},
+            reasoning=(
+                "canonical / distilled .md changed since last incremental run — " "refresh embedded views"
+            ),
+            confidence=0.9,
+            requires_autonomy="brain_loop.incremental_index",
+        )
+    ]
+
+
+_REFLECT_HANDLERS: dict[str, Any] = {
+    "stalled_goal": _reflect_stalled_goal,
+    "recall_miss": _reflect_recall_miss,
+    "breaker_open": _reflect_breaker_open,
+    "accuracy_drop": _reflect_accuracy_drop,
+    "contradiction": _reflect_contradiction,
+    "llm_usage_spike": _reflect_llm_usage_spike,
+    "stale_atom": _reflect_stale_atom,
+    "proactive_urgent": _reflect_proactive_urgent,
+    "proactive_playbook": _reflect_proactive_playbook,
+    "claude_active": _reflect_claude_active,
+    "llm_breaker_closed": _reflect_llm_breaker_closed,
+    "llm_backlog_overflow": _reflect_llm_backlog_breach,
+    "llm_backlog_stale": _reflect_llm_backlog_breach,
+    "canonical_changed": _reflect_canonical_changed,
+}
+
+
 def _reflect(observations: list[Observation]) -> list[Decision]:
+    """Map observations → decisions via the _REFLECT_HANDLERS dispatch table.
+    Unknown observation kinds are silently ignored (no decision produced).
+    """
     decisions: list[Decision] = []
     claude_session = _find_active_claude_session(observations)
-
     for o in observations:
-        if o.kind == "stalled_goal":
-            owner = o.evidence.get("owner", "chris")
-            title = o.evidence.get("title", "")
-            age = o.evidence.get("age_hours", 0)
-            if owner == "chris" and claude_session:
-                decisions.append(
-                    Decision(
-                        observation=o,
-                        kind=DecisionKind.PUSH_TO_CLAUDE,
-                        action_payload={
-                            "session_id": claude_session,
-                            "title": f"Stalled goal: {title}",
-                            "content": (
-                                f"⚠ Goal '{title}' has been stalled for {age:.1f}h. "
-                                f"Consider next steps or mark it paused."
-                            ),
-                            "priority": "high",
-                            "source": "brain_loop.goal_monitor",
-                        },
-                        reasoning=f"Goal stalled >{STALLED_GOAL_HOURS}h, Chris-owned, Claude session active",
-                        confidence=0.8,
-                        requires_autonomy="brain_loop.push_to_claude",
-                    )
-                )
-            elif owner != "chris":
-                decisions.append(
-                    Decision(
-                        observation=o,
-                        kind=DecisionKind.DISPATCH_AGENT,
-                        action_payload={
-                            "agent": owner,
-                            "message": (
-                                f"Your goal '{title}' has been stalled for {age:.1f}h. "
-                                f"Please advance it or report blockers in a reply."
-                            ),
-                        },
-                        reasoning=f"Goal stalled >{STALLED_GOAL_HOURS}h, agent={owner}",
-                        confidence=0.7,
-                        requires_autonomy="brain_loop.dispatch_agent_checkin",
-                    )
-                )
-            else:
-                # Chris-owned but no active session — log only
-                decisions.append(
-                    Decision(
-                        observation=o,
-                        kind=DecisionKind.OBSERVE_ONLY,
-                        reasoning="Chris-owned stalled goal but no active Claude session",
-                        confidence=0.5,
-                        requires_autonomy="brain_loop.observe",
-                    )
-                )
-
-        elif o.kind == "recall_miss":
-            decisions.append(
-                Decision(
-                    observation=o,
-                    kind=DecisionKind.PROPOSE,
-                    action_payload={
-                        "category": "intent_route_candidate",
-                        "evidence": o.evidence,
-                        "session_id": o.subject,
-                    },
-                    reasoning="Recall miss detected mid-session",
-                    confidence=0.9,
-                    requires_autonomy="brain_loop.propose_eval_candidate",
-                )
-            )
-
-        elif o.kind == "breaker_open":
-            decisions.append(
-                Decision(
-                    observation=o,
-                    kind=DecisionKind.TELEGRAM_ALERT,
-                    action_payload={
-                        "severity": "urgent",
-                        "body": (
-                            f"⚠ Breaker OPEN: {o.subject}\n"
-                            f"failures={o.evidence.get('failures', '?')}\n"
-                            f"reason: {o.evidence.get('reason', 'n/a')[:200]}"
-                        ),
-                    },
-                    reasoning="Breaker open = degraded subsystem, Chris must know",
-                    confidence=1.0,
-                    requires_autonomy="brain_loop.telegram_urgent",
-                )
-            )
-
-        elif o.kind == "accuracy_drop":
-            decisions.append(
-                Decision(
-                    observation=o,
-                    kind=DecisionKind.SELF_MODIFY,
-                    action_payload={
-                        "modification": "autonomy_demote",
-                        "domain": o.subject,
-                        "to_level": "L1",
-                        "reason": f"Accuracy {o.evidence.get('accuracy', 0):.0%} < threshold {ACCURACY_DROP_THRESHOLD:.0%}",
-                    },
-                    reasoning=f"Accuracy {o.evidence.get('accuracy', 0):.2f} over {o.evidence.get('total', 0)} tasks",
-                    confidence=0.8,
-                    requires_autonomy="brain_loop.self_modify_autonomy",
-                )
-            )
-
-        elif o.kind == "contradiction":
-            decisions.append(
-                Decision(
-                    observation=o,
-                    kind=DecisionKind.DISPATCH_AGENT,
-                    action_payload={
-                        "agent": "sage",
-                        "message": (
-                            f"New contradiction detected: {o.evidence.get('summary', '')[:200]}\n"
-                            f"Please investigate and write a canonical resolution."
-                        ),
-                    },
-                    reasoning="Sage owns contradiction resolution",
-                    confidence=0.7,
-                    requires_autonomy="brain_loop.dispatch_agent_investigation",
-                )
-            )
-
-        elif o.kind == "llm_usage_spike":
-            # LLM call rate jumped 3x+ — self-handle first. A usage spike is
-            # normally an internal ops issue, not Chris-only knowledge. If
-            # severe and no active session exists, engage the cost governor
-            # instead of paging Chris.
-            hourly = o.evidence.get("hourly_rate", 0)
-            baseline = o.evidence.get("baseline_per_hour", 0)
-            ratio = o.evidence.get("ratio", 0)
-
-            # Phase 4b cost governor: when the spike is severe (>=5x baseline)
-            # AND there's no active Chris session to debug from, autonomously
-            # cap CLI concurrency to 1 for the next 30 min via brain_config_store.
-            # cli_llm reads the cap dynamically; the env-var default acts as
-            # the floor when no live override is set.
-            governor_enabled = os.environ.get("BRAIN_LLM_COST_GOVERNOR", "on").lower() not in (
-                "off",
-                "0",
-                "false",
-                "no",
-            )
-            if governor_enabled and ratio >= 5 and not claude_session:
-                decisions.append(
-                    Decision(
-                        observation=o,
-                        kind=DecisionKind.SELF_MODIFY,
-                        action_payload={
-                            "modification": "engage_llm_cost_governor",
-                            "ratio": ratio,
-                            "hourly": hourly,
-                            "baseline": baseline,
-                            "ttl_s": 1800,
-                        },
-                        reasoning=(
-                            f"LLM rate {ratio}x baseline AND no active Chris session — "
-                            "cap concurrency to 1 for 30 min to bound damage"
-                        ),
-                        confidence=0.85,
-                        requires_autonomy="brain_loop.cost_governor",
-                    )
-                )
-            if claude_session:
-                decisions.append(
-                    Decision(
-                        observation=o,
-                        kind=DecisionKind.PUSH_TO_CLAUDE,
-                        action_payload={
-                            "session_id": claude_session,
-                            "title": "LLM usage spike detected",
-                            "content": (
-                                f"⚠ Last hour: {hourly} LLM calls. "
-                                f"Baseline: {baseline}/hr. Ratio: {ratio}x. "
-                                f"Investigate: `brain cost agent` to see which job is spamming."
-                            ),
-                            "priority": "high",
-                            "source": "brain_loop.llm_usage_spike",
-                        },
-                        reasoning=f"LLM rate {ratio}x baseline — possible runaway job",
-                        confidence=0.9,
-                        requires_autonomy="brain_loop.push_to_claude",
-                    )
-                )
-            elif ratio >= 5:
-                decisions.append(
-                    Decision(
-                        observation=o,
-                        kind=DecisionKind.OBSERVE_ONLY,
-                        reasoning=(
-                            "LLM usage spike has no active session; cost governor "
-                            "decision handles severe cases without notifying Chris"
-                        ),
-                        confidence=0.7,
-                        requires_autonomy="brain_loop.observe",
-                    )
-                )
-            else:
-                decisions.append(
-                    Decision(
-                        observation=o,
-                        kind=DecisionKind.OBSERVE_ONLY,
-                        reasoning="LLM usage spike below autonomous-governor threshold; observe only",
-                        confidence=0.6,
-                        requires_autonomy="brain_loop.observe",
-                    )
-                )
-
-        elif o.kind == "stale_atom":
-            decisions.append(
-                Decision(
-                    observation=o,
-                    kind=DecisionKind.SELF_MODIFY,
-                    action_payload={
-                        "modification": "atom_obsolete",
-                        "atom_id": o.subject,
-                        "reason": (
-                            f"atom kind={o.evidence.get('kind','?')} age={o.evidence.get('age_days','?')}d > "
-                            f"decay={o.evidence.get('decay_threshold_days','?')}d, "
-                            f"reinforcement={o.evidence.get('reinforcement_count','?')}"
-                        ),
-                        "preview": o.evidence.get("text_preview", ""),
-                    },
-                    reasoning="Stale atom past decay window with low access",
-                    confidence=0.7,
-                    requires_autonomy="brain_loop.self_modify_route",
-                )
-            )
-
-        elif o.kind == "proactive_urgent":
-            if claude_session:
-                decisions.append(
-                    Decision(
-                        observation=o,
-                        kind=DecisionKind.PUSH_TO_CLAUDE,
-                        action_payload={
-                            "session_id": claude_session,
-                            "title": o.evidence.get("summary", "urgent insight")[:80],
-                            "content": o.evidence.get("detail", "")[:800],
-                            "priority": "critical",
-                            "source": "brain_loop.proactive",
-                        },
-                        reasoning="Urgent proactive insight + active Claude session",
-                        confidence=0.9,
-                        requires_autonomy="brain_loop.push_to_claude",
-                    )
-                )
-            else:
-                decisions.append(
-                    Decision(
-                        observation=o,
-                        kind=DecisionKind.DISPATCH_AGENT,
-                        action_payload={
-                            "agent": "sage",
-                            "message": (
-                                "Urgent proactive Brain insight with no active CLI session.\n"
-                                "Handle it yourself if possible. Notify Chris only if blocked by "
-                                "missing private knowledge, credentials, account access, physical "
-                                "access, irreversible authority, or human-only judgment.\n\n"
-                                f"Summary: {o.evidence.get('summary', '')[:200]}\n"
-                                f"Detail: {o.evidence.get('detail', '')[:800]}"
-                            ),
-                        },
-                        reasoning="Urgent proactive insight with no active session — Sage self-handles first",
-                        confidence=0.85,
-                        requires_autonomy="brain_loop.dispatch_agent_investigation",
-                    )
-                )
-
-        elif o.kind == "proactive_playbook":
-            actions = o.evidence.get("safe_actions") or []
-            stops = o.evidence.get("stop_conditions") or []
-            action_lines = "\n".join(f"- {a}" for a in actions[:8]) or "- gather read-only evidence"
-            stop_lines = (
-                "\n".join(f"- {s}" for s in stops[:6]) or "- stop before destructive or credentialed work"
-            )
-            body = (
-                "Brain recognized a repeated Chris pattern and prepared a safe proactive playbook.\n"
-                f"Event class: {o.evidence.get('event_class', 'unknown')}\n"
-                f"Summary: {o.evidence.get('summary', '')[:220]}\n\n"
-                f"{o.evidence.get('detail', '')[:1000]}\n\n"
-                "Execute only the safe layer now:\n"
-                f"{action_lines}\n\n"
-                "Stop conditions:\n"
-                f"{stop_lines}\n\n"
-                "Return a concise evidence-backed result before Chris has to ask."
-            )
-            if claude_session:
-                decisions.append(
-                    Decision(
-                        observation=o,
-                        kind=DecisionKind.PUSH_TO_CLAUDE,
-                        action_payload={
-                            "session_id": claude_session,
-                            "title": o.evidence.get("summary", "proactive playbook")[:80],
-                            "content": body[:1800],
-                            "priority": "high",
-                            "source": "brain_loop.proactive_playbook",
-                        },
-                        reasoning="Learned playbook insight + active Claude session",
-                        confidence=0.82,
-                        requires_autonomy="brain_loop.proactive_playbook_execute",
-                    )
-                )
-            else:
-                decisions.append(
-                    Decision(
-                        observation=o,
-                        kind=DecisionKind.DISPATCH_AGENT,
-                        action_payload={
-                            "agent": "sage",
-                            "message": (
-                                body + "\n\nHandle it yourself if possible. Notify Chris only if blocked by "
-                                "missing private knowledge, credentials/account access, irreversible "
-                                "authority, production writes, or human-only judgment."
-                            ),
-                        },
-                        reasoning="Learned playbook insight with no active session — Sage executes safe layer",
-                        confidence=0.78,
-                        requires_autonomy="brain_loop.proactive_playbook_execute",
-                    )
-                )
-
-        elif o.kind == "claude_active":
-            # Side-channel signal, not a standalone decision
+        handler = _REFLECT_HANDLERS.get(o.kind)
+        if handler is None:
             continue
-
-        elif o.kind == "llm_breaker_closed":
-            # Quota just came back — immediately drain the backlog so
-            # missed work catches up within 60 s rather than waiting for
-            # the 30-min cron. Use SELF_MODIFY kind since we're invoking
-            # a brain-owned maintenance action.
-            decisions.append(
-                Decision(
-                    observation=o,
-                    kind=DecisionKind.SELF_MODIFY,
-                    action_payload={
-                        "modification": "drain_llm_backlog",
-                        "pending_backlog": o.evidence.get("pending_backlog", 0),
-                    },
-                    reasoning="llm.dispatch breaker closed with pending backlog — immediate drain",
-                    confidence=0.95,
-                    requires_autonomy="brain_loop.drain_llm_backlog",
-                )
-            )
-
-        elif o.kind in ("llm_backlog_overflow", "llm_backlog_stale"):
-            # Queue is piling up — surface to Chris. Urgent if overflow,
-            # warn if just stale.
-            severity = "urgent" if o.kind == "llm_backlog_overflow" else "warn"
-            pending = o.evidence.get("pending", 0)
-            age_h = o.evidence.get("oldest_age_s", 0) / 3600
-            decisions.append(
-                Decision(
-                    observation=o,
-                    kind=DecisionKind.TELEGRAM_ALERT,
-                    action_payload={
-                        "severity": severity,
-                        "body": (
-                            f"⚠ llm_backlog {o.kind.split('_', 2)[-1]}: "
-                            f"pending={pending}, oldest={age_h:.1f}h. "
-                            f"Drain cron may be stuck or LLM still degraded."
-                        ),
-                    },
-                    reasoning="llm_backlog SLO breach — Chris needs to know",
-                    confidence=0.85,
-                    requires_autonomy="brain_loop.telegram_urgent",
-                )
-            )
-
-        elif o.kind == "canonical_changed":
-            # Phase 1: a canonical or distilled file is newer than the last
-            # incremental index run — refresh the qdrant collections so search
-            # sees the change in ≤90 s rather than waiting for the next 12-hr
-            # full reindex. Reuses indexer.add_documents(force_incremental=True)
-            # which skips unchanged docs by mtime+embed_model match.
-            decisions.append(
-                Decision(
-                    observation=o,
-                    kind=DecisionKind.SELF_MODIFY,
-                    action_payload={"modification": "incremental_canonical_index"},
-                    reasoning=(
-                        "canonical / distilled .md changed since last incremental run — "
-                        "refresh embedded views"
-                    ),
-                    confidence=0.9,
-                    requires_autonomy="brain_loop.incremental_index",
-                )
-            )
-
+        decisions.extend(handler(o, claude_session))
     return decisions
 
 
@@ -1463,66 +1496,103 @@ def _rate_limit_check(key: str) -> bool:
     return True
 
 
+def _resolve_autonomy_level(d: Decision) -> str:
+    """Call the autonomy gate for d.requires_autonomy; fall back to "L0"
+    (most restrictive) if the gate raises. Mutates d.autonomy_level."""
+    try:
+        decision = _authorize(d.requires_autonomy)
+        level = decision.level
+    except Exception as e:
+        log.debug("autonomy check failed for %s: %s", d.requires_autonomy, e)
+        level = "L0"
+    d.autonomy_level = level
+    return level
+
+
+def _eval_proposal_payload_from_downgrade(d: Decision, original_payload: dict) -> dict:
+    """Build the eval_proposal-shaped action_payload used when a Decision is
+    downgraded to PROPOSE.
+
+    HR6 fix (2026-04-14): when downgrading, `_write_eval_proposal` needs a
+    meaningful fingerprint + query row; keeping the original {agent, message}
+    or {session_id, doorbell} shape collapsed into duplicate rows with empty
+    query/expected. The shape MUST be built BEFORE flipping d.kind so
+    `intended_kind` captures the pre-downgrade action intent.
+    """
+    return {
+        "evidence": {
+            "observation_kind": d.observation.kind,
+            "observation_subject": d.observation.subject,
+            "observation_evidence": d.observation.evidence,
+            "intended_kind": d.kind.value,
+            "intended_payload": original_payload,
+        },
+        "reasoning": d.reasoning,
+        "confidence": d.confidence,
+    }
+
+
+def _apply_autonomy_downgrade(d: Decision, level: str) -> None:
+    """Apply autonomy-level downgrade to d in place.
+
+    L0: force OBSERVE_ONLY, mark "[downgraded L0]" in reasoning.
+    L1: if d.kind is something more aggressive than OBSERVE_ONLY/PROPOSE,
+        rewrite payload via _eval_proposal_payload_from_downgrade and flip
+        to PROPOSE.
+    Higher levels: no-op (caller's original kind/payload stand).
+    """
+    if level == "L0":
+        d.kind = DecisionKind.OBSERVE_ONLY
+        d.reasoning += " [downgraded L0]"
+        return
+    if level == "L1" and d.kind not in (DecisionKind.OBSERVE_ONLY, DecisionKind.PROPOSE):
+        original_payload = d.action_payload
+        d.action_payload = _eval_proposal_payload_from_downgrade(d, original_payload)
+        d.kind = DecisionKind.PROPOSE
+        d.reasoning += " [downgraded L1]"
+
+
+def _agent_dispatch_disabled() -> bool:
+    """Honor BRAIN_LOOP_AGENT_DISPATCH_DISABLED env switch (1/true/yes/on)."""
+    return os.environ.get("BRAIN_LOOP_AGENT_DISPATCH_DISABLED", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _apply_agent_dispatch_disable(d: Decision) -> None:
+    """If d is a DISPATCH_AGENT and the env switch is on, rewrite payload
+    into an eval_proposal shape and flip to PROPOSE.
+
+    Shares the eval_proposal payload builder with _apply_autonomy_downgrade
+    so both downgrade paths produce the same shape for downstream
+    `_write_eval_proposal`.
+    """
+    if d.kind != DecisionKind.DISPATCH_AGENT or not _agent_dispatch_disabled():
+        return
+    original_payload = d.action_payload
+    d.action_payload = _eval_proposal_payload_from_downgrade(d, original_payload)
+    d.kind = DecisionKind.PROPOSE
+    d.reasoning += " [agent dispatch disabled]"
+
+
 def _decide(decisions: list[Decision]) -> list[Decision]:
-    """Filter by autonomy gate + rate limit. May downgrade kinds."""
+    """Filter by autonomy gate + rate limit. May downgrade kinds.
+
+    See _resolve_autonomy_level / _apply_autonomy_downgrade /
+    _apply_agent_dispatch_disable for the per-decision mutations applied
+    before the rate-limit gate.
+    """
     if _authorize is None:
         return []
 
     approved: list[Decision] = []
     for d in decisions:
-        try:
-            decision = _authorize(d.requires_autonomy)
-            level = decision.level
-        except Exception as e:
-            log.debug("autonomy check failed for %s: %s", d.requires_autonomy, e)
-            level = "L0"
-        d.autonomy_level = level
-
-        # Downgrade per level
-        if level == "L0":
-            d.kind = DecisionKind.OBSERVE_ONLY
-            d.reasoning += " [downgraded L0]"
-        elif level == "L1":
-            # L1 means propose only — override to PROPOSE unless already OBSERVE
-            if d.kind not in (DecisionKind.OBSERVE_ONLY, DecisionKind.PROPOSE):
-                # HR6 fix (2026-04-14): when downgrading to PROPOSE,
-                # rewrite action_payload into an eval_proposal shape so
-                # _write_eval_proposal can build a meaningful fingerprint
-                # and query row. Previously downgraded dispatches kept
-                # their {agent, message} payload and collapsed into one
-                # meaningless duplicate row with empty query/expected.
-                original_payload = d.action_payload
-                d.action_payload = {
-                    "evidence": {
-                        "observation_kind": d.observation.kind,
-                        "observation_subject": d.observation.subject,
-                        "observation_evidence": d.observation.evidence,
-                        "intended_kind": d.kind.value,
-                        "intended_payload": original_payload,
-                    },
-                    "reasoning": d.reasoning,
-                    "confidence": d.confidence,
-                }
-                d.kind = DecisionKind.PROPOSE
-                d.reasoning += " [downgraded L1]"
-
-        if d.kind == DecisionKind.DISPATCH_AGENT and os.environ.get(
-            "BRAIN_LOOP_AGENT_DISPATCH_DISABLED", ""
-        ).strip().lower() in ("1", "true", "yes", "on"):
-            original_payload = d.action_payload
-            d.action_payload = {
-                "evidence": {
-                    "observation_kind": d.observation.kind,
-                    "observation_subject": d.observation.subject,
-                    "observation_evidence": d.observation.evidence,
-                    "intended_kind": DecisionKind.DISPATCH_AGENT.value,
-                    "intended_payload": original_payload,
-                },
-                "reasoning": d.reasoning,
-                "confidence": d.confidence,
-            }
-            d.kind = DecisionKind.PROPOSE
-            d.reasoning += " [agent dispatch disabled]"
+        level = _resolve_autonomy_level(d)
+        _apply_autonomy_downgrade(d, level)
+        _apply_agent_dispatch_disable(d)
 
         # Rate limit per (kind, subject) pair
         key = f"{d.kind.value}:{d.observation.subject}"
@@ -1735,117 +1805,132 @@ def _telegram_alert(body: str) -> bool:
         return _subscription_llm_handle_alert(body)
 
 
-def _apply_self_modification(payload: dict) -> bool:
-    """Apply a brain_loop self-modification. Most kinds write a proposal
-    for Chris review; drain_llm_backlog is a special case that triggers an
-    immediate catch-up drain when the llm.dispatch breaker just closed."""
-    modification = payload.get("modification", "unknown")
+def _self_mod_drain_llm_backlog(payload: dict) -> bool:
+    """Event-driven llm_backlog drain. Invoked directly instead of queueing
+    a proposal — the whole point is to catch up FAST when quota returns.
+    """
+    try:
+        from llm_backlog import drain
 
-    # Special case: event-driven llm_backlog drain. Directly invoke the
-    # drain function instead of queueing a proposal — the whole point is
-    # to catch up FAST when quota returns.
-    if modification == "drain_llm_backlog":
-        try:
-            from llm_backlog import drain
+        result = drain(limit=100, abort_on_breaker=True)
+        log.info(
+            "brain_loop drain_llm_backlog: drained=%d failed=%d abandoned=%d",
+            result.get("drained", 0),
+            result.get("failed", 0),
+            result.get("abandoned", 0),
+        )
+        return True
+    except Exception as e:
+        log.warning("brain_loop drain_llm_backlog failed: %s", e)
+        return False
 
-            result = drain(limit=100, abort_on_breaker=True)
-            log.info(
-                "brain_loop drain_llm_backlog: drained=%d failed=%d abandoned=%d",
-                result.get("drained", 0),
-                result.get("failed", 0),
-                result.get("abandoned", 0),
-            )
-            return True
-        except Exception as e:
-            log.warning("brain_loop drain_llm_backlog failed: %s", e)
-            return False
 
-    # Phase 4b: engage LLM cost governor — set the dynamic concurrency cap
-    # in brain_config_store so cli_llm reads "1" instead of the env-var "2"
-    # on its next dispatch. Auto-expires via TTL key after ttl_s seconds.
-    if modification == "engage_llm_cost_governor":
-        try:
-            sys.path.insert(0, str(Path(__file__).resolve().parent))
-            import brain_config_store
+def _self_mod_engage_cost_governor(payload: dict) -> bool:
+    """Phase 4b: set the dynamic LLM concurrency cap in brain_config_store
+    so cli_llm reads "1" instead of the env-var "2" on its next dispatch.
+    Auto-expires via TTL key after ttl_s seconds.
 
-            ttl = int(payload.get("ttl_s", 1800))
-            cap_raw = payload.get("concurrency")
-            if cap_raw is None:
-                cap_raw = os.getenv("BRAIN_CLI_LLM_COST_GOVERNOR_CONCURRENCY")
-            if cap_raw is None:
-                try:
-                    cap_raw = brain_config_store.get("BRAIN_CLI_LLM_COST_GOVERNOR_CONCURRENCY")
-                except Exception:
-                    cap_raw = None
+    Concurrency resolution order:
+      1. payload["concurrency"]
+      2. BRAIN_CLI_LLM_COST_GOVERNOR_CONCURRENCY env var
+      3. brain_config_store BRAIN_CLI_LLM_COST_GOVERNOR_CONCURRENCY
+      4. default 1
+    Then clamped to [1, 4].
+    """
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import brain_config_store
+
+        ttl = int(payload.get("ttl_s", 1800))
+        cap_raw = payload.get("concurrency")
+        if cap_raw is None:
+            cap_raw = os.getenv("BRAIN_CLI_LLM_COST_GOVERNOR_CONCURRENCY")
+        if cap_raw is None:
             try:
-                cap = max(1, min(4, int(float(cap_raw)))) if cap_raw is not None else 1
-            except (TypeError, ValueError):
-                cap = 1
-            brain_config_store.set(
-                "BRAIN_CLI_LLM_CONCURRENCY",
-                str(cap),
-                updated_by="brain_loop.cost_governor",
-            )
-            brain_config_store.set(
-                "BRAIN_CLI_LLM_CONCURRENCY_UNTIL",
-                str(int(time.time() + ttl)),
-                updated_by="brain_loop.cost_governor",
-            )
-            log.warning(
-                "cost_governor engaged: cli concurrency capped to %d for %ds "
-                "(ratio=%s, hourly=%s, baseline=%s)",
-                cap,
-                ttl,
-                payload.get("ratio"),
-                payload.get("hourly"),
-                payload.get("baseline"),
-            )
-            return True
-        except Exception as e:
-            log.warning("cost_governor engage failed: %s", e)
-            return False
-
-    # Phase 1: incremental canonical/distilled refresh. Walks the dirs once,
-    # builds the same docs collect_canonical() does, and calls add_documents
-    # with force_incremental=True. The mtime+embed_model skip path inside
-    # add_documents means only docs that actually changed get re-embedded.
-    if modification == "incremental_canonical_index":
+                cap_raw = brain_config_store.get("BRAIN_CLI_LLM_COST_GOVERNOR_CONCURRENCY")
+            except Exception:
+                cap_raw = None
         try:
-            sys.path.insert(0, str(Path(__file__).resolve().parent))
-            from indexer import add_documents, collect_canonical, ensure_collection
+            cap = max(1, min(4, int(float(cap_raw)))) if cap_raw is not None else 1
+        except (TypeError, ValueError):
+            cap = 1
+        brain_config_store.set(
+            "BRAIN_CLI_LLM_CONCURRENCY",
+            str(cap),
+            updated_by="brain_loop.cost_governor",
+        )
+        brain_config_store.set(
+            "BRAIN_CLI_LLM_CONCURRENCY_UNTIL",
+            str(int(time.time() + ttl)),
+            updated_by="brain_loop.cost_governor",
+        )
+        log.warning(
+            "cost_governor engaged: cli concurrency capped to %d for %ds "
+            "(ratio=%s, hourly=%s, baseline=%s)",
+            cap,
+            ttl,
+            payload.get("ratio"),
+            payload.get("hourly"),
+            payload.get("baseline"),
+        )
+        return True
+    except Exception as e:
+        log.warning("cost_governor engage failed: %s", e)
+        return False
 
-            ensure_collection("canonical")
-            ensure_collection("distilled")
-            docs = collect_canonical()
-            canonical_docs = [d for d in docs if d.get("type") == "canonical-note"]
-            distilled_docs = [d for d in docs if d.get("type") == "distilled-note"]
-            t0 = time.time()
-            n_can = add_documents(
-                "canonical",
-                canonical_docs,
-                skip_stale_cleanup=True,
-                force_incremental=True,
-            )
-            n_dist = add_documents(
-                "distilled",
-                distilled_docs,
-                skip_stale_cleanup=True,
-                force_incremental=True,
-            )
-            elapsed = time.time() - t0
-            _set_incremental_last_ts(time.time())
-            log.info(
-                "incremental_canonical_index: canonical=%d distilled=%d in %.1fs",
-                n_can,
-                n_dist,
-                elapsed,
-            )
-            return True
-        except Exception as e:
-            log.warning("incremental_canonical_index failed: %s", e)
-            return False
 
-    # Default: write a proposal for Chris review.
+def _self_mod_incremental_canonical_index(payload: dict) -> bool:
+    """Phase 1: incremental canonical/distilled refresh. Walks the dirs
+    once, builds the same docs collect_canonical() does, and calls
+    add_documents with force_incremental=True. The mtime+embed_model skip
+    path inside add_documents means only docs that actually changed get
+    re-embedded.
+
+    payload is currently unused (preserved in signature for dispatch
+    symmetry and future per-domain selectivity).
+    """
+    _ = payload  # placeholder for future per-domain selectivity
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from indexer import add_documents, collect_canonical, ensure_collection
+
+        ensure_collection("canonical")
+        ensure_collection("distilled")
+        docs = collect_canonical()
+        canonical_docs = [d for d in docs if d.get("type") == "canonical-note"]
+        distilled_docs = [d for d in docs if d.get("type") == "distilled-note"]
+        t0 = time.time()
+        n_can = add_documents(
+            "canonical",
+            canonical_docs,
+            skip_stale_cleanup=True,
+            force_incremental=True,
+        )
+        n_dist = add_documents(
+            "distilled",
+            distilled_docs,
+            skip_stale_cleanup=True,
+            force_incremental=True,
+        )
+        elapsed = time.time() - t0
+        _set_incremental_last_ts(time.time())
+        log.info(
+            "incremental_canonical_index: canonical=%d distilled=%d in %.1fs",
+            n_can,
+            n_dist,
+            elapsed,
+        )
+        return True
+    except Exception as e:
+        log.warning("incremental_canonical_index failed: %s", e)
+        return False
+
+
+def _self_mod_write_proposal(payload: dict) -> bool:
+    """Default self-modification path: write a candidate eval_proposal row
+    for Chris to review. Returns True on success, False on sqlite error.
+    """
+    modification = payload.get("modification", "unknown")
     try:
         with _connect_autonomy() as conn:
             pid = f"selfmod_{int(time.time())}"
@@ -1870,6 +1955,83 @@ def _apply_self_modification(payload: dict) -> bool:
         return False
 
 
+_SELF_MOD_HANDLERS: dict[str, Any] = {
+    "drain_llm_backlog": _self_mod_drain_llm_backlog,
+    "engage_llm_cost_governor": _self_mod_engage_cost_governor,
+    "incremental_canonical_index": _self_mod_incremental_canonical_index,
+}
+
+
+def _apply_self_modification(payload: dict) -> bool:
+    """Apply a brain_loop self-modification. Most kinds write a proposal
+    for Chris review; drain_llm_backlog / engage_llm_cost_governor /
+    incremental_canonical_index are special cases that perform direct
+    effects when fired (see per-handler docstrings).
+    """
+    modification = payload.get("modification", "unknown")
+    handler = _SELF_MOD_HANDLERS.get(modification)
+    if handler is not None:
+        return handler(payload)
+    return _self_mod_write_proposal(payload)
+
+
+def _execute_decision_action(d: Decision) -> dict:
+    """Pure dispatcher: map a Decision.kind to its side-effect call and
+    return the per-action result dict. Caller (_act) wraps this in the
+    outer try/except + audit/outcome write — exceptions raised here
+    propagate up and are caught by _act as `error` status.
+
+    DecisionKind not matched here returns `skipped` (the _act default).
+    """
+    if d.kind == DecisionKind.OBSERVE_ONLY:
+        return {"status": "observed"}
+    if d.kind == DecisionKind.PROPOSE:
+        ok = _write_eval_proposal(d.action_payload)
+        return {"status": "proposed" if ok else "propose_failed"}
+    if d.kind == DecisionKind.DISPATCH_AGENT:
+        ok = _dispatch_agent(
+            d.action_payload.get("agent", "jenna"),
+            d.action_payload.get("message", ""),
+        )
+        return {"status": "dispatched" if ok else "dispatch_failed"}
+    if d.kind == DecisionKind.PUSH_TO_CLAUDE:
+        ok = _write_doorbell(
+            d.action_payload.get("session_id", ""),
+            d.action_payload.get("title", ""),
+            d.action_payload.get("content", ""),
+            d.action_payload.get("priority", "medium"),
+            d.action_payload.get("source", "brain_loop"),
+        )
+        return {"status": "doorbell_written" if ok else "doorbell_failed"}
+    if d.kind == DecisionKind.TELEGRAM_ALERT:
+        ok = _telegram_alert(d.action_payload.get("body", ""))
+        return {"status": "telegram_sent" if ok else "telegram_failed"}
+    if d.kind == DecisionKind.SELF_MODIFY:
+        ok = _apply_self_modification(d.action_payload)
+        return {"status": "self_mod_queued" if ok else "self_mod_failed"}
+    return {"status": "skipped"}
+
+
+def _write_decision_audit(d: Decision) -> int | None:
+    """Insert one action_audit row for the executed Decision. Returns the
+    audit_id on success, None when atoms_store is unavailable or insert
+    raises. Exceptions are swallowed (logging at debug) so audit failure
+    doesn't propagate into the decision result."""
+    if _insert_action_audit is None:
+        return None
+    try:
+        return _insert_action_audit(
+            route=f"brain_loop/{d.kind.value}",
+            query_text=f"{d.observation.kind}:{d.observation.subject}"[:2000],
+            tool="brain_loop",
+            actor="brain_loop",
+            session_id=d.action_payload.get("session_id"),
+        )
+    except Exception as _exc:
+        log.debug("silenced exception in brain_loop.py: %s", _exc)
+        return None
+
+
 def _act(decisions: list[Decision]) -> list[dict]:
     results: list[dict] = []
     belief_snapshot = _decision_belief_snapshot()
@@ -1877,45 +2039,8 @@ def _act(decisions: list[Decision]) -> list[dict]:
         result: dict[str, Any] = {"status": "skipped"}
         action_audit_id: int | None = None
         try:
-            if d.kind == DecisionKind.OBSERVE_ONLY:
-                result = {"status": "observed"}
-            elif d.kind == DecisionKind.PROPOSE:
-                ok = _write_eval_proposal(d.action_payload)
-                result = {"status": "proposed" if ok else "propose_failed"}
-            elif d.kind == DecisionKind.DISPATCH_AGENT:
-                ok = _dispatch_agent(
-                    d.action_payload.get("agent", "jenna"),
-                    d.action_payload.get("message", ""),
-                )
-                result = {"status": "dispatched" if ok else "dispatch_failed"}
-            elif d.kind == DecisionKind.PUSH_TO_CLAUDE:
-                ok = _write_doorbell(
-                    d.action_payload.get("session_id", ""),
-                    d.action_payload.get("title", ""),
-                    d.action_payload.get("content", ""),
-                    d.action_payload.get("priority", "medium"),
-                    d.action_payload.get("source", "brain_loop"),
-                )
-                result = {"status": "doorbell_written" if ok else "doorbell_failed"}
-            elif d.kind == DecisionKind.TELEGRAM_ALERT:
-                ok = _telegram_alert(d.action_payload.get("body", ""))
-                result = {"status": "telegram_sent" if ok else "telegram_failed"}
-            elif d.kind == DecisionKind.SELF_MODIFY:
-                ok = _apply_self_modification(d.action_payload)
-                result = {"status": "self_mod_queued" if ok else "self_mod_failed"}
-
-            # Audit write
-            if _insert_action_audit is not None:
-                try:
-                    action_audit_id = _insert_action_audit(
-                        route=f"brain_loop/{d.kind.value}",
-                        query_text=f"{d.observation.kind}:{d.observation.subject}"[:2000],
-                        tool="brain_loop",
-                        actor="brain_loop",
-                        session_id=d.action_payload.get("session_id"),
-                    )
-                except Exception as _exc:
-                    log.debug("silenced exception in brain_loop.py: %s", _exc)
+            result = _execute_decision_action(d)
+            action_audit_id = _write_decision_audit(d)
         except Exception as e:
             result = {"status": "error", "error": str(e)[:200]}
 
