@@ -118,7 +118,7 @@ def store_patterns(patterns: list[dict]) -> int:
         secret = load_bearer_secret()
     except Exception:
         return 0
-    import urllib.request
+    from http_pool import http_json
 
     stored = 0
     for p in patterns:
@@ -131,27 +131,22 @@ def store_patterns(patterns: list[dict]) -> int:
             if from_ids
             else "Pattern extracted by memory_nudge"
         )
-        payload = json.dumps(
-            {
-                "content": rule[:500],
-                "category": "preference",
-                "agent": "jenna",
-                "source": "memory_nudge_pattern",
-                "reason": reason[:200],
-            }
-        ).encode()
-        req = urllib.request.Request(
-            f"{BRAIN_URL}/memory",
-            data=payload,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {secret}",
-            },
-            method="POST",
-        )
+        payload = {
+            "content": rule[:500],
+            "category": "preference",
+            "agent": "jenna",
+            "source": "memory_nudge_pattern",
+            "reason": reason[:200],
+        }
         try:
-            with urllib.request.urlopen(req, timeout=15):
-                stored += 1
+            http_json(
+                "POST",
+                f"{BRAIN_URL}/memory",
+                payload=payload,
+                timeout=15,
+                headers={"Authorization": f"Bearer {secret}"},
+            )
+            stored += 1
         except Exception as e:
             print(f"store_patterns [{rule[:40]}...] failed: {e}")
     return stored

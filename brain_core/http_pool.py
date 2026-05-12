@@ -53,15 +53,24 @@ def _get_conn(host: str, port: int, timeout: int = 60) -> http.client.HTTPConnec
     return conn
 
 
-def http_json(method: str, url: str, payload=None, timeout: int = 60):
-    """HTTP JSON request with keep-alive connection reuse and auto-reconnect."""
+def http_json(
+    method: str,
+    url: str,
+    payload=None,
+    timeout: int = 60,
+    headers: dict | None = None,
+):
+    """HTTP JSON request with keep-alive connection reuse and auto-reconnect.
+
+    Extra headers (e.g. Authorization) merge on top of defaults; defaults win
+    only for keys the caller didn't set.
+    """
     parsed = urlparse(url)
     body = json.dumps(payload).encode() if payload is not None else None
-    headers = (
-        {"Content-Type": "application/json", "Connection": "keep-alive"}
-        if body
-        else {"Connection": "keep-alive"}
-    )
+    headers = dict(headers or {})
+    headers.setdefault("Connection", "keep-alive")
+    if body and "Content-Type" not in headers:
+        headers["Content-Type"] = "application/json"
     conn = _get_conn(parsed.hostname, parsed.port, timeout=timeout)
     path = parsed.path + (f"?{parsed.query}" if parsed.query else "")
     try:

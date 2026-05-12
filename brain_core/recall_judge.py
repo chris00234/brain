@@ -102,18 +102,19 @@ def _fetch_docs_for_query(query: str) -> dict[str, str]:
         return {}
     try:
         import urllib.parse
-        import urllib.request
         from pathlib import Path
+
+        from http_pool import http_json
 
         secret_path = Path.home() / ".openclaw/credentials/.personal_webhook_secret"
         token = secret_path.read_text().strip() if secret_path.exists() else ""
         qs = urllib.parse.urlencode({"q": query[:500], "k": TOP_K_FOR_JUDGE, "actor": "recall_judge"})
-        req = urllib.request.Request(
+        payload = http_json(
+            "GET",
             f"http://127.0.0.1:8791/recall/v2?{qs}",
-            headers={"Authorization": f"Bearer {token}" if token else ""},
+            timeout=10,
+            headers={"Authorization": f"Bearer {token}"} if token else None,
         )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            payload = json.loads(resp.read())
     except Exception:
         return {}
     docs: dict[str, str] = {}

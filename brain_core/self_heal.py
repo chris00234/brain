@@ -33,6 +33,19 @@ except ImportError:
         return Path("/Users/chrischo/.openclaw/credentials/.personal_webhook_secret").read_text().strip()
 
 
+def _trigger_brain_job(job: str, timeout: int = 10) -> None:
+    """POST /jobs/{job} with bearer auth, via shared http_pool keep-alive."""
+    from http_pool import http_json
+
+    secret = load_bearer_secret()
+    http_json(
+        "POST",
+        f"http://127.0.0.1:8791/jobs/{job}",
+        timeout=timeout,
+        headers={"Authorization": f"Bearer {secret}"},
+    )
+
+
 # Optional whitelist: if set, ONLY signals with `signal.source` in this set
 # are actioned, even when BRAIN_AUTO_HEAL_ENABLED=true. Empty = all sources.
 # Used for staged rollout (week 2: slo_monitor only → week 3: add eval_gate).
@@ -159,16 +172,7 @@ def heal_eval_regression(signal: HealingSignal) -> dict:
         suggestions.append("enable_cross_encoder")
 
     try:
-        import urllib.request
-
-        secret = load_bearer_secret()
-        req = urllib.request.Request(
-            "http://127.0.0.1:8791/jobs/reindex",
-            method="POST",
-            headers={"Authorization": f"Bearer {secret}"},
-        )
-        with urllib.request.urlopen(req, timeout=10):
-            pass
+        _trigger_brain_job("reindex", timeout=10)
         result = "triggered"
         if suggestions:
             result += f" (also: {','.join(suggestions)})"
@@ -188,34 +192,15 @@ def heal_slo_latency(signal: HealingSignal) -> dict:
         return {"action": "log_only", "result": "breach count too low"}
 
     if breach_count < 8:
-        # Vacuum embed cache + prewarm
         try:
-            import urllib.request
-
-            secret = load_bearer_secret()
-            req = urllib.request.Request(
-                "http://127.0.0.1:8791/jobs/log_rotation",
-                method="POST",
-                headers={"Authorization": f"Bearer {secret}"},
-            )
-            with urllib.request.urlopen(req, timeout=5):
-                pass
+            _trigger_brain_job("log_rotation", timeout=5)
             return {"action": "vacuum_embed_cache", "result": "triggered"}
         except Exception as e:
             return {"action": "vacuum_embed_cache", "result": f"failed: {e}"}
 
     if breach_count < 10:
         try:
-            import urllib.request
-
-            secret = load_bearer_secret()
-            req = urllib.request.Request(
-                "http://127.0.0.1:8791/jobs/reindex",
-                method="POST",
-                headers={"Authorization": f"Bearer {secret}"},
-            )
-            with urllib.request.urlopen(req, timeout=5):
-                pass
+            _trigger_brain_job("reindex", timeout=5)
             return {"action": "trigger_reindex", "result": "triggered"}
         except Exception as e:
             return {"action": "trigger_reindex", "result": f"failed: {e}"}
@@ -227,18 +212,8 @@ def heal_slo_latency(signal: HealingSignal) -> dict:
 def heal_memory_growth(signal: HealingSignal) -> dict:
     """Triggered when a collection grows >20% WoW."""
     try:
-        import urllib.request
-
-        secret = load_bearer_secret()
-        # Trigger consolidation + dedup
         for job in ("memory_consolidation",):
-            req = urllib.request.Request(
-                f"http://127.0.0.1:8791/jobs/{job}",
-                method="POST",
-                headers={"Authorization": f"Bearer {secret}"},
-            )
-            with urllib.request.urlopen(req, timeout=5):
-                pass
+            _trigger_brain_job(job, timeout=5)
         return {"action": "consolidate_and_dedup", "result": "triggered"}
     except Exception as e:
         return {"action": "consolidate_and_dedup", "result": f"failed: {e}"}
