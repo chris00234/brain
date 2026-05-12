@@ -1198,6 +1198,19 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         agent="sage",
         misfire_grace=1800,
     ),
+    # 2026-05-12: closes the read-side of dream_replay. Tests each conjecture
+    # against atoms written after it for co-mention of both entities, records
+    # supporters to atom_evidence, bumps confidence, promotes tier
+    # episodic->semantic at 0.5, expires unsupported conjectures at 21d.
+    # Lightweight (pure SQL scans, no LLM, no Qdrant). 04:25 PT - after
+    # dream_replay finishes but before morning ingest.
+    ScheduledJob(
+        name="conjecture_validate",
+        description="Daily validation pass over dream_replay conjectures (promote with evidence, expire after 21d barren)",
+        trigger=CronTrigger(hour=4, minute=25),
+        agent="system",
+        misfire_grace=900,
+    ),
     # 2026-04-16 Tier 3 #5: weekly Friston schema-revision signal - emits
     # raw/inbox proposals for clusters of prediction errors instead of
     # silent per-atom punishment. Sun 08:45 (between dream_replay and

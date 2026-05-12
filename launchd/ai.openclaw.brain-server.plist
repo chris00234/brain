@@ -64,6 +64,8 @@
 		<string>http://127.0.0.1:8792</string>
 		<key>BRAIN_SALIENCE_RANKING_ENABLED</key>
 		<string>true</string>
+		<key>BRAIN_SELF_RAG_ENABLED</key>
+		<string>true</string>
 		<key>BRAIN_SERVER_PORT</key>
 		<string>8791</string>
 		<key>BRAIN_SPREADING_ACTIVATION_ENABLED</key>

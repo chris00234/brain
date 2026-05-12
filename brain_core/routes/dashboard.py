@@ -7,12 +7,8 @@ power the brain-ui dashboard and external MCP tool-discovery calls.
 
 from __future__ import annotations
 
-import json
-
 from api_deps import _safe_http_detail, verify_bearer
 from fastapi import APIRouter, Depends, HTTPException, Query
-
-from config import BRAIN_DIR
 
 router = APIRouter(dependencies=[Depends(verify_bearer)])
 
@@ -89,27 +85,56 @@ def discover_skills(q: str = "", agent: str | None = None, limit: int = 20) -> d
 # ── Phase F1: search quality dashboard ─────────────────
 @router.get("/brain/search-quality", tags=["brain"])
 def search_quality() -> dict:
-    """Rolling search quality metrics for the brain-ui dashboard."""
+    """Rolling search quality metrics for the brain-ui dashboard.
+
+    2026-05-12: feedback now sourced from action_audit (authoritative
+    judged_good / judged_wrong / restated labels) instead of the
+    search-feedback.jsonl serve log. The JSONL was the implicit serve
+    audit, not the explicit feedback signal — counting all rows as
+    "feedback total" produced a misleading 0/500. action_audit holds the
+    actual labels written by recall_outcome_labeler + recall_judge.
+    """
     try:
+        import sqlite3
+
         from metrics_buffer import metrics_buffer as _mb
 
+        from config import BRAIN_DB
+
         stats = _mb.search_latency_stats() if hasattr(_mb, "search_latency_stats") else {}
-        feedback_file = BRAIN_DIR / "logs" / "search-feedback.jsonl"
-        feedback_stats = {"useful": 0, "total": 0}
-        if feedback_file.exists():
+        feedback_stats = {
+            "useful": 0,
+            "wrong": 0,
+            "restated": 0,
+            "judged": 0,
+            "total_recalls": 0,
+            "window_days": 7,
+        }
+        try:
+            conn = sqlite3.connect(str(BRAIN_DB), timeout=5)
             try:
-                with feedback_file.open() as f:
-                    lines = f.readlines()[-500:]
-                    for line in lines:
-                        try:
-                            d = json.loads(line)
-                            feedback_stats["total"] += 1
-                            if d.get("useful"):
-                                feedback_stats["useful"] += 1
-                        except Exception:  # noqa: S112 — skip malformed feedback
-                            continue
-            except Exception:  # noqa: S110 — optional feedback, never fatal
-                pass
+                rows = conn.execute(
+                    "SELECT outcome, COUNT(*) "
+                    "FROM action_audit "
+                    "WHERE route IN ('/recall/v2','/recall/active') "
+                    "  AND created_at > datetime('now', '-7 days') "
+                    "GROUP BY outcome"
+                ).fetchall()
+                for outcome, count in rows:
+                    feedback_stats["total_recalls"] += int(count)
+                    if outcome == "judged_good":
+                        feedback_stats["useful"] = int(count)
+                        feedback_stats["judged"] += int(count)
+                    elif outcome == "judged_wrong":
+                        feedback_stats["wrong"] = int(count)
+                        feedback_stats["judged"] += int(count)
+                    elif outcome == "restated":
+                        feedback_stats["restated"] = int(count)
+                        feedback_stats["judged"] += int(count)
+            finally:
+                conn.close()
+        except Exception:  # noqa: S110 — feedback metric is best-effort
+            pass
         return {
             "p50": stats.get("p50", 0),
             "p95": stats.get("p95", 0),

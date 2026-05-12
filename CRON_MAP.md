@@ -45,6 +45,7 @@
 | `canonical_merge_draft` | `cron(day_of_week=sun, hour=6, minute=15)` | heavy | llm, qdrant | 1800s | Weekly top-3 compaction cluster Sage drafts (Sunday 6:15am, after compaction report) |
 | `community_summaries` | `cron(day_of_week=sun, hour=5, minute=0)` | heavy | llm, neo4j | 1800s | M8.5: Louvain community detection on entity graph + Sage summary per cluster (Sun 5:00am) |
 | `dream_replay` | `cron(hour=3, minute=48)` | heavy | llm, qdrant | 1800s | Nightly REM-like generative conjecture synthesis (03:48 PT - staggered off memory_consolidation @03:45 which contends for local embedder/Qdrant) |
+| `conjecture_validate` | `cron(hour=4, minute=25)` | standard | sqlite | 900s | Daily read-side for dream_replay — score conjectures against new evidence, promote (episodic→semantic) or expire (21d barren). Closes the REM creativity → waking insight loop. |
 | `entity_pages` | `cron(day_of_week=sun, hour=4, minute=33)` | heavy | llm, neo4j | 1800s | Weekly entity page generator - Sage synthesizes one hot entity per run (Sunday 4:33am - staggered off session_rotate @04:30) |
 | `monthly_synthesis` | `cron(day=1, hour=5, minute=0)` | heavy | llm | 300s | Monthly arc (Sage, 1st of month 5am) |
 | `proactive_check` | `cron(hour=7,20,1, minute=30)` | standard | llm | 300s | Proactive insights - schedule gaps, contradictions, trends (3x daily, off work hours) |
@@ -219,6 +220,7 @@
 | `daily_synthesis` | `cron(hour=21, minute=0)` | jenna | standard | llm | 300s | Daily narrative + reflection Q (Jenna) |
 | `db_vacuum_weekly` | `cron(day_of_week=sun, hour=5, minute=30)` | system | heavy | sqlite | 1800s | Weekly VACUUM + ANALYZE on brain.db/autonomy.db/llm_usage.db (Sun 5:30am) |
 | `dream_replay` | `cron(hour=3, minute=48)` | sage | heavy | llm, qdrant | 1800s | Nightly REM-like generative conjecture synthesis (03:48 PT - staggered off memory_consolidation @03:45 which contends for local embedder/Qdrant) |
+| `conjecture_validate` | `cron(hour=4, minute=25)` | system | standard | sqlite | 900s | Daily read-side for dream_replay — score conjectures against new evidence, promote (episodic→semantic) or expire (21d barren). Closes the REM creativity → waking insight loop. |
 | `embed_cache_prune` | `cron(hour=4, minute=8)` | system | standard | - | 900s | Prune embed cache: drop legacy rows, age >30d, cap 15k (daily 4:08am - staggered off content_quality_slo @4:05) |
 | `embed_finetune` | `cron(day_of_week=sat, hour=23, minute=30)` | system | heavy | embedder, training | 3600s | Phase N3: weekly LoRA training on accumulated feedback pairs (Sat 23:30) |
 | `entity_pages` | `cron(day_of_week=sun, hour=4, minute=33)` | sage | heavy | llm, neo4j | 1800s | Weekly entity page generator - Sage synthesizes one hot entity per run (Sunday 4:33am - staggered off session_rotate @04:30) |

@@ -98,6 +98,7 @@ def build_belief_state(
         outcomes=recent_outcomes,
         decision_feedback=decision_feedback,
         next_actions=next_actions,
+        autonomy_db_path=str(getattr(tq, "_db_path", None)) if tq is not None else None,
     )
 
     return {
@@ -354,6 +355,69 @@ def _derive_next_actions(
     return sorted(actions, key=lambda item: item["priority"], reverse=True)[:limit]
 
 
+_AGENCY_MIN_SAMPLES = 50
+_AGENCY_OVERRIDE_PCT_GRADUATE = 5.0
+_AGENCY_OVERRIDE_PCT_FROZEN = 15.0
+
+
+def _compute_per_domain_agency(autonomy_db_path: str | None) -> dict:
+    """Compute per-domain agency level from chris_override rates over 30d.
+
+    2026-05-12: closes D5 — agency was globally hardcoded to
+    'review_first_closed_loop'. With 1198 outcomes in 'general' at 0.3%
+    override rate, that domain has earned graduation. Other low-volume or
+    high-override domains stay locked. Per-domain levels let well-behaved
+    surfaces act more autonomously while keeping risky ones gated.
+
+    Returns: {"domains": {domain: {level, override_pct, total}}, "overall": <level>}
+    The 'overall' is the most-cautious level across active domains so the
+    legacy top-level agency_level still represents the floor of trust.
+    """
+    out = {"domains": {}, "overall": "review_first_closed_loop"}
+    if not autonomy_db_path:
+        return out
+    try:
+        conn = sqlite3.connect(autonomy_db_path, timeout=3)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT domain, COUNT(*) as total, "
+            "       SUM(CASE WHEN chris_override = 1 THEN 1 ELSE 0 END) as overrides "
+            "FROM outcomes "
+            "WHERE created_at > datetime('now', '-30 days') "
+            "  AND domain IS NOT NULL "
+            "GROUP BY domain"
+        ).fetchall()
+        conn.close()
+    except Exception:
+        return out
+
+    levels_seen: list[str] = []
+    for r in rows:
+        domain = r["domain"] or "general"
+        total = int(r["total"] or 0)
+        overrides = int(r["overrides"] or 0)
+        override_pct = (100.0 * overrides / total) if total else 0.0
+        if total < _AGENCY_MIN_SAMPLES:
+            level = "review_first_closed_loop"
+        elif override_pct > _AGENCY_OVERRIDE_PCT_FROZEN:
+            level = "frozen"
+        elif override_pct < _AGENCY_OVERRIDE_PCT_GRADUATE:
+            level = "propose_and_inform"
+        else:
+            level = "review_first_closed_loop"
+        out["domains"][domain] = {
+            "level": level,
+            "override_pct": round(override_pct, 2),
+            "total": total,
+            "overrides": overrides,
+        }
+        levels_seen.append(level)
+    if levels_seen:
+        rank = {"frozen": 0, "review_first_closed_loop": 1, "propose_and_inform": 2}
+        out["overall"] = min(levels_seen, key=lambda lvl: rank.get(lvl, 1))
+    return out
+
+
 def _derive_world_model(
     *,
     goals: list[dict],
@@ -361,9 +425,11 @@ def _derive_world_model(
     outcomes: list[dict],
     decision_feedback: dict,
     next_actions: list[dict],
+    autonomy_db_path: str | None = None,
 ) -> dict:
     top_goal = goals[0] if goals else None
     candidates = decision_feedback.get("learning_candidates") or []
+    agency = _compute_per_domain_agency(autonomy_db_path)
     return {
         "version": 1,
         "top_goal": _compact_goal(top_goal),
@@ -374,7 +440,8 @@ def _derive_world_model(
         },
         "highest_risk": _highest_risk(uncertainties, candidates),
         "next_best_action": next_actions[0] if next_actions else {"type": "observe", "priority": 0.1},
-        "agency_level": "review_first_closed_loop",
+        "agency_level": agency["overall"],
+        "per_domain_agency": agency["domains"],
     }
 
 
