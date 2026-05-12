@@ -158,7 +158,16 @@ def _conn():
 
 
 def _now() -> str:
-    return datetime.now(UTC).isoformat(timespec="seconds")
+    """+00:00-form UTC timestamp. Delegates to db.now_iso() — single source
+    of truth. (See ARCHITECTURE_AUDIT_2026-05-12.md for the Z vs +00:00
+    format inconsistency dormant-bug note.)"""
+    import sys as _sys
+    from pathlib import Path as _Path
+
+    _sys.path.insert(0, str(_Path(__file__).resolve().parent))
+    from db import now_iso as _db_now_iso
+
+    return _db_now_iso()
 
 
 # ---------------------------------------------------------------------------
