@@ -159,6 +159,39 @@ def social_list() -> dict:
         raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e)) from e
 
 
+# ── D9 (2026-05-12): counterfactual simulation candidates ─────
+@router.get("/brain/counterfactual/candidates", tags=["brain"])
+def counterfactual_candidates(
+    limit: int = Query(default=20, ge=1, le=100),
+    days: int = Query(default=14, ge=1, le=90),
+    only_failed: bool = Query(default=False),
+) -> dict:
+    """List decisions worth a counterfactual replay (failed / low-confidence)."""
+    try:
+        from counterfactual import list_counterfactual_candidates
+
+        items = list_counterfactual_candidates(limit=limit, days=days, only_failed=only_failed)
+        return {"items": items, "total": len(items)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e)) from e
+
+
+@router.get("/brain/counterfactual/{decision_id}", tags=["brain"])
+def counterfactual_prompt(decision_id: str) -> dict:
+    """Return the Sage prompt that WOULD run for this decision (dry_run only).
+
+    LLM dispatch is gated until Chris explicitly enables the counterfactual
+    budget — this endpoint exposes the prompt so the cost can be reviewed
+    before any token spend.
+    """
+    try:
+        from counterfactual import build_counterfactual_prompt
+
+        return build_counterfactual_prompt(decision_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e)) from e
+
+
 # ── D8 (2026-05-12): interoception ─────────────────────
 @router.get("/brain/state-of-self", tags=["brain"])
 def state_of_self() -> dict:
