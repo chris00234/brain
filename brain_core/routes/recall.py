@@ -157,6 +157,24 @@ class RecallBatchRequest(BaseModel):
 # ── Service helpers (recall_v2 internal) ─────────────────
 
 
+def _merge_source_timing(
+    timing: dict[str, Any],
+    payloads: list[dict],
+) -> None:
+    """Merge per-source timing keys from each search_all payload into `timing`.
+
+    Each payload from `search_unified.search_all` carries a "source_timing"
+    dict (rag_ms, canonical_ms, ...). When multiple variants run in parallel,
+    we take the MAX across variants since sources run in parallel inside
+    each search_all call — wall-clock for each source is the slowest one.
+
+    Mutates `timing` in place; returns None.
+    """
+    for p in payloads:
+        for k, v in p.get("source_timing", {}).items():
+            timing[k] = max(timing.get(k, 0), v)
+
+
 def _build_recall_v2_cache_key(
     request: Request,
     q: str,
@@ -682,13 +700,9 @@ def recall_v2(
                 except Exception:
                     continue
     timing["search_ms"] = int((time.time() - t_search) * 1000)
-    # Aggregate per-source timing from search_all payloads
-    # Aggregate per-source timing. search_ms is wall-clock for the sequential variant
-    # loop; individual source timings (rag_ms, canonical_ms, etc.) are per-call maxes
-    # across variants since sources run in parallel within each search_all call.
-    for p in all_payloads:
-        for k, v in p.get("source_timing", {}).items():
-            timing[k] = max(timing.get(k, 0), v)
+    # See _merge_source_timing for the per-source timing aggregation contract
+    # (max across variants since sources run in parallel inside each search_all).
+    _merge_source_timing(timing, all_payloads)
 
     # Optionally replace query embedding via HyDE — it affects search_rag specifically.
     # We already ran the normal recall; if hyde=True we also run a second pass using
