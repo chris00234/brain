@@ -87,6 +87,38 @@ PLAYBOOK: dict[str, RemediationRule] = {
         action="confidence_calibration",
         reason="Confidence brier drift exceeded budget; re-fit calibration so drift re-baselines on current data instead of compounding for a week.",
     ),
+    # 2026-05-12: growth-rate breach should run the same log_rotation path
+    # as the absolute-size SLO. Catching growth early means we trim before
+    # logs_dir_total_mb crosses its higher budget.
+    "logs_dir_growth_24h_mb": RemediationRule(
+        slo="logs_dir_growth_24h_mb",
+        kind="trigger",
+        threshold=100,
+        action="log_rotation",
+        reason="Daily logs/ growth exceeded budget; run retention/cleanup before the absolute size SLO breaches.",
+    ),
+    # 2026-05-12: confidence pancake (stddev < 0.05) means the Bayesian
+    # ledger collapsed every atom to the clamp boundaries. Re-fitting the
+    # calibration is the same deterministic local path used for brier drift
+    # and re-baselines the parameters on fresh outcomes data.
+    "atoms_confidence_stddev_1d": RemediationRule(
+        slo="atoms_confidence_stddev_1d",
+        kind="trigger",
+        threshold=0.05,
+        action="confidence_calibration",
+        reason="Confidence stddev collapsed below floor; re-fit calibration so the Bayesian ledger does not stay pancaked at the clamp boundaries.",
+    ),
+    # 2026-05-12: self-eval drift breach should trigger the nightly self_eval
+    # drive on demand. The job rebuilds the drift signal against current
+    # action_audit samples, so a stale snapshot is replaced rather than
+    # continuing to fire alerts off a single bad measurement.
+    "self_eval_drift_7d": RemediationRule(
+        slo="self_eval_drift_7d",
+        kind="trigger",
+        threshold=25,
+        action="self_eval",
+        reason="Self-eval drift exceeded budget; re-run the drift drive so the next reading is current rather than waiting for the nightly cron.",
+    ),
     "entry_contract_missing_pct": RemediationRule(
         slo="entry_contract_missing_pct",
         kind="trigger",

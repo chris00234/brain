@@ -171,7 +171,16 @@ def main() -> int:
     report["recent_remediation"] = _recent_remediation()
     report["elapsed_ms"] = int((time.time() - t0) * 1000)
 
-    print(json.dumps(report, indent=2, default=str))
+    serialized = json.dumps(report, indent=2, default=str)
+    # Persist the latest snapshot so SessionStart hooks / dashboards can
+    # surface drift without re-running the CLI. Best-effort: failure here
+    # must not break stdout output.
+    try:
+        (BRAIN_LOGS_DIR / "brain_doctor_daily.json").write_text(serialized + "\n")
+    except OSError as exc:
+        print(f"# brain-doctor: snapshot write failed: {exc}", file=sys.stderr)
+
+    print(serialized)
     return 0 if not slos or not [r for r in slos.get("items", []) if r.get("breached")] else 1
 
 

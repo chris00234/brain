@@ -56,6 +56,23 @@ def test_playbook_qdrant_backup_job_name_exists(monkeypatch):
     assert slo_remediation.PLAYBOOK["qdrant_backup_age_hours"].action == "qdrant_backup"
 
 
+def test_playbook_new_2026_05_12_remediations_registered():
+    """Verify the 2026-05-12 self-healing additions are wired correctly."""
+
+    import slo_remediation
+
+    expected = {
+        "logs_dir_growth_24h_mb": "log_rotation",
+        "atoms_confidence_stddev_1d": "confidence_calibration",
+        "self_eval_drift_7d": "self_eval",
+    }
+    for slo_name, action in expected.items():
+        rule = slo_remediation.PLAYBOOK.get(slo_name)
+        assert rule is not None, f"{slo_name} should have a remediation rule"
+        assert rule.kind == "trigger"
+        assert rule.action == action
+
+
 def test_playbook_triggers_calibration_refit_on_drift(monkeypatch, tmp_path):
     """2026-05-11: calibration drift breach must self-heal by triggering a
     fresh confidence_calibration fit, not just alert. The weekly cadence is

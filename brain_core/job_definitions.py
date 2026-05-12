@@ -237,6 +237,17 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         agent="system",
         misfire_grace=900,
     ),
+    # 2026-05-12 brain-doctor daily health snapshot. Runs at 5:00am after
+    # the retention cascade and weekly VACUUM so the report reflects the
+    # post-maintenance steady state. Writes logs/brain_doctor_daily.json
+    # for SessionStart hooks to surface; stdout goes to scheduler log.
+    ScheduledJob(
+        name="brain_doctor_daily",
+        description="Write brain-doctor health snapshot to logs/brain_doctor_daily.json (daily 5:00am)",
+        trigger=CronTrigger(hour=5, minute=0),
+        agent="system",
+        misfire_grace=900,
+    ),
     ScheduledJob(
         name="llm_usage_retention",
         description="Roll up llm_usage older than 90d into llm_usage_monthly (1st of month 4:30am)",
@@ -1283,6 +1294,7 @@ RESOURCE_BUDGET_OVERRIDES: dict[str, tuple[str, tuple[str, ...]]] = {
     "db_vacuum_weekly": ("heavy", ("sqlite",)),
     "wal_checkpoint_daily": ("standard", ("sqlite",)),
     "raw_events_retention": ("standard", ("sqlite",)),
+    "brain_doctor_daily": ("standard", ("sqlite", "http")),
     "memory_lifecycle": ("heavy", ("sqlite", "qdrant")),
     "canonical_pipeline": ("heavy", ("sqlite", "qdrant")),
     "sleep_consolidate": ("heavy", ("sqlite", "qdrant")),

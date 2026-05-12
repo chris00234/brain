@@ -3,7 +3,7 @@
 > Auto-generated from `brain_core/job_definitions.py` by `cli/render_cron_map.py`.
 > Do not hand-edit; run `.venv/bin/python cli/render_cron_map.py --write`.
 
-**Total jobs**: 140
+**Total jobs**: 141
 **Default `misfire_grace`**: 300s (5min). Heavy nightly jobs override per job.
 
 ## Jobs by owning agent
@@ -53,7 +53,7 @@
 | `screen_time_ingest` | `cron(day_of_week=sun, hour=4, minute=35)` | standard | - | 300s | Screen Time daily patterns via Sage -> raw/inbox (weekly) |
 | `weekly_synthesis` | `cron(day_of_week=sun, hour=4, minute=15)` | heavy | llm | 300s | Weekly arc (Sage, Sunday 4:15am) |
 
-### system (115 jobs)
+### system (116 jobs)
 
 | Name | Trigger | Budget | Tags | Misfire Grace | Description |
 |---|---|---|---|---|---|
@@ -67,6 +67,7 @@
 | `autonomy_proposer` | `cron(hour=4, minute=45)` | standard | - | 300s | Phase 7: surface autonomy level promote/demote proposals (4:45am) |
 | `backup_restore_drill` | `cron(day_of_week=sat, hour=4, minute=35)` | standard | backup, neo4j, qdrant, sqlite | 900s | Weekly backup restore-readiness drill (SQLite integrity + Qdrant temp restore + Neo4j archive validation) |
 | `backup_verify` | `cron(day=1, hour=4, minute=45)` | heavy | backup, qdrant, sqlite | 900s | Monthly Qdrant backup restore smoke test (1st of month, 4:45am - staggered off llm_usage_retention @04:30 which also touches SQLite / MinIO) |
+| `brain_doctor_daily` | `cron(hour=5, minute=0)` | standard | http, sqlite | 900s | Write brain-doctor health snapshot to logs/brain_doctor_daily.json (daily 5:00am) |
 | `brain_loop_tick` | `interval(0:01:30)` | standard | - | 30s | v3: brain_loop executive cortex tick (every 90s — relaxed from 60s 2026-04-22 to cut 33% of ticks) |
 | `brain_speak_digest` | `cron(hour=7, minute=55)` | standard | - | 300s | Brain's morning digest to Chris — drives observe, composer ranks, top 3 via Telegram (07:55 PT, scheduler runs in local tz). |
 | `brain_speak_urgent` | `cron(minute=*/5)` | standard | - | 300s | Every 5 min: scan drives for severity>=7.5 observations, write to active Claude Code session doorbells. This is brain's interrupt channel. |
@@ -188,6 +189,7 @@
 | `autonomy_proposer` | `cron(hour=4, minute=45)` | system | standard | - | 300s | Phase 7: surface autonomy level promote/demote proposals (4:45am) |
 | `backup_restore_drill` | `cron(day_of_week=sat, hour=4, minute=35)` | system | standard | backup, neo4j, qdrant, sqlite | 900s | Weekly backup restore-readiness drill (SQLite integrity + Qdrant temp restore + Neo4j archive validation) |
 | `backup_verify` | `cron(day=1, hour=4, minute=45)` | system | heavy | backup, qdrant, sqlite | 900s | Monthly Qdrant backup restore smoke test (1st of month, 4:45am - staggered off llm_usage_retention @04:30 which also touches SQLite / MinIO) |
+| `brain_doctor_daily` | `cron(hour=5, minute=0)` | system | standard | http, sqlite | 900s | Write brain-doctor health snapshot to logs/brain_doctor_daily.json (daily 5:00am) |
 | `brain_loop_tick` | `interval(0:01:30)` | system | standard | - | 30s | v3: brain_loop executive cortex tick (every 90s — relaxed from 60s 2026-04-22 to cut 33% of ticks) |
 | `brain_reflect` | `cron(hour=2, minute=45)` | sage | heavy | llm, qdrant | 900s | Nightly Sage pattern/contradiction pass over last 7d of semantic_memory |
 | `brain_speak_digest` | `cron(hour=7, minute=55)` | system | standard | - | 300s | Brain's morning digest to Chris — drives observe, composer ranks, top 3 via Telegram (07:55 PT, scheduler runs in local tz). |

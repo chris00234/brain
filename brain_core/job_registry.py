@@ -332,6 +332,13 @@ JOB_REGISTRY: dict[str, list[str]] = {
         "-c",
         f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from db_maintenance import run_raw_events_retention; import json; print(json.dumps(run_raw_events_retention()))",
     ],
+    # 2026-05-12 brain-doctor daily snapshot. Writes the health report to
+    # logs/brain_doctor_daily.json so SessionStart hooks / dashboards can
+    # surface drift without manually running the CLI.
+    "brain_doctor_daily": [
+        _py,
+        f"{_bd}/cli/brain_doctor.py",
+    ],
     # 2026-04-17 long-term sustainability: llm_usage rollup to monthly.
     # Keep 90d detail, archive older to llm_usage_monthly (month, agent) aggregates.
     "llm_usage_retention": [
