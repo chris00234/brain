@@ -157,6 +157,43 @@ class RecallBatchRequest(BaseModel):
 # ── Service helpers (recall_v2 internal) ─────────────────
 
 
+def _build_empty_recall_v2_response(
+    q: str,
+    *,
+    hyde: bool,
+    hypothetical: str | None,
+    variants: list[str],
+    expand: bool,
+    rerank: bool,
+    decay: bool,
+    t_start: float,
+    timing: dict[str, Any],
+) -> RecallV2Response:
+    """Build a no-results RecallV2Response with the metadata fields populated.
+
+    Called when every payload returned empty results — the route still
+    surfaces the query echo + flags + timing so the caller can see why
+    nothing came back (e.g. timing["search_ms"]) without an empty
+    `results` array hiding the upstream signal.
+
+    `variants` is included only when expand=True so the caller can see
+    which variants ran; otherwise the field stays empty to match the
+    pre-extraction behavior exactly.
+    """
+    return RecallV2Response(
+        query=q,
+        results=[],
+        total_candidates=0,
+        hyde_used=hyde,
+        hypothetical=hypothetical,
+        variants=variants if expand else [],
+        rerank_applied=rerank,
+        time_decay_applied=decay,
+        latency_ms=int((time.time() - t_start) * 1000),
+        timing=timing,
+    )
+
+
 def _filter_nonempty_result_lists(payloads: list[dict]) -> list[list[dict]]:
     """Pull the `results` list out of each payload, dropping empty/missing.
 
@@ -772,16 +809,15 @@ def recall_v2(
     if not result_lists:
         timing["total_ms"] = int((time.time() - t_start) * 1000)
         _metrics_buf.record_search_latency(timing["total_ms"], timing)
-        return RecallV2Response(
-            query=q,
-            results=[],
-            total_candidates=0,
-            hyde_used=hyde,
+        return _build_empty_recall_v2_response(
+            q,
+            hyde=hyde,
             hypothetical=hypothetical,
-            variants=variants if expand else [],
-            rerank_applied=rerank,
-            time_decay_applied=decay,
-            latency_ms=int((time.time() - t_start) * 1000),
+            variants=variants,
+            expand=expand,
+            rerank=rerank,
+            decay=decay,
+            t_start=t_start,
             timing=timing,
         )
 

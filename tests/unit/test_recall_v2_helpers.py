@@ -222,3 +222,99 @@ def test_filter_nonempty_empty_input_is_empty_output():
     from routes.recall import _filter_nonempty_result_lists
 
     assert _filter_nonempty_result_lists([]) == []
+
+
+# ── _build_empty_recall_v2_response ─────────────────────────────────────
+
+
+def test_empty_response_basic_shape():
+    """Default-shaped no-results response — all metadata populated,
+    results=[]/total=0, latency derived from t_start."""
+    import time
+
+    from routes.recall import _build_empty_recall_v2_response
+
+    t_start = time.time() - 0.05  # 50ms ago
+    resp = _build_empty_recall_v2_response(
+        "hello",
+        hyde=False,
+        hypothetical=None,
+        variants=["v1", "v2"],
+        expand=False,
+        rerank=True,
+        decay=True,
+        t_start=t_start,
+        timing={"search_ms": 12},
+    )
+    assert resp.query == "hello"
+    assert resp.results == []
+    assert resp.total_candidates == 0
+    assert resp.hyde_used is False
+    assert resp.hypothetical is None
+    # expand=False → variants must NOT leak into the response
+    assert resp.variants == []
+    assert resp.rerank_applied is True
+    assert resp.time_decay_applied is True
+    assert resp.latency_ms >= 40  # at least ~50ms elapsed since t_start
+    assert resp.timing == {"search_ms": 12}
+
+
+def test_empty_response_expand_true_passes_variants_through():
+    """expand=True surfaces variants to the caller so they can see which
+    query expansions ran — useful for debugging zero-result cases."""
+    import time
+
+    from routes.recall import _build_empty_recall_v2_response
+
+    resp = _build_empty_recall_v2_response(
+        "q",
+        hyde=False,
+        hypothetical=None,
+        variants=["q", "alt1", "alt2"],
+        expand=True,
+        rerank=True,
+        decay=True,
+        t_start=time.time(),
+        timing={},
+    )
+    assert resp.variants == ["q", "alt1", "alt2"]
+
+
+def test_empty_response_hyde_true_surfaces_hypothetical():
+    import time
+
+    from routes.recall import _build_empty_recall_v2_response
+
+    resp = _build_empty_recall_v2_response(
+        "what is X?",
+        hyde=True,
+        hypothetical="X is a concept.",
+        variants=[],
+        expand=False,
+        rerank=True,
+        decay=True,
+        t_start=time.time(),
+        timing={},
+    )
+    assert resp.hyde_used is True
+    assert resp.hypothetical == "X is a concept."
+
+
+def test_empty_response_rerank_decay_flags_round_trip():
+    import time
+
+    from routes.recall import _build_empty_recall_v2_response
+
+    resp = _build_empty_recall_v2_response(
+        "q",
+        hyde=False,
+        hypothetical=None,
+        variants=[],
+        expand=False,
+        rerank=False,
+        decay=False,
+        t_start=time.time(),
+        timing={},
+    )
+    assert resp.rerank_applied is False
+    assert resp.time_decay_applied is False
