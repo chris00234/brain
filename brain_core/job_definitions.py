@@ -226,6 +226,17 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         agent="system",
         misfire_grace=900,
     ),
+    # 2026-05-12 raw_events retention. Prunes unreferenced raw_events older
+    # than 90d while protecting coding_event / atoms_hot_path. Runs at 4:22
+    # in the gap between action_audit_retention (4:20) and eval_proposal_triage
+    # (4:25). Operates on brain.db only, so no contention with autonomy.db.
+    ScheduledJob(
+        name="raw_events_retention",
+        description="Prune unreferenced raw_events older than 14d (daily 4:22am)",
+        trigger=CronTrigger(hour=4, minute=22),
+        agent="system",
+        misfire_grace=900,
+    ),
     ScheduledJob(
         name="llm_usage_retention",
         description="Roll up llm_usage older than 90d into llm_usage_monthly (1st of month 4:30am)",
@@ -1271,6 +1282,7 @@ RESOURCE_BUDGET_OVERRIDES: dict[str, tuple[str, tuple[str, ...]]] = {
     # Exclusive-ish local maintenance budget.
     "db_vacuum_weekly": ("heavy", ("sqlite",)),
     "wal_checkpoint_daily": ("standard", ("sqlite",)),
+    "raw_events_retention": ("standard", ("sqlite",)),
     "memory_lifecycle": ("heavy", ("sqlite", "qdrant")),
     "canonical_pipeline": ("heavy", ("sqlite", "qdrant")),
     "sleep_consolidate": ("heavy", ("sqlite", "qdrant")),

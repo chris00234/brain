@@ -148,6 +148,48 @@ def test_wal_checkpoint_runs_and_reports_ok(monkeypatch: pytest.MonkeyPatch, tmp
     assert db_maintenance.WAL_JOURNAL_SIZE_LIMIT_BYTES > 0
 
 
+def test_raw_events_retention_keeps_referenced_and_protected(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """raw_events retention contract: drop old unreferenced rows, keep
+    rows that are (a) referenced by an atom, (b) protected by source_type,
+    or (c) still inside the retention window.
+    """
+
+    db = tmp_path / "brain.db"
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "CREATE TABLE raw_events (id TEXT PRIMARY KEY, source_type TEXT NOT NULL, "
+            "content TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL)"
+        )
+        conn.execute("CREATE TABLE atoms (id TEXT PRIMARY KEY, raw_event_id TEXT)")
+        old = _iso(-30)
+        recent = _iso(-1)
+        rows = [
+            ("re_old_unref", "openclaw_session", old),
+            ("re_old_ref", "openclaw_session", old),
+            ("re_old_protected_coding", "coding_event", old),
+            ("re_old_protected_hotpath", "atoms_hot_path", old),
+            ("re_recent_unref", "openclaw_session", recent),
+        ]
+        conn.executemany(
+            "INSERT INTO raw_events (id, source_type, created_at) VALUES (?, ?, ?)",
+            rows,
+        )
+        conn.execute("INSERT INTO atoms (id, raw_event_id) VALUES ('atm_1', 're_old_ref')")
+
+    monkeypatch.setattr(db_maintenance, "BRAIN_DB", db)
+    summary = db_maintenance.run_raw_events_retention(days=14)
+    assert summary["status"] == "ok"
+    assert summary["deleted"] == 1
+    assert summary["remaining"] == 4
+
+    with sqlite3.connect(db) as conn:
+        kept = {row[0] for row in conn.execute("SELECT id FROM raw_events").fetchall()}
+    assert "re_old_unref" not in kept
+    assert {"re_old_ref", "re_old_protected_coding", "re_old_protected_hotpath", "re_recent_unref"} == kept
+
+
 def test_apply_hot_db_pragmas_sets_limit(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """The shared PRAGMA helper must set journal_size_limit on a live connection.
 

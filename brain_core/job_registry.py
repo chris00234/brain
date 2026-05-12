@@ -324,6 +324,14 @@ JOB_REGISTRY: dict[str, list[str]] = {
         "-c",
         f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from db_maintenance import run_action_audit_retention; import json; print(json.dumps(run_action_audit_retention()))",
     ],
+    # 2026-05-12 raw_events retention. Prunes unreferenced rows older than 90d
+    # while protecting sources that maintain sidecar links (coding_event,
+    # atoms_hot_path). FTS shadow table auto-syncs via AFTER DELETE triggers.
+    "raw_events_retention": [
+        _py,
+        "-c",
+        f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from db_maintenance import run_raw_events_retention; import json; print(json.dumps(run_raw_events_retention()))",
+    ],
     # 2026-04-17 long-term sustainability: llm_usage rollup to monthly.
     # Keep 90d detail, archive older to llm_usage_monthly (month, agent) aggregates.
     "llm_usage_retention": [

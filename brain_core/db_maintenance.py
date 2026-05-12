@@ -39,6 +39,17 @@ except ImportError:
 # Retention policies
 ACTION_AUDIT_RETENTION_DAYS = 90
 LLM_USAGE_RETENTION_DAYS = 90
+# raw_events is the ingest log for atom synthesis. Most rows get referenced
+# by atoms.raw_event_id; many do not (every active source still writes a
+# `raw_events` row whether or not an atom lands). The `processed_at` column
+# is dead schema — no code path sets it — so retention can't rely on that.
+# Instead we prune rows that are old AND unreferenced AND not from sources
+# we know maintain their own sidecar reference (coding_event_outcomes,
+# atoms_hot_path internal provenance). 14d gives the synthesis pipeline
+# two weeks to claim a row before pruning; longer windows leave legacy
+# unreferenced rows accumulating since they will never be claimed.
+RAW_EVENTS_RETENTION_DAYS = 14
+RAW_EVENTS_PROTECTED_SOURCES = ("coding_event", "atoms_hot_path")
 # autonomy_decisions writes ~48K rows/day (one per autonomy.authorize call).
 # Only db_maintenance and incident review read it; nothing on the hot path.
 # 14d window keeps two weeks of gate-check audit, steady-state ~670K rows.
@@ -238,6 +249,49 @@ def run_vacuum() -> dict:
 
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
+
+
+def run_raw_events_retention(days: int = RAW_EVENTS_RETENTION_DAYS) -> dict:
+    """Drop unreferenced raw_events older than N days, protecting sources that
+    maintain their own sidecar links.
+
+    raw_events accumulated ~10k stale rows once the multi-source ingest pipeline
+    shifted to source-aware atom synthesis. Most legacy openclaw_session /
+    browser / claude_code_session rows now sit unreferenced because no atom
+    points back at them. The protected source list keeps coding_event
+    (referenced by coding_event_outcomes.event_id) and atoms_hot_path (internal
+    provenance still being written by upsert_atom).
+
+    The FTS shadow table `raw_events_fts` syncs via AFTER DELETE triggers,
+    so deleting from raw_events auto-cleans the index. No manual FTS work.
+    """
+    summary: dict = {
+        "table": "raw_events",
+        "days_kept": days,
+        "protected_sources": list(RAW_EVENTS_PROTECTED_SOURCES),
+        "started_at": _now_iso(),
+    }
+    try:
+        conn = sqlite3.connect(str(BRAIN_DB))
+        try:
+            placeholders = ",".join("?" for _ in RAW_EVENTS_PROTECTED_SOURCES)
+            cur = conn.execute(
+                f"DELETE FROM raw_events "
+                f"WHERE created_at < datetime('now', 'utc', ? || ' days') "
+                f"  AND source_type NOT IN ({placeholders}) "
+                f"  AND id NOT IN (SELECT raw_event_id FROM atoms WHERE raw_event_id IS NOT NULL)",
+                (f"-{int(days)}", *RAW_EVENTS_PROTECTED_SOURCES),
+            )
+            summary["deleted"] = cur.rowcount
+            conn.commit()
+            summary["remaining"] = conn.execute("SELECT count(*) FROM raw_events").fetchone()[0]
+            summary["status"] = "ok"
+        finally:
+            conn.close()
+    except Exception as exc:
+        summary["status"] = f"error:{str(exc)[:150]}"
+    summary["finished_at"] = _now_iso()
+    return summary
 
 
 def run_action_audit_retention(days: int = ACTION_AUDIT_RETENTION_DAYS) -> dict:
@@ -583,6 +637,7 @@ if __name__ == "__main__":
     sub.add_parser("vacuum")
     sub.add_parser("wal_checkpoint")
     sub.add_parser("retention_audit")
+    sub.add_parser("retention_raw_events")
     sub.add_parser("retention_usage")
     sub.add_parser("retention_decisions")
     sub.add_parser("retention_metrics")
@@ -596,6 +651,8 @@ if __name__ == "__main__":
         print(json.dumps(run_wal_checkpoint(), indent=2))
     elif args.cmd == "retention_audit":
         print(json.dumps(run_action_audit_retention(), indent=2))
+    elif args.cmd == "retention_raw_events":
+        print(json.dumps(run_raw_events_retention(), indent=2))
     elif args.cmd == "retention_usage":
         print(json.dumps(run_llm_usage_retention(), indent=2))
     elif args.cmd == "retention_decisions":

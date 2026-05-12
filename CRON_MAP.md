@@ -3,7 +3,7 @@
 > Auto-generated from `brain_core/job_definitions.py` by `cli/render_cron_map.py`.
 > Do not hand-edit; run `.venv/bin/python cli/render_cron_map.py --write`.
 
-**Total jobs**: 139
+**Total jobs**: 140
 **Default `misfire_grace`**: 300s (5min). Heavy nightly jobs override per job.
 
 ## Jobs by owning agent
@@ -53,7 +53,7 @@
 | `screen_time_ingest` | `cron(day_of_week=sun, hour=4, minute=35)` | standard | - | 300s | Screen Time daily patterns via Sage -> raw/inbox (weekly) |
 | `weekly_synthesis` | `cron(day_of_week=sun, hour=4, minute=15)` | heavy | llm | 300s | Weekly arc (Sage, Sunday 4:15am) |
 
-### system (114 jobs)
+### system (115 jobs)
 
 | Name | Trigger | Budget | Tags | Misfire Grace | Description |
 |---|---|---|---|---|---|
@@ -144,6 +144,7 @@
 | `prune_raw_orphaned` | `cron(month=1,4,7,10, day=1, hour=4, minute=25)` | standard | - | 1800s | Quarterly raw/orphaned prune (180d retention; 1st of Jan/Apr/Jul/Oct @ 04:25) |
 | `qdrant_write_audit` | `cron(hour=6, minute=32)` | light | - | 900s | Daily source audit: fail on raw qdrant_client mutating writes outside approved boundaries (06:32 PT) |
 | `ragas_eval_gate` | `cron(day_of_week=sun, hour=4, minute=45)` | heavy | eval, llm, qdrant | 1800s | Weekly generated-answer RAGAS faithfulness/relevance gate over answer-oriented eval set (Sun 04:45) |
+| `raw_events_retention` | `cron(hour=4, minute=22)` | standard | sqlite | 900s | Prune unreferenced raw_events older than 14d (daily 4:22am) |
 | `re_examine_rejected` | `cron(day=2, hour=4, minute=30)` | heavy | qdrant, sqlite | 1800s | Monthly rejected-proposal re-examination (2nd of month @ 04:30) |
 | `recall_outcome_label` | `cron(minute=17)` | standard | - | 300s | Hourly — mark action_audit recalls 'restated' when same session re-asks within 120s (cosine ≥0.85). Converts the ~24k/week pending recall signal into training data. |
 | `reindex` | `cron(hour=3,23, minute=17)` | heavy | embedder, index, qdrant | 900s | Full Qdrant reindex (2x daily, off-hours) |
@@ -284,6 +285,7 @@
 | `qdrant_write_audit` | `cron(hour=6, minute=32)` | system | light | - | 900s | Daily source audit: fail on raw qdrant_client mutating writes outside approved boundaries (06:32 PT) |
 | `ragas_eval_gate` | `cron(day_of_week=sun, hour=4, minute=45)` | system | heavy | eval, llm, qdrant | 1800s | Weekly generated-answer RAGAS faithfulness/relevance gate over answer-oriented eval set (Sun 04:45) |
 | `raptor_build` | `cron(day_of_week=sun, hour=7, minute=15)` | sage | heavy | embedder, index, qdrant | 1800s | Weekly RAPTOR hierarchical summary tree (Sun 07:15) |
+| `raw_events_retention` | `cron(hour=4, minute=22)` | system | standard | sqlite | 900s | Prune unreferenced raw_events older than 14d (daily 4:22am) |
 | `re_examine_rejected` | `cron(day=2, hour=4, minute=30)` | system | heavy | qdrant, sqlite | 1800s | Monthly rejected-proposal re-examination (2nd of month @ 04:30) |
 | `recall_judge` | `cron(hour=4, minute=27)` | jenna | heavy | llm, qdrant, sqlite | 900s | Daily 4:27am — sample 30 recent recalls, LLM-judges relevance/groundedness via live re-recall, writes recall_judgments + back-fills action_audit.outcome (judged_good/judged_wrong). |
 | `recall_outcome_label` | `cron(minute=17)` | system | standard | - | 300s | Hourly — mark action_audit recalls 'restated' when same session re-asks within 120s (cosine ≥0.85). Converts the ~24k/week pending recall signal into training data. |
