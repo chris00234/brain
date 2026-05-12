@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 import json
+import math
 import re as _re_eval
 import sys
 import time
@@ -30,6 +31,8 @@ from typing import Any
 DEFAULT_EVAL_SET = Path("/Users/chrischo/server/brain/cli/eval_set.json")
 SECRET_FILE = Path("/Users/chrischo/.openclaw/credentials/.personal_webhook_secret")
 BASE = "http://127.0.0.1:8791"
+BRAIN_CORE = Path("/Users/chrischo/server/brain/brain_core")
+DIVERSITY_HIGH_COSINE_THRESHOLD = 0.92
 
 
 def _get(path: str, token: str) -> dict:
@@ -46,6 +49,108 @@ def _get(path: str, token: str) -> dict:
     except Exception as e:
         return {"error": str(e), "results": []}
 
+
+
+
+def _cosine(left: list[float], right: list[float]) -> float:
+    if not left or not right or len(left) != len(right):
+        return 0.0
+    dot = sum(a * b for a, b in zip(left, right, strict=False))
+    left_norm = math.sqrt(sum(a * a for a in left))
+    right_norm = math.sqrt(sum(b * b for b in right))
+    if left_norm == 0.0 or right_norm == 0.0:
+        return 0.0
+    return dot / (left_norm * right_norm)
+
+
+def _topk_diversity_metrics(results: list[dict], *, top_k: int = 5) -> dict:
+    """Measure final top-k semantic redundancy using the existing e5 embedder.
+
+    This is deliberately diagnostic-only. It lets eval reports test Claude's
+    challenge to the xMemory idea: redundancy should matter only if it
+    correlates with downstream source/content failures.
+    """
+
+    texts = [str(row.get("content") or row.get("title") or "")[:1000] for row in results[:top_k]]
+    texts = [text for text in texts if text.strip()]
+    if len(texts) < 2:
+        return {
+            "status": "insufficient_results",
+            "result_count": len(texts),
+            "mean_pairwise_cosine": 0.0,
+            "max_pairwise_cosine": 0.0,
+            "high_similarity_pair_count": 0,
+        }
+    try:
+        if str(BRAIN_CORE) not in sys.path:
+            sys.path.insert(0, str(BRAIN_CORE))
+        from indexer import get_embeddings_batch
+
+        embeddings = get_embeddings_batch(texts, prefix="passage", use_cache=True)
+    except Exception as exc:
+        return {
+            "status": "error",
+            "error": str(exc)[:160],
+            "result_count": len(texts),
+            "mean_pairwise_cosine": 0.0,
+            "max_pairwise_cosine": 0.0,
+            "high_similarity_pair_count": 0,
+        }
+    pair_scores: list[float] = []
+    for idx, left in enumerate(embeddings):
+        for right in embeddings[idx + 1 :]:
+            pair_scores.append(_cosine(left, right))
+    if not pair_scores:
+        return {
+            "status": "insufficient_embeddings",
+            "result_count": len(texts),
+            "mean_pairwise_cosine": 0.0,
+            "max_pairwise_cosine": 0.0,
+            "high_similarity_pair_count": 0,
+        }
+    high_pairs = sum(1 for score in pair_scores if score >= DIVERSITY_HIGH_COSINE_THRESHOLD)
+    return {
+        "status": "ok",
+        "result_count": len(texts),
+        "mean_pairwise_cosine": round(sum(pair_scores) / len(pair_scores), 4),
+        "max_pairwise_cosine": round(max(pair_scores), 4),
+        "high_similarity_pair_count": high_pairs,
+        "high_similarity_threshold": DIVERSITY_HIGH_COSINE_THRESHOLD,
+    }
+
+
+def _aggregate_diversity(per_test: list[dict]) -> dict:
+    rows = [row for row in per_test if isinstance(row.get("diversity"), dict)]
+    usable = [row for row in rows if row["diversity"].get("status") == "ok"]
+
+    def _mean(selected: list[dict], key: str = "mean_pairwise_cosine") -> float:
+        values = [float(row["diversity"].get(key) or 0.0) for row in selected]
+        return round(sum(values) / len(values), 4) if values else 0.0
+
+    content_failed = [row for row in usable if not row.get("hit_content_loose")]
+    source_failed = [row for row in usable if not row.get("hit_source")]
+    passed = [row for row in usable if row.get("hit_content_loose") and row.get("hit_source")]
+    return {
+        "status": "ok" if usable else "missing",
+        "coverage_level": "final_topk_e5_cosine_v1",
+        "case_count": len(usable),
+        "error_count": len(rows) - len(usable),
+        "mean_pairwise_cosine": _mean(usable),
+        "max_pairwise_cosine": max(
+            (float(row["diversity"].get("max_pairwise_cosine") or 0.0) for row in usable),
+            default=0.0,
+        ),
+        "high_similarity_pair_count": sum(
+            int(row["diversity"].get("high_similarity_pair_count") or 0) for row in usable
+        ),
+        "passed_mean_pairwise_cosine": _mean(passed),
+        "content_failed_mean_pairwise_cosine": _mean(content_failed),
+        "source_failed_mean_pairwise_cosine": _mean(source_failed),
+        "interpretation": (
+            "diagnostic_only; promote retrieval changes only if redundancy "
+            "correlates with failures"
+        ),
+    }
 
 _WORD_RE = _re_eval.compile(r"[\w가-힣]+", _re_eval.UNICODE)
 _STOP = {
@@ -409,7 +514,14 @@ def _reciprocal_rank(rank: int) -> float:
 
 
 def run_eval(
-    use_v2: bool, hyde: bool, expand: bool, iterative: bool, token: str, cases: list[dict], n_results: int = 5
+    use_v2: bool,
+    hyde: bool,
+    expand: bool,
+    iterative: bool,
+    token: str,
+    cases: list[dict],
+    n_results: int = 5,
+    diversity_metrics: bool = False,
 ) -> dict:
     hits_source = 0
     hits_content_strict = 0
@@ -481,6 +593,7 @@ def run_eval(
         rr_sum += rr
         ndcg_sum += ndcg
 
+        diversity = _topk_diversity_metrics(results) if diversity_metrics else None
         per_test.append(
             {
                 "query": q,
@@ -497,6 +610,7 @@ def run_eval(
                 "rr": round(rr, 3),
                 "ndcg5": round(ndcg, 3),
                 "latency_ms": int(dt),
+                **({"diversity": diversity} if diversity is not None else {}),
                 "top_sources": [
                     r.get("path") or r.get("source") or r.get("title") or r.get("collection") or ""
                     for r in results[:5]
@@ -505,7 +619,7 @@ def run_eval(
         )
 
     total = len(cases)
-    return {
+    summary = {
         "total": total,
         "hit_source_pct": round(100 * hits_source / total, 1) if total else 0,
         "hit_content_pct": round(100 * hits_content_strict / total, 1) if total else 0,
@@ -518,6 +632,9 @@ def run_eval(
         "mean_latency_ms": round(sum(latencies) / len(latencies), 0) if latencies else 0,
         "per_test": per_test,
     }
+    if diversity_metrics:
+        summary["diversity"] = _aggregate_diversity(per_test)
+    return summary
 
 
 def _persist_report(report: dict, track: str, content_metric: str) -> None:
@@ -614,6 +731,11 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=0, help="Only run first N cases (0 = all)")
     parser.add_argument("--json", action="store_true")
     parser.add_argument(
+        "--diversity-metrics",
+        action="store_true",
+        help="Add diagnostic final-top-k e5 cosine redundancy metrics to eval output.",
+    )
+    parser.add_argument(
         "--include-per-test",
         action="store_true",
         help="Keep per_test case results in JSON output. Required by LoRA A/B gate "
@@ -650,9 +772,23 @@ def main() -> int:
 
     if not args.json:
         print(f"Running {len(cases)} eval cases against /recall and /recall/v2...")
-    baseline = run_eval(use_v2=False, hyde=False, expand=False, iterative=False, token=token, cases=cases)
+    baseline = run_eval(
+        use_v2=False,
+        hyde=False,
+        expand=False,
+        iterative=False,
+        token=token,
+        cases=cases,
+        diversity_metrics=args.diversity_metrics,
+    )
     v2 = run_eval(
-        use_v2=True, hyde=args.hyde, expand=args.expand, iterative=args.iterative, token=token, cases=cases
+        use_v2=True,
+        hyde=args.hyde,
+        expand=args.expand,
+        iterative=args.iterative,
+        token=token,
+        cases=cases,
+        diversity_metrics=args.diversity_metrics,
     )
 
     # M8.3: RAGAS LLM-as-judge scoring (opt-in)
@@ -758,6 +894,10 @@ def main() -> int:
         print(f"  hit_content@5 loose   : {r.get('hit_content_loose_pct', 0):5.1f}%  (≥75% token overlap)")
         print(f"  mean rank             : {r['mean_rank']}")
         print(f"  mean latency          : {r['mean_latency_ms']:5.0f} ms")
+        if args.diversity_metrics:
+            div = r.get("diversity", {})
+            print(f"  top-k mean cosine     : {div.get('mean_pairwise_cosine', 0):.4f}")
+            print(f"  top-k high-sim pairs  : {div.get('high_similarity_pair_count', 0)}")
 
     ds = v2["hit_source_pct"] - baseline["hit_source_pct"]
     dc = v2["hit_content_pct"] - baseline["hit_content_pct"]

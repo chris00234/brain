@@ -69,6 +69,12 @@ READINESS_SURFACES: tuple[ReadinessSurface, ...] = (
         readiness_fields=("openclaw_gateway",),
         rationale="Autonomous agent work depends on gateway health being explicit.",
     ),
+    ReadinessSurface(
+        id="autonomous_work",
+        label="autonomous/background work visibility",
+        readiness_fields=("autonomous_work",),
+        rationale="No-consent background work needs visible action, status, and evidence.",
+    ),
 )
 
 

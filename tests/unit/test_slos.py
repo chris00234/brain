@@ -37,7 +37,9 @@ def test_slo_count(slos_module):
     # + 1 openclaw_gateway_health (agent-dispatch gateway watcher)
     # + 1 task_dispatch_stale_started_count (unclosed dispatch attempt watcher)
     # + 1 task_failure_lesson_missing_count (Reflexion lesson coverage watcher)
-    assert len(slos_module.SLOS) == 27
+    # + 1 autonomous_work_visibility_gap_count (background work traceability)
+    assert len(slos_module.SLOS) == 29
+    assert "logs_dir_growth_24h_mb" in slos_module.SLOS
     assert "atoms_write_throughput_1h" in slos_module.SLOS
     assert "calibration_brier_drift_7d" in slos_module.SLOS
     assert "dispatch_failure_rate_1h" in slos_module.SLOS
@@ -55,6 +57,7 @@ def test_slo_count(slos_module):
     assert "openclaw_gateway_health" in slos_module.SLOS
     assert "task_dispatch_stale_started_count" in slos_module.SLOS
     assert "task_failure_lesson_missing_count" in slos_module.SLOS
+    assert "autonomous_work_visibility_gap_count" in slos_module.SLOS
 
 
 def test_recall_v2_p95_lower_is_better(slos_module):
@@ -189,11 +192,189 @@ def test_measure_task_failure_lesson_missing_count(slos_module, monkeypatch, tmp
     assert slos_module._measure_task_failure_lesson_missing_count() == 2.0
 
 
+def test_measure_autonomous_work_visibility_gap_count(slos_module, monkeypatch):
+    fake = type(sys)("autonomous_work")
+    fake.visibility_gap_count = lambda hours=24: 3
+    monkeypatch.setitem(sys.modules, "autonomous_work", fake)
+
+    assert slos_module._measure_autonomous_work_visibility_gap_count() == 3.0
+
+
 def test_eval_holdout_growth_never_breaches(slos_module):
     slo = slos_module.SLOS["eval_holdout_growth_weekly"]
     assert slo.severity == "info"
     assert slos_module._is_breach(slo, 0.0) is False
     assert slos_module._is_breach(slo, 100.0) is False
+
+
+def test_logs_dir_target_matches_steady_state(slos_module):
+    """Regression: target raised 2048→3072 MB 2026-05-11 to match steady state
+    after brain.db crossed 400 MB and bounded WAL/backup retention. Anyone
+    lowering this back below 3072 needs to either (a) materially shrink the
+    SQLite truth layer, or (b) move local backups out of logs/."""
+
+    slo = slos_module.SLOS["logs_dir_total_mb"]
+    assert slo.target == 3072.0
+    assert slos_module._is_breach(slo, 3100.0) is True
+    assert slos_module._is_breach(slo, 2500.0) is False
+
+
+def test_calibration_brier_drift_target(slos_module):
+    """W5 silent-miscalibration detector. 0.05 budget means a week-over-week
+    brier change of 0.05 or less is treated as normal noise."""
+
+    slo = slos_module.SLOS["calibration_brier_drift_7d"]
+    assert slo.target == 0.05
+    assert slo.severity == "warning"
+    assert slos_module._is_breach(slo, 0.06) is True
+    assert slos_module._is_breach(slo, 0.04) is False
+
+
+def test_recall_v2_content_hit_cold_start_does_not_breach(slos_module, monkeypatch, tmp_path):
+    """Regression for 2026-05-11: when the eval report is missing the SLO
+    must NOT report a critical 0% hit rate. The eval pipeline's own health
+    is tracked separately; this SLO is the retrieval quality gate and a
+    cold start (no report yet) is not a retrieval regression.
+    """
+
+    monkeypatch.setattr(slos_module, "BRAIN_LOGS_DIR", tmp_path)
+    value = slos_module._measure_recall_v2_content_hit()
+    slo = slos_module.SLOS["recall_v2_content_hit_pct"]
+    assert slos_module._is_breach(slo, value) is False
+
+
+def test_recall_v2_content_hit_real_zero_breaches(slos_module, monkeypatch, tmp_path):
+    """When a present eval report records 0% hit rate, the SLO must breach.
+    The cold-start fix must not mask a real retrieval regression."""
+
+    monkeypatch.setattr(slos_module, "BRAIN_LOGS_DIR", tmp_path)
+    (tmp_path / "eval-report-stable.json").write_text(json.dumps({"v2": {"hit_content_pct": 0.0}}))
+    value = slos_module._measure_recall_v2_content_hit()
+    slo = slos_module.SLOS["recall_v2_content_hit_pct"]
+    assert slos_module._is_breach(slo, value) is True
+
+
+def test_no_slo_cold_start_false_positive(slos_module, monkeypatch, tmp_path):
+    """Contract: every measurement must return a non-breaching value when its
+    upstream data source is absent. Any new SLO that violates this surfaces
+    here before it pages Chris with a false positive on a clean install.
+
+    Strategy: redirect every directory and DB path the measurements know
+    about into an empty tmp_path. Mock out import-dependent measurements
+    (breaker count, metrics_buffer, autonomous_work, telegram healthcheck,
+    socket connect, MinIO, eval audit) to their "no data" return shapes.
+    Then check that no SLO reports a breach.
+    """
+
+    monkeypatch.setattr(slos_module, "BRAIN_DIR", tmp_path)
+    monkeypatch.setattr(slos_module, "BRAIN_LOGS_DIR", tmp_path)
+    monkeypatch.setattr(slos_module, "BRAIN_DB", tmp_path / "brain.db")
+    monkeypatch.setattr(slos_module, "AUTONOMY_DB", tmp_path / "autonomy.db")
+    monkeypatch.setattr(slos_module, "METRICS_DB", tmp_path / "metrics_history.db")
+
+    fake_metrics = type(sys)("metrics_buffer")
+
+    class _Buf:
+        @staticmethod
+        def snapshot():
+            return {}
+
+    fake_metrics.metrics_buffer = _Buf()
+    monkeypatch.setitem(sys.modules, "metrics_buffer", fake_metrics)
+
+    fake_breakers = type(sys)("breakers")
+    fake_breakers.list_all = lambda: []
+    monkeypatch.setitem(sys.modules, "breakers", fake_breakers)
+
+    fake_aw = type(sys)("autonomous_work")
+    fake_aw.visibility_gap_count = lambda hours=24: 0
+    monkeypatch.setitem(sys.modules, "autonomous_work", fake_aw)
+
+    fake_telegram = type(sys)("telegram_alert")
+    fake_telegram.direct_api_healthcheck = lambda: (True, "ok")
+    monkeypatch.setitem(sys.modules, "telegram_alert", fake_telegram)
+
+    fake_eca = type(sys)("entry_contract_audit")
+    fake_eca.audit_collections = lambda: {"missing_pct": 0.0}
+    monkeypatch.setitem(sys.modules, "entry_contract_audit", fake_eca)
+
+    fake_bcs = type(sys)("brain_config_store")
+    fake_bcs.get = lambda _k: None
+    fake_bcs.set = lambda _k, _v, updated_by=None: None
+    monkeypatch.setitem(sys.modules, "brain_config_store", fake_bcs)
+
+    monkeypatch.setattr(slos_module.socket, "create_connection", lambda *_a, **_k: _FakeSocket())
+
+    # Backup-age SLOs intentionally return 999.0 on missing files (operator-
+    # visible "no backup ever" signal). They are excluded from the no-false-
+    # positive contract because that breach is by design.
+    intentional_cold_start_breaches = {
+        "qdrant_backup_age_hours",
+        "neo4j_backup_age_hours",
+        "backup_restore_drill_age_hours",
+    }
+
+    for name, fn in slos_module._MEASUREMENTS.items():
+        if name in intentional_cold_start_breaches:
+            continue
+        try:
+            actual = fn()
+        except Exception as exc:
+            raise AssertionError(f"{name} measurement raised on cold start: {exc}") from exc
+        slo = slos_module.SLOS[name]
+        breach = slos_module._is_breach(slo, actual)
+        assert not breach, (
+            f"{name} false-positive on cold start: actual={actual} target={slo.target} "
+            f"severity={slo.severity}. Measurements must return a non-breaching value when "
+            f"their upstream data is absent."
+        )
+
+
+class _FakeSocket:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+
+def test_logs_dir_growth_24h_returns_delta(slos_module, monkeypatch):
+    """Pair a fresh snapshot with one ~24h ago and verify the delta."""
+
+    from datetime import UTC as _UTC
+    from datetime import datetime as _dt
+    from datetime import timedelta as _td
+
+    now = _dt.now(_UTC)
+    history = [
+        {"ts": (now - _td(hours=24)).isoformat(timespec="seconds"), "mb": 1700.0},
+        {"ts": now.isoformat(timespec="seconds"), "mb": 1820.0},
+    ]
+    import json as _json
+
+    fake_bcs = type(sys)("brain_config_store")
+    fake_bcs.get = lambda _k: _json.dumps(history)
+    fake_bcs.set = lambda _k, _v, updated_by=None: None
+    monkeypatch.setitem(sys.modules, "brain_config_store", fake_bcs)
+
+    delta = slos_module._measure_logs_dir_growth_24h_mb()
+    assert delta == 120.0
+    slo = slos_module.SLOS["logs_dir_growth_24h_mb"]
+    assert slos_module._is_breach(slo, delta) is True
+
+
+def test_logs_dir_growth_24h_cold_start(slos_module, monkeypatch):
+    """No prior snapshots → return 0, never breach on cold start."""
+
+    fake_bcs = type(sys)("brain_config_store")
+    fake_bcs.get = lambda _k: None
+    fake_bcs.set = lambda _k, _v, updated_by=None: None
+    monkeypatch.setitem(sys.modules, "brain_config_store", fake_bcs)
+
+    delta = slos_module._measure_logs_dir_growth_24h_mb()
+    assert delta == 0.0
+    slo = slos_module.SLOS["logs_dir_growth_24h_mb"]
+    assert slos_module._is_breach(slo, delta) is False
 
 
 def test_check_one_returns_result(slos_module, monkeypatch):
@@ -240,6 +421,58 @@ def test_alert_rate_limited(slos_module, monkeypatch):
     assert slos_module.maybe_alert(result) is True
     assert slos_module.maybe_alert(result) is False  # rate-limited
     assert sent == [slo.name]
+
+
+def test_sleep_cycle_alert_uses_daily_rate_limit(slos_module):
+    slo = slos_module.SLOS["sleep_cycles_duration_1d_p95"]
+    assert slos_module._alert_rate_limit_s(slo) == slos_module.DAILY_JOB_ALERT_RATE_LIMIT_S
+    assert (
+        slos_module._alert_rate_limit_s(slos_module.SLOS["breaker_open_count"])
+        == slos_module.ALERT_RATE_LIMIT_S
+    )
+
+
+def test_measure_sleep_cycles_uses_latest_completed_cycle_and_julianday(slos_module, monkeypatch, tmp_path):
+    db = tmp_path / "brain.db"
+    import sqlite3
+
+    conn = sqlite3.connect(str(db))
+    try:
+        conn.execute(
+            "CREATE TABLE sleep_cycles (id INTEGER PRIMARY KEY, started_at TEXT NOT NULL, ended_at TEXT)"
+        )
+        # More than 24h old but same calendar date shape that previously leaked
+        # through lexicographic `started_at >= datetime('now', '-1 day')`.
+        conn.execute(
+            "INSERT INTO sleep_cycles (started_at, ended_at) "
+            "VALUES (datetime('now', '-26 hours'), datetime('now', '-25 hours', '+162 seconds'))"
+        )
+        conn.execute(
+            "UPDATE sleep_cycles SET started_at=replace(started_at, ' ', 'T') || 'Z', "
+            "ended_at=replace(ended_at, ' ', 'T') || 'Z' WHERE id=1"
+        )
+        conn.execute(
+            "INSERT INTO sleep_cycles (started_at, ended_at) "
+            "VALUES (datetime('now', '-4 hours'), datetime('now', '-4 hours', '+169 seconds'))"
+        )
+        conn.execute(
+            "UPDATE sleep_cycles SET started_at=replace(started_at, ' ', 'T') || 'Z', "
+            "ended_at=replace(ended_at, ' ', 'T') || 'Z' WHERE id=2"
+        )
+        conn.execute(
+            "INSERT INTO sleep_cycles (started_at, ended_at) "
+            "VALUES (datetime('now', '-5 minutes'), datetime('now', '-5 minutes', '+13 seconds'))"
+        )
+        conn.execute(
+            "UPDATE sleep_cycles SET started_at=replace(started_at, ' ', 'T') || 'Z', "
+            "ended_at=replace(ended_at, ' ', 'T') || 'Z' WHERE id=3"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.setattr(slos_module, "BRAIN_DB", db)
+    assert slos_module._measure_sleep_cycles_duration_p95() == 13.0
 
 
 def test_failed_alert_does_not_persist_rate_limit(slos_module, monkeypatch):
@@ -385,6 +618,60 @@ def test_measure_recall_v2_p95_ignores_eval_traffic_class(slos_module, monkeypat
         )
 
     assert slos_module._measure_recall_v2_p95() == 120.0
+
+
+def test_measure_recall_v2_p95_skips_internal_agent_only_snapshot(slos_module, monkeypatch, tmp_path):
+    metrics_db = tmp_path / "metrics_history.db"
+    brain_db = tmp_path / "brain.db"
+    monkeypatch.setattr(slos_module, "METRICS_DB", metrics_db)
+    monkeypatch.setattr(slos_module, "BRAIN_DB", brain_db)
+    metrics_db.parent.mkdir(parents=True, exist_ok=True)
+    clean_prod_payload = {"routes": {"/recall/v2": {"window_count": 30, "p95_ms": 120.0}}}
+    internal_only_payload = {"routes": {"/recall/v2": {"window_count": 30, "p95_ms": 2400.0}}}
+    with sqlite3.connect(metrics_db) as conn:
+        conn.execute("CREATE TABLE metrics_snapshots (id INTEGER PRIMARY KEY, timestamp TEXT, payload TEXT)")
+        conn.execute(
+            "INSERT INTO metrics_snapshots (timestamp, payload) VALUES (?, ?)",
+            ("2026-05-06T14:50:00+00:00", json.dumps(clean_prod_payload)),
+        )
+        conn.execute(
+            "INSERT INTO metrics_snapshots (timestamp, payload) VALUES (?, ?)",
+            ("2026-05-06T15:20:00+00:00", json.dumps(internal_only_payload)),
+        )
+    with sqlite3.connect(brain_db) as conn:
+        conn.execute("CREATE TABLE action_audit (route TEXT, actor TEXT, created_at TEXT)")
+        conn.executemany(
+            "INSERT INTO action_audit (route, actor, created_at) VALUES ('/recall/v2', 'codex', ?)",
+            [(f"2026-05-06T14:{minute:02d}:00Z",) for minute in range(51, 60)]
+            + [(f"2026-05-06T15:{minute:02d}:00Z",) for minute in range(21)],
+        )
+
+    assert slos_module._measure_recall_v2_p95() == 120.0
+
+
+def test_measure_recall_v2_p95_keeps_snapshot_when_prod_actor_present(slos_module, monkeypatch, tmp_path):
+    metrics_db = tmp_path / "metrics_history.db"
+    brain_db = tmp_path / "brain.db"
+    monkeypatch.setattr(slos_module, "METRICS_DB", metrics_db)
+    monkeypatch.setattr(slos_module, "BRAIN_DB", brain_db)
+    metrics_db.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"routes": {"/recall/v2": {"window_count": 30, "p95_ms": 2400.0}}}
+    with sqlite3.connect(metrics_db) as conn:
+        conn.execute("CREATE TABLE metrics_snapshots (id INTEGER PRIMARY KEY, timestamp TEXT, payload TEXT)")
+        conn.execute(
+            "INSERT INTO metrics_snapshots (timestamp, payload) VALUES (?, ?)",
+            ("2026-05-06T15:20:00+00:00", json.dumps(payload)),
+        )
+    with sqlite3.connect(brain_db) as conn:
+        conn.execute("CREATE TABLE action_audit (route TEXT, actor TEXT, created_at TEXT)")
+        rows = [(f"2026-05-06T15:{minute:02d}:00Z", "codex") for minute in range(29)]
+        rows.append(("2026-05-06T15:20:00Z", "human"))
+        conn.executemany(
+            "INSERT INTO action_audit (route, actor, created_at) VALUES ('/recall/v2', ?, ?)",
+            [(actor, created_at) for created_at, actor in rows],
+        )
+
+    assert slos_module._measure_recall_v2_p95() == 2400.0
 
 
 def test_measure_recall_v2_p95_prefers_live_prod_samples(slos_module, monkeypatch, tmp_path):

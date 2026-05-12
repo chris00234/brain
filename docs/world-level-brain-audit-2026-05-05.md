@@ -1089,3 +1089,10 @@ curl /brain/slos
 ```
 
 Result: 35 targeted outcome/readiness tests passed; compile passed; targeted ruff F passed. Live readiness now reports `status=ready`, `blockers=[]`; skill-promotion outcome maturity reports `status=ok`, `linked_outcomes=29`, `task_linked_outcomes=0`, `source_success_count=29`, `procedures_with_outcomes=5`, `success_rate=100.0`; failure-lesson outcome reports `status=ok`, `linked_outcomes=5`, `success_rate=1.0`, `lessons_with_outcomes=3`. Full `tests/unit` plus repo-wide `ruff --select F` exited 0. Bug audit reports `status=ok`, `bug_classes_checked=8`, `bug_classes_locked=8`; gap audit reports `status=ok`, `implemented_evidence_count=44`, `theme_count=7`; completion audit now has no weak/open/missing rows after the checklist update and is ready for final review. Live `/brain/slos` reports `checked=27`, `breached=0`, `alerts_sent=0`.
+
+
+## 2026-05-07 research refresh and implemented delta
+
+Recent research scan added one safe implementation target: xMemory-style evidence-diversity diagnostics for agent memory retrieval. Claude challenged adding a standalone readiness/UI audit before proving downstream value, so the implementation was narrowed into the existing eval pipeline.
+
+Implemented evidence: `cli/eval_compare.py --diversity-metrics` now adds diagnostic final-top-k e5 cosine redundancy metrics to eval reports, with failure-correlation aggregates. Regression evidence: `tests/unit/test_eval_compare_source.py`. Live sample: `logs/eval-diversity-sample-2026-05-07.json`. Research note: `docs/research/world-level-brain-research-refresh-2026-05-07.md`.

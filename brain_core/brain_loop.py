@@ -1769,14 +1769,32 @@ def _apply_self_modification(payload: dict) -> bool:
             import brain_config_store
 
             ttl = int(payload.get("ttl_s", 1800))
-            brain_config_store.set("BRAIN_CLI_LLM_CONCURRENCY", "1", updated_by="brain_loop.cost_governor")
+            cap_raw = payload.get("concurrency")
+            if cap_raw is None:
+                cap_raw = os.getenv("BRAIN_CLI_LLM_COST_GOVERNOR_CONCURRENCY")
+            if cap_raw is None:
+                try:
+                    cap_raw = brain_config_store.get("BRAIN_CLI_LLM_COST_GOVERNOR_CONCURRENCY")
+                except Exception:
+                    cap_raw = None
+            try:
+                cap = max(1, min(4, int(float(cap_raw)))) if cap_raw is not None else 1
+            except (TypeError, ValueError):
+                cap = 1
+            brain_config_store.set(
+                "BRAIN_CLI_LLM_CONCURRENCY",
+                str(cap),
+                updated_by="brain_loop.cost_governor",
+            )
             brain_config_store.set(
                 "BRAIN_CLI_LLM_CONCURRENCY_UNTIL",
                 str(int(time.time() + ttl)),
                 updated_by="brain_loop.cost_governor",
             )
             log.warning(
-                "cost_governor engaged: cli concurrency capped to 1 for %ds (ratio=%s, hourly=%s, baseline=%s)",
+                "cost_governor engaged: cli concurrency capped to %d for %ds "
+                "(ratio=%s, hourly=%s, baseline=%s)",
+                cap,
                 ttl,
                 payload.get("ratio"),
                 payload.get("hourly"),

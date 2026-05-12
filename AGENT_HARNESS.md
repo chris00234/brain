@@ -69,9 +69,10 @@ curl -H "Authorization: Bearer $SECRET" \
 | Web search | `brain_search_web` | `POST /web/search` | SearXNG + per-domain trust scoring. |
 | Focus/working mem | `brain_focus`, `brain_wm_*` | `POST /brain/focus`, `POST /brain/wm` | Session-scoped. |
 | Feedback | — | `POST /recall/feedback` | Report useful/wrong to train LtR + calibration. |
-| Ops readiness | — | `GET /brain/ops/readiness` | Aggregated readiness blockers: backup, retrieval/eval gates, source governance, skill promotion, OpenClaw gateway, UI parity. |
+| Ops readiness | — | `GET /brain/ops/readiness` | Aggregated readiness blockers: backup, retrieval/eval gates, source governance, skill promotion, autonomous work visibility, OpenClaw gateway, UI parity. |
 | SLO roster | — | `GET /brain/slos` | Current SLO measurements and breaches. |
 | Task execution truth | — | `GET /brain/tasks/{task_id}/execution`, `GET /brain/task-dispatch-attempts` | Handoff → dispatch attempt → outcome evidence, including backend/model/error metadata. |
+| Autonomous work | — | `GET /brain/autonomous-work` | Recent no-prior-ack/background work from task dispatch, SLO remediation, and autonomy decisions with status, consent mode, trace IDs, and evidence. |
 
 Full OpenAPI: `GET /openapi.json` or `GET /docs`.
 

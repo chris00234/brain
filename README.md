@@ -33,8 +33,11 @@ Claude accounts; OpenClaw is only the integration/emergency fallback lane.
 `primary_model=gpt-5.5`) rather than the legacy OpenClaw wrapper.
 
 OpenClaw agent handoffs depend on the local gateway at `127.0.0.1:18789`; use
-`/brain/ops/readiness`, `/brain/slos`, and `/brain/tasks/{task_id}/execution`
-to prove work actually dispatched before claiming automation is running or done.
+`/brain/ops/readiness`, `/brain/slos`, `/brain/autonomous-work`, and
+`/brain/tasks/{task_id}/execution` to prove work actually dispatched before
+claiming automation is running or done. The `autonomous_work_visibility_gap_count`
+SLO must stay at 0 so background/no-prior-ack work is never hidden from the UI
+or postmortems.
 Task-evaluation decisions notify Chris only as action summaries from
 `task_queue:evaluation_action_summary` (`TASK EVALUATION ACTION — Brain handled
 these without asking`), not as requests for evaluation approval.

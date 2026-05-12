@@ -265,6 +265,14 @@ class TaskQueue:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA foreign_keys=ON")
             conn.execute("PRAGMA cache_size=-8000")
+            try:
+                from db_maintenance import apply_hot_db_pragmas as _apply_hot_db_pragmas
+
+                _apply_hot_db_pragmas(conn)
+            except Exception:
+                # Long-lived autonomy.db connection — losing the limit only
+                # means the daily TRUNCATE remains the sole ceiling.
+                pass
             conn.row_factory = sqlite3.Row
             self._local.conn = conn
         return conn
@@ -531,7 +539,7 @@ class TaskQueue:
         return self._transition(task_id, {"approved", "assigned", "resumed"}, "running", by=by)
 
     def complete_task(self, task_id: str, result: str = "", by: str = "system") -> dict:
-        updated = self._transition(task_id, {"running"}, "completed", by=by, result=result)
+        updated = self._transition(task_id, {"running"}, "completed", by=by, result=result, error="")
         # Auto-complete parent goal when all subtasks are done
         goal_id = updated.get("parent_goal_id")
         if goal_id:
@@ -899,6 +907,23 @@ class TaskQueue:
             conn.execute("UPDATE tasks SET metadata = ? WHERE id = ?", (json.dumps(meta), task_id))
             conn.commit()
 
+    def _append_task_execution_event(self, task_id: str, event: dict) -> None:
+        """Append a non-transition evidence event to task execution_log."""
+        conn = self._conn()
+        task = self.get_task(task_id)
+        if not task:
+            return
+        log_rows = task.get("execution_log") or []
+        if not isinstance(log_rows, list):
+            log_rows = []
+        event = {**event, "at": event.get("at") or self._now()}
+        log_rows.append(event)
+        conn.execute(
+            "UPDATE tasks SET execution_log = ?, updated_at = ? WHERE id = ?",
+            (json.dumps(log_rows), self._now(), task_id),
+        )
+        conn.commit()
+
     def _merge_task_metadata(self, task_id: str, patch: dict) -> None:
         """Merge metadata fields for a task without clobbering existing keys."""
         conn = self._conn()
@@ -1074,20 +1099,48 @@ class TaskQueue:
             if not task:
                 # Unit tests may pass synthetic task dicts directly.
                 return True
+            routed_at = self._now()
+            reason_preview = " ".join(str(action_text or "").split())[:800]
             agent = (task.get("assigned_agent") or "").strip().lower()
+            assigned_agent = task.get("assigned_agent") or "sage"
+            brain_action = "approved_for_existing_agent"
             if agent in {"", "chris", "human", "user"}:
+                assigned_agent = "sage"
+                brain_action = "reassigned_to_sage_and_approved"
                 conn = self._conn()
                 conn.execute(
                     "UPDATE tasks SET assigned_agent = ?, updated_at = ? WHERE id = ?",
-                    ("sage", self._now(), tid),
+                    (assigned_agent, routed_at, tid),
                 )
                 conn.commit()
             self._merge_task_metadata(
                 tid,
                 {
+                    "task_evaluation_alert_policy": "autonomous_log",
+                    "task_evaluation_action": "routed_for_agent_execution",
+                    "task_evaluation_brain_action": brain_action,
+                    "task_evaluation_decision": "handleable",
+                    "task_evaluation_reason": reason_preview,
+                    "task_evaluation_source": "llm_handleable",
+                    "task_evaluation_routed_at": routed_at,
+                    "task_evaluation_next_evidence": f"/brain/tasks/{tid}/execution",
                     "escalation_llm_route": "handleable",
-                    "escalation_llm_action": action_text[:500],
-                    "escalation_llm_routed_at": self._now(),
+                    "escalation_llm_action": reason_preview,
+                    "escalation_llm_routed_at": routed_at,
+                },
+            )
+            self._append_task_execution_event(
+                tid,
+                {
+                    "event": "task_evaluation",
+                    "by": "escalation_llm",
+                    "decision": "handleable",
+                    "action": "routed_for_agent_execution",
+                    "brain_action": brain_action,
+                    "assigned_agent": assigned_agent,
+                    "reason": reason_preview,
+                    "evidence": f"/brain/tasks/{tid}/execution",
+                    "at": routed_at,
                 },
             )
             try:
@@ -1095,6 +1148,13 @@ class TaskQueue:
                 log.info("task escalation self-routed %s for agent handling", tid)
                 return True
             except ValueError as exc:
+                self._merge_task_metadata(
+                    tid,
+                    {
+                        "task_evaluation_brain_action": "evaluation_recorded_approval_skipped",
+                        "task_evaluation_approval_error": str(exc)[:200],
+                    },
+                )
                 log.debug("task escalation self-route skipped for %s: %s", tid, exc)
                 return False
 
@@ -1156,17 +1216,34 @@ class TaskQueue:
         for t, action, reason, source in actions:
             tid = t["id"]
             reason_preview = " ".join(str(reason or "").split())[:500]
+            decision = "human_needed" if source == "llm_human_needed" else "policy_held"
             self._merge_task_metadata(
                 tid,
                 {
                     "task_evaluation_alert_policy": "action_summary",
                     "task_evaluation_action": action,
+                    "task_evaluation_brain_action": action,
+                    "task_evaluation_decision": decision,
                     "task_evaluation_reason": reason_preview,
                     "task_evaluation_source": source,
                     "task_evaluation_routed_at": routed_at,
-                    "escalation_llm_route": "human_needed" if source == "llm_human_needed" else "policy_held",
+                    "task_evaluation_next_evidence": f"/brain/tasks/{tid}/execution",
+                    "escalation_llm_route": decision,
                     "escalation_llm_reason": reason_preview,
                     "escalation_llm_routed_at": routed_at,
+                },
+            )
+            self._append_task_execution_event(
+                tid,
+                {
+                    "event": "task_evaluation",
+                    "by": source,
+                    "decision": decision,
+                    "action": action,
+                    "brain_action": action,
+                    "reason": reason_preview,
+                    "evidence": f"/brain/tasks/{tid}/execution",
+                    "at": routed_at,
                 },
             )
             lines.append(
@@ -1204,6 +1281,45 @@ class TaskQueue:
         desc = str(task.get("description") or "").strip()
         task_description = (title + (" — " + desc if desc else ""))[:800]
         if not task_description or not failure_reason:
+            return
+        if self._is_transient_dispatch_error(failure_reason):
+            # Infra failure (backend_cooldown / timeout / rate_limit / gateway).
+            # Recording via codex would deadlock on the same throttled backend,
+            # so use the deterministic local path. Neo4j MERGE collapses repeats
+            # to one lesson row per (agent, error_class).
+            try:
+                from failure_memory import record_infra_failure_lesson
+
+                lesson_id = record_infra_failure_lesson(
+                    task_description=task_description,
+                    failure_reason=failure_reason,
+                    agent_id=agent_id or "system",
+                ) or ""
+            except Exception as exc:
+                log.debug("infra-lesson record failed: %s", exc)
+                lesson_id = ""
+            now = self._now()
+            status = "recorded" if lesson_id else "record_failed"
+            if attempt_id:
+                self._merge_dispatch_attempt_metadata(
+                    attempt_id,
+                    {
+                        "failure_lesson_status": status,
+                        "failure_lesson_id": lesson_id,
+                        "failure_lesson_completed_at": now,
+                        "failure_lesson_kind": "infra",
+                    },
+                )
+            task_id = str(task.get("id") or "")
+            if task_id:
+                self._merge_task_metadata(
+                    task_id,
+                    {
+                        "last_failure_lesson_status": status,
+                        "last_failure_lesson_id": lesson_id,
+                        "last_failure_lesson_completed_at": now,
+                    },
+                )
             return
         if attempt_id:
             self._merge_dispatch_attempt_metadata(

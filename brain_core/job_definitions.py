@@ -821,7 +821,7 @@ JOB_SCHEDULE: list[ScheduledJob] = [
     ),
     ScheduledJob(
         name="embed_cache_prune",
-        description="Prune embed cache: drop legacy rows, age >60d, cap 25k (daily 4:08am - staggered off content_quality_slo @4:05)",
+        description="Prune embed cache: drop legacy rows, age >30d, cap 15k (daily 4:08am - staggered off content_quality_slo @4:05)",
         trigger=CronTrigger(hour=4, minute=8),
         agent="system",
         misfire_grace=900,

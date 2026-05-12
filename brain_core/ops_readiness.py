@@ -131,7 +131,7 @@ def ui_parity_audit_snapshot() -> dict[str, Any]:
     return {
         **data,
         "status": status,
-        "min_required": 10,
+        "min_required": 11,
     }
 
 
@@ -369,6 +369,21 @@ def openclaw_gateway_snapshot() -> dict[str, Any]:
     }
 
 
+def autonomous_work_readiness_snapshot() -> dict[str, Any]:
+    """Show whether recent autonomous/background work is auditable."""
+
+    try:
+        from autonomous_work import readiness_snapshot as _snapshot
+
+        return _snapshot()
+    except Exception as exc:
+        return {
+            "status": "blocked",
+            "readiness_blocking": True,
+            "error": str(exc)[:200],
+        }
+
+
 def readiness_snapshot() -> dict[str, Any]:
     backup = backup_restore_snapshot()
     retrieval = retrieval_regression_snapshot()
@@ -384,6 +399,7 @@ def readiness_snapshot() -> dict[str, Any]:
     source_governance = source_governance_readiness_snapshot()
     skill_promotion = skill_promotion_readiness_snapshot()
     failure_lesson_outcome = failure_lesson_outcome_readiness_snapshot()
+    autonomous_work = autonomous_work_readiness_snapshot()
     incidents = remediation_incident_ledger()
     escalations = slo_escalation_ledger()
     blockers: list[str] = []
@@ -415,6 +431,8 @@ def readiness_snapshot() -> dict[str, Any]:
         blockers.append("skill_promotion_outcomes")
     if failure_lesson_outcome.get("readiness_blocking") is True:
         blockers.append("failure_lesson_outcome")
+    if autonomous_work.get("readiness_blocking") is True:
+        blockers.append("autonomous_work_visibility")
     return {
         "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
         "status": "ready" if not blockers else "blocked",
@@ -433,6 +451,7 @@ def readiness_snapshot() -> dict[str, Any]:
         "source_governance": source_governance,
         "skill_promotion": skill_promotion,
         "failure_lesson_outcome": failure_lesson_outcome,
+        "autonomous_work": autonomous_work,
         "slo_incident_ledger": incidents,
         "slo_escalation_ledger": escalations,
     }

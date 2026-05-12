@@ -70,9 +70,22 @@ PLAYBOOK: dict[str, RemediationRule] = {
     "logs_dir_total_mb": RemediationRule(
         slo="logs_dir_total_mb",
         kind="trigger",
-        threshold=2048,
+        threshold=3072,
         action="log_rotation",
         reason="Brain logs exceeded size budget; run retention/cleanup pass.",
+    ),
+    # 2026-05-11: when brier drift breaches, trigger a fresh confidence
+    # calibration fit instead of waiting for the weekly job. The weekly
+    # cadence means a stale calibration can stay red for up to 7 days
+    # before the next fit naturally re-baselines drift. Re-running the
+    # fit is deterministic, idempotent, and uses only local SQLite + eval
+    # report data — no LLM calls.
+    "calibration_brier_drift_7d": RemediationRule(
+        slo="calibration_brier_drift_7d",
+        kind="trigger",
+        threshold=0.05,
+        action="confidence_calibration",
+        reason="Confidence brier drift exceeded budget; re-fit calibration so drift re-baselines on current data instead of compounding for a week.",
     ),
     "entry_contract_missing_pct": RemediationRule(
         slo="entry_contract_missing_pct",
@@ -131,6 +144,13 @@ PLAYBOOK: dict[str, RemediationRule] = {
         threshold=0,
         action="inspect /brain/task-dispatch-attempts and requeue or close stale dispatch evidence",
         reason="A task dispatch attempt stayed in started too long; automatic closure would obscure execution truth.",
+    ),
+    "autonomous_work_visibility_gap_count": RemediationRule(
+        slo="autonomous_work_visibility_gap_count",
+        kind="manual",
+        threshold=0,
+        action="inspect /brain/autonomous-work and repair the missing ledger fields",
+        reason="Brain background work must stay visible before any automatic cleanup changes evidence.",
     ),
 }
 

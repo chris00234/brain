@@ -40,8 +40,11 @@ log = logging.getLogger("brain.backup_docker_volumes")
 
 BRAIN_LOGS_DIR = Path("/Users/chrischo/server/brain/logs")
 BACKUP_DIR = BRAIN_LOGS_DIR / "backups" / "docker-volumes"
-RETENTION_DAYS = 7
-LOCAL_SIZE_CAP_MB = 512
+# 2026-05-11: docker-volumes lives under brain/logs/ so it counts toward the
+# logs_dir SLO. 7→4 days local + 512→320 MB cap reclaims ~200 MB without
+# losing durability — MinIO retains the long-DR window via the upload below.
+RETENTION_DAYS = 4
+LOCAL_SIZE_CAP_MB = 320
 MINIO_BUCKET = "rag-backups"
 MINIO_PREFIX = "docker-volumes/"
 

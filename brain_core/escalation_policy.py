@@ -76,6 +76,19 @@ _HUMAN_REQUIRED_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ),
 )
 
+_AGENT_ROUTING_INSTRUCTION_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bhandle it yourself if possible;?\s*", re.I),
+    re.compile(r"\bnotify chris only for (?:a )?true human(?: blocker)?\.?", re.I),
+    re.compile(r"\bdo not (?:alert|notify) chris if\b[^.]{0,240}\.", re.I),
+)
+
+
+def _candidate_text(title: str, content: str, metadata: dict[str, Any]) -> str:
+    text = " ".join(str(part or "") for part in (title, content, metadata.get("reason", "")))
+    for pattern in _AGENT_ROUTING_INSTRUCTION_PATTERNS:
+        text = pattern.sub(" ", text)
+    return text
+
 
 def classify_escalation(
     *,
@@ -98,7 +111,7 @@ def classify_escalation(
     if str(meta.get("escalation_target", "")).lower() in {"human", "chris"}:
         return EscalationRoute("human", "metadata_escalation_target")
 
-    text = " ".join(str(part or "") for part in (title, content, meta.get("reason", "")))
+    text = _candidate_text(title, content, meta)
     # Knowledge-gap tasks are remediation work, not proof that Chris must be
     # interrupted. Even when the query mentions private domains such as email
     # or credentials, the first action is still agent-side source discovery

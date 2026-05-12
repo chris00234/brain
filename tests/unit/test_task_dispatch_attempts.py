@@ -201,6 +201,44 @@ def test_policy_human_required_sends_action_summary_not_escalation_alert(monkeyp
     assert updated["metadata"]["task_evaluation_source"] == "classifier_human_required"
 
 
+def test_brain_speak_urgent_handoff_routes_to_agent_execution(monkeypatch, tmp_path):
+    dispatch_calls: list[dict] = []
+
+    class _Result:
+        ok = True
+        text = "HANDLEABLE: Sage should resolve stale escalations from Brain evidence and report outcomes."
+        error = ""
+
+    fake_cli = type(sys)("cli_llm")
+    fake_cli.dispatch = lambda **kwargs: dispatch_calls.append(kwargs) or _Result()
+    monkeypatch.setitem(sys.modules, "cli_llm", fake_cli)
+
+    tq = TaskQueue(tmp_path / "autonomy.db")
+    task = tq.create_task(
+        title=(
+            "Handoff from brain_speak_urgent: Urgent Brain observation with no active CLI session. "
+            "Handle it yourself if possible; notify Chris only for a true human blocker."
+        ),
+        description=(
+            "[brain_speak_urgent] no active CLI sessions; urgent observations:\n"
+            "- [7.5] stale_thread_drive/thread: claude → chris 메시지 108h째 pending: "
+            "20 task escalations need your review"
+        ),
+        assigned_agent="sage",
+        confidence=0.0,
+    )
+
+    tq._escalate_tasks([task])
+    updated = tq.get_task(task["id"])
+
+    assert len(dispatch_calls) == 1
+    assert updated["status"] == "approved"
+    assert updated["metadata"]["task_evaluation_alert_policy"] == "autonomous_log"
+    assert updated["metadata"]["task_evaluation_decision"] == "handleable"
+    assert updated["metadata"]["task_evaluation_action"] == "routed_for_agent_execution"
+    assert updated["metadata"]["task_evaluation_source"] == "llm_handleable"
+
+
 class _InlinePool:
     def submit(self, fn, *args, **kwargs):
         return fn(*args, **kwargs)
@@ -229,8 +267,23 @@ def test_deferred_dispatch_records_failure_lesson(monkeypatch, tmp_path):
     fake_cli.dispatch = lambda **_kwargs: _Result()
     fake_autonomy = type(sys)("autonomy")
     fake_autonomy.authorize = lambda *_args, **_kwargs: _Gate()
+    # task_queue routes transient/infra errors (timeout, backend_cooldown,
+    # rate_limit, gateway) to record_infra_failure_lesson instead of the
+    # general record_failure_lesson path; both surfaces must be stubbed so
+    # whichever the dispatcher chooses captures the lesson record.
     fake_failure = type(sys)("failure_memory")
     fake_failure.record_failure_lesson = lambda **kwargs: recorded.append(kwargs) or "lesson_1"
+    fake_failure.record_infra_failure_lesson = lambda task_description, failure_reason, agent_id: (
+        recorded.append(
+            {
+                "task_description": task_description,
+                "failure_reason": failure_reason,
+                "agent_id": agent_id,
+                "context": "transient_dispatch",
+            }
+        )
+        or "lesson_1"
+    )
     monkeypatch.setitem(sys.modules, "cli_llm", fake_cli)
     monkeypatch.setitem(sys.modules, "autonomy", fake_autonomy)
     monkeypatch.setitem(sys.modules, "failure_memory", fake_failure)
@@ -256,6 +309,27 @@ def test_deferred_dispatch_records_failure_lesson(monkeypatch, tmp_path):
     assert truth["dispatch_attempts"][0]["metadata"]["failure_lesson_status"] == "recorded"
     assert truth["dispatch_attempts"][0]["metadata"]["failure_lesson_id"] == "lesson_1"
     assert truth["task"]["metadata"]["last_failure_lesson_status"] == "recorded"
+
+
+def test_completed_task_clears_stale_dispatch_error(tmp_path):
+    tq = TaskQueue(tmp_path / "autonomy.db")
+    task = tq.create_task(
+        title="Retry after backend cooldown",
+        description="Complete successfully after an earlier transient defer.",
+        confidence=0.9,
+    )
+    tq.approve_task(task["id"], by="test")
+    tq.start_task(task["id"], by="test")
+    deferred = tq.defer_task(task["id"], error="backend_cooldown 238s", by="test")
+    assert deferred["status"] == "approved"
+    assert deferred["error"] == "backend_cooldown 238s"
+
+    tq.start_task(task["id"], by="test")
+    completed = tq.complete_task(task["id"], result="DONE", by="test")
+
+    assert completed["status"] == "completed"
+    assert completed["result"] == "DONE"
+    assert completed["error"] == ""
 
 
 def test_retrieved_failure_lessons_are_injected_into_next_task(monkeypatch, tmp_path):
@@ -313,3 +387,36 @@ def test_retrieved_failure_lessons_are_injected_into_next_task(monkeypatch, tmp_
     assert truth["task"]["metadata"]["retrieved_lesson_ids"] == ["lesson_gateway"]
     assert truth["dispatch_attempts"][0]["metadata"]["lesson_ids"] == ["lesson_gateway"]
     assert truth["outcomes"][0]["lesson_ids"] == ["lesson_gateway"]
+
+
+def test_task_evaluation_handleable_records_visible_llm_action(monkeypatch, tmp_path):
+    class _Result:
+        ok = True
+        text = "HANDLEABLE: assign Sage to inspect the logs and report concrete evidence"
+        error = ""
+
+    fake_cli = type(sys)("cli_llm")
+    fake_cli.dispatch = lambda **_kwargs: _Result()
+    monkeypatch.setitem(sys.modules, "cli_llm", fake_cli)
+
+    tq = TaskQueue(tmp_path / "autonomy.db")
+    task = tq.create_task(
+        title="Inspect automation result",
+        description="Find what Brain did automatically",
+        assigned_agent="human",
+        confidence=0.2,
+    )
+
+    handled = tq._review_tasks_with_subscription_llm([task])
+    updated = tq.get_task(task["id"])
+
+    assert handled == {task["id"]}
+    assert updated["assigned_agent"] == "sage"
+    assert updated["status"] == "approved"
+    assert updated["metadata"]["task_evaluation_alert_policy"] == "autonomous_log"
+    assert updated["metadata"]["task_evaluation_decision"] == "handleable"
+    assert updated["metadata"]["task_evaluation_action"] == "routed_for_agent_execution"
+    assert updated["metadata"]["task_evaluation_brain_action"] == "reassigned_to_sage_and_approved"
+    assert updated["metadata"]["task_evaluation_source"] == "llm_handleable"
+    assert updated["metadata"]["task_evaluation_next_evidence"] == f"/brain/tasks/{task['id']}/execution"
+    assert any(row.get("event") == "task_evaluation" for row in updated["execution_log"])

@@ -89,7 +89,7 @@
 | `crag_regression` | `cron(hour=7, minute=2)` | standard | eval, qdrant | 900s | Daily CRAG retrieval-confidence safety gate over stable eval queries (07:02 PT) |
 | `cross_agent_lessons` | `cron(hour=5, minute=10)` | standard | - | 300s | Daily 5:10am — scan atoms from last 48h for cross-agent lesson signals (failure/correction keywords + named agents). Flags atoms.lesson_candidate=1 + lesson_agents list so skill_materializer can seed procedural skills from them. |
 | `db_vacuum_weekly` | `cron(day_of_week=sun, hour=5, minute=30)` | heavy | sqlite | 1800s | Weekly VACUUM + ANALYZE on brain.db/autonomy.db/llm_usage.db (Sun 5:30am) |
-| `embed_cache_prune` | `cron(hour=4, minute=8)` | standard | - | 900s | Prune embed cache: drop legacy rows, age >60d, cap 25k (daily 4:08am - staggered off content_quality_slo @4:05) |
+| `embed_cache_prune` | `cron(hour=4, minute=8)` | standard | - | 900s | Prune embed cache: drop legacy rows, age >30d, cap 15k (daily 4:08am - staggered off content_quality_slo @4:05) |
 | `embed_finetune` | `cron(day_of_week=sat, hour=23, minute=30)` | heavy | embedder, training | 3600s | Phase N3: weekly LoRA training on accumulated feedback pairs (Sat 23:30) |
 | `entity_reconcile` | `cron(hour=2, minute=55)` | heavy | embedder, neo4j, sqlite | 1800s | v3: nightly catch-up for atoms with missing entity extraction (02:55) |
 | `entity_resolution` | `cron(hour=3, minute=5)` | heavy | embedder, neo4j | 900s | Nightly entity merge: embedding similarity + co-occurrence (3:05am) |
@@ -216,7 +216,7 @@
 | `daily_synthesis` | `cron(hour=21, minute=0)` | jenna | standard | llm | 300s | Daily narrative + reflection Q (Jenna) |
 | `db_vacuum_weekly` | `cron(day_of_week=sun, hour=5, minute=30)` | system | heavy | sqlite | 1800s | Weekly VACUUM + ANALYZE on brain.db/autonomy.db/llm_usage.db (Sun 5:30am) |
 | `dream_replay` | `cron(hour=3, minute=48)` | sage | heavy | llm, qdrant | 1800s | Nightly REM-like generative conjecture synthesis (03:48 PT - staggered off memory_consolidation @03:45 which contends for local embedder/Qdrant) |
-| `embed_cache_prune` | `cron(hour=4, minute=8)` | system | standard | - | 900s | Prune embed cache: drop legacy rows, age >60d, cap 25k (daily 4:08am - staggered off content_quality_slo @4:05) |
+| `embed_cache_prune` | `cron(hour=4, minute=8)` | system | standard | - | 900s | Prune embed cache: drop legacy rows, age >30d, cap 15k (daily 4:08am - staggered off content_quality_slo @4:05) |
 | `embed_finetune` | `cron(day_of_week=sat, hour=23, minute=30)` | system | heavy | embedder, training | 3600s | Phase N3: weekly LoRA training on accumulated feedback pairs (Sat 23:30) |
 | `entity_pages` | `cron(day_of_week=sun, hour=4, minute=33)` | sage | heavy | llm, neo4j | 1800s | Weekly entity page generator - Sage synthesizes one hot entity per run (Sunday 4:33am - staggered off session_rotate @04:30) |
 | `entity_reconcile` | `cron(hour=2, minute=55)` | system | heavy | embedder, neo4j, sqlite | 1800s | v3: nightly catch-up for atoms with missing entity extraction (02:55) |

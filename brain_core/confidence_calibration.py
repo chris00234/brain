@@ -268,15 +268,26 @@ def run() -> dict:
     a, b = _logistic_fit(pairs)
     reliability = _reliability(a, b, pairs)
 
-    # Compute drift vs prior fit (absolute delta in reliability_brier)
+    # Compute drift vs prior fit (absolute delta in reliability_brier).
+    # Cold-start guard (2026-05-11): the prior fit must be a REAL prior fit
+    # — fitted=True, n_samples >= MIN_SAMPLES, and a strictly positive brier.
+    # Without this guard the very first calibration after a brain wipe (or
+    # after older code that saved reliability_brier=0.0 as a stub) reports
+    # drift = |new_brier - 0| = new_brier and immediately breaches the
+    # `calibration_brier_drift_7d` SLO with a false positive even though
+    # there is nothing to compare against.
     prior = _load_params() or {}
     prior_brier = prior.get("reliability_brier")
+    prior_n = int(prior.get("n_samples") or 0)
+    prior_fitted = bool(prior.get("fitted"))
     drift = 0.0
-    if prior_brier is not None:
+    if prior_fitted and prior_n >= MIN_SAMPLES and prior_brier is not None:
         try:
-            drift = round(abs(float(reliability) - float(prior_brier)), 4)
+            prior_brier_f = float(prior_brier)
         except (TypeError, ValueError):
-            drift = 0.0
+            prior_brier_f = 0.0
+        if prior_brier_f > 0.0:
+            drift = round(abs(float(reliability) - prior_brier_f), 4)
 
     params = {
         "a": round(a, 4),

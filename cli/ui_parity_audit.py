@@ -76,6 +76,20 @@ CHECKS: tuple[ParityCheck, ...] = (
         rationale="Chris's fake-automation concern requires visible handoff→dispatch evidence.",
     ),
     ParityCheck(
+        id="autonomous_work",
+        label="autonomous/background work visibility",
+        backend_tokens=(
+            "/brain/autonomous-work",
+            "autonomous_work_visibility_gap_count",
+            "autonomous_work",
+        ),
+        ui_tokens=("autonomousWork", "Autonomous Work", "visibility_gap_count"),
+        backend_paths=("/brain/autonomous-work",),
+        api_client_paths=("/brain/autonomous-work",),
+        readiness_fields=readiness_fields_for("autonomous_work"),
+        rationale="Background/no-consent work must show what actually ran and whether evidence is missing.",
+    ),
+    ParityCheck(
         id="retrieval_eval_gates",
         label="retrieval, CRAG, RAGAS, adversarial, holdout eval gates",
         backend_tokens=(

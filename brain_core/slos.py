@@ -46,6 +46,7 @@ except ImportError:
 
 METRICS_DB = BRAIN_LOGS_DIR / "metrics_history.db"
 ALERT_RATE_LIMIT_S = 1800  # 30 min per (slo_name, severity)
+DAILY_JOB_ALERT_RATE_LIMIT_S = 26 * 3600
 
 
 @dataclass(frozen=True)
@@ -138,12 +139,12 @@ SLOS: dict[str, SLO] = {
         metric_unit="stddev",
         consecutive_breaches_required=2,
     ),
-    # Phase N4 watcher — sleep_consolidate wall-clock. Alert if the job
-    # starts creeping past 2 minutes — usually means atom_coactivation is
-    # approaching the O(n²) cap or the A-MEM step is linking too aggressively.
+    # Phase N4 watcher — sleep_consolidate wall-clock. This daily job needs a
+    # latest-cycle signal: after a verified remediation run, stale pre-fix
+    # cycles should not keep the system red for the rest of the day.
     "sleep_cycles_duration_1d_p95": SLO(
         name="sleep_cycles_duration_1d_p95",
-        description="P95 wall-clock duration of sleep_consolidate over last 24h",
+        description="Latest completed sleep_consolidate wall-clock duration in the last 24h",
         target=120.0,
         severity="warning",
         metric_unit="seconds",
@@ -228,12 +229,37 @@ SLOS: dict[str, SLO] = {
         metric_unit="%",
         consecutive_breaches_required=2,
     ),
+    # 2026-05-11: target raised 2048→3072 MB. The original 2GB ceiling was set
+    # when brain.db was ~150 MB; today brain.db alone is 401 MB and autonomy.db
+    # 290 MB — the SQLite truth layer plus the 96 MiB-capped WAL files
+    # (db_maintenance.WAL_JOURNAL_SIZE_LIMIT_BYTES) plus 4 days of local
+    # backups (brain_db + docker-volumes, MinIO holds the long-DR window)
+    # constitute ~2.0 GB of legitimate steady state. 3072 MB gives natural
+    # growth headroom; the SLO still catches WAL leaks and silent log
+    # explosions because those move multi-hundred MB at a time. Tightening
+    # again only makes sense after a brain.db VACUUM materially shrinks the
+    # truth layer or after archival pruning of long-lived raw_events.
     "logs_dir_total_mb": SLO(
         name="logs_dir_total_mb",
-        description="Total size of ~/server/brain/logs/ in MB (DBs + journals + job logs)",
-        target=2048.0,  # 2GB soft ceiling
+        description="Total size of ~/server/brain/logs/ in MB (DBs + journals + job logs + local backups). Target raised 2048→3072 MB 2026-05-11 to match steady-state with brain.db crossing 400 MB and bounded WAL/backup retention.",
+        target=3072.0,
         severity="warning",
         metric_unit="MB",
+        consecutive_breaches_required=1,
+    ),
+    # 2026-05-11 growth-rate companion to logs_dir_total_mb. Catches anomalous
+    # daily growth (WAL leak, runaway log file, accumulator regression) BEFORE
+    # the absolute size budget breaches. Normal day-over-day delta is ~25 MB
+    # (50 MB new brain backup + 20 MB new autonomy backup - ~45 MB pruned
+    # by retention - some VACUUM reclaim). 100 MB/day target gives 4x normal
+    # headroom while flagging real anomalies. Snapshots come from the daily
+    # WAL checkpoint job, so this signal lags real growth by at most 24h.
+    "logs_dir_growth_24h_mb": SLO(
+        name="logs_dir_growth_24h_mb",
+        description="24-hour delta in ~/server/brain/logs/ size. Catches WAL leaks, accumulator regressions, and runaway log writes BEFORE the absolute logs_dir_total_mb budget breaches.",
+        target=100.0,
+        severity="warning",
+        metric_unit="MB/24h",
         consecutive_breaches_required=1,
     ),
     "entry_contract_missing_pct": SLO(
@@ -282,6 +308,17 @@ SLOS: dict[str, SLO] = {
         target=0.0,
         severity="warning",
         metric_unit="attempts",
+        consecutive_breaches_required=1,
+    ),
+    "autonomous_work_visibility_gap_count": SLO(
+        name="autonomous_work_visibility_gap_count",
+        description=(
+            "Recent concrete autonomous/background work records missing UI/postmortem evidence fields. "
+            "Non-zero means Brain did background work without enough visible traceability."
+        ),
+        target=0.0,
+        severity="critical",
+        metric_unit="records",
         consecutive_breaches_required=1,
     ),
     # 2026-04-21: qdrant-backup silent-failure watcher. The nightly
@@ -341,6 +378,76 @@ SLOS: dict[str, SLO] = {
 
 
 _RECALL_MIN_SAMPLES = 30  # guard against cold-boot snapshots with a handful of warmup hits
+_RECALL_AGENT_ACTORS = {
+    "codex",
+    "mcp",
+    "claude",
+    "claude-code",
+    "gemini",
+    "openclaw",
+    "jenna",
+    "liz",
+    "ellie",
+    "sage",
+    "market",
+    "recall_judge",
+    "slo_monitor",
+}
+
+
+def _parse_snapshot_ts(timestamp: str | None) -> datetime | None:
+    if not timestamp:
+        return None
+    raw = str(timestamp).strip()
+    try:
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        parsed = datetime.fromisoformat(raw)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(UTC)
+    except ValueError:
+        return None
+
+
+def _snapshot_recall_v2_internal_only(timestamp: str | None, sample_count: int) -> bool:
+    """Return True when a persisted route snapshot is only internal agents.
+
+    The metrics buffer started with just route-level samples, so historical
+    snapshots cannot directly distinguish `actor=codex` command bursts from
+    human/prod recall. Cross-check action_audit for the same 30-minute metrics
+    window: if every audited `/recall/v2` request is an internal actor, the
+    production latency SLO should ignore that snapshot instead of paging Chris.
+    """
+
+    if sample_count < _RECALL_MIN_SAMPLES:
+        return False
+    ts = _parse_snapshot_ts(timestamp)
+    if ts is None or not BRAIN_DB.exists():
+        return False
+    start = ts - timedelta(seconds=1800)
+    start_s = start.strftime("%Y-%m-%dT%H:%M:%SZ")
+    end_s = ts.strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        with sqlite3.connect(str(BRAIN_DB)) as conn:
+            rows = conn.execute(
+                """
+                SELECT lower(coalesce(actor, '')) AS actor, count(*) AS n
+                FROM action_audit
+                WHERE route = '/recall/v2'
+                  AND created_at >= ?
+                  AND created_at <= ?
+                GROUP BY lower(coalesce(actor, ''))
+                """,
+                (start_s, end_s),
+            ).fetchall()
+    except sqlite3.Error:
+        return False
+    total = sum(int(row[1] or 0) for row in rows)
+    if total < _RECALL_MIN_SAMPLES:
+        return False
+    internal = sum(int(row[1] or 0) for row in rows if str(row[0] or "") in _RECALL_AGENT_ACTORS)
+    return internal == total
 
 
 def _live_recall_v2_p95() -> tuple[bool, float]:
@@ -390,9 +497,9 @@ def _measure_recall_v2_p95() -> float:
         conn = sqlite3.connect(str(METRICS_DB))
         try:
             rows = conn.execute(
-                "SELECT payload FROM metrics_snapshots " "ORDER BY id DESC LIMIT 20"
+                "SELECT timestamp, payload FROM metrics_snapshots " "ORDER BY id DESC LIMIT 20"
             ).fetchall()
-            for (payload_str,) in rows:
+            for timestamp, payload_str in rows:
                 try:
                     payload = json.loads(payload_str)
                 except (json.JSONDecodeError, TypeError) as _exc:
@@ -401,7 +508,13 @@ def _measure_recall_v2_p95() -> float:
                 routes = payload.get("routes", {}) or {}
                 v2 = routes.get("/recall/v2") or {}
                 v2_samples = v2.get("window_count", v2.get("count", 0))
-                if v2_samples >= _RECALL_MIN_SAMPLES and v2.get("p95_ms") is not None:
+                try:
+                    v2_samples_i = int(v2_samples or 0)
+                except (TypeError, ValueError):
+                    v2_samples_i = 0
+                if _snapshot_recall_v2_internal_only(timestamp, v2_samples_i):
+                    continue
+                if v2_samples_i >= _RECALL_MIN_SAMPLES and v2.get("p95_ms") is not None:
                     return float(v2["p95_ms"])
                 v1 = routes.get("/recall") or {}
                 v1_samples = v1.get("window_count", v1.get("count", 0))
@@ -415,18 +528,31 @@ def _measure_recall_v2_p95() -> float:
 
 
 def _measure_recall_v2_content_hit() -> float:
-    """Read latest stable-track eval result."""
+    """Read latest stable-track eval result.
+
+    Cold-start safety (2026-05-11): this SLO is *higher-is-better*, so any
+    "no data" path that returned 0.0 was a critical-severity false-positive
+    waiting to fire. Returning the target (or above) when the eval report
+    is missing or unparseable lets the system stay quiet on a fresh install
+    and on transient read failures, while a real 0% hit rate from a present
+    report still breaches. The eval job's own health is tracked elsewhere
+    (eval_holdout_growth_weekly, scheduler history) — this SLO is for the
+    retrieval gate, not the eval pipeline.
+    """
     try:
         report_path = BRAIN_LOGS_DIR / "eval-report-stable.json"
         if not report_path.exists():
             report_path = BRAIN_LOGS_DIR / "eval-report.json"
         if not report_path.exists():
-            return 0.0
+            return float(SLOS["recall_v2_content_hit_pct"].target)
         data = json.loads(report_path.read_text())
-        v2 = data.get("v2", {})
-        return float(v2.get("hit_content_pct", 0))
-    except Exception:
-        return 0.0
+        v2 = data.get("v2") or {}
+        if "hit_content_pct" not in v2:
+            return float(SLOS["recall_v2_content_hit_pct"].target)
+        return float(v2["hit_content_pct"])
+    except Exception as exc:
+        log.debug("recall_v2_content_hit_pct measurement failed: %s", exc)
+        return float(SLOS["recall_v2_content_hit_pct"].target)
 
 
 def _measure_breaker_open_count() -> float:
@@ -506,7 +632,10 @@ def _measure_atoms_write_throughput() -> float:
         log.debug("silenced exception in slos.py: %s", _exc)
     try:
         if not BRAIN_DB.exists():
-            return 0.0
+            # Cold start (fresh install) — no DB yet means no input, no output,
+            # and no "stuck writer" can exist. Return the floor like the night
+            # branch above so the SLO stays quiet until real data starts flowing.
+            return 5.0
         cutoff = time.time() - 3600
         conn = sqlite3.connect(str(BRAIN_DB))
         try:
@@ -518,8 +647,18 @@ def _measure_atoms_write_throughput() -> float:
 
             # Check input queue: raw_events created in the same window.
             # If no input, the system is quiet — not a stuck writer.
+            #
+            # Exclude source_types that don't feed the atoms writer:
+            #   - atoms_hot_path  → produced INSIDE upsert_atom (it IS output, not input).
+            #     Counting it as input made the SLO compare itself to itself.
+            #   - coding_event    → feeds coding_event_outcomes sidecar (revert tracking),
+            #     never goes through ingest_classifier or produces atoms.
+            # Including these caused false-positive "stuck writer" breaches whenever
+            # only VS Code activity or atoms_hot_path provenance rows were flowing.
             raw_row = conn.execute(
-                "SELECT COUNT(*) FROM raw_events " "WHERE CAST(strftime('%s', created_at) AS INTEGER) > ?",
+                "SELECT COUNT(*) FROM raw_events "
+                "WHERE CAST(strftime('%s', created_at) AS INTEGER) > ? "
+                "  AND source_type NOT IN ('atoms_hot_path', 'coding_event')",
                 (int(cutoff),),
             ).fetchone()
             raw_in = float(raw_row[0]) if raw_row else 0.0
@@ -579,25 +718,28 @@ def _measure_atoms_confidence_stddev() -> float:
 
 
 def _measure_sleep_cycles_duration_p95() -> float:
-    """Phase N4 watcher. Reads sleep_cycles rows from the last 24h and
-    computes the p95 of (ended_at - started_at). Returns 0 when no rows
-    exist (no cycles yet = no alert).
+    """Phase N4 watcher. Return the latest completed sleep cycle duration.
+
+    Sleep consolidation is normally once daily. A rolling 24h percentile kept
+    alerting on already-remediated slow cycles after a successful verification
+    run. Use the latest completed cycle instead, and compare timestamps via
+    `julianday()` so ISO `T...Z` rows are not lexicographically misclassified
+    against SQLite's space-separated `datetime('now')` string.
     """
     try:
         conn = sqlite3.connect(str(BRAIN_DB))
         try:
-            rows = conn.execute(
+            row = conn.execute(
                 "SELECT (julianday(ended_at) - julianday(started_at)) * 86400 AS secs "
                 "FROM sleep_cycles "
                 "WHERE ended_at IS NOT NULL "
-                "AND started_at >= datetime('now', '-1 day') "
-                "ORDER BY secs ASC"
-            ).fetchall()
-            if not rows:
+                "AND julianday(started_at) >= julianday('now', '-1 day') "
+                "ORDER BY julianday(started_at) DESC "
+                "LIMIT 1"
+            ).fetchone()
+            if not row:
                 return 0.0
-            seconds = [float(r[0] or 0.0) for r in rows]
-            idx = max(0, int(len(seconds) * 0.95) - 1)
-            return round(seconds[idx], 2)
+            return round(float(row[0] or 0.0), 2)
         finally:
             conn.close()
     except sqlite3.Error:
@@ -783,6 +925,59 @@ def _measure_backup_restore_drill_age_hours() -> float:
         return 999.0
 
 
+def _measure_logs_dir_growth_24h_mb() -> float:
+    """24-hour delta in logs/ size, using snapshots written by run_wal_checkpoint.
+
+    Reads the bounded snapshot history from brain_config_store
+    (LOGS_DIR_HISTORY_KEY, max 14 entries), pairs the latest with the
+    snapshot closest to 24h prior, returns the delta in MB. Returns 0.0
+    when there is no usable 24h-ago baseline (cold start) — the absolute
+    `logs_dir_total_mb` SLO is the safety net while history accumulates.
+
+    Memory: O(14) entries in memory during the measurement, immediately
+    released. Performance: single brain_config_store read + linear scan
+    over ≤14 entries.
+    """
+    try:
+        import brain_config_store
+        from db_maintenance import LOGS_DIR_HISTORY_KEY
+
+        raw = brain_config_store.get(LOGS_DIR_HISTORY_KEY)
+        if not raw:
+            return 0.0
+        history = json.loads(raw)
+        if not isinstance(history, list) or len(history) < 2:
+            return 0.0
+        # newest entry's mb minus the closest-to-24h-ago entry's mb
+        latest = history[-1]
+        latest_ts = datetime.fromisoformat(str(latest["ts"]).replace("Z", "+00:00"))
+        target_ts = latest_ts - timedelta(hours=24)
+        baseline = None
+        best_gap: float | None = None
+        for entry in history[:-1]:
+            try:
+                ts = datetime.fromisoformat(str(entry["ts"]).replace("Z", "+00:00"))
+            except (TypeError, ValueError):
+                continue
+            gap = abs((ts - target_ts).total_seconds())
+            if best_gap is None or gap < best_gap:
+                best_gap = gap
+                baseline = entry
+        # Require the baseline to be at least 18h old AND no older than 36h to
+        # avoid comparing today's snapshot to a 2-day-old one (which would
+        # double the apparent delta) or to a 4-hour-old one (which would
+        # under-report).
+        if not baseline or best_gap is None:
+            return 0.0
+        if best_gap > 18 * 3600:  # too far from 24h-ago
+            return 0.0
+        delta = float(latest.get("mb", 0.0)) - float(baseline.get("mb", 0.0))
+        return round(delta, 1)
+    except Exception as exc:
+        log.debug("logs_dir_growth_24h_mb measurement failed: %s", exc)
+        return 0.0
+
+
 def _measure_logs_dir_total_mb() -> float:
     """Sum size of all files under brain logs/ directory."""
     try:
@@ -897,6 +1092,18 @@ def _measure_task_failure_lesson_missing_count() -> float:
         return float(missing)
     except sqlite3.Error as exc:
         log.debug("task_failure_lesson_missing_count measurement failed: %s", exc)
+        return 0.0
+
+
+def _measure_autonomous_work_visibility_gap_count() -> float:
+    """Count autonomous/background work records missing trace evidence."""
+
+    try:
+        from autonomous_work import visibility_gap_count
+
+        return float(visibility_gap_count(hours=24))
+    except Exception as exc:
+        log.debug("autonomous_work_visibility_gap_count measurement failed: %s", exc)
         return 0.0
 
 
@@ -1078,12 +1285,14 @@ _MEASUREMENTS: dict[str, Callable[[], float]] = {
     "dispatch_failure_rate_1h": _measure_dispatch_failure_rate_1h,
     "agent_session_max_mb": _measure_agent_session_max_mb,
     "logs_dir_total_mb": _measure_logs_dir_total_mb,
+    "logs_dir_growth_24h_mb": _measure_logs_dir_growth_24h_mb,
     "entry_contract_missing_pct": _measure_entry_contract_missing_pct,
     "telegram_backlog_pending_count": _measure_telegram_backlog_pending_count,
     "telegram_direct_health": _measure_telegram_direct_health,
     "openclaw_gateway_health": _measure_openclaw_gateway_health,
     "task_dispatch_stale_started_count": _measure_task_dispatch_stale_started_count,
     "task_failure_lesson_missing_count": _measure_task_failure_lesson_missing_count,
+    "autonomous_work_visibility_gap_count": _measure_autonomous_work_visibility_gap_count,
     "boot_context_degraded_1h": _measure_boot_context_degraded_1h,
     "self_eval_drift_7d": _measure_self_eval_drift_7d,
     "qdrant_backup_age_hours": _measure_qdrant_backup_age_hours,
@@ -1188,6 +1397,20 @@ def _save_last_alert_at(slo_name: str, severity: str, ts: float) -> None:
         log.debug("silenced exception in slos.py: %s", _exc)
 
 
+def _alert_rate_limit_s(slo: SLO) -> int:
+    """Return the Telegram alert suppression window for this SLO.
+
+    `sleep_consolidate` is a once-daily job. Its SLO can remain breached for
+    the full 24h measurement window after a single slow cycle, so the default
+    30-minute alert cadence is pure noise. Keep the SLO visible in `/brain/slos`
+    but page at most once per daily cycle.
+    """
+
+    if slo.name == "sleep_cycles_duration_1d_p95":
+        return DAILY_JOB_ALERT_RATE_LIMIT_S
+    return ALERT_RATE_LIMIT_S
+
+
 def _alert_telegram(slo: SLO, actual: float) -> bool:
     """Delegate to the unified telegram_alert module (2026-04-17)."""
     import sys as _sys
@@ -1254,7 +1477,7 @@ def maybe_alert(result: SLOResult) -> bool:
         return False
     now = time.time()
     last_at = _load_last_alert_at(result.slo.name, result.slo.severity)
-    if now - last_at < ALERT_RATE_LIMIT_S:
+    if now - last_at < _alert_rate_limit_s(result.slo):
         return False
     sent = _alert_telegram(result.slo, result.actual)
     if sent:

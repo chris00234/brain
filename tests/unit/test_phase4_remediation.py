@@ -168,6 +168,31 @@ def test_brain_loop_cost_governor_engage_writes_config(monkeypatch):
     assert "BRAIN_CLI_LLM_CONCURRENCY_UNTIL" in cfg
 
 
+def test_brain_loop_cost_governor_honors_configured_concurrency(monkeypatch):
+    """Chris can keep a low governor cap while allowing two Claude Max slots."""
+    import brain_loop
+
+    cfg: dict = {"BRAIN_CLI_LLM_COST_GOVERNOR_CONCURRENCY": "2"}
+    fake_cfg = type(sys)("brain_config_store")
+    fake_cfg.get = lambda k: cfg.get(k)
+    fake_cfg.set = lambda k, v, **_kw: cfg.update({k: v})
+    monkeypatch.setitem(sys.modules, "brain_config_store", fake_cfg)
+
+    ok = brain_loop._apply_self_modification(
+        {
+            "modification": "engage_llm_cost_governor",
+            "ttl_s": 1800,
+            "ratio": 6,
+            "hourly": 600,
+            "baseline": 100,
+        }
+    )
+
+    assert ok is True
+    assert cfg.get("BRAIN_CLI_LLM_CONCURRENCY") == "2"
+    assert "BRAIN_CLI_LLM_CONCURRENCY_UNTIL" in cfg
+
+
 def test_brain_loop_reflect_emits_governor_only_on_severe_spike():
     """ratio<5 should NOT engage governor (just alert); ratio>=5 with no
     Chris session SHOULD emit a SELF_MODIFY decision.

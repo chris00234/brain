@@ -65,6 +65,91 @@ def _sqlite_size_mb(path: Path) -> float:
     return round(path.stat().st_size / 1048576, 2)
 
 
+# WAL ceiling per hot DB (bytes). SQLite's `journal_size_limit` is a
+# per-connection setting — it does NOT persist in the database file header —
+# so to actually bound the WAL during the day every long-lived connection on
+# hot DBs has to call `apply_hot_db_pragmas` after enabling WAL mode. Daily
+# checkpoint truncates to 0; the in-day ceiling caps growth between cycles.
+# 96 MiB across 5 hot DBs caps the WAL contribution at ~480 MiB total,
+# leaving headroom inside the 3 GiB logs_dir budget.
+WAL_JOURNAL_SIZE_LIMIT_BYTES = 96 * 1024 * 1024
+
+
+LOGS_DIR_HISTORY_KEY = "slo.logs_dir_history"
+LOGS_DIR_HISTORY_MAX_ENTRIES = 14  # ~2 weeks of daily snapshots
+
+
+def _logs_dir_total_mb() -> float:
+    """Sum of all file sizes under BRAIN_LOGS_DIR in MB. O(directory tree)."""
+    total = 0
+    for p in BRAIN_LOGS_DIR.rglob("*"):
+        if p.is_file():
+            try:
+                total += p.stat().st_size
+            except OSError:
+                continue
+    return round(total / (1024 * 1024), 1)
+
+
+def record_logs_dir_size_snapshot() -> dict:
+    """Append the current logs-dir size to brain_config_store history.
+
+    Stores a bounded JSON list of `{ts, mb}` snapshots (max 14 entries),
+    used by `logs_dir_growth_24h_mb` SLO to detect anomalous daily growth.
+    O(1) memory: list never exceeds 14 entries.
+    """
+    summary: dict = {"started_at": _now_iso()}
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import brain_config_store
+
+        mb = _logs_dir_total_mb()
+        raw = brain_config_store.get(LOGS_DIR_HISTORY_KEY) or "[]"
+        try:
+            history = json.loads(raw)
+            if not isinstance(history, list):
+                history = []
+        except json.JSONDecodeError:
+            history = []
+        history.append({"ts": _now_iso(), "mb": mb})
+        history = history[-LOGS_DIR_HISTORY_MAX_ENTRIES:]
+        brain_config_store.set(
+            LOGS_DIR_HISTORY_KEY,
+            json.dumps(history, separators=(",", ":")),
+            updated_by="db_maintenance.record_logs_dir_size_snapshot",
+        )
+        summary["mb"] = mb
+        summary["entries"] = len(history)
+        summary["status"] = "ok"
+    except Exception as exc:
+        summary["status"] = f"error:{str(exc)[:120]}"
+    summary["finished_at"] = _now_iso()
+    return summary
+
+
+def apply_hot_db_pragmas(conn: sqlite3.Connection) -> None:
+    """Apply the standard WAL ceiling on a hot-DB connection.
+
+    Called by every long-lived brain-server connection after the existing
+    `PRAGMA journal_mode=WAL`. Without this, the WAL file balloons to
+    200-300 MB between daily TRUNCATE cycles because SQLite has no
+    per-commit ceiling unless this is set on the writing connection.
+    """
+    try:
+        conn.execute(f"PRAGMA journal_size_limit = {WAL_JOURNAL_SIZE_LIMIT_BYTES}").fetchone()
+    except sqlite3.Error as exc:
+        log.debug("apply_hot_db_pragmas: journal_size_limit skipped: %s", exc)
+
+
+_HOT_DBS: tuple[tuple[str, Path], ...] = (
+    ("brain.db", BRAIN_DB),
+    ("autonomy.db", AUTONOMY_DB),
+    ("llm_usage.db", LLM_USAGE_DB),
+    ("metrics_history.db", METRICS_HISTORY_DB),
+    ("embedding_cache.db", BRAIN_LOGS_DIR / "embedding_cache.db"),
+)
+
+
 def run_wal_checkpoint() -> dict:
     """Daily PRAGMA wal_checkpoint(TRUNCATE) across hot brain SQLite DBs.
 
@@ -77,15 +162,19 @@ def run_wal_checkpoint() -> dict:
 
     TRUNCATE is safe with active readers/writers — falls back to PASSIVE
     when blocked rather than waiting indefinitely.
+
+    Long-term durability (2026-05-11): even with the daily TRUNCATE the
+    brain server's long-running connections keep blocking truncation
+    because new writes land between this job and the next, so the WAL
+    file balloons back to 200-300 MB by midday. We now also set
+    `PRAGMA journal_size_limit` here AND on each hot writer's connection
+    (see `apply_hot_db_pragmas`). The limit is per-connection — SQLite
+    does not persist it in the file header — so every long-lived hot-DB
+    connection must call the helper after enabling WAL mode, or the
+    in-day WAL ceiling regresses.
     """
     summary: dict = {"started_at": _now_iso(), "dbs": []}
-    for label, path in [
-        ("brain.db", BRAIN_DB),
-        ("autonomy.db", AUTONOMY_DB),
-        ("llm_usage.db", LLM_USAGE_DB),
-        ("metrics_history.db", METRICS_HISTORY_DB),
-        ("embedding_cache.db", BRAIN_LOGS_DIR / "embedding_cache.db"),
-    ]:
+    for label, path in _HOT_DBS:
         if not path.exists():
             continue
         wal = path.with_suffix(path.suffix + "-wal")
@@ -96,6 +185,7 @@ def run_wal_checkpoint() -> dict:
         try:
             conn = sqlite3.connect(str(path), isolation_level=None, timeout=30.0)
             try:
+                conn.execute(f"PRAGMA journal_size_limit = {WAL_JOURNAL_SIZE_LIMIT_BYTES}").fetchone()
                 row = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
                 entry["result"] = list(row) if row else None
             finally:
@@ -105,6 +195,10 @@ def run_wal_checkpoint() -> dict:
         except Exception as exc:
             entry["status"] = f"error:{str(exc)[:120]}"
         summary["dbs"].append(entry)
+    # Daily logs_dir size snapshot for growth-rate SLO. Runs after the WAL
+    # truncate so the snapshot reflects the post-checkpoint steady state,
+    # not the mid-day WAL bulge.
+    summary["logs_dir_snapshot"] = record_logs_dir_size_snapshot()
     summary["finished_at"] = _now_iso()
     return summary
 

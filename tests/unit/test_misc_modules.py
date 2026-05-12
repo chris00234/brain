@@ -297,6 +297,92 @@ def test_confidence_calibration_apply_identity_on_missing():
     assert 0.0 <= c <= 1.0
 
 
+def test_confidence_calibration_cold_start_drift_is_zero(monkeypatch):
+    """Cold-start guard: first real fit must report drift=0.
+
+    Regression for 2026-05-11 false-positive on the calibration_brier_drift_7d
+    SLO. The earlier code computed drift = |new_brier - prior_brier| using
+    prior_brier as it was loaded — but when the prior fit was an identity
+    stub (or older code that saved reliability_brier=0.0), prior_brier was
+    0.0 and drift collapsed to the absolute new_brier, which trivially
+    exceeds the 0.05 SLO budget. Cold start must report drift=0.
+    """
+    import confidence_calibration as cc
+
+    state: dict[str, str] = {}
+
+    class FakeStore:
+        @staticmethod
+        def get(key):
+            return state.get(key)
+
+        @staticmethod
+        def set(key, value, updated_by=None):
+            state[key] = value
+
+    import sys as _sys
+
+    monkeypatch.setitem(_sys.modules, "brain_config_store", FakeStore)
+    monkeypatch.setattr(cc, "_collect_pairs", lambda: [(0.8, 1)] * cc.MIN_SAMPLES)
+    monkeypatch.setattr(cc, "_logistic_fit", lambda _pairs: (1.0, 0.0))
+    monkeypatch.setattr(cc, "_reliability", lambda _a, _b, _pairs: 0.0783)
+
+    # Seed a stub prior to mimic the production state that triggered the bug.
+    import json as _json
+
+    state["confidence_calibration.v1"] = _json.dumps(
+        {
+            "a": 1.0,
+            "b": 0.0,
+            "fitted": True,
+            "reliability_brier": 0.0,
+            "n_samples": 477,
+        }
+    )
+
+    out = cc.run()
+    assert out["status"] == "ok"
+    assert out["brier_drift"] == 0.0
+
+
+def test_confidence_calibration_real_drift_is_reported(monkeypatch):
+    """Once a meaningful prior exists, drift = |new - prior| with the guard."""
+    import confidence_calibration as cc
+
+    state: dict[str, str] = {}
+
+    class FakeStore:
+        @staticmethod
+        def get(key):
+            return state.get(key)
+
+        @staticmethod
+        def set(key, value, updated_by=None):
+            state[key] = value
+
+    import json as _json
+    import sys as _sys
+
+    monkeypatch.setitem(_sys.modules, "brain_config_store", FakeStore)
+    monkeypatch.setattr(cc, "_collect_pairs", lambda: [(0.8, 1)] * cc.MIN_SAMPLES)
+    monkeypatch.setattr(cc, "_logistic_fit", lambda _pairs: (1.0, 0.0))
+    monkeypatch.setattr(cc, "_reliability", lambda _a, _b, _pairs: 0.12)
+
+    state["confidence_calibration.v1"] = _json.dumps(
+        {
+            "a": 1.0,
+            "b": 0.0,
+            "fitted": True,
+            "reliability_brier": 0.08,
+            "n_samples": cc.MIN_SAMPLES + 1,
+        }
+    )
+
+    out = cc.run()
+    assert out["status"] == "ok"
+    assert abs(out["brier_drift"] - 0.04) < 1e-6
+
+
 # ── attention ───────────────────────────────────────────────────
 def test_attention_enqueue_returns_dict(tmp_path, monkeypatch):
     """enqueue must return a dict; DB write is best-effort."""

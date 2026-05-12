@@ -20,6 +20,7 @@ from __future__ import annotations
 import importlib
 import sys
 import time
+import types
 from pathlib import Path
 
 import pytest
@@ -159,6 +160,38 @@ def test_cold_atoms_stay_episodic(brain_env):
     finally:
         conn.close()
     assert episodic >= 10, f"cold atoms should stay episodic, found {episodic}"
+
+
+def test_sage_summary_uses_bounded_openclaw_attempt(brain_env, monkeypatch):
+    atoms_store, sc, fake_db = brain_env
+    sc = importlib.reload(sc)
+    monkeypatch.setattr(sc, "BRAIN_DB", fake_db)
+    atom_id = atoms_store.derive_atom_id("semantic_memory:atom_0")
+    calls = []
+
+    def fake_dispatch(**kwargs):
+        calls.append(kwargs)
+        return types.SimpleNamespace(ok=True, text="summary")
+
+    monkeypatch.setitem(sys.modules, "cli_llm", types.SimpleNamespace(dispatch=fake_dispatch))
+
+    import sqlite3
+
+    conn = sqlite3.connect(str(fake_db))
+    conn.row_factory = sqlite3.Row
+    try:
+        result = sc._summarize_via_sage({"replay_count": 20}, {atom_id}, conn)
+    finally:
+        conn.close()
+
+    assert result == {"ok": True, "text": "summary"}
+    assert len(calls) == 1
+    assert calls[0]["agent"] == "sage"
+    assert calls[0]["backend"] == "openclaw"
+    assert calls[0]["max_backends"] == 1
+    assert calls[0]["timeout"] == sc.SUMMARY_TIMEOUT_SEC
+    assert calls[0]["backlog_payload"]["backend"] == "openclaw"
+    assert calls[0]["backlog_payload"]["max_backends"] == 1
 
 
 def test_link_atom_entity_via_helpers(brain_env):

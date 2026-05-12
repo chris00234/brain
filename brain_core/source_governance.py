@@ -56,7 +56,11 @@ GOVERNED_SOURCES: tuple[GovernedSource, ...] = (
         jobs=("openclaw_sessions_ingest",),
         state_files=("openclaw-sessions-state.json",),
         log_files=("jobs/openclaw_sessions_ingest.log",),
-        max_age_hours=8,
+        # The scheduler intentionally leaves a long daytime gap to avoid
+        # competing with local embedder/Qdrant resources. Keep the freshness
+        # gate wider than the 06:35→19:35 local schedule gap plus normal
+        # distillation runtime, otherwise readiness falsely blocks every day.
+        max_age_hours=16,
         rationale=(
             "OpenClaw agents must use the Brain effectively, " "so their sessions need timely distillation."
         ),

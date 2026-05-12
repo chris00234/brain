@@ -596,3 +596,86 @@ def test_ragas_loop_uses_answer_rubric_for_judge_expected(monkeypatch, tmp_path,
     out = json.loads(capsys.readouterr().out)
     assert captured["expected"] == "strict answer rubric"
     assert out["ragas"]["cases"][0]["answer_rubric"] == "strict answer rubric"
+
+
+def test_diversity_aggregate_correlates_failures_without_gating() -> None:
+    per_test = [
+        {
+            "hit_source": True,
+            "hit_content_loose": True,
+            "diversity": {
+                "status": "ok",
+                "mean_pairwise_cosine": 0.2,
+                "max_pairwise_cosine": 0.3,
+                "high_similarity_pair_count": 0,
+            },
+        },
+        {
+            "hit_source": False,
+            "hit_content_loose": False,
+            "diversity": {
+                "status": "ok",
+                "mean_pairwise_cosine": 0.9,
+                "max_pairwise_cosine": 0.95,
+                "high_similarity_pair_count": 2,
+            },
+        },
+    ]
+
+    out = eval_compare._aggregate_diversity(per_test)
+
+    assert out["coverage_level"] == "final_topk_e5_cosine_v1"
+    assert out["case_count"] == 2
+    assert out["passed_mean_pairwise_cosine"] == 0.2
+    assert out["content_failed_mean_pairwise_cosine"] == 0.9
+    assert out["source_failed_mean_pairwise_cosine"] == 0.9
+    assert out["high_similarity_pair_count"] == 2
+    assert "diagnostic_only" in out["interpretation"]
+
+
+def test_run_eval_can_include_diagnostic_diversity_metrics(monkeypatch) -> None:
+    monkeypatch.setattr(
+        eval_compare,
+        "_get",
+        lambda _path, _token: {
+            "results": [
+                {
+                    "collection": "canonical",
+                    "source_type": "canonical",
+                    "path": "canonical/chris/_state.md",
+                    "content": "Current active project context.",
+                }
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        eval_compare,
+        "_topk_diversity_metrics",
+        lambda _results: {
+            "status": "ok",
+            "result_count": 1,
+            "mean_pairwise_cosine": 0.42,
+            "max_pairwise_cosine": 0.42,
+            "high_similarity_pair_count": 0,
+        },
+    )
+
+    report = eval_compare.run_eval(
+        use_v2=True,
+        hyde=False,
+        expand=False,
+        iterative=False,
+        token="test-token",
+        cases=[
+            {
+                "query": "active project?",
+                "expected_source": "canonical/chris/_state.md",
+                "expected_content": "active project",
+            }
+        ],
+        diversity_metrics=True,
+    )
+
+    assert report["diversity"]["coverage_level"] == "final_topk_e5_cosine_v1"
+    assert report["diversity"]["mean_pairwise_cosine"] == 0.42
+    assert report["per_test"][0]["diversity"]["status"] == "ok"

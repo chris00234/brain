@@ -70,7 +70,10 @@ PROMOTION_CONFIDENCE_FLOOR = 0.6
 PROMOTION_REINFORCE_WEIGHT = 0.3
 PREDICTIVE_ERROR_DEMOTION = 0.5
 SUMMARY_TRIGGER_REPLAY_COUNT = 20
-SUMMARY_TIMEOUT_SEC = 60
+# Keep the optional Sage summary inside the sleep-cycle wall-clock SLO. The
+# deterministic consolidation work normally finishes in a few seconds; slow
+# provider fallback should not make the sleep SLO noisy.
+SUMMARY_TIMEOUT_SEC = 30
 MAX_COACTIVATION_ROWS = 100_000  # emergency cap — alert + skip upsert if exceeded
 
 
@@ -426,14 +429,18 @@ def _summarize_via_sage(cycle_stats: dict, touched_atom_ids: set[str], conn: sql
         result = dispatch(
             agent="sage",
             message=prompt,
+            backend="openclaw",
             thinking="off",
             timeout=SUMMARY_TIMEOUT_SEC,
+            max_backends=1,
             backlog_kind="reflect",
             backlog_payload={
                 "agent": "sage",
                 "prompt": prompt,
+                "backend": "openclaw",
                 "thinking": "off",
                 "timeout": SUMMARY_TIMEOUT_SEC,
+                "max_backends": 1,
                 "source": "sleep_consolidate",
             },
         )

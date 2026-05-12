@@ -4,10 +4,21 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "brain_core"))
 
 import ops_readiness  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _default_autonomous_work_ok(monkeypatch):
+    monkeypatch.setattr(
+        ops_readiness,
+        "autonomous_work_readiness_snapshot",
+        lambda: {"status": "ok", "readiness_blocking": False, "visibility_gap_count": 0},
+    )
 
 
 def test_readiness_snapshot_surfaces_blocked_backup(tmp_path, monkeypatch):
@@ -107,7 +118,7 @@ def test_ui_parity_audit_snapshot_blocks_missing_coverage(tmp_path, monkeypatch)
     out = ops_readiness.ui_parity_audit_snapshot()
 
     assert out["status"] == "blocked"
-    assert out["min_required"] == 10
+    assert out["min_required"] == 11
 
 
 def test_readiness_snapshot_blocks_ui_parity_audit(tmp_path, monkeypatch):
@@ -635,3 +646,37 @@ def test_readiness_snapshot_blocks_insufficient_outcome_maturity(monkeypatch):
     assert out["status"] == "blocked"
     assert "skill_promotion_outcomes" in out["blockers"]
     assert "failure_lesson_outcome" in out["blockers"]
+
+
+def test_readiness_snapshot_blocks_autonomous_work_visibility_gap(monkeypatch):
+    monkeypatch.setattr(ops_readiness, "backup_restore_snapshot", lambda: {"all_ok": True, "status": "ok"})
+    monkeypatch.setattr(ops_readiness, "retrieval_regression_snapshot", lambda: {"status": "ok"})
+    monkeypatch.setattr(ops_readiness, "crag_regression_snapshot", lambda: {"status": "ok"})
+    monkeypatch.setattr(ops_readiness, "crag_correction_regression_snapshot", lambda: {"status": "ok"})
+    monkeypatch.setattr(ops_readiness, "crag_llm_correction_regression_snapshot", lambda: {"status": "ok"})
+    monkeypatch.setattr(ops_readiness, "adversarial_eval_snapshot", lambda: {"status": "ok"})
+    monkeypatch.setattr(ops_readiness, "holdout_eval_snapshot", lambda: {"status": "ok"})
+    monkeypatch.setattr(ops_readiness, "ragas_eval_snapshot", lambda: {"status": "ok"})
+    monkeypatch.setattr(ops_readiness, "release_readiness_snapshot", lambda: {"status": "ok"})
+    monkeypatch.setattr(ops_readiness, "ui_parity_audit_snapshot", lambda: {"status": "ok"})
+    monkeypatch.setattr(ops_readiness, "openclaw_gateway_snapshot", lambda: {"status": "ok"})
+    monkeypatch.setattr(ops_readiness, "source_governance_readiness_snapshot", lambda: {"status": "ok"})
+    monkeypatch.setattr(ops_readiness, "skill_promotion_readiness_snapshot", lambda: {"status": "ok"})
+    monkeypatch.setattr(
+        ops_readiness,
+        "failure_lesson_outcome_readiness_snapshot",
+        lambda: {"status": "ok", "readiness_blocking": False},
+    )
+    monkeypatch.setattr(ops_readiness, "remediation_incident_ledger", lambda: {"status": "ok"})
+    monkeypatch.setattr(ops_readiness, "slo_escalation_ledger", lambda: {"status": "ok"})
+    monkeypatch.setattr(
+        ops_readiness,
+        "autonomous_work_readiness_snapshot",
+        lambda: {"status": "blocked", "readiness_blocking": True, "visibility_gap_count": 1},
+    )
+
+    out = ops_readiness.readiness_snapshot()
+
+    assert out["status"] == "blocked"
+    assert "autonomous_work_visibility" in out["blockers"]
+    assert out["autonomous_work"]["visibility_gap_count"] == 1

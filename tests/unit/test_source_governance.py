@@ -11,6 +11,14 @@ sys.path.insert(0, str(ROOT / "brain_core"))
 import source_governance  # noqa: E402
 
 
+def test_openclaw_source_freshness_matches_intentional_daytime_schedule_gap():
+    openclaw = next(
+        source for source in source_governance.GOVERNED_SOURCES if source.id == "openclaw_sessions"
+    )
+
+    assert openclaw.max_age_hours >= 14
+
+
 def test_source_governance_ok_when_critical_source_is_fresh(tmp_path, monkeypatch):
     now = datetime(2026, 5, 5, 5, 0, tzinfo=UTC)
     logs = tmp_path / "logs"

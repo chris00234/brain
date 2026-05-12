@@ -60,6 +60,12 @@ def _get_conn() -> sqlite3.Connection:
         conn.execute("PRAGMA busy_timeout=5000")
         conn.execute("PRAGMA wal_autocheckpoint=1000")
         conn.execute("PRAGMA cache_size=-16000")
+        try:
+            from db_maintenance import apply_hot_db_pragmas as _apply_hot_db_pragmas
+
+            _apply_hot_db_pragmas(conn)
+        except Exception as _exc:
+            log.debug("embed_cache journal_size_limit skipped: %s", _exc)
         conn.execute("CREATE TABLE IF NOT EXISTS embeddings (hash TEXT PRIMARY KEY, embedding BLOB)")
         # Additive migration: add created_at column for TTL-based eviction
         try:

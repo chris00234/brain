@@ -36,7 +36,12 @@ log = logging.getLogger("brain.backup_brain_db")
 
 BRAIN_LOGS_DIR = Path("/Users/chrischo/server/brain/logs")
 BACKUP_DIR = BRAIN_LOGS_DIR / "backups"
-RETENTION_DAYS = 7
+# Local retention covers the rapid-restore window only (oops-I-just-corrupted-it).
+# MinIO holds the longer DR window via the upload path below, so the local copy
+# can be aggressive without losing durability. 2026-05-11 fix: 7→4 days local
+# reclaims ~210 MB inside logs/, keeping the directory under the logs_dir SLO
+# budget as brain.db itself crossed 400 MB.
+RETENTION_DAYS = 4
 MINIO_BUCKET = "rag-backups"
 MINIO_PREFIX = "brain-db-backup/"
 

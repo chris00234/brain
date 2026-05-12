@@ -11,11 +11,17 @@ Asserts:
 from __future__ import annotations
 
 import sqlite3
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
 from brain_core import db_maintenance
+
+
+def _iso(offset_days: int) -> str:
+    """Return an ISO UTC timestamp `offset_days` from now (negative = past)."""
+    return (datetime.now(UTC) + timedelta(days=offset_days)).strftime("%Y-%m-%dT%H:%M:%S+00:00")
 
 
 @pytest.fixture()
@@ -41,9 +47,9 @@ def autonomy_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
             "INSERT INTO autonomy_decisions (ts_utc, kind, level, allowed, reason, breaker_state) "
             "VALUES (?, 't', 'L1', 1, 'r', 'closed')",
             [
-                ("2026-01-01T00:00:00+00:00",),  # ancient
-                ("2026-04-01T00:00:00+00:00",),  # ~25d old
-                ("2026-04-25T00:00:00+00:00",),  # 1d old
+                (_iso(-365),),  # ancient
+                (_iso(-25),),  # 25d old (older than 14d retention)
+                (_iso(-1),),  # 1d old (kept)
             ],
         )
         conn.commit()
@@ -65,9 +71,9 @@ def metrics_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         conn.executemany(
             "INSERT INTO metrics_snapshots (timestamp, payload) VALUES (?, '{}')",
             [
-                ("2026-01-01T00:00:00",),
-                ("2026-04-01T00:00:00",),
-                ("2026-04-25T00:00:00",),
+                (_iso(-365),),
+                (_iso(-25),),
+                (_iso(-1),),
             ],
         )
         conn.commit()
@@ -87,7 +93,8 @@ def test_autonomy_decisions_retention_drops_older_rows(autonomy_db: Path) -> Non
         rows = conn.execute("SELECT ts_utc FROM autonomy_decisions").fetchall()
     finally:
         conn.close()
-    assert rows == [("2026-04-25T00:00:00+00:00",)]
+    assert len(rows) == 1
+    assert rows[0][0].startswith(datetime.now(UTC).strftime("%Y-%m"))
 
 
 def test_metrics_history_retention_drops_older_rows(metrics_db: Path) -> None:
@@ -108,6 +115,55 @@ def test_metrics_history_retention_db_missing(monkeypatch: pytest.MonkeyPatch, t
     monkeypatch.setattr(db_maintenance, "METRICS_HISTORY_DB", tmp_path / "missing.db")
     summary = db_maintenance.run_metrics_history_retention(days=14)
     assert summary["status"] == "db_missing"
+
+
+def test_wal_checkpoint_runs_and_reports_ok(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The daily WAL checkpoint must succeed on a WAL-mode DB.
+
+    SQLite auto-checkpoints aggressively (default wal_autocheckpoint=1000)
+    so the WAL is rarely large at the moment we observe it in tests. The
+    production contract is "the call returns ok and reports a wal_size_after",
+    which is enough for the scheduler to log a successful run.
+    """
+
+    db = tmp_path / "brain.db"
+    conn = sqlite3.connect(str(db))
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("CREATE TABLE t (id INTEGER)")
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.setattr(db_maintenance, "BRAIN_DB", db)
+    monkeypatch.setattr(db_maintenance, "AUTONOMY_DB", tmp_path / "missing_autonomy.db")
+    monkeypatch.setattr(db_maintenance, "LLM_USAGE_DB", tmp_path / "missing_llm.db")
+    monkeypatch.setattr(db_maintenance, "METRICS_HISTORY_DB", tmp_path / "missing_metrics.db")
+    monkeypatch.setattr(db_maintenance, "BRAIN_LOGS_DIR", tmp_path)
+    monkeypatch.setattr(db_maintenance, "_HOT_DBS", (("brain.db", db),))
+
+    summary = db_maintenance.run_wal_checkpoint()
+    assert summary["dbs"][0]["status"] == "ok"
+    assert "wal_size_after_mb" in summary["dbs"][0]
+    assert db_maintenance.WAL_JOURNAL_SIZE_LIMIT_BYTES > 0
+
+
+def test_apply_hot_db_pragmas_sets_limit(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The shared PRAGMA helper must set journal_size_limit on a live connection.
+
+    Long-lived brain-server connections call this helper at open time so the
+    96 MiB ceiling applies during the day, not only during the daily checkpoint.
+    """
+
+    db = tmp_path / "brain.db"
+    conn = sqlite3.connect(str(db))
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        db_maintenance.apply_hot_db_pragmas(conn)
+        limit = conn.execute("PRAGMA journal_size_limit").fetchone()[0]
+    finally:
+        conn.close()
+    assert limit == db_maintenance.WAL_JOURNAL_SIZE_LIMIT_BYTES
 
 
 # ── obsolete_expired_atoms ────────────────────────────────────────────

@@ -51,6 +51,37 @@ def test_escalation_policy_routes_knowledge_gaps_to_agents_first():
     assert route.reason == "knowledge_gap_agent_remediation"
 
 
+def test_escalation_policy_keeps_brain_speak_urgent_wrapper_with_agents():
+    route = escalation_policy.classify_escalation(
+        title=(
+            "Handoff from brain_speak_urgent: Urgent Brain observation with no active CLI session. "
+            "Handle it yourself if possible; notify Chris only for a true human blocker."
+        ),
+        content=(
+            "[brain_speak_urgent] no active CLI sessions; urgent observations:\n"
+            "- [7.5] stale_thread_drive/thread: claude → chris 메시지 108h째 pending: "
+            "20 task escalations need your review"
+        ),
+    )
+
+    assert route.target == "llm"
+    assert route.notify_human is False
+
+
+def test_escalation_policy_keeps_truncated_brain_speak_urgent_wrapper_with_agents():
+    route = escalation_policy.classify_escalation(
+        title=(
+            "Handoff from brain_speak_urgent: Urgent Brain observation with no active CLI session. "
+            "Handle it yourself if possible; notify Chris only for a true human "
+        ),
+        content="",
+        metadata={"task_evaluation_reason": "explicit_human_request"},
+    )
+
+    assert route.target == "llm"
+    assert route.notify_human is False
+
+
 def test_agent_messenger_decision_uses_llm_before_notifying(monkeypatch):
     llm_calls: list[dict] = []
     telegram_calls: list[dict] = []
@@ -140,8 +171,40 @@ def test_agent_messenger_handoff_task_keeps_full_description(monkeypatch):
 
     assert action == "task_created"
     assert created[0]["description"] == content
+    assert created[0]["metadata"]["source"] == "agent_messenger"
+    assert created[0]["metadata"]["source_via"] == "agent_messenger"
     assert created[0]["metadata"]["source_message_id"] == "msg_123"
     assert created[0]["metadata"]["from_agent"] == "jenna"
+
+
+def test_agent_messenger_handoff_task_preserves_upstream_source(monkeypatch):
+    created: list[dict] = []
+
+    class _FakeTaskQueue:
+        def create_task(self, **kwargs):
+            created.append(kwargs)
+            return {"id": "task_fake", **kwargs}
+
+    fake_task_queue = type(sys)("task_queue")
+    fake_task_queue.task_queue = _FakeTaskQueue()
+    monkeypatch.setitem(sys.modules, "task_queue", fake_task_queue)
+
+    agent_messenger.route_message(
+        {
+            "id": "msg_urgent",
+            "from_agent": "brain_speak_urgent",
+            "to_agent": "sage",
+            "content": "Urgent Brain observation with no active CLI session.",
+            "message_type": "handoff",
+            "priority": 2,
+            "metadata": {"source": "brain_speak_urgent"},
+        }
+    )
+
+    assert created[0]["description"] == "Urgent Brain observation with no active CLI session."
+    assert created[0]["metadata"]["source"] == "brain_speak_urgent"
+    assert created[0]["metadata"]["source_via"] == "agent_messenger"
+    assert created[0]["metadata"]["source_message_id"] == "msg_urgent"
 
 
 def test_task_queue_reviews_handleable_escalation_with_subscription_llm(monkeypatch, tmp_path):

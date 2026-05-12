@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import re
+import resource
 import subprocess
 import sys
 import threading
@@ -32,6 +33,37 @@ from typing import Annotated, Any, Literal
 # state on shutdown. Set these before any model/sklearn imports.
 os.environ.setdefault("LOKY_MAX_CPU_COUNT", "8")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
+
+def _raise_nofile_limit() -> dict[str, int | str | bool]:
+    """Keep the long-running API below launchd/macOS fd failure modes.
+
+    The brain server legitimately keeps SQLite WAL handles, Neo4j/Ollama
+    sockets, job log handles, and uvicorn accept sockets open concurrently.
+    A launchd default soft limit of 256 is too low: once SQLite/thread-pool
+    activity approaches that ceiling, uvicorn starts failing `accept()` with
+    OSError 24 and the watchdog sees transient HTTP 000 outages. Raise the
+    process soft limit early, before FastAPI imports start background pools.
+    """
+
+    raw_target = os.getenv("BRAIN_MIN_NOFILE", "8192")
+    try:
+        target = int(raw_target)
+    except ValueError:
+        target = 8192
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if hard != resource.RLIM_INFINITY:
+            target = min(target, hard)
+        if soft < target:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+            soft = target
+        return {"ok": True, "soft": int(soft), "hard": "unlimited" if hard == resource.RLIM_INFINITY else int(hard)}
+    except Exception as exc:  # pragma: no cover - platform/launchd dependent
+        return {"ok": False, "error": str(exc)}
+
+
+_NOFILE_LIMIT = _raise_nofile_limit()
 
 import structlog
 from fastapi import (
@@ -398,6 +430,51 @@ import secrets as _secrets
 # _request_id_ctx + get_request_id moved to brain_core/api_deps.py
 
 
+_EVAL_TRAFFIC_ACTORS = {"eval", "benchmark", "loadtest"}
+_AGENT_TRAFFIC_ACTORS = {
+    "codex",
+    "mcp",
+    "claude",
+    "claude-code",
+    "gemini",
+    "openclaw",
+    "jenna",
+    "liz",
+    "ellie",
+    "sage",
+    "market",
+    "recall_judge",
+    "slo_monitor",
+}
+
+
+def _traffic_class_for_request(request) -> str:
+    """Classify latency samples so SLOs track human/prod traffic.
+
+    Internal agent/tooling calls can be bursty and command-shaped; keeping
+    them in the base route made `/recall/v2` page on Codex maintenance traffic
+    rather than user-facing latency. They remain visible as `/recall/v2#agent`.
+    """
+
+    explicit = (
+        request.headers.get("x-brain-traffic")
+        or request.headers.get("x-brain-traffic-class")
+        or request.headers.get("x-traffic-class")
+        or ""
+    ).strip().lower()
+    if explicit in {"prod", "agent", "eval"}:
+        return explicit
+
+    x_agent = (request.headers.get("x-agent") or "").strip().lower()
+    actor = (request.query_params.get("actor") or "").strip().lower()
+    caller = x_agent or actor
+    if caller in _EVAL_TRAFFIC_ACTORS:
+        return "eval"
+    if caller in _AGENT_TRAFFIC_ACTORS:
+        return "agent"
+    return "prod"
+
+
 @app.middleware("http")
 async def _request_id_and_metrics_middleware(request, call_next):
     # Allow callers to pass their own correlation ID (e.g. Claude hooks
@@ -427,8 +504,7 @@ async def _request_id_and_metrics_middleware(request, call_next):
         # metrics buffer can distinguish 4xx from 5xx after the fact.
         # Falls back to positional call when the buffer hasn't been
         # migrated yet — forward-compatible with older buffers.
-        x_agent = (request.headers.get("x-agent") or "").strip().lower()
-        traffic_class = "eval" if x_agent in {"eval", "benchmark", "loadtest"} else "prod"
+        traffic_class = _traffic_class_for_request(request)
         try:
             _metrics_buf.record_request(
                 str(request.url.path),
@@ -570,6 +646,7 @@ def main() -> None:
         f"brain-server (FastAPI) v2.0 listening on http://{LISTEN_HOST}:{LISTEN_PORT}\n"
         f"  in-process search: rag={search_unified._RAG_IN_PROCESS} canonical={search_unified._CANONICAL_IN_PROCESS}\n"
         f"  jobs registered: {len(JOB_REGISTRY)}\n"
+        f"  nofile limit: {_NOFILE_LIMIT}\n"
         f"  OpenAPI docs at: http://{LISTEN_HOST}:{LISTEN_PORT}/docs\n"
     )
     uvicorn.run(

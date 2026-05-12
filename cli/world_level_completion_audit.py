@@ -161,6 +161,26 @@ def artifact_checks(root: Path = ROOT) -> list[dict]:
             Path("docs/research/world-level-brain-research-refresh-2026-05-05.md"),
             "current primary-source research/repo refresh",
         ),
+        (
+            "research_refresh_2026_05_07",
+            Path("docs/research/world-level-brain-research-refresh-2026-05-07.md"),
+            "latest xMemory/agent-memory research refresh",
+        ),
+        (
+            "eval_diversity_metrics",
+            Path("cli/eval_compare.py"),
+            "existing eval pipeline final-top-k diversity diagnostics",
+        ),
+        (
+            "eval_diversity_tests",
+            Path("tests/unit/test_eval_compare_source.py"),
+            "diversity diagnostic regression tests",
+        ),
+        (
+            "eval_diversity_sample",
+            Path("logs/eval-diversity-sample-2026-05-07.json"),
+            "live diversity metric sample",
+        ),
     ]
     out = []
     for key, rel, description in required:

@@ -102,6 +102,20 @@ def slo_incidents(limit: int = Query(default=200, ge=1, le=1000)) -> dict:
         raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e)) from e
 
 
+@router.get("/brain/autonomous-work", tags=["observability"])
+def autonomous_work(
+    limit: int = Query(default=50, ge=1, le=200),
+    hours: int = Query(default=24, ge=1, le=168),
+) -> dict:
+    """Recent autonomous/background work with concrete execution evidence."""
+    try:
+        from brain_core.autonomous_work import recent_autonomous_work
+
+        return recent_autonomous_work(limit=limit, hours=hours)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e)) from e
+
+
 # ── Trace / ingest / index / canonical ────────────────
 @router.get("/brain/trace/{note_id}", tags=["autonomy"])
 def trace_provenance(note_id: str, max_depth: int = 3) -> dict:

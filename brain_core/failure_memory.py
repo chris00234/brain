@@ -123,6 +123,109 @@ def record_failure_lesson(
         return None
 
 
+_INFRA_REFLECTION = {
+    "backend_cooldown": (
+        "Backend cooldown — the LLM provider was rate-limited or in an outage window when this task tried to dispatch.",
+        "Do not retry inside the cooldown window; respect backoff and let the breaker close.",
+        "Wait for cooldown to expire, then re-dispatch with jitter; consider a different backend if cooldown is recurring.",
+    ),
+    "timeout": (
+        "Backend timeout — the LLM call exceeded its wall-clock budget before producing output.",
+        "Long-running prompts on a stressed backend; do not loop without backoff.",
+        "Increase timeout only if measurements support it; otherwise shorten the prompt or shed load.",
+    ),
+    "rate_limit": (
+        "Rate limit — provider throttled the request, usually subscription/tenant level.",
+        "Retrying immediately just burns the cooldown; tighten dispatch concurrency.",
+        "Apply exponential backoff with jitter; lower per-minute concurrency for the affected agent.",
+    ),
+    "gateway": (
+        "Gateway transport error — the local CLI process or relay closed mid-call.",
+        "Treating gateway closures as task-level bugs; they are infra.",
+        "Restart or reconnect the gateway; verify CLI auth before re-dispatching.",
+    ),
+    "breaker": (
+        "Circuit breaker open — repeated failures triggered the local breaker.",
+        "Forcing dispatch while the breaker is open hides the underlying failure.",
+        "Identify what tripped the breaker (look at backend stderr / cooldown reasons), then half-open with a probe.",
+    ),
+    "generic_infra": (
+        "Infrastructure-class failure — backend/transport/throttle, not a task-design issue.",
+        "Reflecting via the same backend while it is unhealthy.",
+        "Wait for backend health to recover; adjust queue concurrency before retrying.",
+    ),
+}
+
+
+def _classify_infra_error(failure_reason: str) -> str:
+    err = (failure_reason or "").lower()
+    if "backend_cooldown" in err:
+        return "backend_cooldown"
+    if "timeout" in err:
+        return "timeout"
+    if "rate" in err and "limit" in err:
+        return "rate_limit"
+    if "gateway" in err or "transporterror" in err:
+        return "gateway"
+    if err.startswith("breaker_") or "circuit breaker" in err:
+        return "breaker"
+    return "generic_infra"
+
+
+def record_infra_failure_lesson(
+    task_description: str,
+    failure_reason: str,
+    agent_id: str = "system",
+) -> str | None:
+    """Record an infra-class failure lesson without an LLM round-trip.
+
+    Backend cooldowns, timeouts, rate limits, and gateway errors are not
+    task-design failures — reflecting on them via the same throttled backend
+    deadlocks the lesson recorder. Use a deterministic reflection keyed by
+    error class, with the same Neo4j MERGE so repeated failures dedupe.
+    """
+    error_class = _classify_infra_error(failure_reason)
+    reflection, avoid, try_next = _INFRA_REFLECTION[error_class]
+
+    # Lesson ID keyed by (agent, error_class) so 1000 backend_cooldowns collapse
+    # to one Lesson row per agent — failure_count grows on MATCH.
+    lesson_id = "lesson_infra_" + hashlib.md5(f"{agent_id}:{error_class}".encode()).hexdigest()[:12]
+    now_iso = datetime.now(UTC).isoformat()
+
+    try:
+        from neo4j_client import run_write
+
+        run_write(
+            "MERGE (l:Lesson {id: $id}) "
+            "ON CREATE SET l.task = $task, l.failure_reason = $reason, "
+            "  l.reflection = $reflection, l.avoid = $avoid, l.try_next = $try_next, "
+            "  l.agent_id = $agent_id, l.error_class = $error_class, l.kind = 'infra', "
+            "  l.created_at = $created_at, l.last_seen_at = $created_at, "
+            "  l.failure_count = 1, l.archived = false "
+            "ON MATCH SET l.last_seen_at = $created_at, "
+            "  l.failure_count = coalesce(l.failure_count, 1) + 1, "
+            "  l.failure_reason = $reason "
+            "WITH l "
+            "MERGE (a:Agent {name: $agent_id}) "
+            "MERGE (a)-[:HAS_LESSON]->(l)",
+            {
+                "id": lesson_id,
+                "task": task_description[:500],
+                "reason": failure_reason[:500],
+                "reflection": reflection,
+                "avoid": avoid,
+                "try_next": try_next,
+                "agent_id": agent_id,
+                "error_class": error_class,
+                "created_at": now_iso,
+            },
+        )
+        return lesson_id
+    except Exception as e:
+        log.warning("neo4j infra-lesson write failed: %s", e)
+        return None
+
+
 def get_similar_lessons(task_description: str, agent_id: str = "system", limit: int = 3) -> list[dict]:
     """Query Neo4j for lessons similar to the given task.
 
