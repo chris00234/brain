@@ -154,6 +154,55 @@ class RecallBatchRequest(BaseModel):
     agent: str = Field(default="unknown", max_length=64)
 
 
+# ── Service helpers (recall_v2 internal) ─────────────────
+
+
+def _build_recall_v2_cache_key(
+    request: Request,
+    q: str,
+    n: int,
+    *,
+    hyde: bool,
+    expand: bool,
+    rerank: bool,
+    decay: bool,
+    iterative: bool,
+    collection: str | None,
+    domain: str | None,
+    since: str | None,
+    until: str | None,
+    entity: str | None,
+    source_type: str | None,
+    include_history: bool,
+    include_obsolete: bool,
+    as_of: str | None,
+    canonical_first: bool,
+    exclude_already_used: bool,
+) -> str:
+    """Build the response-cache key for /recall/v2.
+
+    Includes session_id + agent + active embedder adapter so concurrent
+    sessions don't share each other's spreading-activation-boosted results
+    (2026-04-16 R-3) and adapter swaps don't serve stale pre-adapter cached
+    rows (2026-04-17 LoRA A/B fix).
+    """
+    sess_hdr = request.headers.get("x-session-id", "")
+    agent_hdr = request.headers.get("x-agent", "")
+    try:
+        from indexer import _lora_embedder as _active_adapter
+
+        adapter_marker = _active_adapter[0] if _active_adapter else "base"
+    except Exception:
+        adapter_marker = "base"
+    return (
+        f"{q}:{n}:{hyde}:{expand}:{rerank}:{decay}:{iterative}:{collection}:"
+        f"{domain}:{since}:{until}:{entity}:{source_type}:"
+        f"{include_history}:{include_obsolete}:{as_of}:{canonical_first}:"
+        f"excl={exclude_already_used}:"
+        f"sess={sess_hdr}:agent={agent_hdr}:emb={adapter_marker}"
+    )
+
+
 # ── Routes: recall ──────────────────────────────────────
 @router.get("/recall", response_model=RecallResponse, tags=["recall"])
 @limiter.limit("3000/minute")  # M7-WS7 + M8 follow-up: read path — same envelope as /recall/v2
@@ -547,30 +596,28 @@ def recall_v2(
         raise HTTPException(status_code=400, detail="q parameter required")
 
     # Response cache — identical queries within 30s return cached.
-    # 2026-04-16 R-3: include session_id (from X-Session-Id header or
-    # Authorization-derived fingerprint) in the cache key so spreading
-    # activation + working-memory state doesn't leak between sessions.
-    # Previously two concurrent sessions sharing a query got each other's
-    # activation-boosted results.
-    _sess_hdr = request.headers.get("x-session-id", "")
-    _agent_hdr = request.headers.get("x-agent", "")
-    # 2026-04-17 fix: include the active embedder's adapter path in the
-    # cache key so adapter swaps (e.g. during A/B gate) don't serve stale
-    # pre-adapter results. Without this, cached responses from the base
-    # embedder get returned to adapter-path callers → zero measurable
-    # delta in LoRA A/B even when the adapter genuinely changes rankings.
-    try:
-        from indexer import _lora_embedder as _active_adapter
-
-        _adapter_marker = _active_adapter[0] if _active_adapter else "base"
-    except Exception:
-        _adapter_marker = "base"
-    cache_key = (
-        f"{q}:{n}:{hyde}:{expand}:{rerank}:{decay}:{iterative}:{collection}:"
-        f"{domain}:{since}:{until}:{entity}:{source_type}:"
-        f"{include_history}:{include_obsolete}:{as_of}:{canonical_first}:"
-        f"excl={exclude_already_used}:"
-        f"sess={_sess_hdr}:agent={_agent_hdr}:emb={_adapter_marker}"
+    # See _build_recall_v2_cache_key for the session/agent/adapter inclusions
+    # (2026-04-16 R-3 + 2026-04-17 LoRA A/B fix).
+    cache_key = _build_recall_v2_cache_key(
+        request,
+        q,
+        n,
+        hyde=hyde,
+        expand=expand,
+        rerank=rerank,
+        decay=decay,
+        iterative=iterative,
+        collection=collection,
+        domain=domain,
+        since=since,
+        until=until,
+        entity=entity,
+        source_type=source_type,
+        include_history=include_history,
+        include_obsolete=include_obsolete,
+        as_of=as_of,
+        canonical_first=canonical_first,
+        exclude_already_used=exclude_already_used,
     )
     cached = _recall_cache_get(cache_key)
     if cached:
