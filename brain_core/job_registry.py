@@ -485,6 +485,14 @@ JOB_REGISTRY: dict[str, list[str]] = {
         "-c",
         f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from atom_recall_quality import run; import json; print(json.dumps(run(), ensure_ascii=False))",
     ],
+    # 2026-05-12: D9 counterfactual replay. Picks 1 failed decision/day,
+    # dispatches Sage via codex (subscription) to imagine alternatives.
+    # Bounded to 1/day for cost control; can scale once outcomes prove out.
+    "counterfactual_replay": [
+        _py,
+        "-c",
+        f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from counterfactual import run_daily; import json; print(json.dumps(run_daily(max_dispatches=1), ensure_ascii=False))",
+    ],
     # 2026-04-16 Tier 3 #5: weekly Friston free-energy schema revision —
     # clusters repeated prediction errors, emits raw/inbox proposals for
     # Sage-level schema rewrite instead of atom-level punishment.

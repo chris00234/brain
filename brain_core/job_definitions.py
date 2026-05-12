@@ -1221,6 +1221,16 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         agent="system",
         misfire_grace=900,
     ),
+    # 2026-05-12: D9 — counterfactual replay via codex subscription CLI.
+    # Picks 1 candidate/day, no marginal cost. Runs 04:45 PT after
+    # atom_recall_quality.
+    ScheduledJob(
+        name="counterfactual_replay",
+        description="Daily counterfactual what-if replay on top failed decision (D9, codex subscription)",
+        trigger=CronTrigger(hour=4, minute=45),
+        agent="sage",
+        misfire_grace=1800,
+    ),
     # 2026-04-16 Tier 3 #5: weekly Friston schema-revision signal - emits
     # raw/inbox proposals for clusters of prediction errors instead of
     # silent per-atom punishment. Sun 08:45 (between dream_replay and

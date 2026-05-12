@@ -115,6 +115,129 @@ def list_counterfactual_candidates(
         conn.close()
 
 
+def simulate_counterfactual(decision_id: str) -> dict:
+    """Dispatch the counterfactual prompt to Sage via subscription CLI.
+
+    Uses cli_llm.cli_dispatch on the codex (GPT Pro subscription) path — no
+    marginal cost, within Chris's existing subscription policy. Bounded to
+    1 call per cron tick. Result stored in counterfactual_results table.
+    """
+    prompt_payload = build_counterfactual_prompt(decision_id)
+    if prompt_payload.get("error"):
+        return prompt_payload
+    try:
+        from cli_llm import cli_dispatch
+    except ImportError:
+        return {"error": "cli_llm_unavailable", "decision_id": decision_id}
+    full_prompt = prompt_payload.get("full_prompt") or ""
+    if not full_prompt:
+        return {"error": "empty_prompt", "decision_id": decision_id}
+    try:
+        r = cli_dispatch(full_prompt, backend="codex", timeout=60)
+    except Exception as exc:
+        return {"error": f"dispatch_failed:{exc!s}", "decision_id": decision_id}
+    if not getattr(r, "ok", False):
+        return {"error": "dispatch_not_ok", "decision_id": decision_id}
+    text = (getattr(r, "text", "") or "").strip()
+    parsed: dict | None = None
+    if text:
+        import re as _re
+
+        cleaned = _re.sub(r"^```(?:json)?|```$", "", text, flags=_re.MULTILINE).strip()
+        try:
+            parsed = json.loads(cleaned)
+        except json.JSONDecodeError:
+            parsed = None
+
+    # Store result
+    _ensure_results_schema()
+    conn = sqlite3.connect(str(AUTONOMY_DB), timeout=5)
+    try:
+        conn.execute(
+            "INSERT INTO counterfactual_results "
+            "(decision_id, raw_response, parsed_json, created_at) "
+            "VALUES (?, ?, ?, datetime('now'))",
+            (decision_id, text[:4000], json.dumps(parsed) if parsed else None),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return {
+        "decision_id": decision_id,
+        "ok": True,
+        "raw_response": text[:1000],
+        "parsed": parsed,
+    }
+
+
+_results_schema_done = False
+
+
+def _ensure_results_schema() -> None:
+    global _results_schema_done
+    if _results_schema_done:
+        return
+    conn = sqlite3.connect(str(AUTONOMY_DB), timeout=5)
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS counterfactual_results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                decision_id TEXT NOT NULL,
+                raw_response TEXT,
+                parsed_json TEXT,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_cf_results_decision
+                ON counterfactual_results(decision_id);
+            CREATE INDEX IF NOT EXISTS idx_cf_results_created
+                ON counterfactual_results(created_at);
+            """
+        )
+        conn.commit()
+        _results_schema_done = True
+    finally:
+        conn.close()
+
+
+def run_daily(max_dispatches: int = 1) -> dict:
+    """Cron entry: pick top-N candidates not yet simulated, dispatch each."""
+    _ensure_results_schema()
+    candidates = list_counterfactual_candidates(limit=max_dispatches * 5, days=14, only_failed=True)
+    if not candidates:
+        return {"status": "ok", "scanned": 0, "dispatched": 0}
+
+    conn = sqlite3.connect(str(AUTONOMY_DB), timeout=5)
+    try:
+        already = {
+            row[0]
+            for row in conn.execute("SELECT DISTINCT decision_id FROM counterfactual_results").fetchall()
+        }
+    finally:
+        conn.close()
+
+    dispatched: list[dict] = []
+    for c in candidates:
+        if len(dispatched) >= max_dispatches:
+            break
+        if c["decision_id"] in already:
+            continue
+        result = simulate_counterfactual(c["decision_id"])
+        dispatched.append(
+            {
+                "decision_id": c["decision_id"],
+                "ok": result.get("ok", False),
+                "error": result.get("error"),
+            }
+        )
+    return {
+        "status": "ok",
+        "candidates": len(candidates),
+        "dispatched": len(dispatched),
+        "results": dispatched,
+    }
+
+
 def build_counterfactual_prompt(decision_id: str) -> dict:
     """Return the prompt Sage would receive for counterfactual replay.
 
