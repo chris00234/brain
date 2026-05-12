@@ -1121,11 +1121,17 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         agent="system",
         misfire_grace=1800,
     ),
-    # Active forgetting - real pruning + stale superseded cleanup
+    # Active forgetting - real pruning + stale superseded cleanup.
+    # 2026-05-12 audit: was 4:15am, just 5 min after the dry-run started.
+    # Pruning a multi-thousand-row atoms table can take 10+ minutes; the
+    # 5-min gap meant the dry-run might still be in flight when the real
+    # pass started, defeating the purpose of having a dry-run gate at all.
+    # Moved to 5:15am — 65 min buffer is enough for the dry-run to finish
+    # (and any operator review window if Chris ever wires that up).
     ScheduledJob(
         name="memory_pruning_active",
-        description="Monthly REAL atrophied-memory pruning (15th 4:15am, dry_run=False)",
-        trigger=CronTrigger(day=15, hour=4, minute=15),
+        description="Monthly REAL atrophied-memory pruning (15th 5:15am, 1h after dry-run, dry_run=False)",
+        trigger=CronTrigger(day=15, hour=5, minute=15),
         agent="system",
         misfire_grace=1800,
     ),
