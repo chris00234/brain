@@ -28,7 +28,6 @@ import urllib.parse
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
@@ -76,8 +75,7 @@ def _conn() -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
-def _now() -> str:
-    return datetime.now(UTC).isoformat(timespec="seconds")
+from db import now_iso as _now  # noqa: E402  — single-source UTC stamp helper
 
 
 def _domain_of(url: str) -> str:

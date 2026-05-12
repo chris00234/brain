@@ -37,7 +37,6 @@ from __future__ import annotations
 import logging
 import sqlite3
 import sys
-from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -86,8 +85,7 @@ def _ensure_schema() -> None:
         conn.close()
 
 
-def _now_iso() -> str:
-    return datetime.now(UTC).isoformat(timespec="seconds")
+from db import now_iso as _now_iso  # noqa: E402  — single-source UTC stamp helper
 
 
 def record_valence(

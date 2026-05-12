@@ -57,8 +57,7 @@ BACKUP_DIR = BRAIN_LOGS_DIR / "self_modify_backups"
 AUDIT_LOG = BRAIN_LOGS_DIR / "self_modify_audit.jsonl"
 
 
-def _now_iso() -> str:
-    return datetime.now(UTC).isoformat(timespec="seconds")
+from db import now_iso as _now_iso  # noqa: E402  — single-source UTC stamp helper
 
 
 def _load_routes() -> dict:
