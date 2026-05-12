@@ -157,6 +157,25 @@ class RecallBatchRequest(BaseModel):
 # ── Service helpers (recall_v2 internal) ─────────────────
 
 
+def _apply_temporal_filter_inplace(
+    payloads: list[dict],
+    start_dt: datetime | None,
+    end_dt: datetime | None,
+) -> None:
+    """Apply Python-side temporal filter to each payload's results in place.
+
+    ChromaDB 1.4.1 can't range-filter string datetime fields, so the temporal
+    bounds get applied post-search. No-op if both bounds are None.
+
+    Mutates each payload's `results` list in place; returns None.
+    """
+    if not (start_dt or end_dt):
+        return
+    for p in payloads:
+        if isinstance(p, dict) and p.get("results"):
+            p["results"] = temporal.filter_by_created_at(p["results"], start_dt, end_dt)
+
+
 def _merge_source_timing(
     timing: dict[str, Any],
     payloads: list[dict],
@@ -732,12 +751,9 @@ def recall_v2(
             pass
         timing["hyde_ms"] = int((time.time() - t_hyde) * 1000)
 
-    # ChromaDB 1.4.1 can't range-filter string datetime fields, so apply the
-    # temporal filter Python-side to each payload's results before RRF.
-    if start_dt or end_dt:
-        for p in all_payloads:
-            if isinstance(p, dict) and p.get("results"):
-                p["results"] = temporal.filter_by_created_at(p["results"], start_dt, end_dt)
+    # See _apply_temporal_filter_inplace for the ChromaDB 1.4.1 range-filter
+    # workaround. No-op when neither bound is set.
+    _apply_temporal_filter_inplace(all_payloads, start_dt, end_dt)
 
     # Merge all result lists via RRF.
     result_lists = [p.get("results", []) for p in all_payloads if p.get("results")]

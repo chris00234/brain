@@ -89,3 +89,83 @@ def test_merge_source_timing_returns_none_and_mutates_in_place():
     result = _merge_source_timing(timing, [{"source_timing": {"x_ms": 1}}])
     assert result is None
     assert timing == {"x_ms": 1}
+
+
+# ── _apply_temporal_filter_inplace ──────────────────────────────────────
+
+
+def test_temporal_filter_no_bounds_is_no_op():
+    """Neither start_dt nor end_dt set → payloads untouched. This is the
+    common case (most queries have no temporal filter)."""
+    from routes.recall import _apply_temporal_filter_inplace
+
+    payloads = [
+        {"results": [{"id": "1", "created_at": "2026-01-01"}]},
+        {"results": [{"id": "2", "created_at": "2026-06-01"}]},
+    ]
+    snapshot = [dict(p) for p in payloads]
+    _apply_temporal_filter_inplace(payloads, None, None)
+    assert payloads == snapshot
+
+
+def test_temporal_filter_only_start_calls_filter_with_start(monkeypatch):
+    """When start_dt is set (with end_dt None), the underlying
+    temporal.filter_by_created_at is called with both bounds passed through."""
+    from datetime import UTC, datetime
+
+    import temporal
+    from routes.recall import _apply_temporal_filter_inplace
+
+    captured: list[tuple] = []
+
+    def _fake_filter(rows, start, end):
+        captured.append((tuple(r["id"] for r in rows), start, end))
+        if start is None:
+            return rows
+        return [r for r in rows if r.get("created_at", "") >= start.isoformat()]
+
+    monkeypatch.setattr(temporal, "filter_by_created_at", _fake_filter)
+
+    start = datetime(2026, 3, 1, tzinfo=UTC)
+    payloads = [
+        {"results": [{"id": "old", "created_at": "2026-01-15"}, {"id": "new", "created_at": "2026-04-01"}]},
+    ]
+    _apply_temporal_filter_inplace(payloads, start, None)
+    assert captured, "temporal.filter_by_created_at was not called"
+    assert captured[0][1] == start
+    assert captured[0][2] is None
+
+
+def test_temporal_filter_skips_payloads_with_no_results():
+    """Payloads with `results` empty or missing must not crash."""
+    from datetime import UTC, datetime
+
+    from routes.recall import _apply_temporal_filter_inplace
+
+    start = datetime(2026, 3, 1, tzinfo=UTC)
+    payloads = [
+        {},
+        {"results": []},
+        {"results": None},
+        {"other_key": 1},
+    ]
+    snapshot = [dict(p) for p in payloads]
+    _apply_temporal_filter_inplace(payloads, start, None)
+    assert payloads == snapshot
+
+
+def test_temporal_filter_handles_non_dict_payload_gracefully():
+    """`isinstance(p, dict)` guard — None/strings as payload elements
+    must not raise."""
+    from datetime import UTC, datetime
+
+    from routes.recall import _apply_temporal_filter_inplace
+
+    start = datetime(2026, 3, 1, tzinfo=UTC)
+    payloads = [None, "not-a-dict", 42, {"results": []}]
+    _apply_temporal_filter_inplace(payloads, start, None)
+    # No crash, no mutation on the non-dict entries
+    assert payloads[0] is None
+    assert payloads[1] == "not-a-dict"
+    assert payloads[2] == 42
+    assert payloads[3] == {"results": []}
