@@ -159,6 +159,18 @@ def social_list() -> dict:
         raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e)) from e
 
 
+# ── D8 (2026-05-12): interoception ─────────────────────
+@router.get("/brain/state-of-self", tags=["brain"])
+def state_of_self() -> dict:
+    """Return Chris's interoceptive state (sleep / activity / energy)."""
+    try:
+        from interoception import state_of_self as _state_of_self
+
+        return _state_of_self()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e)) from e
+
+
 # ── D7 (2026-05-12): per-atom recall quality ───────────
 @router.get("/brain/atoms/recall-quality/low", tags=["brain"])
 def atoms_low_quality(
