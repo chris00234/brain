@@ -157,6 +157,63 @@ class RecallBatchRequest(BaseModel):
 # ── Service helpers (recall_v2 internal) ─────────────────
 
 
+def _run_hyde_pass(
+    q: str,
+    n: int,
+    search_n_mult: int,
+    *,
+    domain: str | None,
+    where: dict | None,
+    collections_arg: list[str] | None,
+    entity: str | None,
+    source_type: str | None,
+    include_history: bool,
+    include_obsolete: bool,
+    as_of: str | None,
+) -> tuple[str | None, dict | None, int]:
+    """Second-pass HyDE search.
+
+    Generates a hypothetical answer via `_hyde.generate_hypothetical(q)`,
+    then runs `search_unified.search_all` with the hypothetical as the
+    query text — this changes the vector embedding while keeping the
+    original q for trust/freshness scoring (passed as `original_query`).
+
+    Returns `(hypothetical_or_none, payload_or_none, elapsed_ms)`. The
+    caller is responsible for:
+      - merging hypothetical into the outer `hypothetical` variable
+      - appending payload to `all_payloads` for downstream RRF
+      - writing `timing['hyde_ms'] = elapsed_ms`
+
+    Swallows any LLM/search exception so a failed HyDE pass never breaks
+    the recall — the route still returns the variant-search results.
+    """
+    t_hyde = time.time()
+    hypothetical: str | None = None
+    payload: dict | None = None
+    try:
+        hypothetical = _hyde.generate_hypothetical(q)
+        if hypothetical:
+            payload = search_unified.search_all(
+                hypothetical,
+                n * search_n_mult,
+                sources=["rag", "canonical", "obsidian"],
+                domain=domain,
+                original_query=q,
+                where=where,
+                collections=collections_arg,
+                entity=entity,
+                explain=False,
+                source_type=source_type,
+                include_history=include_history,
+                include_obsolete=include_obsolete,
+                as_of=as_of,
+            )
+    except Exception:
+        pass
+    elapsed_ms = int((time.time() - t_hyde) * 1000)
+    return hypothetical, payload, elapsed_ms
+
+
 def _build_empty_recall_v2_response(
     q: str,
     *,
@@ -771,33 +828,27 @@ def recall_v2(
     # (max across variants since sources run in parallel inside each search_all).
     _merge_source_timing(timing, all_payloads)
 
-    # Optionally replace query embedding via HyDE — it affects search_rag specifically.
-    # We already ran the normal recall; if hyde=True we also run a second pass using
-    # the hypothetical answer as the query text, which changes the vector embedding.
+    # Optionally replace query embedding via HyDE — see _run_hyde_pass docstring
+    # for the second-pass semantics.
     if hyde:
-        t_hyde = time.time()
-        try:
-            hypothetical = _hyde.generate_hypothetical(q)
-            if hypothetical:
-                hyde_payload = search_unified.search_all(
-                    hypothetical,
-                    n * search_n_mult,
-                    sources=["rag", "canonical", "obsidian"],
-                    domain=domain,
-                    original_query=q,
-                    where=where,
-                    collections=collections_arg,
-                    entity=entity,
-                    explain=False,
-                    source_type=source_type,
-                    include_history=include_history,
-                    include_obsolete=include_obsolete,
-                    as_of=as_of,
-                )
-                all_payloads.append(hyde_payload)
-        except Exception:
-            pass
-        timing["hyde_ms"] = int((time.time() - t_hyde) * 1000)
+        hyde_hypo, hyde_payload, hyde_ms = _run_hyde_pass(
+            q,
+            n,
+            search_n_mult,
+            domain=domain,
+            where=where,
+            collections_arg=collections_arg,
+            entity=entity,
+            source_type=source_type,
+            include_history=include_history,
+            include_obsolete=include_obsolete,
+            as_of=as_of,
+        )
+        if hyde_hypo is not None:
+            hypothetical = hyde_hypo
+        if hyde_payload is not None:
+            all_payloads.append(hyde_payload)
+        timing["hyde_ms"] = hyde_ms
 
     # See _apply_temporal_filter_inplace for the ChromaDB 1.4.1 range-filter
     # workaround. No-op when neither bound is set.

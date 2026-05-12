@@ -318,3 +318,148 @@ def test_empty_response_rerank_decay_flags_round_trip():
     )
     assert resp.rerank_applied is False
     assert resp.time_decay_applied is False
+
+
+# ── _run_hyde_pass ──────────────────────────────────────────────────────
+
+
+def _hyde_kwargs():
+    return dict(
+        domain=None,
+        where=None,
+        collections_arg=None,
+        entity=None,
+        source_type=None,
+        include_history=False,
+        include_obsolete=False,
+        as_of=None,
+    )
+
+
+def test_hyde_success_returns_hypothetical_and_payload(monkeypatch):
+    """Happy path: generate_hypothetical returns a string, search_all
+    returns a payload. Helper returns the triple."""
+    import hyde as _hyde
+    import search_unified
+    from routes.recall import _run_hyde_pass
+
+    monkeypatch.setattr(_hyde, "generate_hypothetical", lambda q: f"HYPO: {q}")
+    captured: dict = {}
+
+    def _fake_search(query, n, **kw):
+        captured["query"] = query
+        captured["n"] = n
+        captured["kw"] = kw
+        return {"results": [{"id": "h1", "score": 0.9}]}
+
+    monkeypatch.setattr(search_unified, "search_all", _fake_search)
+
+    hypo, payload, ms = _run_hyde_pass("what is x?", 5, 3, **_hyde_kwargs())
+    assert hypo == "HYPO: what is x?"
+    assert payload == {"results": [{"id": "h1", "score": 0.9}]}
+    assert isinstance(ms, int)
+    assert ms >= 0
+    # Verify the search_all call shape: hypothetical as query, original_query as q,
+    # n*search_n_mult inflated count, fixed three-source list
+    assert captured["query"] == "HYPO: what is x?"
+    assert captured["n"] == 15  # 5 * 3
+    assert captured["kw"]["original_query"] == "what is x?"
+    assert captured["kw"]["sources"] == ["rag", "canonical", "obsidian"]
+    assert captured["kw"]["explain"] is False
+
+
+def test_hyde_empty_hypothetical_skips_search(monkeypatch):
+    """generate_hypothetical returns falsy → don't call search_all,
+    payload is None, timing still recorded."""
+    import hyde as _hyde
+    import search_unified
+    from routes.recall import _run_hyde_pass
+
+    monkeypatch.setattr(_hyde, "generate_hypothetical", lambda q: "")
+    search_called: list = []
+    monkeypatch.setattr(search_unified, "search_all", lambda *a, **k: search_called.append(True) or {})
+
+    hypo, payload, ms = _run_hyde_pass("q", 5, 3, **_hyde_kwargs())
+    assert hypo == ""
+    assert payload is None
+    assert search_called == [], "search_all called even though hypothetical was empty"
+    assert isinstance(ms, int)
+
+
+def test_hyde_generate_exception_returns_none_none(monkeypatch):
+    """If generate_hypothetical raises, helper swallows the exception and
+    returns (None, None, elapsed_ms). The route then keeps hypothetical
+    at its prior (None) value."""
+    import hyde as _hyde
+    from routes.recall import _run_hyde_pass
+
+    def _boom(q):
+        raise RuntimeError("LLM down")
+
+    monkeypatch.setattr(_hyde, "generate_hypothetical", _boom)
+    hypo, payload, ms = _run_hyde_pass("q", 5, 3, **_hyde_kwargs())
+    assert hypo is None
+    assert payload is None
+    assert isinstance(ms, int)
+
+
+def test_hyde_search_exception_returns_hypo_none_payload(monkeypatch):
+    """When generate_hypothetical succeeds but search_all raises, we still
+    keep the hypothetical text (it might be useful in the response
+    meta_note) — payload is None."""
+    import hyde as _hyde
+    import search_unified
+    from routes.recall import _run_hyde_pass
+
+    monkeypatch.setattr(_hyde, "generate_hypothetical", lambda q: "the answer is X")
+
+    def _boom(*a, **k):
+        raise RuntimeError("qdrant timeout")
+
+    monkeypatch.setattr(search_unified, "search_all", _boom)
+
+    hypo, payload, ms = _run_hyde_pass("q", 5, 3, **_hyde_kwargs())
+    # Original inline code: `hypothetical = _hyde.generate_hypothetical(q)` runs
+    # BEFORE search_all. If search throws, hypothetical is already assigned.
+    # The except clause swallows but doesn't undo the assignment.
+    assert hypo == "the answer is X"
+    assert payload is None
+    assert isinstance(ms, int)
+
+
+def test_hyde_kwargs_threaded_into_search(monkeypatch):
+    """All keyword filters must be passed through to search_all unchanged."""
+    import hyde as _hyde
+    import search_unified
+    from routes.recall import _run_hyde_pass
+
+    monkeypatch.setattr(_hyde, "generate_hypothetical", lambda q: "hypo")
+    captured: dict = {}
+
+    def _fake_search(query, n, **kw):
+        captured.update(kw)
+        return {"results": []}
+
+    monkeypatch.setattr(search_unified, "search_all", _fake_search)
+
+    _run_hyde_pass(
+        "q",
+        4,
+        2,
+        domain="coding",
+        where={"k": "v"},
+        collections_arg=["canonical"],
+        entity="openclaw",
+        source_type="note",
+        include_history=True,
+        include_obsolete=True,
+        as_of="2026-01-01",
+    )
+    assert captured["domain"] == "coding"
+    assert captured["where"] == {"k": "v"}
+    assert captured["collections"] == ["canonical"]
+    assert captured["entity"] == "openclaw"
+    assert captured["source_type"] == "note"
+    assert captured["include_history"] is True
+    assert captured["include_obsolete"] is True
+    assert captured["as_of"] == "2026-01-01"
