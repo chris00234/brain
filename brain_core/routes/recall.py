@@ -157,6 +157,17 @@ class RecallBatchRequest(BaseModel):
 # ── Service helpers (recall_v2 internal) ─────────────────
 
 
+def _filter_nonempty_result_lists(payloads: list[dict]) -> list[list[dict]]:
+    """Pull the `results` list out of each payload, dropping empty/missing.
+
+    Each payload from `search_unified.search_all` either has a non-empty
+    `results` list, an empty list, or is missing the key entirely. RRF
+    fusion needs only the non-empty lists; the rest would distort the
+    reciprocal-rank contributions if included as empty arrays.
+    """
+    return [p.get("results", []) for p in payloads if p.get("results")]
+
+
 def _apply_temporal_filter_inplace(
     payloads: list[dict],
     start_dt: datetime | None,
@@ -755,8 +766,9 @@ def recall_v2(
     # workaround. No-op when neither bound is set.
     _apply_temporal_filter_inplace(all_payloads, start_dt, end_dt)
 
-    # Merge all result lists via RRF.
-    result_lists = [p.get("results", []) for p in all_payloads if p.get("results")]
+    # Merge all result lists via RRF. See _filter_nonempty_result_lists for
+    # why empty/missing-results payloads must be dropped before fusion.
+    result_lists = _filter_nonempty_result_lists(all_payloads)
     if not result_lists:
         timing["total_ms"] = int((time.time() - t_start) * 1000)
         _metrics_buf.record_search_latency(timing["total_ms"], timing)

@@ -169,3 +169,56 @@ def test_temporal_filter_handles_non_dict_payload_gracefully():
     assert payloads[1] == "not-a-dict"
     assert payloads[2] == 42
     assert payloads[3] == {"results": []}
+
+
+# ── _filter_nonempty_result_lists ───────────────────────────────────────
+
+
+def test_filter_nonempty_drops_missing_results_key():
+    from routes.recall import _filter_nonempty_result_lists
+
+    payloads = [{"source_timing": {}}, {"results": [{"id": 1}]}]
+    out = _filter_nonempty_result_lists(payloads)
+    assert out == [[{"id": 1}]]
+
+
+def test_filter_nonempty_drops_empty_results_list():
+    from routes.recall import _filter_nonempty_result_lists
+
+    payloads = [{"results": []}, {"results": [{"id": 1}]}, {"results": []}]
+    out = _filter_nonempty_result_lists(payloads)
+    assert out == [[{"id": 1}]]
+
+
+def test_filter_nonempty_preserves_order():
+    """Order matters for downstream RRF — the helper must not reorder."""
+    from routes.recall import _filter_nonempty_result_lists
+
+    payloads = [
+        {"results": [{"id": "a"}]},
+        {"results": []},
+        {"results": [{"id": "b"}, {"id": "c"}]},
+        {"results": [{"id": "d"}]},
+    ]
+    out = _filter_nonempty_result_lists(payloads)
+    assert out == [
+        [{"id": "a"}],
+        [{"id": "b"}, {"id": "c"}],
+        [{"id": "d"}],
+    ]
+
+
+def test_filter_nonempty_all_empty_returns_empty_outer_list():
+    """When every payload is empty/missing results, return [] so the route
+    can fast-return the empty-RecallV2Response (this is the early-return
+    guard before RRF)."""
+    from routes.recall import _filter_nonempty_result_lists
+
+    payloads = [{"results": []}, {}, {"results": []}]
+    assert _filter_nonempty_result_lists(payloads) == []
+
+
+def test_filter_nonempty_empty_input_is_empty_output():
+    from routes.recall import _filter_nonempty_result_lists
+
+    assert _filter_nonempty_result_lists([]) == []
