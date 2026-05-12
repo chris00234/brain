@@ -159,6 +159,32 @@ def social_list() -> dict:
         raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e)) from e
 
 
+# ── D10 (2026-05-12): multimodal episodic binding ──────
+@router.get("/brain/episode/by-atom/{atom_id}", tags=["brain"])
+def episode_by_atom(atom_id: str, window_minutes: int = Query(default=30, ge=1, le=720)) -> dict:
+    """Return everything brain remembers from the temporal window around this atom."""
+    try:
+        from episodic_binding import bind_episode_by_atom
+
+        return bind_episode_by_atom(atom_id, window_minutes=window_minutes)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e)) from e
+
+
+@router.get("/brain/episode/by-time", tags=["brain"])
+def episode_by_time(
+    ts: str = Query(...),
+    window_minutes: int = Query(default=30, ge=1, le=720),
+) -> dict:
+    """Return all brain artifacts within a temporal window of a timestamp."""
+    try:
+        from episodic_binding import bind_episode_by_timestamp
+
+        return bind_episode_by_timestamp(ts, window_minutes=window_minutes)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e)) from e
+
+
 # ── D9 (2026-05-12): counterfactual simulation candidates ─────
 @router.get("/brain/counterfactual/candidates", tags=["brain"])
 def counterfactual_candidates(
