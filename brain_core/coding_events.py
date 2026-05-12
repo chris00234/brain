@@ -70,8 +70,7 @@ def ensure_schema() -> None:
         conn.commit()
 
 
-def _now_iso() -> str:
-    return datetime.now(UTC).isoformat(timespec="seconds")
+from db import now_iso as _now_iso  # noqa: E402  — single-source UTC stamp helper
 
 
 def _parse_fts_row(row: sqlite3.Row) -> dict:

@@ -63,8 +63,7 @@ NOVELTY_HALF_LIFE = 3
 MAX_FOCUS_CHARS = 300
 
 
-def _now_iso() -> str:
-    return datetime.now(UTC).isoformat(timespec="seconds")
+from db import now_iso as _now_iso  # noqa: E402  — single-source UTC stamp helper
 
 
 def _recent_focus_signal() -> tuple[str, list[dict]]:

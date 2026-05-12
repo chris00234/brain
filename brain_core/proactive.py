@@ -68,8 +68,7 @@ def _make_id(*parts: str) -> str:
     return hashlib.sha256("|".join(parts).encode()).hexdigest()[:16]
 
 
-def _now_iso() -> str:
-    return datetime.now(UTC).isoformat(timespec="seconds")
+from db import now_iso as _now_iso  # noqa: E402  — single-source UTC stamp helper
 
 
 def _expires_iso(hours: int = INSIGHT_TTL_HOURS) -> str:

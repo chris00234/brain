@@ -36,7 +36,6 @@ import os
 import re
 import sqlite3
 import sys
-from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -108,8 +107,7 @@ def _rank_entities_for_summary(entity_names: set[str]) -> list[str]:
     return sorted(cleaned, key=lambda e: (len(e.split()) > 5, len(e), e.lower()))[:MAX_ENTITIES_PER_SUMMARY]
 
 
-def _now_iso() -> str:
-    return datetime.now(UTC).isoformat(timespec="seconds")
+from db import now_iso as _now_iso  # noqa: E402  — single-source UTC stamp helper
 
 
 def _ensure_schema() -> None:
