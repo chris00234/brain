@@ -12,7 +12,6 @@ import json
 import logging
 import sqlite3
 from collections.abc import Sequence
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -105,7 +104,16 @@ _HOT_METADATA_KEYS = {
 
 
 def _now() -> str:
-    return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+    """Z-suffix UTC timestamp. Delegates to db.now_iso(z_suffix=True) so
+    entry_documents.last_indexed_at lex-sorts with atoms_store / entity_graph
+    timestamps without divergence."""
+    import sys as _sys
+    from pathlib import Path as _Path
+
+    _sys.path.insert(0, str(_Path(__file__).resolve().parent))
+    from db import now_iso as _db_now_iso
+
+    return _db_now_iso(z_suffix=True)
 
 
 def ensure_entry_manifest_schema(db_path: Path | None = None) -> None:

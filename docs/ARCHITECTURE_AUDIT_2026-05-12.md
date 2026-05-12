@@ -141,6 +141,32 @@ These are candidates for either deeper wiring or archival.
 99 `os.getenv()` calls across 30 files. `brain_loop.py` has 7 inline,
 `cross_encoder_model.py` has 14 inline. Should flow through `config.py`.
 
+### Timestamp format inconsistency (2026-05-12 follow-up)
+
+Two ISO8601 conventions coexist in brain.db tables:
+
+| Writer | Format | Tables |
+|---|---|---|
+| `atoms_store._now()` | `...Z` | atoms.{valid_from, valid_until, updated_at} |
+| `entry_manifest._now()` | `...Z` | entry_documents.last_indexed_at |
+| `memory_lifecycle._now_iso()` | `...Z` | (Qdrant payload metadata) |
+| `entity_graph._now()` | `...+00:00` | entities.{created_at, last_seen_at} |
+| `db.now_iso()` default | `...+00:00` | most autonomy.db tables |
+
+Both parse correctly via `datetime.fromisoformat`. The risk is purely
+lexicographic: a single ORDER BY across a Z-and-+00:00 mixed column would
+sort `+00:00` entries before `Z` entries within the same instant (`+`=0x2B
+< `Z`=0x5A). Currently no JOIN unifies these columns, so the bug is dormant.
+
+Mitigation (2026-05-12): `db.now_iso(z_suffix=True)` added so the next
+migration phase can normalize the +00:00 writers without changing
+atoms_store / entry_manifest behavior. atoms_store and entry_manifest
+already delegate to the new helper.
+
+Decision deferred: normalizing the historical `+00:00` rows in
+brain_core.entities requires a one-shot UPDATE plus a `CHECK` constraint
+to prevent regression. Schedule for a quiet-hour sprint.
+
 ### Test coverage gaps
 No dedicated unit tests for the 7 largest production modules:
 - `test_search_unified.py` (only basic exists)

@@ -28,6 +28,26 @@ def test_now_iso_returns_utc_iso(tmp_path, monkeypatch):
     assert parsed.tzinfo.utcoffset(parsed) == datetime.now(UTC).tzinfo.utcoffset(datetime.now(UTC))
 
 
+def test_now_iso_default_is_plus_zero_zero(tmp_path, monkeypatch):
+    """Default form (no z_suffix) must end with the explicit +00:00 offset."""
+    db = _reload(monkeypatch, tmp_path)
+    ts = db.now_iso()
+    assert ts.endswith("+00:00"), f"expected +00:00 suffix, got {ts!r}"
+    assert "Z" not in ts
+
+
+def test_now_iso_z_suffix_returns_z_form(tmp_path, monkeypatch):
+    """z_suffix=True must emit ...Z so it lex-compares with atoms_store /
+    entry_manifest / entity_graph timestamps."""
+    db = _reload(monkeypatch, tmp_path)
+    ts = db.now_iso(z_suffix=True)
+    assert ts.endswith("Z"), f"expected Z suffix, got {ts!r}"
+    assert "+00:00" not in ts
+    # Still parses as UTC
+    parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    assert parsed.tzinfo is not None
+
+
 def test_ensure_schema_is_idempotent_per_key(tmp_path, monkeypatch):
     db = _reload(monkeypatch, tmp_path)
     conn = sqlite3.connect(str(tmp_path / "brain.db"))

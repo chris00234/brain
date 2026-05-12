@@ -42,12 +42,21 @@ except ImportError:
     AUTONOMY_DB = Path("/Users/chrischo/server/brain/logs/autonomy.db")
 
 
-def now_iso() -> str:
+def now_iso(*, z_suffix: bool = False) -> str:
     """UTC second-precision ISO timestamp string.
 
     Replaces 20+ inline `_now_iso()` definitions across brain_core.
+
+    `z_suffix=True` returns `...Z` instead of `...+00:00`. atoms_store,
+    entry_manifest, memory_lifecycle, and entity_graph all write Z-suffix
+    timestamps so their valid_from / observed_at columns lex-sort the same
+    way. Modules writing to those tables MUST pass z_suffix=True or risk
+    silent timestamp-ordering bugs.
     """
-    return datetime.now(UTC).isoformat(timespec="seconds")
+    stamp = datetime.now(UTC).isoformat(timespec="seconds")
+    if z_suffix:
+        return stamp.replace("+00:00", "Z")
+    return stamp
 
 
 def open_brain_db(timeout: float = 10.0, row_factory: type | None = None) -> sqlite3.Connection:

@@ -361,7 +361,10 @@ def _now() -> str:
     # Emit Z-suffix so lexicographic comparisons match the Z-normalized
     # timestamps written by memory_lifecycle / entity_graph. Mixed
     # +00:00 vs Z strings broke age ordering in prune / cleanup sweeps.
-    return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+    # Delegates to db.now_iso(z_suffix=True) — single source of truth.
+    from db import now_iso as _db_now_iso
+
+    return _db_now_iso(z_suffix=True)
 
 
 def init_schema(db_path: Path | None = None) -> None:
