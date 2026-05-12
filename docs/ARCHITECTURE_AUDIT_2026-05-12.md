@@ -53,24 +53,41 @@ Routes contain raw SQL instead of delegating to service modules:
 
 Worst: `routes/recall.py recall_v2()` is an 803-line route handler.
 
-### 4. HTTP scattered across brain_core
+### 4. HTTP scattered across brain_core (partially intentional)
 13 modules do direct `urllib.request` / `httpx` calls instead of going
-through `http_pool.py` (which exists at 100 lines and provides
-`http_json()`). Only `indexer.py` uses the pool. Others (slo_monitor,
-self_heal, telegram_alert, vision_llm, recall_judge, web_search,
-reranker_client, migrations_brain_db, pipeline/memory_nudge, etc.)
-bypass it, losing connection pooling and centralized timeout config.
+through `http_pool.py`. Initial audit flagged this as a violation, but
+deeper inspection (2026-05-12) shows most are intentional:
+
+- **slo_monitor** — uses raw urllib because `http_pool` keep-alive would
+  distort fresh-TCP latency measurements (the whole point of the probe)
+- **telegram_alert** — sends `application/x-www-form-urlencoded`, not JSON;
+  `http_pool.http_json()` only does JSON
+- **vision_llm** — uploads binary image data; http_pool doesn't support it
+- **web_search** — uses httpx (async-capable, needed for parallel queries)
+- **reranker_client** — has worker discovery + retry logic specific to the
+  reranker process lifecycle
+
+True candidates for migration are narrower: `recall_judge.py`, `self_heal.py`,
+`pipeline/memory_nudge.py`, `migrations_brain_db.py`. Each is brain-internal
+JSON over local HTTP and would benefit from connection reuse. Defer to a
+future sprint with explicit per-module review rather than a blanket migration.
 
 ### 5. 141 cron jobs with 2-5am congestion
 The 2am-5am window has 40+ heavy jobs competing for SQLite locks,
 Qdrant writes, local embedder, and LLM CLI slots. Stagger comments
 throughout CRON_MAP.md indicate this is already causing contention.
 
-Functional overlap candidates:
-- `slo_monitor` (hourly) vs `slos_check` (5-min) — both alert SLO budgets
+Functional overlap candidates (verify before merging — most distinctions
+are real on closer reading):
+- `slo_monitor` (hourly) vs `slos_check` (5-min) — **NOT a duplicate**:
+  slo_monitor does ACTIVE PROBING with fresh latency samples;
+  slos_check reads accumulated SLO state. Complementary.
 - `memory_pruning` + `memory_pruning_active` — 5 min apart, no gate
-- `proactive_check` (3x/day) vs `proactive_insights` (daily) — overlap
-- `canonical_staleness_check` partially overlaps `canonical_lint` + `stale_current_truth`
+  (real issue — verify the dry-run actually completes first)
+- `proactive_check` (3x/day, Sage) vs `proactive_insights` (daily, system)
+  — different agents, different cadences, potentially complementary
+- `canonical_staleness_check` partially overlaps `canonical_lint` +
+  `stale_current_truth` — verify each detector's claim space
 
 ## Smaller issues
 
