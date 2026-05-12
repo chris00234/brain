@@ -11,10 +11,12 @@ This module is the single source of truth. New modules should import
 from here. Existing modules can migrate piecemeal; their internal helpers
 remain backward-compatible.
 
-Three primitives:
+Primitives:
   now_iso()              — UTC second-precision ISO timestamp string
   open_brain_db(timeout) — sqlite3.Connection with WAL + timeout sane defaults
   open_autonomy_db(...)  — same, against autonomy.db
+  open_audit_db(...)     — same, against audit.db (honors BRAIN_AUDIT_DB env)
+  open_facts_db(...)     — same, against facts.db
   ensure_schema(conn, ddl) — idempotent schema execute with module-level cache
 
 Plus a CONTEXT MANAGER `transaction(conn)` that wraps BEGIN IMMEDIATE
@@ -27,6 +29,7 @@ Resource-safe: every helper closes connections in a `finally` block.
 from __future__ import annotations
 
 import contextlib
+import os
 import sqlite3
 import sys
 from collections.abc import Iterator
@@ -36,10 +39,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 try:
-    from config import AUTONOMY_DB, BRAIN_DB
+    from config import AUDIT_DB, AUTONOMY_DB, BRAIN_DB, FACTS_DB
 except ImportError:
     BRAIN_DB = Path("/Users/chrischo/server/brain/logs/brain.db")
     AUTONOMY_DB = Path("/Users/chrischo/server/brain/logs/autonomy.db")
+    AUDIT_DB = Path("/Users/chrischo/server/brain/logs/audit.db")
+    FACTS_DB = Path("/Users/chrischo/server/brain/logs/facts.db")
 
 
 def now_iso(*, z_suffix: bool = False) -> str:
@@ -73,6 +78,38 @@ def open_brain_db(timeout: float = 10.0, row_factory: type | None = None) -> sql
 def open_autonomy_db(timeout: float = 5.0, row_factory: type | None = None) -> sqlite3.Connection:
     """Open autonomy.db with WAL + sane defaults."""
     conn = sqlite3.connect(str(AUTONOMY_DB), timeout=timeout)
+    if row_factory is not None:
+        conn.row_factory = row_factory
+    return conn
+
+
+def _resolve_audit_db() -> Path:
+    """Resolve the audit DB path, honoring BRAIN_AUDIT_DB env override.
+
+    Re-read at call time (not module load) so pytest fixtures that set the
+    env var AFTER importing this module still take effect — same pattern
+    audit_log.py uses internally.
+    """
+    override = os.environ.get("BRAIN_AUDIT_DB")
+    if override:
+        return Path(override)
+    return AUDIT_DB
+
+
+def open_audit_db(timeout: float = 10.0, row_factory: type | None = None) -> sqlite3.Connection:
+    """Open audit.db (or BRAIN_AUDIT_DB override). Caller MUST close."""
+    path = _resolve_audit_db()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(path), timeout=timeout)
+    if row_factory is not None:
+        conn.row_factory = row_factory
+    return conn
+
+
+def open_facts_db(timeout: float = 10.0, row_factory: type | None = None) -> sqlite3.Connection:
+    """Open facts.db with WAL + sane defaults. Caller MUST close."""
+    FACTS_DB.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(FACTS_DB), timeout=timeout)
     if row_factory is not None:
         conn.row_factory = row_factory
     return conn

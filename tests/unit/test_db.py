@@ -16,6 +16,9 @@ def _reload(monkeypatch, tmp_path):
 
     monkeypatch.setattr(db, "BRAIN_DB", tmp_path / "brain.db")
     monkeypatch.setattr(db, "AUTONOMY_DB", tmp_path / "autonomy.db")
+    monkeypatch.setattr(db, "AUDIT_DB", tmp_path / "audit.db")
+    monkeypatch.setattr(db, "FACTS_DB", tmp_path / "facts.db")
+    monkeypatch.delenv("BRAIN_AUDIT_DB", raising=False)
     db._schema_cache.clear()
     return db
 
@@ -125,3 +128,64 @@ def test_parse_iso_utc_returns_none_on_invalid(tmp_path, monkeypatch):
     assert db.parse_iso_utc(None) is None
     assert db.parse_iso_utc("") is None
     assert db.parse_iso_utc("not a date") is None
+
+
+def test_open_audit_db_creates_parent_and_returns_connection(tmp_path, monkeypatch):
+    """open_audit_db must mkdir parent (audit.db is its own file) and yield a
+    usable sqlite connection."""
+    db = _reload(monkeypatch, tmp_path)
+    nested = tmp_path / "nested" / "audit.db"
+    monkeypatch.setattr(db, "AUDIT_DB", nested)
+    conn = db.open_audit_db()
+    try:
+        conn.execute("CREATE TABLE t(id INT)")
+        conn.execute("INSERT INTO t VALUES (1)")
+        conn.commit()
+        assert nested.exists()
+        assert conn.execute("SELECT id FROM t").fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+def test_open_audit_db_honors_brain_audit_db_env(tmp_path, monkeypatch):
+    """BRAIN_AUDIT_DB env override must take effect at call time, even when
+    the default AUDIT_DB is bound to a different path."""
+    db = _reload(monkeypatch, tmp_path)
+    override = tmp_path / "override-audit.db"
+    monkeypatch.setenv("BRAIN_AUDIT_DB", str(override))
+    conn = db.open_audit_db()
+    try:
+        conn.execute("CREATE TABLE t(id INT)")
+        conn.commit()
+        assert override.exists()
+        # The default AUDIT_DB path should NOT have been created
+        assert not (tmp_path / "audit.db").exists()
+    finally:
+        conn.close()
+
+
+def test_open_audit_db_row_factory_applied(tmp_path, monkeypatch):
+    db = _reload(monkeypatch, tmp_path)
+    conn = db.open_audit_db(row_factory=sqlite3.Row)
+    try:
+        conn.execute("CREATE TABLE t(x INT)")
+        conn.execute("INSERT INTO t(x) VALUES (42)")
+        conn.commit()
+        row = conn.execute("SELECT x FROM t").fetchone()
+        assert row["x"] == 42  # only works with Row factory
+    finally:
+        conn.close()
+
+
+def test_open_facts_db_creates_parent_and_returns_connection(tmp_path, monkeypatch):
+    db = _reload(monkeypatch, tmp_path)
+    nested = tmp_path / "nested" / "facts.db"
+    monkeypatch.setattr(db, "FACTS_DB", nested)
+    conn = db.open_facts_db()
+    try:
+        conn.execute("CREATE TABLE t(id INT)")
+        conn.execute("INSERT INTO t VALUES (1)")
+        conn.commit()
+        assert nested.exists()
+    finally:
+        conn.close()

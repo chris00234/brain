@@ -46,6 +46,12 @@ BRAIN_HOME = HOME / "server"  # ~/server — root of all server services
 QDRANT_DATA = BRAIN_DIR / "qdrant-data"
 EMBED_CACHE_DB = BRAIN_LOGS_DIR / "embedding_cache.db"
 AUTONOMY_DB = BRAIN_LOGS_DIR / "autonomy.db"
+# audit_log.py owns audit.db; BRAIN_AUDIT_DB env overrides for test isolation
+# (pytest fixtures redirect to tmp_path so dev scripts don't pollute prod).
+AUDIT_DB = BRAIN_LOGS_DIR / "audit.db"
+# fact_store.py owns facts.db — structured (entity, attribute, value) triples
+# with temporal validity, separate from the atoms graph.
+FACTS_DB = BRAIN_LOGS_DIR / "facts.db"
 
 # ── Derived paths: openclaw ───────────────────────────────
 OPENCLAW_BIN = str(HOME / ".local" / "bin" / "openclaw")
