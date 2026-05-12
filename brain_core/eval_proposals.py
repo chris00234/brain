@@ -14,69 +14,36 @@ from __future__ import annotations
 
 import sqlite3
 import sys
-import threading
 import uuid
-from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-try:
-    from config import AUTONOMY_DB
-except ImportError:
-    AUTONOMY_DB = Path("/Users/chrischo/server/brain/logs/autonomy.db")
+from db import ensure_schema as _ensure_schema_cached
+from db import now_iso, open_autonomy_db
 
-
-_init_lock = threading.Lock()
-_initialized = False
-
-
-def _now() -> str:
-    return datetime.now(UTC).isoformat(timespec="seconds")
-
-
-def _ensure_schema() -> None:
-    global _initialized
-    if _initialized:
-        return
-    with _init_lock:
-        if _initialized:
-            return
-        AUTONOMY_DB.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(AUTONOMY_DB))
-        try:
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS eval_proposals (
-                  id TEXT PRIMARY KEY,
-                  query TEXT NOT NULL,
-                  expected TEXT NOT NULL,
-                  expected_sources TEXT NOT NULL DEFAULT '[]',
-                  source_event TEXT NOT NULL DEFAULT 'manual',
-                  status TEXT NOT NULL DEFAULT 'candidate',
-                  confidence REAL NOT NULL DEFAULT 0.5,
-                  novelty_score REAL,
-                  promoted_at TEXT,
-                  reviewed_at TEXT,
-                  created_at TEXT NOT NULL
-                )
-                """
-            )
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_eval_proposals_status ON eval_proposals(status)")
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_eval_proposals_created ON eval_proposals(created_at)"
-            )
-            conn.commit()
-        finally:
-            conn.close()
-        _initialized = True
+_SCHEMA_DDL = """
+CREATE TABLE IF NOT EXISTS eval_proposals (
+  id TEXT PRIMARY KEY,
+  query TEXT NOT NULL,
+  expected TEXT NOT NULL,
+  expected_sources TEXT NOT NULL DEFAULT '[]',
+  source_event TEXT NOT NULL DEFAULT 'manual',
+  status TEXT NOT NULL DEFAULT 'candidate',
+  confidence REAL NOT NULL DEFAULT 0.5,
+  novelty_score REAL,
+  promoted_at TEXT,
+  reviewed_at TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_eval_proposals_status ON eval_proposals(status);
+CREATE INDEX IF NOT EXISTS idx_eval_proposals_created ON eval_proposals(created_at);
+"""
 
 
 def _conn() -> sqlite3.Connection:
-    _ensure_schema()
-    conn = sqlite3.connect(str(AUTONOMY_DB))
-    conn.row_factory = sqlite3.Row
+    conn = open_autonomy_db(row_factory=sqlite3.Row)
+    _ensure_schema_cached(conn, "eval_proposals", _SCHEMA_DDL)
     return conn
 
 
@@ -108,7 +75,7 @@ def insert_proposal(
                     _json.dumps(expected_sources or []),
                     source_event,
                     confidence,
-                    _now(),
+                    now_iso(),
                 ),
             )
             conn.commit()
@@ -145,13 +112,13 @@ def mark_status(proposal_id: str, status: str, *, novelty_score: float | None = 
                 conn.execute(
                     "UPDATE eval_proposals SET status = ?, promoted_at = ?, novelty_score = ? "
                     "WHERE id = ?",
-                    (status, _now(), novelty_score, proposal_id),
+                    (status, now_iso(), novelty_score, proposal_id),
                 )
             elif status == "rejected":
                 conn.execute(
                     "UPDATE eval_proposals SET status = ?, reviewed_at = ?, novelty_score = ? "
                     "WHERE id = ?",
-                    (status, _now(), novelty_score, proposal_id),
+                    (status, now_iso(), novelty_score, proposal_id),
                 )
             else:
                 conn.execute(

@@ -15,16 +15,21 @@ sys.path.insert(0, str(BRAIN_ROOT / "brain_core"))
 
 @pytest.fixture
 def isolated_promote(tmp_path, monkeypatch):
-    """Wire eval_holdout_promote against tmp_path eval set + a stubbed embedder."""
-    for mod in ("eval_holdout_promote", "eval_proposals", "config"):
+    """Wire eval_holdout_promote against tmp_path eval set + a stubbed embedder.
+
+    eval_proposals migrated to db.open_autonomy_db on 2026-05-12; the canonical
+    AUTONOMY_DB now lives on the shared db module.
+    """
+    for mod in ("eval_holdout_promote", "eval_proposals", "config", "db"):
         if mod in sys.modules:
             del sys.modules[mod]
+    import db as _db
     import eval_holdout_promote
     import eval_proposals
 
     fake_db = tmp_path / "autonomy.db"
-    monkeypatch.setattr(eval_proposals, "AUTONOMY_DB", fake_db)
-    monkeypatch.setattr(eval_proposals, "_initialized", False)
+    monkeypatch.setattr(_db, "AUTONOMY_DB", fake_db)
+    _db._schema_cache.clear()
     monkeypatch.setattr(eval_holdout_promote, "list_candidates", eval_proposals.list_candidates)
     monkeypatch.setattr(eval_holdout_promote, "mark_status", eval_proposals.mark_status)
 

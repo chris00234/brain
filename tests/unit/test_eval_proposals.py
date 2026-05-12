@@ -14,15 +14,21 @@ sys.path.insert(0, str(BRAIN_ROOT / "brain_core"))
 
 @pytest.fixture
 def isolated_proposals(tmp_path, monkeypatch):
-    """Point eval_proposals at a fresh tmp_path autonomy.db."""
-    for mod in ("eval_proposals", "config"):
+    """Point eval_proposals at a fresh tmp_path autonomy.db.
+
+    After 2026-05-12 eval_proposals delegates to db.open_autonomy_db, so the
+    canonical AUTONOMY_DB lives on the shared db module. Patch db.AUTONOMY_DB
+    and clear the schema cache so each test starts fresh.
+    """
+    for mod in ("eval_proposals", "config", "db"):
         if mod in sys.modules:
             del sys.modules[mod]
+    import db as _db
     import eval_proposals
 
     fake_db = tmp_path / "autonomy.db"
-    monkeypatch.setattr(eval_proposals, "AUTONOMY_DB", fake_db)
-    monkeypatch.setattr(eval_proposals, "_initialized", False)
+    monkeypatch.setattr(_db, "AUTONOMY_DB", fake_db)
+    _db._schema_cache.clear()
     yield eval_proposals
     importlib.reload(eval_proposals)
 
