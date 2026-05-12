@@ -146,6 +146,30 @@ def search_quality() -> dict:
         raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e)) from e
 
 
+# ── D6 (2026-05-12): Theory-of-Mind read endpoints ─────
+@router.get("/brain/social", tags=["brain"])
+def social_list() -> dict:
+    """List subjects (agents + humans) the brain models, with belief counts."""
+    try:
+        from social_model import list_subjects
+
+        subjects = list_subjects()
+        return {"subjects": subjects, "total": len(subjects)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e)) from e
+
+
+@router.get("/brain/social/{subject}", tags=["brain"])
+def social_get(subject: str, limit: int = Query(default=50, ge=1, le=200)) -> dict:
+    """Return belief atoms the brain attributes to one subject."""
+    try:
+        from social_model import get_subject_model
+
+        return get_subject_model(subject, limit=limit)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e)) from e
+
+
 @router.get("/brain/judgment-report", tags=["brain"])
 def judgment_report(hours: int = Query(default=24, ge=1, le=168)) -> dict:
     """Active-recall judgment telemetry for hook-noise and context-budget tuning."""
