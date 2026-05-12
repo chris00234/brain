@@ -18,17 +18,15 @@ from __future__ import annotations
 
 import contextlib
 import sqlite3
-import threading
+import sys
 import uuid
-from datetime import UTC, datetime
 from pathlib import Path
 
-try:
-    from config import BRAIN_LOGS_DIR
-except ImportError:
-    BRAIN_LOGS_DIR = Path("/Users/chrischo/server/brain/logs")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-DB_PATH = BRAIN_LOGS_DIR / "facts.db"
+from db import ensure_schema as _ensure_schema_cached
+from db import now_iso as _now
+from db import open_facts_db
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS facts (
@@ -57,36 +55,20 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_fact_entity_attr_value ON facts(entity, at
 """
 
 
-_schema_initialized = False
-_schema_lock = threading.Lock()
-
-
-def _ensure_schema():
-    global _schema_initialized
-    if _schema_initialized:
-        return
-    with _schema_lock:
-        if _schema_initialized:
-            return
-        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(DB_PATH))
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.executescript(_SCHEMA)
-        conn.close()
-        _schema_initialized = True
-
-
 @contextlib.contextmanager
 def _conn_ctx():
-    """Short-lived connection with IMMEDIATE transaction for read-then-write atomicity."""
-    _ensure_schema()
-    conn = sqlite3.connect(str(DB_PATH), isolation_level=None)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.row_factory = sqlite3.Row
+    """Short-lived connection with IMMEDIATE transaction for read-then-write atomicity.
+
+    `isolation_level=None` puts python's sqlite3 driver into autocommit mode so
+    we control transactions manually — the driver no longer auto-issues BEGIN
+    before our explicit BEGIN IMMEDIATE (which would otherwise nest).
+    """
+    conn = open_facts_db(row_factory=sqlite3.Row)
+    conn.isolation_level = None
+    _ensure_schema_cached(conn, "fact_store", _SCHEMA)
     conn.execute("BEGIN IMMEDIATE")
     try:
         yield conn
-        # Commit if caller hasn't already committed/rolled back
         if conn.in_transaction:
             conn.execute("COMMIT")
     except Exception:
@@ -100,17 +82,12 @@ def _conn_ctx():
 @contextlib.contextmanager
 def _conn_read():
     """Read-only connection — no IMMEDIATE lock needed."""
-    _ensure_schema()
-    conn = sqlite3.connect(str(DB_PATH))
-    conn.row_factory = sqlite3.Row
+    conn = open_facts_db(row_factory=sqlite3.Row)
+    _ensure_schema_cached(conn, "fact_store", _SCHEMA)
     try:
         yield conn
     finally:
         conn.close()
-
-
-def _now() -> str:
-    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 def _normalize(value: str) -> str:
