@@ -256,12 +256,15 @@ def seed_known_agents() -> dict:
     """Idempotently insert the canonical seed beliefs.
 
     Skips rows that already exist (matched by subject + belief text).
+    Wrapped in BEGIN IMMEDIATE so a concurrent record_belief cannot
+    insert a duplicate between our SELECT and INSERT (D1-D10 review fix).
     """
     _ensure_schema()
     conn = sqlite3.connect(str(DB_PATH))
     inserted = 0
     skipped = 0
     try:
+        conn.execute("BEGIN IMMEDIATE")
         for seed in SEEDS:
             existing = conn.execute(
                 "SELECT 1 FROM social_beliefs "

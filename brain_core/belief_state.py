@@ -378,16 +378,18 @@ def _compute_per_domain_agency(autonomy_db_path: str | None) -> dict:
         return out
     try:
         conn = sqlite3.connect(autonomy_db_path, timeout=3)
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            "SELECT domain, COUNT(*) as total, "
-            "       SUM(CASE WHEN chris_override = 1 THEN 1 ELSE 0 END) as overrides "
-            "FROM outcomes "
-            "WHERE created_at > datetime('now', '-30 days') "
-            "  AND domain IS NOT NULL "
-            "GROUP BY domain"
-        ).fetchall()
-        conn.close()
+        try:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT domain, COUNT(*) as total, "
+                "       SUM(CASE WHEN chris_override = 1 THEN 1 ELSE 0 END) as overrides "
+                "FROM outcomes "
+                "WHERE created_at > datetime('now', '-30 days') "
+                "  AND domain IS NOT NULL "
+                "GROUP BY domain"
+            ).fetchall()
+        finally:
+            conn.close()
     except Exception:
         return out
 

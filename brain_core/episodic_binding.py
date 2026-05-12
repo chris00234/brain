@@ -32,7 +32,7 @@ import json
 import logging
 import sqlite3
 import sys
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -46,12 +46,20 @@ log = logging.getLogger("brain.episodic_binding")
 
 
 def _parse_iso(ts: str | None) -> datetime | None:
+    """Parse ISO timestamp, forcing UTC when timezone is absent.
+
+    Naive datetimes serialize without offset and compare incorrectly against
+    UTC-stamped valid_from values in SQLite. Force UTC on naive inputs.
+    """
     if not ts:
         return None
     try:
-        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
     except (TypeError, ValueError):
         return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt
 
 
 def _atom_neighbors(

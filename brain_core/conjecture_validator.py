@@ -101,6 +101,15 @@ def _fetch_conjectures(conn: sqlite3.Connection) -> list[dict]:
     return out
 
 
+def _escape_like(s: str) -> str:
+    """Escape LIKE metacharacters so entity names with % or _ don't over-match.
+
+    D1-D10 review fix: an entity name like '100%' would otherwise match
+    every atom. Escape \\, %, _ and reference the escape in the LIKE clause.
+    """
+    return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def _find_supporters(
     conn: sqlite3.Connection,
     conjecture_id: str,
@@ -115,16 +124,16 @@ def _find_supporters(
       - Other conjecture atoms (we want real evidence, not cross-dream chains)
       - Obsolete-tier atoms (already retired)
     """
-    pat_a = f"%{entity_a}%"
-    pat_b = f"%{entity_b}%"
+    pat_a = f"%{_escape_like(entity_a)}%"
+    pat_b = f"%{_escape_like(entity_b)}%"
     rows = conn.execute(
         "SELECT id FROM atoms "
         "WHERE id != ? "
         "  AND kind != 'conjecture' "
         "  AND tier != 'obsolete' "
         "  AND valid_from > ? "
-        "  AND text LIKE ? COLLATE NOCASE "
-        "  AND text LIKE ? COLLATE NOCASE "
+        "  AND text LIKE ? ESCAPE '\\' COLLATE NOCASE "
+        "  AND text LIKE ? ESCAPE '\\' COLLATE NOCASE "
         "ORDER BY valid_from ASC "
         "LIMIT ?",
         (conjecture_id, since_iso, pat_a, pat_b, SUPPORT_SEARCH_LIMIT),

@@ -149,12 +149,14 @@ def simulate_counterfactual(decision_id: str) -> dict:
         except json.JSONDecodeError:
             parsed = None
 
-    # Store result
+    # Store result. INSERT OR IGNORE + UNIQUE(decision_id) makes this
+    # idempotent under concurrent run_daily calls (D1-D10 review fix).
     _ensure_results_schema()
     conn = sqlite3.connect(str(AUTONOMY_DB), timeout=5)
     try:
+        conn.execute("BEGIN IMMEDIATE")
         conn.execute(
-            "INSERT INTO counterfactual_results "
+            "INSERT OR IGNORE INTO counterfactual_results "
             "(decision_id, raw_response, parsed_json, created_at) "
             "VALUES (?, ?, ?, datetime('now'))",
             (decision_id, text[:4000], json.dumps(parsed) if parsed else None),
@@ -183,7 +185,7 @@ def _ensure_results_schema() -> None:
             """
             CREATE TABLE IF NOT EXISTS counterfactual_results (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                decision_id TEXT NOT NULL,
+                decision_id TEXT NOT NULL UNIQUE,
                 raw_response TEXT,
                 parsed_json TEXT,
                 created_at TEXT NOT NULL
