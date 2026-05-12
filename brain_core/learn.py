@@ -243,7 +243,10 @@ FACT_DECLARATIONS = re.compile(
 
 
 def _now_iso() -> str:
-    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    """Z-suffix UTC timestamp. Delegates to db.now_iso(z_suffix=True)."""
+    from db import now_iso
+
+    return now_iso(z_suffix=True)
 
 
 def _digest(text: str) -> str:

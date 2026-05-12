@@ -50,7 +50,6 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import UTC
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -1419,11 +1418,7 @@ def _hash(s: str) -> str:
     return hashlib.sha256(s.encode()).hexdigest()[:16]
 
 
-def _now_iso() -> str:
-    from datetime import datetime
-
-    return datetime.now(UTC).isoformat(timespec="seconds")
-
+from db import now_iso as _now_iso  # noqa: E402  — single-source UTC stamp helper
 
 # ── Public entry point ────────────────────────────────────────────
 
