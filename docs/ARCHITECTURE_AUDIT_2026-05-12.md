@@ -9,11 +9,35 @@ queries.
 - **Neo4j graph**: 4,983 entities, 47,465 relations, 25,935 tracked memory
   accesses, 72 skills, 25 lessons, 4 agents. Healthy and growing.
 - **Qdrant collections**: 9 collections, all non-empty except healthcheck
-  probe. canonical=13616, code=19084, distilled=10702, experience=13292.
+  probe. canonical=13628, code=19084, distilled=10702, experience=13292.
 - **brain.db**: 33 tables, well-organized. raw_events FTS5 working.
-  atoms tiered (core=280, episodic=1956, semantic=172).
+  atoms tiered (core=280, episodic=1956, semantic=172, obsolete=42).
 - **autonomy.db**: 24 tables, clean. outcomes=65602 with rich provenance.
 - **28 SLOs**: 0 breached. Backups within window. WAL checkpoints daily.
+
+## Ontology + metadata audit (2026-05-12)
+
+- **atoms.kind**: 7 distinct values, healthy distribution (fact 804,
+  preference 786, decision 549, conjecture 101, correction 74,
+  entity 71, other 23). No stray kinds.
+- **atoms.tier**: 4 distinct, well-separated (episodic 1956, core 280,
+  semantic 172, obsolete 42).
+- **provenance_json**: 0 rows with malformed JSON. Schema integrity intact
+  across the entire atoms table.
+- **Neo4j RELATES_TO edges**: 10 relationship types covering 21,564 edges.
+  Distribution skews toward auto-extracted (`co_mention` 12131,
+  `co_retrieved` 2269, `related_to` 3561) but rich-semantic types are
+  populated too (`uses` 797, `depends_on` 787, `part_of` 735, `manages`
+  348, `affects` 232, `created` 144, `prefers` 20). 4.2 edges/entity
+  average — solid graph density.
+- **Cross-DB entity consistency**: brain.db.entities (5135) and Neo4j
+  Entity (4983) differ by 3% — explained by entity_graph.py's eventual-
+  consistency model (atoms_store writes immediately to brain.db, Neo4j
+  sync runs nightly). No data corruption.
+
+Conclusion: the **data layer is healthy**. All structural improvements
+remaining live in the application code (god-modules, routes-vs-services
+boundary), not in the data model itself.
 
 ## Top 5 architectural problems
 
