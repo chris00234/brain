@@ -463,3 +463,74 @@ def test_hyde_kwargs_threaded_into_search(monkeypatch):
     assert captured["include_history"] is True
     assert captured["include_obsolete"] is True
     assert captured["as_of"] == "2026-01-01"
+
+
+# ── _run_rrf_fuse ───────────────────────────────────────────────────────
+
+
+def test_rrf_fuse_calls_rrf_with_path_id_key(monkeypatch):
+    """Helper must invoke _rrf.rrf_fuse with id_key='path' (the original
+    inline call signature) — any other id key changes which results
+    get fused vs. treated as distinct."""
+    import rrf as _rrf
+    from routes.recall import _run_rrf_fuse
+
+    captured: dict = {}
+
+    def _fake_fuse(lists, **kw):
+        captured["lists"] = lists
+        captured["kw"] = kw
+        return [{"id": "fused"}]
+
+    monkeypatch.setattr(_rrf, "rrf_fuse", _fake_fuse)
+    fused, ms = _run_rrf_fuse([[{"id": "a"}], [{"id": "b"}]])
+    assert fused == [{"id": "fused"}]
+    assert captured["kw"] == {"id_key": "path"}
+    assert isinstance(ms, int)
+    assert ms >= 0
+
+
+def test_rrf_fuse_empty_input_passes_through(monkeypatch):
+    """Empty input is passed through to rrf_fuse — the early-return for
+    no-results lives upstream in the route, not in this helper."""
+    import rrf as _rrf
+    from routes.recall import _run_rrf_fuse
+
+    monkeypatch.setattr(_rrf, "rrf_fuse", lambda lists, **kw: [])
+    fused, ms = _run_rrf_fuse([])
+    assert fused == []
+    assert isinstance(ms, int)
+
+
+# ── _apply_time_decay ───────────────────────────────────────────────────
+
+
+def test_time_decay_calls_apply_to_results(monkeypatch):
+    """Helper must delegate to _time_decay.apply_to_results with the
+    fused list as the sole argument."""
+    import time_decay as _td
+    from routes.recall import _apply_time_decay
+
+    captured: list = []
+
+    def _fake_decay(results):
+        captured.append(results)
+        # Mimic a real decay: multiply score by 0.9
+        return [{**r, "score": r.get("score", 0) * 0.9} for r in results]
+
+    monkeypatch.setattr(_td, "apply_to_results", _fake_decay)
+    fused = [{"id": "a", "score": 1.0}, {"id": "b", "score": 2.0}]
+    out, ms = _apply_time_decay(fused)
+    assert captured == [fused]
+    assert out == [{"id": "a", "score": 0.9}, {"id": "b", "score": 1.8}]
+    assert isinstance(ms, int)
+
+
+def test_time_decay_empty_input_returns_empty(monkeypatch):
+    import time_decay as _td
+    from routes.recall import _apply_time_decay
+
+    monkeypatch.setattr(_td, "apply_to_results", lambda r: r)
+    out, ms = _apply_time_decay([])
+    assert out == []
+    assert isinstance(ms, int)

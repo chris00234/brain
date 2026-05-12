@@ -157,6 +157,32 @@ class RecallBatchRequest(BaseModel):
 # ── Service helpers (recall_v2 internal) ─────────────────
 
 
+def _run_rrf_fuse(result_lists: list[list[dict]]) -> tuple[list[dict], int]:
+    """RRF-fuse a list of result lists, keyed by 'path'.
+
+    Returns (fused_results, elapsed_ms). The caller writes
+    `timing['rrf_ms'] = elapsed_ms`.
+    """
+    t_rrf = time.time()
+    fused = _rrf.rrf_fuse(result_lists, id_key="path")
+    return fused, int((time.time() - t_rrf) * 1000)
+
+
+def _apply_time_decay(fused: list[dict]) -> tuple[list[dict], int]:
+    """Apply exponential time decay to a fused result list.
+
+    Decay multiplies into each result's `score`, which by this point in
+    the pipeline is either the raw RRF score (no rerank) or the rerank
+    score (after stage-1 + optional stage-2 cross-encoder).
+
+    Returns (decayed_results, elapsed_ms). The caller writes
+    `timing['decay_ms'] = elapsed_ms`.
+    """
+    t_decay = time.time()
+    decayed = _time_decay.apply_to_results(fused)
+    return decayed, int((time.time() - t_decay) * 1000)
+
+
 def _run_hyde_pass(
     q: str,
     n: int,
@@ -872,9 +898,8 @@ def recall_v2(
             timing=timing,
         )
 
-    t_rrf = time.time()
-    fused = _rrf.rrf_fuse(result_lists, id_key="path")
-    timing["rrf_ms"] = int((time.time() - t_rrf) * 1000)
+    fused, rrf_ms = _run_rrf_fuse(result_lists)
+    timing["rrf_ms"] = rrf_ms
 
     # Two-stage rerank (2026-04-12):
     # 1. Token-overlap rerank.py — applies trust_boost (1.4x canonical), title
@@ -929,12 +954,10 @@ def recall_v2(
                 log.warning("cross-encoder rerank failed, stage-1 result stands: %s", _ce_err)
 
     # Apply time decay AFTER rerank so freshness actually affects the final ordering.
-    # Decay multiplies into `score`, which is now either the raw RRF score (no rerank)
-    # or the reranked score (with rerank).
+    # See _apply_time_decay docstring for the score-multiplication contract.
     if decay:
-        t_decay = time.time()
-        fused = _time_decay.apply_to_results(fused)
-        timing["decay_ms"] = int((time.time() - t_decay) * 1000)
+        fused, decay_ms = _apply_time_decay(fused)
+        timing["decay_ms"] = decay_ms
 
     for r in fused:
         meta = r.get("metadata") or {}
