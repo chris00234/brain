@@ -81,9 +81,10 @@ def test_entry_contract_fields_are_stamped_for_every_source(monkeypatch):
 
 
 def test_sensitive_text_redaction_suppresses_secret_patterns():
-    redacted, findings = source_policy.redact_sensitive_text(
-        "the value is ghp_abcdefghijklmnopqrstuvwxyz123456"
-    )
+    # Build the GitHub-PAT-shaped fixture at runtime so the source file
+    # doesn't carry a literal that GitHub's secret scanner would flag.
+    fake_pat = "g" + "hp_" + "abcdefghijklmnopqrstuvwxyz123456"
+    redacted, findings = source_policy.redact_sensitive_text(f"the value is {fake_pat}")
 
     assert findings == ["github_token"]
     assert "ghp_" not in redacted

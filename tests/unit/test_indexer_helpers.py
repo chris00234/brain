@@ -37,10 +37,13 @@ def test_filter_secrets_redacts_api_key_assignments():
 def test_filter_secrets_redacts_ghp_token():
     from indexer import filter_secrets
 
-    # 36-char ghp token pattern
-    raw = "X-Github: ghp_abcdefghijklmnopqrstuvwxyz0123456789"
+    # Build the GitHub-PAT-shaped fixture at runtime so the source file
+    # doesn't carry a 40-char ghp_ literal that GitHub's secret scanner
+    # would flag (same approach as the sk-openai test below).
+    fake_pat = "g" + "hp_" + "abcdefghijklmnopqrstuvwxyz0123456789"
+    raw = f"X-Github: {fake_pat}"
     out = filter_secrets(raw)
-    assert "ghp_abcdefghij" not in out
+    assert fake_pat[:14] not in out
     assert "[REDACTED]" in out
 
 
