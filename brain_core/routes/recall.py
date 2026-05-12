@@ -157,6 +157,725 @@ class RecallBatchRequest(BaseModel):
 # ── Service helpers (recall_v2 internal) ─────────────────
 
 
+def _run_crag_retry(
+    q: str,
+    n: int,
+    fused: list[dict],
+    retry_fn,
+) -> tuple[list[dict], int, dict, str | None]:
+    """Phase M9 CRAG iterative retry: score first-hop confidence, optionally
+    rewrite the query and run a single recursive retry, pick the
+    higher-confidence result set.
+
+    The retry is dispatched via the `retry_fn` callable (passed in by
+    recall_v2 so this helper doesn't reach back into the module for the
+    recursive recall_v2 reference). Capped at 1 retry to bound latency.
+
+    Returns (fused_after, crag_ms, crag_telemetry, error_str_or_None).
+    On any failure the input `fused` is returned unchanged with ms=0 and
+    an empty telemetry; the caller writes timing["crag_error"] when
+    `error_str_or_None` is not None.
+    """
+    try:
+        from brain_core.crag import (
+            expand_query as _crag_expand_query,
+        )
+        from brain_core.crag import (
+            score_confidence as _crag_score,
+        )
+        from brain_core.crag import (
+            should_iterate as _crag_should_iterate,
+        )
+
+        t_crag = time.time()
+        # See _score_crag_first_hop docstring for the optional Self-RAG blend.
+        confidence_report = _score_crag_first_hop(q, fused, n)
+        telemetry: dict[str, Any] = {
+            "first_hop_confidence": confidence_report.score,
+            "first_hop_components": confidence_report.components,
+            "iterated": False,
+        }
+        if _crag_should_iterate(confidence_report):
+            rewritten = _crag_expand_query(q, fused[:3])
+            if rewritten and rewritten != q:
+                telemetry["expanded_query"] = rewritten
+                # M7-WS7 C2 fix: retry_fn recurses with iterative=False AND
+                # forces hyde=False, expand=False to prevent the inner call
+                # from firing additional LLM dispatches. Worst case before
+                # this fix: 1 outer HyDE + 3 outer expand + 1 CRAG rewrite
+                # + 1 inner HyDE + 1 inner expand = up to 7 LLM calls per
+                # req. After this fix: outer dispatches + 1 CRAG rewrite,
+                # max.
+                second_hop = retry_fn(rewritten)
+                second_results = second_hop.results
+                second_report = _crag_score(second_results[: max(n, 5)])
+                telemetry["second_hop_confidence"] = second_report.score
+                telemetry["iterated"] = True
+                # Pick the higher-confidence result set
+                if second_report.score > confidence_report.score:
+                    fused = second_results
+                    telemetry["selected"] = "second_hop"
+                else:
+                    telemetry["selected"] = "first_hop"
+        crag_ms = int((time.time() - t_crag) * 1000)
+        return fused, crag_ms, telemetry, None
+    except Exception as _crag_err:
+        log.warning("crag iterative path failed: %s", _crag_err)
+        return fused, 0, {}, str(_crag_err)[:200]
+
+
+def _decide_use_crag(q: str, iterative: bool) -> tuple[bool, str | None]:
+    """M8.4: Adaptive-RAG router decides whether CRAG iterative recall fires.
+
+    Default behavior honors the caller's `iterative=` flag. When the
+    adaptive_rag.should_use_crag router is enabled, it can OVERRIDE the
+    caller flag — disabling CRAG for SIMPLE queries (pure latency cost
+    with no recall benefit) and enabling CRAG for MULTI queries even when
+    the caller didn't ask.
+
+    Returns (use_crag, reason). `reason` is the router's reason string when
+    the router fired; None when the router was disabled or unavailable.
+    On any failure, falls back to the caller's `iterative` flag.
+    """
+    use_crag = iterative
+    reason: str | None = None
+    try:
+        from brain_core.adaptive_rag import should_use_crag as _ar_should_use
+
+        use_crag, reason = _ar_should_use(q, caller_explicit=iterative)
+    except Exception:
+        use_crag = iterative
+        reason = None
+    return use_crag, reason
+
+
+def _score_crag_first_hop(q: str, fused: list[dict], n: int):
+    """First-hop CRAG confidence scoring + optional Self-RAG blend.
+
+    Computes `confidence_report` from the top max(n,5) results, then —
+    if BRAIN_SELF_RAG_ENABLED is on AND the critique returns a self_rag-
+    sourced score — blends that into the report's score/components.
+
+    Returns the (possibly mutated) confidence_report. Self-RAG failures
+    are swallowed (best-effort layer; ~1s Jenna dispatch cost).
+
+    Lifted from inline CRAG block so the heuristic + semantic-critique
+    blend can be unit-tested independently of the recursive retry path.
+    """
+    from brain_core.crag import score_confidence as _crag_score
+
+    confidence_report = _crag_score(fused[: max(n, 5)], query=q)
+    # 2026-04-16 Tier 3 #11: Self-RAG (Asai 2023) semantic critique layer.
+    # Off by default — costs ~1s Jenna call per iterative recall.
+    try:
+        from brain_core.self_rag import blend_with_heuristic as _blend_self_rag
+        from brain_core.self_rag import critique as _self_rag_critique
+
+        _sr = _self_rag_critique(q, fused[: max(n, 5)])
+        if _sr.components.get("source") == "self_rag":
+            blended = _blend_self_rag(_sr.score, confidence_report.score)
+            confidence_report.score = blended
+            confidence_report.components = {
+                **confidence_report.components,
+                "self_rag_score": _sr.score,
+                "self_rag_components": _sr.components,
+                "blended": True,
+            }
+    except Exception:
+        pass
+    return confidence_report
+
+
+def _apply_parent_child_expand(fused: list[dict]) -> list[dict]:
+    """M9.2: parent-child retrieval expand.
+
+    When a child chunk wins the rank, swap its content for the wider parent
+    chunk so the LLM consumer gets more context. Off by default; enabled via
+    BRAIN_PARENT_CHILD_EXPAND in parent_child_expand.expand_to_parents.
+
+    Runs BEFORE community injection so parents are available for both the
+    child-expanded path and the community synthetic results. On import or
+    expansion failure, the input is returned unchanged.
+    """
+    try:
+        from brain_core.parent_child_expand import expand_to_parents as _pc_expand
+
+        return _pc_expand(fused)
+    except Exception as _pc_err:
+        log.warning("parent-child expand failed: %s", _pc_err)
+        return fused
+
+
+def _inject_community_summaries(q: str, fused: list[dict]) -> tuple[list[dict], int]:
+    """M8.7: inject GraphRAG community summaries for MULTI-class queries.
+
+    When adaptive_rag classifies the query as MULTI (comparison, reasoning,
+    multi-fact synthesis), the weekly-generated community summaries from
+    the entity graph Louvain clusters are merged into fused with a synthetic
+    rank. Gives the caller cross-document synthesis that single-doc retrieval
+    can't provide.
+
+    Cheap: summaries are pre-computed and sit in a small table with the
+    entities indexed. get_summaries_matching does a single SELECT + a
+    substring check against the query terms (<5ms).
+
+    Off when BRAIN_COMMUNITY_SUMMARIES is unset, when the query is non-MULTI,
+    or when no community matches the query entities.
+
+    2026-04-16 R-2 scoring fix: score was previously hardcoded 95.0 which
+    always placed community summaries at rank 1, overriding every Tier 1/2/3
+    scoring fix above. Now scored relative to the current top result
+    (0.85*top, clamped to [55,100]) so they can tiebreak or lead but not
+    blindly dominate.
+
+    Returns (new_fused, injected_count). On any failure, returns (fused, 0)
+    and logs a warning.
+    """
+    try:
+        from brain_core.adaptive_rag import classify as _ar_classify
+        from brain_core.community_summaries import get_summaries_matching as _cs_match
+
+        classification = _ar_classify(q)
+        if classification.label != "multi":
+            return fused, 0
+        summaries = _cs_match(q, limit=2)
+        if not summaries:
+            return fused, 0
+        top_score = float(fused[0].get("score", 0.0)) if fused else 0.0
+        # Community injected at 0.85×top: meaningful but not always rank-1.
+        synth_score = max(55.0, min(100.0, top_score * 0.85)) if top_score > 0 else 70.0
+        synthetic: list[dict] = []
+        for s in summaries:
+            synthetic.append(
+                {
+                    "id": f"community:{','.join(s['entities'][:3])[:64]}",
+                    "score": synth_score,
+                    "source_type": "community",
+                    "collection": "community_summaries",
+                    "title": f"Community: {', '.join(s['entities'][:5])}",
+                    "content": s["summary"],
+                    "path": "graph/community/" + s.get("generated_at", ""),
+                    "trust_tier": 2,  # derived, not canonical
+                    "metadata": {
+                        "entities": s["entities"],
+                        "atom_count": s.get("atom_count", 0),
+                        "generated_at": s.get("generated_at"),
+                    },
+                }
+            )
+        # Merge by score so they mix with real results rather than always
+        # leading. MULTI queries still benefit because the score is high
+        # enough to surface in top-3 typically.
+        merged = sorted(fused + synthetic, key=lambda r: r.get("score", 0), reverse=True)
+        return merged, len(synthetic)
+    except Exception as _cs_err:
+        log.warning("community summary inject failed: %s", _cs_err)
+        return fused, 0
+
+
+def _to_dashed_uuid(raw: str) -> str:
+    """Hex32 UUID (dashes stripped) → canonical dashed form. Other shapes
+    pass through unchanged. Used to normalize result ids before writing
+    them to action_audit so downstream readers (recall_judge,
+    contradiction propagation, audit dashboards) can round-trip them
+    back to Qdrant points.
+    """
+    if not raw:
+        return raw
+    if len(raw) == 32 and "-" not in raw and all(c in "0123456789abcdef" for c in raw.lower()):
+        return f"{raw[:8]}-{raw[8:12]}-{raw[12:16]}-{raw[16:20]}-{raw[20:]}"
+    return raw
+
+
+def _post_recall_side_effects(q: str, fused: list[dict], n: int, agent: str) -> None:
+    """Run auto-feedback + action-audit writes for the recall response.
+
+    Dispatched off the response path by _dispatch_post_recall_side_effects
+    (either FastAPI BackgroundTasks or the search bg pool). M7-WS7 H3 fix:
+    insert_action_audit was previously synchronous on the response path
+    (0.5-30ms under SQLite writer contention). Both writes now share the
+    same off-path dispatch so neither blocks the response.
+
+    The action_audit write is wrapped in try/except so an atoms_store
+    transient failure doesn't kill the feedback recorder side of the call.
+    The retrieved_chroma_ids list is capped at 20 (audit storage budget).
+    """
+    _record_auto_feedback(q, fused[:n], agent)
+    try:
+        from brain_core.atoms_store import insert_action_audit as _iaa
+
+        _iaa(
+            route="/recall/v2",
+            tool="brain_recall",
+            actor=agent,
+            query_text=q[:500],
+            retrieved_chroma_ids=[
+                _to_dashed_uuid(str(r.get("id") or r.get("chroma_id") or ""))[:64]
+                for r in fused[:n]
+                if r.get("id") or r.get("chroma_id")
+            ][:20],
+        )
+    except Exception:
+        pass
+
+
+def _dispatch_post_recall_side_effects(
+    q: str,
+    fused: list[dict],
+    n: int,
+    agent: str,
+    background: BackgroundTasks | None,
+) -> None:
+    """Submit _post_recall_side_effects off the response path.
+
+    Preferred path: FastAPI BackgroundTasks (runs after response is sent).
+    Fallback path: search bg pool (when no BackgroundTasks was injected,
+    e.g. internal callers like brain_loop). If both fail, drop the writes —
+    they're observability/feedback, not a hot path.
+    """
+    if background is not None:
+        background.add_task(_post_recall_side_effects, q, fused, n, agent)
+        return
+    try:
+        from brain_core.search_unified import _search_bg_pool
+
+        _search_bg_pool.submit(_post_recall_side_effects, q, fused, n, agent)
+    except Exception:
+        pass
+
+
+def _log_recall_gap(
+    q: str,
+    fused: list[dict],
+    n: int,
+    *,
+    collection: str | None,
+    domain: str | None,
+    entity: str | None,
+    source_type: str | None,
+    since: str | None,
+    until: str | None,
+    as_of: str | None,
+    include_history: bool,
+    include_obsolete: bool,
+) -> None:
+    """Gap logging — record queries where the brain has nothing semantically
+    close. Cross-encoder score is the only signal that reflects real semantic
+    match; blended `score` is dominated by RRF ranks which always have a
+    top-N winner even for gibberish queries.
+
+    Heuristic: log when max CE score < 0.52 (model at the sigmoid midpoint,
+    "I have no opinion"). Good queries see CE 0.55-0.75. Falls back to a
+    blended-score threshold of 30.0 if CE was disabled.
+
+    Only fires when the query is filter-free — filtered queries with no hits
+    are usually intentional, not gaps.
+
+    Appends one JSON line to BRAIN_DIR/logs/recall-gaps.jsonl. All
+    exceptions swallowed (best-effort observability).
+    Moved from /recall v1 on 2026-04-12; v1's max_score<5.0 threshold never fired.
+    """
+    try:
+        filter_free = not (
+            collection
+            or domain
+            or entity
+            or source_type
+            or since
+            or until
+            or as_of
+            or include_history
+            or include_obsolete
+        )
+        if not filter_free:
+            return
+        results_list = fused[:n]
+        ce_scores = [
+            float(r.get("cross_encoder_score", 0))
+            for r in results_list
+            if r.get("cross_encoder_score") is not None
+        ]
+        max_ce = max(ce_scores, default=0.0)
+        # Fall back to blended score threshold if CE wasn't run (flag off)
+        max_score = max((float(r.get("score", 0)) for r in results_list), default=0.0)
+        is_gap = (
+            len(results_list) == 0 or (ce_scores and max_ce < 0.52) or (not ce_scores and max_score < 30.0)
+        )
+        if not is_gap:
+            return
+        gap_log = BRAIN_DIR / "logs" / "recall-gaps.jsonl"
+        gap_log.parent.mkdir(parents=True, exist_ok=True)
+        with gap_log.open("a") as gf:
+            gf.write(
+                json.dumps(
+                    {
+                        "timestamp": datetime.now(UTC).isoformat(),
+                        "query": q[:500],
+                        "n_results": len(results_list),
+                        "max_score": round(max_score, 2),
+                        "max_ce_score": round(max_ce, 4) if ce_scores else None,
+                        "endpoint": "/recall/v2",
+                    }
+                )
+                + "\n"
+            )
+    except Exception:
+        pass
+
+
+def _log_retrieval_inhibition(fused: list[dict], q: str) -> None:
+    """2026-04-16 Tier 3 #4 + R-10: retrieval-induced inhibition logging.
+
+    Record top result as winner, ranks 2-5 as losers on this query cue.
+    Dispatched to the search bg pool so we don't add SQLite write latency
+    to the hot recall path (~15ms saved on p95).
+
+    Only fires when at least 2 semantic_memory results land in the top-5;
+    graph/canonical winners don't generate competition signals for the
+    atom-level inhibition table.
+
+    All exceptions swallowed — observability path, not a hot path. The
+    bg-pool submit itself is fire-and-forget.
+    """
+    try:
+        if fused and len(fused) >= 2:
+            sm_results = [r for r in fused[:5] if r.get("collection") == "semantic_memory" and r.get("id")]
+            if len(sm_results) >= 2:
+                from retrieval_inhibition import log_competition as _log_comp
+
+                from brain_core.search_unified import _search_bg_pool as _bg
+
+                winner_id = sm_results[0]["id"]
+                loser_ids = [r["id"] for r in sm_results[1:]]
+                _bg.submit(_log_comp, winner_id, loser_ids, q)
+    except Exception:
+        pass
+
+
+def _apply_metacognitive_surface_inplace(fused: list[dict], top_n: int) -> int:
+    """Inject metacognitive signals (confidence, trust_score,
+    pending_contradictions) into the top-N semantic_memory results.
+
+    Two passes, both best-effort (each wrapped in try/except so a brain.db
+    or Qdrant outage doesn't break the recall response):
+
+      1. Confidence + trust_score from atoms.confidence (Bayesian-updated
+         ledger), optionally Platt-calibrated via confidence_calibration.
+         Surfaces `confidence` (calibrated), `confidence_raw` (uncalibrated),
+         and `trust_score_current` on each row.
+
+      2. Pending-contradictions count: query semantic_contradictions in
+         Qdrant for unresolved rows referencing top-result IDs. Surfaces
+         `pending_contradictions` (int count) on rows with open disputes.
+
+    Mutates fused[:top_n] in place. Returns elapsed_ms for both passes
+    combined (they share a single t_meta — the prior inline structure).
+    Only semantic_memory results are touched; other collections are skipped
+    because their atoms aren't in the brain.db confidence/trust ledger.
+    """
+    t_meta = time.time()
+
+    # Pass 1: confidence + trust_score
+    try:
+        from atoms_store import _conn as _atoms_conn
+
+        sm_ids = [
+            r.get("id", "")
+            for r in fused[:top_n]
+            if isinstance(r, dict) and r.get("collection") == "semantic_memory" and r.get("id")
+        ]
+        if sm_ids:
+            placeholders = ",".join("?" for _ in sm_ids)
+            with _atoms_conn() as _c:
+                rows = _c.execute(
+                    f"SELECT chroma_id, confidence, trust_score "
+                    f"FROM atoms WHERE chroma_id IN ({placeholders})",
+                    sm_ids,
+                ).fetchall()
+            try:
+                from confidence_calibration import apply_calibration as _apply_cal
+            except Exception:
+
+                def _apply_cal(x):
+                    return x  # type: ignore
+
+            conf_by_id = {
+                r["chroma_id"]: {
+                    "confidence_raw": round(float(r["confidence"] or 0.5), 3),
+                    "confidence": round(float(_apply_cal(float(r["confidence"] or 0.5))), 3),
+                    "trust_score": round(float(r["trust_score"] or 0.5), 3),
+                }
+                for r in rows
+            }
+            for r in fused[:top_n]:
+                if r.get("collection") != "semantic_memory":
+                    continue
+                row = conf_by_id.get(r.get("id", ""))
+                if row:
+                    r["confidence"] = row["confidence"]
+                    r["confidence_raw"] = row["confidence_raw"]
+                    r["trust_score_current"] = row["trust_score"]
+    except Exception:
+        pass
+
+    # Pass 2: pending-contradictions count
+    try:
+        if fused:
+            top_ids = [r.get("id", "") for r in fused[:top_n] if r.get("id")]
+            if top_ids:
+                points = get_vector_store().get(
+                    "semantic_contradictions",
+                    filter={
+                        "$or": [
+                            {"memory_id_a": {"$in": top_ids}},
+                            {"memory_id_b": {"$in": top_ids}},
+                        ]
+                    },
+                    limit=100,
+                    with_payload=True,
+                    with_documents=False,
+                )
+                contra_count: dict[str, int] = {}
+                for p in points:
+                    meta = p.payload or {}
+                    if meta.get("resolved"):
+                        continue
+                    a, b = meta.get("memory_id_a"), meta.get("memory_id_b")
+                    if a:
+                        contra_count[a] = contra_count.get(a, 0) + 1
+                    if b:
+                        contra_count[b] = contra_count.get(b, 0) + 1
+                for r in fused[:top_n]:
+                    rid = r.get("id", "")
+                    if rid and rid in contra_count:
+                        r["pending_contradictions"] = contra_count[rid]
+    except Exception:
+        pass
+
+    return int((time.time() - t_meta) * 1000)
+
+
+_CONTENT_ENRICHABLE_TYPES = frozenset(
+    {
+        "canonical-note",
+        "distilled-note",
+        "obsidian-note",
+        "agent-config",
+        "learning",
+        "docker-compose",
+        "nginx-conf",
+    }
+)
+_CONTENT_ENRICH_MAX_FILE_BYTES = 4000
+
+
+def _apply_content_enrichment_inplace(fused: list[dict], top_n: int) -> int:
+    """Read source files for the top-N file-backed results and replace
+    the per-chunk `content` snippet with a richer excerpt (up to
+    _CONTENT_ENRICH_MAX_FILE_BYTES) centered on the matched anchor.
+
+    Retrieval ranking already happened; this just gives the caller (and
+    downstream UIs / eval tools) richer context for the same document
+    without disturbing rank order. The anchor lookup tries to find the
+    first 120 chars of the chunk inside the live file — if found, a
+    window around it is returned; if not (stale chunk, edited file), the
+    file head is returned instead.
+
+    Mutates `fused[i]['content']` in place. Returns elapsed_ms. Only
+    types in `_CONTENT_ENRICHABLE_TYPES` are enriched; other result
+    types and missing/unreadable files are skipped.
+    """
+    t_enrich = time.time()
+    seen_paths: set[str] = set()
+    for r in fused[:top_n]:
+        path = r.get("path", "")
+        if not path or path in seen_paths:
+            continue
+        rtype = r.get("type") or (r.get("metadata") or {}).get("type") or ""
+        if rtype not in _CONTENT_ENRICHABLE_TYPES:
+            continue
+        try:
+            p = Path(path)
+            if not p.is_file():
+                continue
+            txt = p.read_text(errors="ignore")
+        except Exception:
+            continue
+        chunk = r.get("content") or ""
+        anchor = chunk[:120] if chunk else ""
+        if anchor and anchor in txt:
+            idx = txt.index(anchor)
+            start = max(0, idx - 500)
+            end = min(len(txt), idx + _CONTENT_ENRICH_MAX_FILE_BYTES - 500)
+            r["content"] = txt[start:end]
+        else:
+            r["content"] = txt[:_CONTENT_ENRICH_MAX_FILE_BYTES]
+        seen_paths.add(path)
+    return int((time.time() - t_enrich) * 1000)
+
+
+def _apply_exclude_already_used(
+    fused: list[dict],
+    *,
+    subject: str = "chris",
+    relationship: str = "uses",
+) -> tuple[list[dict], int, int]:
+    """Phase G3 graph-constraint exclusion.
+
+    Drop semantic_memory results whose extracted entities overlap the
+    names returned by `(subject)-[:RELATES_TO {relationship}]->(t)` in
+    Neo4j — i.e. atoms about tools/concepts the subject already uses.
+
+    Why entity-link join (not raw text match): names like "react" (verb),
+    "ghost" (idiom), "neo4j" (in unrelated graph-DB chatter) false-
+    positive on word-boundary regex. The atom_entity table only links
+    an atom to an entity when entity_graph.extract_and_store_entities
+    (Sage LLM) judged it a real reference — that's the precision
+    boundary we want. Other collections (canonical/obsidian/experience)
+    don't run through the brain.db entity extractor, so we leave them
+    unfiltered rather than fall back to a noisy regex.
+
+    Returns (filtered_fused, dropped_count, elapsed_ms).
+    """
+    t_excl = time.time()
+    excluded_count = 0
+    try:
+        from entity_graph import get_excluded_entities
+
+        excluded_names = get_excluded_entities(subject, relationship)
+    except Exception:
+        excluded_names = set()
+
+    if excluded_names:
+        try:
+            from atoms_store import _conn as _atoms_conn
+
+            result_ids = [r.get("id") for r in fused if r.get("id")]
+            excluded_lower = [n.lower() for n in excluded_names if n]
+            if result_ids and excluded_lower:
+                rid_ph = ",".join("?" for _ in result_ids)
+                ex_ph = ",".join("?" for _ in excluded_lower)
+                with _atoms_conn() as _c:
+                    rows = _c.execute(
+                        "SELECT DISTINCT atoms.chroma_id "
+                        "FROM atoms "
+                        "JOIN atom_entity ON atom_entity.atom_id = atoms.id "
+                        "JOIN entities ON entities.id = atom_entity.entity_id "
+                        f"WHERE LOWER(entities.name) IN ({ex_ph}) "
+                        f"AND (atoms.chroma_id IN ({rid_ph}) OR "
+                        f"     SUBSTR(atoms.chroma_id, INSTR(atoms.chroma_id, ':') + 1) IN ({rid_ph}))",
+                        excluded_lower + result_ids + result_ids,
+                    ).fetchall()
+                drop_set: set[str] = set()
+                for row in rows:
+                    full = row["chroma_id"]
+                    drop_set.add(full)
+                    if ":" in full:
+                        drop_set.add(full.split(":", 1)[1])
+                if drop_set:
+                    before = len(fused)
+                    fused = [r for r in fused if r.get("id") not in drop_set]
+                    excluded_count = before - len(fused)
+        except Exception as exc:
+            log.warning("exclude_already_used filter failed: %s", exc)
+
+    return fused, excluded_count, int((time.time() - t_excl) * 1000)
+
+
+def _run_token_rerank(q: str, fused: list[dict]) -> tuple[list[dict], int]:
+    """Stage-1 token-overlap rerank.
+
+    Idempotent (2026-04-16 fix): search_all already applied it per-variant
+    and marked each result `_rerank_applied`. Calling `_rerank.rerank`
+    again is a no-op score-wise; it only re-sorts. The score-promotion
+    loop copies `rerank_score` into `score` so downstream sort + decay
+    see the rerank result.
+
+    Returns (fused, elapsed_ms). The caller writes
+    `timing['rerank_ms'] = elapsed_ms`.
+    """
+    t_rerank = time.time()
+    fused = _rerank.rerank(q, fused, top_k=None)
+    for r in fused:
+        r["score"] = r.get("rerank_score", r.get("score", 0))
+    return fused, int((time.time() - t_rerank) * 1000)
+
+
+def _run_cross_encoder_rerank(q: str, fused: list[dict]) -> tuple[list[dict], int | None, int | None]:
+    """Stage-2 BGE cross-encoder rerank on the top window.
+
+    Returns (fused, ce_top_k_or_none, elapsed_ms_or_none).
+
+    The route writes the timing keys only when the values are not None:
+      - both None if `BRAIN_CROSS_ENCODER_ENABLED` is false
+      - both None if the cross-encoder import/call raises (stage-1 result
+        is kept and a warning is logged)
+      - both populated on success
+
+    top_k=14 is the empirically-derived window (cut from 20 in 2026-04):
+    extra slots rarely reshuffle the final top, and MPS batch time scales
+    linearly with pair count — saves ~30ms p95 on single queries and a
+    lot more under concurrent .predict() serialization.
+    """
+    ce_enabled = False
+    try:
+        from brain_core import config as _brain_config
+
+        ce_enabled = bool(getattr(_brain_config, "BRAIN_CROSS_ENCODER_ENABLED", False))
+    except Exception:
+        ce_enabled = False
+
+    if not ce_enabled:
+        return fused, None, None
+
+    t_ce = time.time()
+    try:
+        from brain_core.cross_encoder_rerank import (
+            choose_cross_encoder_top_k,
+            rerank_with_cross_encoder,
+        )
+
+        ce_top_k = choose_cross_encoder_top_k(q, fused, default_top_k=14)
+        fused = rerank_with_cross_encoder(q, fused, top_k=ce_top_k)
+        return fused, ce_top_k, int((time.time() - t_ce) * 1000)
+    except Exception as _ce_err:
+        log.warning("cross-encoder rerank failed, stage-1 result stands: %s", _ce_err)
+        return fused, None, None
+
+
+def _apply_primary_doc_boost_inplace(fused: list[dict]) -> None:
+    """Boost any result whose metadata flags primary_doc_lookup=True.
+
+    The active_recall canonical/L0 layer marks results that came from
+    the primary-document identity layer with `metadata.primary_doc_lookup`.
+    These should win over semantic hits even when the semantic match has
+    a higher raw score — the +35 bump is the empirically-derived margin.
+
+    Mutates each result's `score` in place; returns None.
+    """
+    for r in fused:
+        meta = r.get("metadata") or {}
+        if meta.get("primary_doc_lookup"):
+            r["score"] = float(r.get("score", 0)) + 35.0
+
+
+def _sort_and_diversify(fused: list[dict], top_window: int) -> list[dict]:
+    """Score-desc sort + reranker diversification on the top window.
+
+    Diversification caps `max_per_source=2` (limits how many results from
+    a single source can occupy the top window) but leaves
+    max_per_collection unbounded. Wraps diversify_sources in
+    `contextlib.suppress(Exception)` since a failed diversifier should not
+    break the recall — the sorted list stands.
+    """
+    fused.sort(key=lambda r: r.get("score", 0), reverse=True)
+    with contextlib.suppress(Exception):
+        fused = _rerank.diversify_sources(
+            fused, top_window=top_window, max_per_source=2, max_per_collection=None
+        )
+    return fused
+
+
 def _run_rrf_fuse(result_lists: list[list[dict]]) -> tuple[list[dict], int]:
     """RRF-fuse a list of result lists, keyed by 'path'.
 
@@ -901,57 +1620,18 @@ def recall_v2(
     fused, rrf_ms = _run_rrf_fuse(result_lists)
     timing["rrf_ms"] = rrf_ms
 
-    # Two-stage rerank (2026-04-12):
-    # 1. Token-overlap rerank.py — applies trust_boost (1.4x canonical), title
-    #    overlap, source boost. Cheap, semantically naive but preserves the
-    #    canonical-as-truth-layer principle.
-    # 2. BGE-reranker-base cross-encoder — refines ordering with real semantic
-    #    scoring. Blends with stage-1 output so trust boosts carry through.
-    # When BRAIN_CROSS_ENCODER_ENABLED=false, only stage 1 runs.
+    # Two-stage rerank (2026-04-12): token-overlap (stage 1) +
+    # BGE cross-encoder (stage 2, gated on BRAIN_CROSS_ENCODER_ENABLED).
+    # See _run_token_rerank / _run_cross_encoder_rerank docstrings.
     if rerank:
-        t_rerank = time.time()
-        # Stage 1 rerank is idempotent (2026-04-16 fix): search_all already
-        # applied it per-variant and marked each result `_rerank_applied`.
-        # Calling _rerank.rerank again is a no-op score-wise; it only
-        # re-sorts. Previously the `len(variants) == 1` condition caused a
-        # second multiplicative rerank pass for expand=True queries that
-        # compounded trust/relevance boosts and flattened the top-K to the
-        # [0,100] clamp ceiling.
-        fused = _rerank.rerank(q, fused, top_k=None)
-        for r in fused:
-            r["score"] = r.get("rerank_score", r.get("score", 0))
-        timing["rerank_ms"] = int((time.time() - t_rerank) * 1000)
+        fused, rerank_ms = _run_token_rerank(q, fused)
+        timing["rerank_ms"] = rerank_ms
 
-        # Stage 2: real cross-encoder refinement on the top window
-        ce_enabled = False
-        try:
-            from brain_core import config as _brain_config
-
-            ce_enabled = bool(getattr(_brain_config, "BRAIN_CROSS_ENCODER_ENABLED", False))
-        except Exception:
-            ce_enabled = False
-
-        if ce_enabled:
-            t_ce = time.time()
-            try:
-                from brain_core.cross_encoder_rerank import (
-                    choose_cross_encoder_top_k,
-                    rerank_with_cross_encoder,
-                )
-
-                # Only rerank the top window — tail stays ordered by stage 1.
-                # cross_encoder_rerank overwrites `score` with a blend of the
-                # stage-1 score (which already includes trust_boost) and CE signal.
-                # top_k cut 20→14: for n≤10 responses the extra 6 rerank slots
-                # almost never reshuffle the final top, and MPS batch time scales
-                # linearly with pair count — ~30ms p95 saved on single queries and
-                # a lot more under concurrent load where .predict() serializes.
-                ce_top_k = choose_cross_encoder_top_k(q, fused, default_top_k=14)
-                fused = rerank_with_cross_encoder(q, fused, top_k=ce_top_k)
-                timing["cross_encoder_top_k"] = ce_top_k
-                timing["cross_encoder_ms"] = int((time.time() - t_ce) * 1000)
-            except Exception as _ce_err:
-                log.warning("cross-encoder rerank failed, stage-1 result stands: %s", _ce_err)
+        fused, ce_top_k, ce_ms = _run_cross_encoder_rerank(q, fused)
+        if ce_top_k is not None:
+            timing["cross_encoder_top_k"] = ce_top_k
+        if ce_ms is not None:
+            timing["cross_encoder_ms"] = ce_ms
 
     # Apply time decay AFTER rerank so freshness actually affects the final ordering.
     # See _apply_time_decay docstring for the score-multiplication contract.
@@ -959,235 +1639,25 @@ def recall_v2(
         fused, decay_ms = _apply_time_decay(fused)
         timing["decay_ms"] = decay_ms
 
-    for r in fused:
-        meta = r.get("metadata") or {}
-        if meta.get("primary_doc_lookup"):
-            r["score"] = float(r.get("score", 0)) + 35.0
+    _apply_primary_doc_boost_inplace(fused)
+    fused = _sort_and_diversify(fused, top_window=n)
 
-    fused.sort(key=lambda r: r.get("score", 0), reverse=True)
-    with contextlib.suppress(Exception):
-        fused = _rerank.diversify_sources(fused, top_window=n, max_per_source=2, max_per_collection=None)
-
-    # Phase G3: opt-in graph-constraint exclusion. When the caller flags
-    # exclude_already_used=true (typical: Sage doing tool-recommendation
-    # research), drop semantic_memory results whose extracted entities
-    # overlap the names returned by
-    # `(chris)-[:RELATES_TO {relationship:'uses'}]->(t)` in Neo4j.
-    #
-    # Why entity-link join (not raw text match): names like "react" (verb),
-    # "ghost" (idiom), "neo4j" (in unrelated graph-DB chatter) false-positive
-    # on word-boundary regex. The atom_entity table only links an atom to
-    # an entity when entity_graph.extract_and_store_entities (Sage LLM)
-    # judged it a real reference — that's the precision boundary we want.
-    #
-    # Other collections (canonical/obsidian/experience/...) don't run
-    # through the brain.db entity extractor, so we leave them unfiltered
-    # rather than fall back to a noisy regex.
+    # Phase G3: opt-in graph-constraint exclusion. See
+    # _apply_exclude_already_used docstring for the entity-link semantics.
     if exclude_already_used:
-        t_excl = time.time()
-        excluded_count = 0
-        try:
-            from entity_graph import get_excluded_entities
-
-            excluded_names = get_excluded_entities("chris", "uses")
-        except Exception:
-            excluded_names = set()
-
-        if excluded_names:
-            try:
-                from atoms_store import _conn as _atoms_conn
-
-                # Recall returns IDs in two forms: legacy /recall keeps the
-                # collection prefix (e.g. "semantic_memory:abc"), /recall/v2
-                # strips it down to bare hex. atoms.chroma_id stores the
-                # full prefixed form. Match both with a bare-hex synonym so
-                # callers from either path get filtered.
-                result_ids = [r.get("id") for r in fused if r.get("id")]
-                excluded_lower = [n.lower() for n in excluded_names if n]
-                if result_ids and excluded_lower:
-                    rid_ph = ",".join("?" for _ in result_ids)
-                    ex_ph = ",".join("?" for _ in excluded_lower)
-                    with _atoms_conn() as _c:
-                        rows = _c.execute(
-                            "SELECT DISTINCT atoms.chroma_id "
-                            "FROM atoms "
-                            "JOIN atom_entity ON atom_entity.atom_id = atoms.id "
-                            "JOIN entities ON entities.id = atom_entity.entity_id "
-                            f"WHERE LOWER(entities.name) IN ({ex_ph}) "
-                            f"AND (atoms.chroma_id IN ({rid_ph}) OR "
-                            f"     SUBSTR(atoms.chroma_id, INSTR(atoms.chroma_id, ':') + 1) IN ({rid_ph}))",
-                            excluded_lower + result_ids + result_ids,
-                        ).fetchall()
-                    drop_set: set[str] = set()
-                    for row in rows:
-                        full = row["chroma_id"]
-                        drop_set.add(full)
-                        if ":" in full:
-                            drop_set.add(full.split(":", 1)[1])
-                    if drop_set:
-                        before = len(fused)
-                        fused = [r for r in fused if r.get("id") not in drop_set]
-                        excluded_count = before - len(fused)
-            except Exception as exc:
-                log.warning("exclude_already_used filter failed: %s", exc)
-
-        timing["exclude_already_used_ms"] = int((time.time() - t_excl) * 1000)
+        fused, excluded_count, excl_ms = _apply_exclude_already_used(fused)
+        timing["exclude_already_used_ms"] = excl_ms
         timing["exclude_already_used_dropped"] = excluded_count
 
-    # Content enrichment pass: for file-backed top-N results, replace the
-    # per-chunk content snippet with a longer excerpt read directly from the
-    # source file. Retrieval ranking already happened; this just gives the
-    # caller (and downstream UIs / eval tools) richer context for the same
-    # document without disturbing rank order or latency-critical paths.
-    t_enrich = time.time()
-    _seen_paths: set[str] = set()
-    _max_file_bytes = 4000  # cap per result so responses stay compact
-    _enrichable_types = {
-        "canonical-note",
-        "distilled-note",
-        "obsidian-note",
-        "agent-config",
-        "learning",
-        "docker-compose",
-        "nginx-conf",
-    }
-    for _r in fused[:n]:
-        _path = _r.get("path", "")
-        if not _path or _path in _seen_paths:
-            continue
-        _rtype = _r.get("type") or (_r.get("metadata") or {}).get("type") or ""
-        if _rtype not in _enrichable_types:
-            continue
-        try:
-            _p = Path(_path)
-            if not _p.is_file():
-                continue
-            _txt = _p.read_text(errors="ignore")
-        except Exception:
-            continue
-        # Prefer a window centered on the matched chunk's text to stay local
-        # to what ranked, not a generic file head. Fall back to file head
-        # if the chunk isn't found in the file anymore (stale chunks, edits).
-        _chunk = _r.get("content") or ""
-        _anchor = _chunk[:120] if _chunk else ""
-        if _anchor and _anchor in _txt:
-            _idx = _txt.index(_anchor)
-            _start = max(0, _idx - 500)
-            _end = min(len(_txt), _idx + _max_file_bytes - 500)
-            _r["content"] = _txt[_start:_end]
-        else:
-            _r["content"] = _txt[:_max_file_bytes]
-        _seen_paths.add(_path)
-    timing["enrich_ms"] = int((time.time() - t_enrich) * 1000)
+    # Content enrichment — see _apply_content_enrichment_inplace docstring.
+    timing["enrich_ms"] = _apply_content_enrichment_inplace(fused, top_n=n)
 
-    # 2026-04-16 Tier 3 #14: metacognitive surface. Inject per-result
-    # `confidence` (from atoms.confidence, Bayesian-updated ledger) and
-    # `pending_contradictions` count (from semantic_contradictions) so
-    # downstream callers can make informed decisions about trusting each
-    # fact. The raw data has existed in brain.db + Chroma for weeks but
-    # never flowed through to the recall response — a superhuman brain
-    # should surface its own uncertainty, not hide it.
-    t_meta = time.time()
-    try:
-        from atoms_store import _conn as _atoms_conn
+    # Metacognitive surface — see _apply_metacognitive_surface_inplace docstring.
+    timing["metacognition_ms"] = _apply_metacognitive_surface_inplace(fused, top_n=n)
 
-        sm_ids = [
-            r.get("id", "")
-            for r in fused[:n]
-            if isinstance(r, dict) and r.get("collection") == "semantic_memory" and r.get("id")
-        ]
-        if sm_ids:
-            placeholders = ",".join("?" for _ in sm_ids)
-            with _atoms_conn() as _c:
-                rows = _c.execute(
-                    f"SELECT chroma_id, confidence, trust_score "
-                    f"FROM atoms WHERE chroma_id IN ({placeholders})",
-                    sm_ids,
-                ).fetchall()
-            # 2026-04-16 Tier 3 #3: apply confidence calibration before
-            # surfacing. If the weekly calibration job has fitted Platt
-            # parameters, raw atom confidence is mapped through the
-            # logistic transform; otherwise identity.
-            try:
-                from confidence_calibration import apply_calibration as _apply_cal
-            except Exception:
-
-                def _apply_cal(x):
-                    return x  # type: ignore
-
-            conf_by_id = {
-                r["chroma_id"]: {
-                    "confidence_raw": round(float(r["confidence"] or 0.5), 3),
-                    "confidence": round(float(_apply_cal(float(r["confidence"] or 0.5))), 3),
-                    "trust_score": round(float(r["trust_score"] or 0.5), 3),
-                }
-                for r in rows
-            }
-            for r in fused[:n]:
-                if r.get("collection") != "semantic_memory":
-                    continue
-                row = conf_by_id.get(r.get("id", ""))
-                if row:
-                    r["confidence"] = row["confidence"]
-                    r["confidence_raw"] = row["confidence_raw"]
-                    r["trust_score_current"] = row["trust_score"]
-    except Exception:
-        pass
-
-    # Pending-contradictions lookup — count unresolved semantic_contradictions
-    # rows that reference any top result's chroma_id. This is the signal
-    # that tells a caller "this fact has an open dispute."
-    try:
-        if fused:
-            top_ids = [r.get("id", "") for r in fused[:n] if r.get("id")]
-            if top_ids:
-                points = get_vector_store().get(
-                    "semantic_contradictions",
-                    filter={
-                        "$or": [
-                            {"memory_id_a": {"$in": top_ids}},
-                            {"memory_id_b": {"$in": top_ids}},
-                        ]
-                    },
-                    limit=100,
-                    with_payload=True,
-                    with_documents=False,
-                )
-                contra_count: dict[str, int] = {}
-                for p in points:
-                    meta = p.payload or {}
-                    if meta.get("resolved"):
-                        continue
-                    a, b = meta.get("memory_id_a"), meta.get("memory_id_b")
-                    if a:
-                        contra_count[a] = contra_count.get(a, 0) + 1
-                    if b:
-                        contra_count[b] = contra_count.get(b, 0) + 1
-                for r in fused[:n]:
-                    rid = r.get("id", "")
-                    if rid and rid in contra_count:
-                        r["pending_contradictions"] = contra_count[rid]
-    except Exception:
-        pass
-    timing["metacognition_ms"] = int((time.time() - t_meta) * 1000)
-
-    # 2026-04-16 Tier 3 #4 + R-10: retrieval-induced inhibition logging.
-    # Record top as winner, rank 2–5 as losers on this query cue.
-    # Dispatched to the search bg pool so we don't add SQLite write
-    # latency to the hot recall path (~15ms saved on p95).
-    try:
-        if fused and len(fused) >= 2:
-            _sm_results = [r for r in fused[:5] if r.get("collection") == "semantic_memory" and r.get("id")]
-            if len(_sm_results) >= 2:
-                from retrieval_inhibition import log_competition as _log_comp
-
-                from brain_core.search_unified import _search_bg_pool as _bg
-
-                _winner_id = _sm_results[0]["id"]
-                _loser_ids = [r["id"] for r in _sm_results[1:]]
-                _bg.submit(_log_comp, _winner_id, _loser_ids, q)
-    except Exception:
-        pass
+    # Retrieval-induced inhibition logging — see _log_retrieval_inhibition
+    # docstring for the winner/loser semantics and bg-pool dispatch contract.
+    _log_retrieval_inhibition(fused, q)
 
     total_candidates = sum(p.get("total_candidates", 0) for p in all_payloads)
     timing["total_ms"] = int((time.time() - t_start) * 1000)
@@ -1205,172 +1675,51 @@ def recall_v2(
     # and for MULTI queries auto-enable CRAG even when the caller didn't ask.
     # Default OFF via BRAIN_ADAPTIVE_RAG env var. When disabled, the caller's
     # explicit `iterative=` param is honored as before.
-    use_crag = iterative
-    try:
-        from brain_core.adaptive_rag import should_use_crag as _ar_should_use
-
-        use_crag, _ar_reason = _ar_should_use(q, caller_explicit=iterative)
+    # See _decide_use_crag docstring for the adaptive-RAG router behavior.
+    use_crag, _ar_reason = _decide_use_crag(q, iterative)
+    if _ar_reason is not None:
         timing["adaptive_rag"] = _ar_reason
-    except Exception:
-        use_crag = iterative
 
     if use_crag and fused:
-        try:
-            from brain_core.crag import (
-                expand_query as _crag_expand_query,
+
+        def _crag_retry(rewritten_q: str):
+            return recall_v2(
+                request,
+                q=rewritten_q,
+                n=n,
+                hyde=False,
+                expand=False,
+                rerank=rerank,
+                decay=decay,
+                iterative=False,
+                since=since,
+                until=until,
+                entity=entity,
+                collection=collection,
+                domain=domain,
+                source_type=source_type,
+                include_history=include_history,
+                include_obsolete=include_obsolete,
+                as_of=as_of,
+                background=background,
             )
-            from brain_core.crag import (
-                score_confidence as _crag_score,
-            )
-            from brain_core.crag import (
-                should_iterate as _crag_should_iterate,
-            )
 
-            t_crag = time.time()
-            confidence_report = _crag_score(fused[: max(n, 5)], query=q)
-            # 2026-04-16 Tier 3 #11: Self-RAG (Asai 2023) semantic critique
-            # layer. When BRAIN_SELF_RAG_ENABLED=true, we dispatch Jenna to
-            # score result relevance semantically and blend with the
-            # heuristic. Replaces the token-shape-only confidence signal
-            # with a real "does this answer the query?" judgment. Off by
-            # default — costs ~1s Jenna call per iterative recall.
-            try:
-                from brain_core.self_rag import blend_with_heuristic as _blend_self_rag
-                from brain_core.self_rag import critique as _self_rag_critique
+        # See _run_crag_retry docstring for the score → rewrite → retry pipeline.
+        fused, _crag_ms, _crag_tele, _crag_err = _run_crag_retry(q, n, fused, _crag_retry)
+        if _crag_err is not None:
+            timing["crag_error"] = _crag_err
+        else:
+            timing["crag_ms"] = _crag_ms
+            timing["crag"] = _crag_tele
 
-                _sr = _self_rag_critique(q, fused[: max(n, 5)])
-                if _sr.components.get("source") == "self_rag":
-                    blended = _blend_self_rag(_sr.score, confidence_report.score)
-                    confidence_report.score = blended
-                    confidence_report.components = {
-                        **confidence_report.components,
-                        "self_rag_score": _sr.score,
-                        "self_rag_components": _sr.components,
-                        "blended": True,
-                    }
-            except Exception:
-                pass
-            crag_telemetry: dict[str, Any] = {
-                "first_hop_confidence": confidence_report.score,
-                "first_hop_components": confidence_report.components,
-                "iterated": False,
-            }
-            if _crag_should_iterate(confidence_report):
-                rewritten = _crag_expand_query(q, fused[:3])
-                if rewritten and rewritten != q:
-                    crag_telemetry["expanded_query"] = rewritten
-                    # M7-WS7 C2 fix: recurse with iterative=False AND force
-                    # hyde=False, expand=False to prevent the inner call from
-                    # firing additional LLM dispatches. Worst case before this
-                    # fix: 1 outer HyDE + 3 outer expand + 1 CRAG rewrite + 1
-                    # inner HyDE + 1 inner expand = up to 7 LLM calls per req.
-                    # After this fix: outer dispatches + 1 CRAG rewrite, max.
-                    second_hop = recall_v2(
-                        request,
-                        q=rewritten,
-                        n=n,
-                        hyde=False,
-                        expand=False,
-                        rerank=rerank,
-                        decay=decay,
-                        iterative=False,
-                        since=since,
-                        until=until,
-                        entity=entity,
-                        collection=collection,
-                        domain=domain,
-                        source_type=source_type,
-                        include_history=include_history,
-                        include_obsolete=include_obsolete,
-                        as_of=as_of,
-                        background=background,
-                    )
-                    second_results = second_hop.results
-                    second_report = _crag_score(second_results[: max(n, 5)])
-                    crag_telemetry["second_hop_confidence"] = second_report.score
-                    crag_telemetry["iterated"] = True
-                    # Pick the higher-confidence result set
-                    if second_report.score > confidence_report.score:
-                        fused = second_results
-                        crag_telemetry["selected"] = "second_hop"
-                    else:
-                        crag_telemetry["selected"] = "first_hop"
-            timing["crag_ms"] = int((time.time() - t_crag) * 1000)
-            timing["crag"] = crag_telemetry
-        except Exception as _crag_err:
-            log.warning("crag iterative path failed: %s", _crag_err)
-            timing["crag_error"] = str(_crag_err)[:200]
+    # Parent-child expand — see _apply_parent_child_expand docstring.
+    fused = _apply_parent_child_expand(fused)
 
-    # M9.2: parent-child retrieval expand. When a child chunk wins the rank,
-    # swap its content for the wider parent chunk so the LLM consumer gets
-    # more context. Off by default; enabled via BRAIN_PARENT_CHILD_EXPAND.
-    # Runs BEFORE community injection so parents are available for both
-    # the child-expanded path and the community synthetic results.
-    try:
-        from brain_core.parent_child_expand import expand_to_parents as _pc_expand
-
-        fused = _pc_expand(fused)
-    except Exception as _pc_err:
-        log.warning("parent-child expand failed: %s", _pc_err)
-
-    # M8.7: inject GraphRAG community summaries for MULTI-class queries.
-    # When adaptive_rag classifies a query as MULTI (comparison, reasoning,
-    # multi-fact synthesis), the weekly-generated community summaries from
-    # the entity graph Louvain clusters are prepended as a synthetic result
-    # at rank 0 with a special source marker. Gives the caller cross-document
-    # synthesis that single-doc retrieval can't provide.
-    #
-    # Cheap: the summaries are pre-computed and sit in a small table with
-    # the entities indexed. get_summaries_matching does a single SELECT + a
-    # substring check against the query terms (<5ms).
-    #
-    # Off when BRAIN_COMMUNITY_SUMMARIES is unset or when no community
-    # matches the query entities.
-    try:
-        from brain_core.adaptive_rag import classify as _ar_classify
-        from brain_core.community_summaries import get_summaries_matching as _cs_match
-
-        _classification = _ar_classify(q)
-        if _classification.label == "multi":
-            _summaries = _cs_match(q, limit=2)
-            if _summaries:
-                # 2026-04-16 R-2 fix: score was hardcoded 95.0 which
-                # always placed community summaries at rank 1 regardless
-                # of whether they were actually the best answer,
-                # overriding every Tier 1/2/3 scoring fix above. Now
-                # scored relative to the current top result so they can
-                # tiebreak or lead but not blindly dominate. Inserted
-                # near top-K but not prepended — MMR + source diversity
-                # still decide final placement.
-                top_score = float(fused[0].get("score", 0.0)) if fused else 0.0
-                # Community injected at 0.85×top: meaningful but not always rank-1.
-                synth_score = max(55.0, min(100.0, top_score * 0.85)) if top_score > 0 else 70.0
-                synthetic = []
-                for s in _summaries:
-                    synthetic.append(
-                        {
-                            "id": f"community:{','.join(s['entities'][:3])[:64]}",
-                            "score": synth_score,
-                            "source_type": "community",
-                            "collection": "community_summaries",
-                            "title": f"Community: {', '.join(s['entities'][:5])}",
-                            "content": s["summary"],
-                            "path": "graph/community/" + s.get("generated_at", ""),
-                            "trust_tier": 2,  # derived, not canonical
-                            "metadata": {
-                                "entities": s["entities"],
-                                "atom_count": s.get("atom_count", 0),
-                                "generated_at": s.get("generated_at"),
-                            },
-                        }
-                    )
-                # Merge by score so they mix with real results rather than
-                # always leading. MULTI queries still benefit because the
-                # score is high enough to surface in top-3 typically.
-                fused = sorted(fused + synthetic, key=lambda r: r.get("score", 0), reverse=True)
-                timing["community_summaries_injected"] = len(synthetic)
-    except Exception as _cs_err:
-        log.warning("community summary inject failed: %s", _cs_err)
+    # Community summaries — see _inject_community_summaries docstring for the
+    # MULTI-class gate and synthetic-row scoring contract.
+    fused, _injected = _inject_community_summaries(q, fused)
+    if _injected:
+        timing["community_summaries_injected"] = _injected
 
     _metrics_buf.record_search_latency(timing["total_ms"], timing)
 
@@ -1392,111 +1741,28 @@ def recall_v2(
     )
     _recall_cache_put(cache_key, response)
 
-    # Gap logging: record queries where cross-encoder relevance is flat,
-    # meaning the brain has nothing semantically close. The CE score is the
-    # only signal that reflects real semantic match — blended `score` is
-    # dominated by RRF ranks which always have a top-N winner even for
-    # gibberish queries.
-    #
-    # Heuristic: log when max CE score < 0.52 (model is at the sigmoid midpoint,
-    # indicating "I have no opinion"). Good queries see CE scores 0.55-0.75.
-    # Only log unfiltered queries — filtered queries with no hits are usually
-    # intentional.
-    # Moved from /recall v1 on 2026-04-12; v1's max_score<5.0 threshold never fired.
-    try:
-        filter_free = not (
-            collection
-            or domain
-            or entity
-            or source_type
-            or since
-            or until
-            or as_of
-            or include_history
-            or include_obsolete
-        )
-        if filter_free:
-            results_list = fused[:n]
-            ce_scores = [
-                float(r.get("cross_encoder_score", 0))
-                for r in results_list
-                if r.get("cross_encoder_score") is not None
-            ]
-            max_ce = max(ce_scores, default=0.0)
-            # Fall back to blended score threshold if CE wasn't run (flag off)
-            max_score = max((float(r.get("score", 0)) for r in results_list), default=0.0)
-            is_gap = (
-                len(results_list) == 0
-                or (ce_scores and max_ce < 0.52)
-                or (not ce_scores and max_score < 30.0)
-            )
-            if is_gap:
-                gap_log = BRAIN_DIR / "logs" / "recall-gaps.jsonl"
-                gap_log.parent.mkdir(parents=True, exist_ok=True)
-                with gap_log.open("a") as gf:
-                    gf.write(
-                        json.dumps(
-                            {
-                                "timestamp": datetime.now(UTC).isoformat(),
-                                "query": q[:500],
-                                "n_results": len(results_list),
-                                "max_score": round(max_score, 2),
-                                "max_ce_score": round(max_ce, 4) if ce_scores else None,
-                                "endpoint": "/recall/v2",
-                            }
-                        )
-                        + "\n"
-                    )
-    except Exception:
-        pass
+    # Gap logging — see _log_recall_gap docstring for the CE-score threshold
+    # heuristic and filter-free guard.
+    _log_recall_gap(
+        q,
+        fused,
+        n,
+        collection=collection,
+        domain=domain,
+        entity=entity,
+        source_type=source_type,
+        since=since,
+        until=until,
+        as_of=as_of,
+        include_history=include_history,
+        include_obsolete=include_obsolete,
+    )
 
-    # Auto-record search feedback + adoption tracking — both fire-and-forget.
-    # M7-WS7 H3 fix: insert_action_audit was previously synchronous on the
-    # response path (0.5-30ms per call under writer contention). Both the
-    # auto-feedback recorder and the adoption tracker now share the same
-    # background dispatch so neither blocks the response.
+    # Auto-feedback + action-audit dispatch — see
+    # _dispatch_post_recall_side_effects docstring for the off-path dispatch
+    # contract.
     agent = request.headers.get("x-agent") or request.query_params.get("actor") or "unknown"
-
-    def _post_recall_side_effects() -> None:
-        _record_auto_feedback(q, fused[:n], agent)
-        try:
-            from brain_core.atoms_store import insert_action_audit as _iaa
-
-            # Normalize ids to dashed UUID form so downstream readers
-            # (recall_judge, contradiction propagation, audit dashboards) can
-            # round-trip them back to Qdrant points. The recall result builder
-            # was emitting hex32 (UUID with dashes stripped); writing those
-            # raw left the audit rows opaque and unmappable.
-            def _to_dashed_uuid(raw: str) -> str:
-                if not raw:
-                    return raw
-                if len(raw) == 32 and "-" not in raw and all(c in "0123456789abcdef" for c in raw.lower()):
-                    return f"{raw[:8]}-{raw[8:12]}-{raw[12:16]}-{raw[16:20]}-{raw[20:]}"
-                return raw
-
-            _iaa(
-                route="/recall/v2",
-                tool="brain_recall",
-                actor=agent,
-                query_text=q[:500],
-                retrieved_chroma_ids=[
-                    _to_dashed_uuid(str(r.get("id") or r.get("chroma_id") or ""))[:64]
-                    for r in fused[:n]
-                    if r.get("id") or r.get("chroma_id")
-                ][:20],
-            )
-        except Exception:
-            pass
-
-    if background is not None:
-        background.add_task(_post_recall_side_effects)
-    else:
-        try:
-            from brain_core.search_unified import _search_bg_pool
-
-            _search_bg_pool.submit(_post_recall_side_effects)
-        except Exception:
-            pass
+    _dispatch_post_recall_side_effects(q, fused, n, agent, background)
 
     return response
 

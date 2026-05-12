@@ -534,3 +534,1914 @@ def test_time_decay_empty_input_returns_empty(monkeypatch):
     out, ms = _apply_time_decay([])
     assert out == []
     assert isinstance(ms, int)
+
+
+# ── _apply_primary_doc_boost_inplace ────────────────────────────────────
+
+
+def test_primary_doc_boost_adds_35_to_flagged_results():
+    """Results whose metadata.primary_doc_lookup is truthy get +35 score.
+    The +35 margin is empirically derived to outweigh strong semantic hits."""
+    from routes.recall import _apply_primary_doc_boost_inplace
+
+    fused = [
+        {"id": "primary", "score": 50.0, "metadata": {"primary_doc_lookup": True}},
+        {"id": "semantic", "score": 80.0, "metadata": {"primary_doc_lookup": False}},
+        {"id": "noflag", "score": 75.0, "metadata": {}},
+        {"id": "nometa", "score": 70.0},
+    ]
+    _apply_primary_doc_boost_inplace(fused)
+    assert fused[0]["score"] == 85.0  # 50 + 35
+    assert fused[1]["score"] == 80.0  # untouched
+    assert fused[2]["score"] == 75.0
+    assert fused[3]["score"] == 70.0
+
+
+def test_primary_doc_boost_treats_missing_score_as_zero():
+    """If `score` key is absent, dict.get returns the default 0, then +35
+    yields 35. Verifies the boost still fires on flagged results that
+    haven't yet been scored by RRF (edge case)."""
+    from routes.recall import _apply_primary_doc_boost_inplace
+
+    fused = [{"id": "x", "metadata": {"primary_doc_lookup": True}}]
+    _apply_primary_doc_boost_inplace(fused)
+    assert fused[0]["score"] == 35.0
+
+
+def test_primary_doc_boost_empty_input_is_no_op():
+    from routes.recall import _apply_primary_doc_boost_inplace
+
+    fused: list[dict] = []
+    _apply_primary_doc_boost_inplace(fused)
+    assert fused == []
+
+
+def test_primary_doc_boost_metadata_none_is_treated_as_no_flag():
+    """`r.get("metadata") or {}` — metadata explicitly None must not raise
+    and must be treated as no flag (no boost)."""
+    from routes.recall import _apply_primary_doc_boost_inplace
+
+    fused = [{"id": "x", "score": 10.0, "metadata": None}]
+    _apply_primary_doc_boost_inplace(fused)
+    assert fused[0]["score"] == 10.0
+
+
+# ── _sort_and_diversify ─────────────────────────────────────────────────
+
+
+def test_sort_and_diversify_sorts_by_score_desc(monkeypatch):
+    """Highest score wins. diversify_sources is mocked to return its
+    input unchanged so we observe pure sort behavior."""
+    import rerank as _rerank
+    from routes.recall import _sort_and_diversify
+
+    monkeypatch.setattr(_rerank, "diversify_sources", lambda fused, **kw: fused)
+    out = _sort_and_diversify(
+        [{"id": "low", "score": 1}, {"id": "high", "score": 10}, {"id": "mid", "score": 5}],
+        top_window=10,
+    )
+    assert [r["id"] for r in out] == ["high", "mid", "low"]
+
+
+def test_sort_and_diversify_calls_diversify_with_correct_kwargs(monkeypatch):
+    """diversify_sources must receive top_window=n, max_per_source=2,
+    max_per_collection=None — the exact pre-extraction call shape."""
+    import rerank as _rerank
+    from routes.recall import _sort_and_diversify
+
+    captured: dict = {}
+
+    def _fake_div(fused, **kw):
+        captured.update(kw)
+        return fused
+
+    monkeypatch.setattr(_rerank, "diversify_sources", _fake_div)
+    _sort_and_diversify([{"id": "a", "score": 1}], top_window=7)
+    assert captured == {"top_window": 7, "max_per_source": 2, "max_per_collection": None}
+
+
+def test_sort_and_diversify_swallows_diversify_exception(monkeypatch):
+    """If diversify_sources raises, the sorted list still returns
+    (contextlib.suppress(Exception) — failed diversification must not
+    fail the whole recall)."""
+    import rerank as _rerank
+    from routes.recall import _sort_and_diversify
+
+    def _boom(*a, **k):
+        raise RuntimeError("diversifier crashed")
+
+    monkeypatch.setattr(_rerank, "diversify_sources", _boom)
+    fused = [{"id": "a", "score": 5}, {"id": "b", "score": 10}]
+    out = _sort_and_diversify(fused, top_window=5)
+    # Sort happened before the diversify attempt, so order is sorted
+    assert [r["id"] for r in out] == ["b", "a"]
+
+
+def test_sort_and_diversify_empty_input(monkeypatch):
+    import rerank as _rerank
+    from routes.recall import _sort_and_diversify
+
+    monkeypatch.setattr(_rerank, "diversify_sources", lambda fused, **kw: fused)
+    assert _sort_and_diversify([], top_window=10) == []
+
+
+# ── _run_token_rerank (stage 1) ─────────────────────────────────────────
+
+
+def test_token_rerank_delegates_to_rerank_with_top_k_none(monkeypatch):
+    """Stage-1 helper must call _rerank.rerank(q, fused, top_k=None) —
+    the pre-extraction signature."""
+    import rerank as _rerank
+    from routes.recall import _run_token_rerank
+
+    captured: dict = {}
+
+    def _fake_rerank(query, fused, top_k=None):
+        captured["query"] = query
+        captured["fused"] = fused
+        captured["top_k"] = top_k
+        return [{**r, "rerank_score": r.get("score", 0) * 1.4} for r in fused]
+
+    monkeypatch.setattr(_rerank, "rerank", _fake_rerank)
+    fused_in = [{"id": "a", "score": 5}, {"id": "b", "score": 10}]
+    fused_out, ms = _run_token_rerank("q", fused_in)
+
+    assert captured["query"] == "q"
+    assert captured["top_k"] is None
+    # rerank_score copied into score (the post-rerank score-promotion loop)
+    assert fused_out[0]["score"] == 7.0  # 5 * 1.4
+    assert fused_out[1]["score"] == 14.0  # 10 * 1.4
+    assert isinstance(ms, int)
+
+
+def test_token_rerank_score_promotion_falls_back_to_existing_score(monkeypatch):
+    """If a result has no rerank_score, the promotion loop must keep the
+    existing score rather than zero it out."""
+    import rerank as _rerank
+    from routes.recall import _run_token_rerank
+
+    monkeypatch.setattr(_rerank, "rerank", lambda q, fused, top_k: fused)
+    out, _ms = _run_token_rerank("q", [{"id": "x", "score": 42}])
+    assert out[0]["score"] == 42
+
+
+def test_token_rerank_empty_input(monkeypatch):
+    import rerank as _rerank
+    from routes.recall import _run_token_rerank
+
+    monkeypatch.setattr(_rerank, "rerank", lambda q, fused, top_k: fused)
+    out, ms = _run_token_rerank("q", [])
+    assert out == []
+    assert isinstance(ms, int)
+
+
+# ── _run_cross_encoder_rerank (stage 2) ─────────────────────────────────
+
+
+def test_cross_encoder_disabled_returns_none_timing(monkeypatch):
+    """When BRAIN_CROSS_ENCODER_ENABLED is false, return (fused, None, None).
+    The caller knows not to write timing keys."""
+    from routes.recall import _run_cross_encoder_rerank
+
+    from brain_core import config as _brain_config
+
+    monkeypatch.setattr(_brain_config, "BRAIN_CROSS_ENCODER_ENABLED", False, raising=False)
+    fused_in = [{"id": "a", "score": 5}]
+    fused_out, ce_top_k, ce_ms = _run_cross_encoder_rerank("q", fused_in)
+    assert fused_out is fused_in
+    assert ce_top_k is None
+    assert ce_ms is None
+
+
+def test_cross_encoder_enabled_calls_choose_top_k_and_rerank(monkeypatch):
+    """Happy path with CE enabled: choose_cross_encoder_top_k decides the
+    window, rerank_with_cross_encoder applies it. Both timing keys
+    returned populated."""
+    import sys
+    import types
+
+    from routes.recall import _run_cross_encoder_rerank
+
+    from brain_core import config as _brain_config
+
+    monkeypatch.setattr(_brain_config, "BRAIN_CROSS_ENCODER_ENABLED", True, raising=False)
+
+    captured: dict = {}
+
+    def _fake_choose(q, fused, default_top_k):
+        captured["choose_args"] = (q, fused, default_top_k)
+        return 14
+
+    def _fake_rerank(q, fused, top_k):
+        captured["rerank_args"] = (q, fused, top_k)
+        return [{**r, "score": r.get("score", 0) + 1} for r in fused]
+
+    fake_mod = types.ModuleType("brain_core.cross_encoder_rerank")
+    fake_mod.choose_cross_encoder_top_k = _fake_choose
+    fake_mod.rerank_with_cross_encoder = _fake_rerank
+    monkeypatch.setitem(sys.modules, "brain_core.cross_encoder_rerank", fake_mod)
+
+    fused_in = [{"id": "a", "score": 5}]
+    fused_out, ce_top_k, ce_ms = _run_cross_encoder_rerank("q", fused_in)
+    assert ce_top_k == 14
+    assert ce_ms is not None
+    assert isinstance(ce_ms, int)
+    assert captured["choose_args"] == ("q", fused_in, 14)
+    assert captured["rerank_args"][2] == 14
+    assert fused_out[0]["score"] == 6
+
+
+def test_cross_encoder_exception_falls_back_to_stage_1(monkeypatch):
+    """If the cross-encoder import or call raises, return the fused list
+    unchanged + (None, None) timing — stage-1 result stands, a warning
+    gets logged but the recall succeeds."""
+    import sys
+    import types
+
+    from routes.recall import _run_cross_encoder_rerank
+
+    from brain_core import config as _brain_config
+
+    monkeypatch.setattr(_brain_config, "BRAIN_CROSS_ENCODER_ENABLED", True, raising=False)
+
+    fake_mod = types.ModuleType("brain_core.cross_encoder_rerank")
+
+    def _boom(*a, **k):
+        raise RuntimeError("CE model load failed")
+
+    fake_mod.choose_cross_encoder_top_k = _boom
+    fake_mod.rerank_with_cross_encoder = _boom
+    monkeypatch.setitem(sys.modules, "brain_core.cross_encoder_rerank", fake_mod)
+
+    fused_in = [{"id": "a", "score": 5}]
+    fused_out, ce_top_k, ce_ms = _run_cross_encoder_rerank("q", fused_in)
+    assert fused_out is fused_in
+    assert ce_top_k is None
+    assert ce_ms is None
+
+
+def test_cross_encoder_config_import_failure_falls_back(monkeypatch):
+    """If the config import / getattr raises, treat CE as disabled rather
+    than crashing. (ce_enabled=False on except path.)"""
+    import sys
+    import types
+
+    # Replace brain_core.config with a module whose attribute access raises.
+    class _BoomConfig(types.ModuleType):
+        def __getattribute__(self, name):
+            if name == "BRAIN_CROSS_ENCODER_ENABLED":
+                raise RuntimeError("config import broken")
+            return types.ModuleType.__getattribute__(self, name)
+
+    fake = _BoomConfig("brain_core.config")
+    monkeypatch.setitem(sys.modules, "brain_core.config", fake)
+
+    from routes.recall import _run_cross_encoder_rerank
+
+    fused_in = [{"id": "a", "score": 5}]
+    fused_out, ce_top_k, ce_ms = _run_cross_encoder_rerank("q", fused_in)
+    assert fused_out is fused_in
+    assert ce_top_k is None
+    assert ce_ms is None
+
+
+# ── _apply_exclude_already_used ─────────────────────────────────────────
+
+
+def test_exclude_already_used_neo4j_failure_returns_unfiltered(monkeypatch):
+    """If get_excluded_entities raises, helper swallows + returns (fused, 0, ms)
+    — the rest of the recall must not fail when Neo4j is unreachable."""
+    import entity_graph
+    from routes.recall import _apply_exclude_already_used
+
+    def _boom(subject, relationship):
+        raise RuntimeError("neo4j down")
+
+    monkeypatch.setattr(entity_graph, "get_excluded_entities", _boom)
+    fused_in = [{"id": "a", "score": 5}]
+    fused_out, dropped, ms = _apply_exclude_already_used(fused_in)
+    assert fused_out is fused_in
+    assert dropped == 0
+    assert isinstance(ms, int)
+
+
+def test_exclude_already_used_empty_exclusion_set_is_passthrough(monkeypatch):
+    """When subject has no graph-recorded `uses` relationships, the
+    helper short-circuits before opening atoms.db."""
+    import entity_graph
+    from routes.recall import _apply_exclude_already_used
+
+    monkeypatch.setattr(entity_graph, "get_excluded_entities", lambda s, r: set())
+    fused_in = [{"id": "a", "score": 5}]
+    fused_out, dropped, ms = _apply_exclude_already_used(fused_in)
+    assert fused_out is fused_in
+    assert dropped == 0
+    assert isinstance(ms, int)
+
+
+def test_exclude_already_used_default_subject_relationship_args(monkeypatch):
+    """Helper defaults to subject='chris', relationship='uses' — verifies
+    the contract that recall_v2 callers rely on."""
+    import entity_graph
+    from routes.recall import _apply_exclude_already_used
+
+    captured: list = []
+
+    def _capture(subject, relationship):
+        captured.append((subject, relationship))
+        return set()
+
+    monkeypatch.setattr(entity_graph, "get_excluded_entities", _capture)
+    _apply_exclude_already_used([{"id": "x", "score": 1}])
+    assert captured == [("chris", "uses")]
+
+
+def test_exclude_already_used_subject_relationship_override(monkeypatch):
+    """Override subject/relationship for non-chris callers (future-proof)."""
+    import entity_graph
+    from routes.recall import _apply_exclude_already_used
+
+    captured: list = []
+
+    def _capture(subject, relationship):
+        captured.append((subject, relationship))
+        return set()
+
+    monkeypatch.setattr(entity_graph, "get_excluded_entities", _capture)
+    _apply_exclude_already_used(
+        [{"id": "x", "score": 1}],
+        subject="alice",
+        relationship="prefers",
+    )
+    assert captured == [("alice", "prefers")]
+
+
+def test_exclude_already_used_sql_failure_logs_and_returns_unfiltered(monkeypatch):
+    """If the atoms.db SELECT raises, helper swallows the exception, logs
+    a warning, and returns (fused unchanged, 0 dropped, ms). The recall
+    must succeed even when the entity-link join fails."""
+    import entity_graph
+    from routes.recall import _apply_exclude_already_used
+
+    monkeypatch.setattr(entity_graph, "get_excluded_entities", lambda s, r: {"react"})
+
+    # Make the atoms_store import explode at the second try/except boundary
+    import contextlib
+
+    import atoms_store
+
+    @contextlib.contextmanager
+    def _boom_conn(*a, **k):
+        raise RuntimeError("atoms.db locked")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(atoms_store, "_conn", _boom_conn)
+    fused_in = [{"id": "a", "score": 5}]
+    fused_out, dropped, ms = _apply_exclude_already_used(fused_in)
+    assert fused_out is fused_in
+    assert dropped == 0
+    assert isinstance(ms, int)
+
+
+# ── _apply_content_enrichment_inplace ──────────────────────────────────
+
+
+def test_content_enrichment_replaces_with_anchor_window(tmp_path):
+    """When the chunk's anchor (first 120 chars) appears in the file,
+    enrichment returns a window centered on it (up to ±500/MAX-500)."""
+    from routes.recall import _apply_content_enrichment_inplace
+
+    p = tmp_path / "note.md"
+    body = "HEADER\n\n" + ("ANCHOR" + "x" * 100) + "\n\nMIDDLE\n\nFOOTER"
+    p.write_text(body)
+
+    fused = [
+        {
+            "id": "1",
+            "path": str(p),
+            "type": "canonical-note",
+            "content": "ANCHOR" + "x" * 100,
+        }
+    ]
+    ms = _apply_content_enrichment_inplace(fused, top_n=1)
+    assert "ANCHOR" in fused[0]["content"]
+    assert isinstance(ms, int)
+
+
+def test_content_enrichment_falls_back_to_file_head_when_anchor_missing(tmp_path):
+    """If the chunk anchor isn't in the file (stale chunks, edits), return
+    the first _CONTENT_ENRICH_MAX_FILE_BYTES of the file."""
+    from routes.recall import _apply_content_enrichment_inplace
+
+    p = tmp_path / "note.md"
+    p.write_text("STALE FILE HEAD\n\nbody body body")
+    fused = [
+        {
+            "id": "1",
+            "path": str(p),
+            "type": "canonical-note",
+            "content": "MISSING ANCHOR TEXT",
+        }
+    ]
+    _apply_content_enrichment_inplace(fused, top_n=1)
+    assert fused[0]["content"].startswith("STALE FILE HEAD")
+
+
+def test_content_enrichment_skips_non_enrichable_types(tmp_path):
+    """Result types not in _CONTENT_ENRICHABLE_TYPES must be left alone
+    (no file read, no content rewrite). The semantic_memory collection,
+    for example, doesn't have a file path the brain owns."""
+    from routes.recall import _apply_content_enrichment_inplace
+
+    p = tmp_path / "x.md"
+    p.write_text("file content")
+    original = "raw semantic chunk"
+    fused = [{"id": "1", "path": str(p), "type": "semantic_memory", "content": original}]
+    _apply_content_enrichment_inplace(fused, top_n=1)
+    assert fused[0]["content"] == original
+
+
+def test_content_enrichment_dedupes_paths(tmp_path):
+    """If two top-N results share the same path, only the first gets
+    enriched — subsequent rows preserve their per-chunk content."""
+    from routes.recall import _apply_content_enrichment_inplace
+
+    p = tmp_path / "shared.md"
+    p.write_text("FILE BODY enriched content here")
+    fused = [
+        {"id": "1", "path": str(p), "type": "canonical-note", "content": "ANCHOR1"},
+        {"id": "2", "path": str(p), "type": "canonical-note", "content": "ANCHOR2"},
+    ]
+    _apply_content_enrichment_inplace(fused, top_n=2)
+    assert "FILE BODY" in fused[0]["content"]
+    assert fused[1]["content"] == "ANCHOR2"  # untouched
+
+
+def test_content_enrichment_skips_missing_files(tmp_path):
+    """A non-existent path must not raise — the row stays at its original
+    chunk content."""
+    from routes.recall import _apply_content_enrichment_inplace
+
+    fused = [
+        {
+            "id": "1",
+            "path": str(tmp_path / "does_not_exist.md"),
+            "type": "canonical-note",
+            "content": "kept",
+        }
+    ]
+    _apply_content_enrichment_inplace(fused, top_n=1)
+    assert fused[0]["content"] == "kept"
+
+
+def test_content_enrichment_respects_top_n_cutoff(tmp_path):
+    """Only the first top_n results are considered — extras stay raw."""
+    from routes.recall import _apply_content_enrichment_inplace
+
+    p = tmp_path / "f.md"
+    p.write_text("file body text")
+    fused = [
+        {"id": "1", "path": str(p), "type": "canonical-note", "content": "raw1"},
+        {"id": "2", "path": str(tmp_path / "g.md"), "type": "canonical-note", "content": "raw2"},
+    ]
+    _apply_content_enrichment_inplace(fused, top_n=1)
+    assert "file body" in fused[0]["content"]
+    assert fused[1]["content"] == "raw2"  # outside top_n window
+
+
+def test_content_enrichment_empty_input_returns_zero_ms():
+    from routes.recall import _apply_content_enrichment_inplace
+
+    ms = _apply_content_enrichment_inplace([], top_n=10)
+    assert isinstance(ms, int)
+    assert ms >= 0
+
+
+def test_content_enrichment_metadata_type_fallback(tmp_path):
+    """If `r['type']` is missing, fall back to `r['metadata']['type']`
+    (some upstream paths put it there)."""
+    from routes.recall import _apply_content_enrichment_inplace
+
+    p = tmp_path / "x.md"
+    p.write_text("file body")
+    fused = [
+        {
+            "id": "1",
+            "path": str(p),
+            "metadata": {"type": "canonical-note"},
+            "content": "raw",
+        }
+    ]
+    _apply_content_enrichment_inplace(fused, top_n=1)
+    assert "file body" in fused[0]["content"]
+
+
+def test_exclude_already_used_no_result_ids_short_circuits(monkeypatch):
+    """If fused has results without 'id' keys (or is empty), the SQL
+    query is skipped (result_ids and excluded_lower guard)."""
+    import entity_graph
+    from routes.recall import _apply_exclude_already_used
+
+    monkeypatch.setattr(entity_graph, "get_excluded_entities", lambda s, r: {"react"})
+
+    import atoms_store
+
+    sql_called: list = []
+    monkeypatch.setattr(
+        atoms_store,
+        "_conn",
+        lambda *a, **k: sql_called.append(True) or (_ for _ in ()).throw(Exception("guard")),
+    )
+
+    # No ids on the results → SQL must not be called
+    fused_in = [{"score": 5}, {"score": 1}]
+    fused_out, dropped, ms = _apply_exclude_already_used(fused_in)
+    assert fused_out is fused_in
+    assert dropped == 0
+    assert sql_called == [], "atoms_store._conn called when there were no ids"
+
+
+# ── _apply_metacognitive_surface_inplace ───────────────────────────────
+
+
+class _FakeAtomsRow(dict):
+    """sqlite3.Row stand-in — supports r['col'] access used by the helper."""
+
+
+class _FakeAtomsCursor:
+    def __init__(self, rows: list[dict]):
+        self._rows = rows
+
+    def fetchall(self) -> list[dict]:
+        return [_FakeAtomsRow(r) for r in self._rows]
+
+
+class _FakeAtomsConn:
+    def __init__(self, rows: list[dict]):
+        self._rows = rows
+        self.last_sql: str | None = None
+        self.last_params: list | None = None
+
+    def execute(self, sql: str, params=()):
+        self.last_sql = sql
+        self.last_params = list(params)
+        return _FakeAtomsCursor(self._rows)
+
+
+class _FakeAtomsConnCtx:
+    """Context manager wrapper matching `with _atoms_conn() as c:` shape."""
+
+    def __init__(self, conn: _FakeAtomsConn):
+        self._conn = conn
+
+    def __enter__(self) -> _FakeAtomsConn:
+        return self._conn
+
+    def __exit__(self, *exc) -> None:
+        return None
+
+
+class _FakeQdrantPoint:
+    def __init__(self, payload: dict):
+        self.payload = payload
+
+
+class _FakeVectorStore:
+    def __init__(self, points: list[_FakeQdrantPoint] | None = None, raise_exc: Exception | None = None):
+        self._points = points or []
+        self._raise_exc = raise_exc
+        self.last_call: dict | None = None
+
+    def get(self, collection: str, **kwargs):
+        self.last_call = {"collection": collection, **kwargs}
+        if self._raise_exc is not None:
+            raise self._raise_exc
+        return self._points
+
+
+def test_metacognitive_surface_injects_confidence_and_trust(monkeypatch):
+    """Pass 1 happy path: semantic_memory rows pick up confidence /
+    confidence_raw / trust_score_current from the atoms ledger."""
+    import atoms_store
+    import confidence_calibration
+    from routes import recall as recall_mod
+    from routes.recall import _apply_metacognitive_surface_inplace
+
+    conn = _FakeAtomsConn(
+        rows=[
+            {"chroma_id": "atm_1", "confidence": 0.8, "trust_score": 0.9},
+            {"chroma_id": "atm_2", "confidence": 0.2, "trust_score": 0.4},
+        ]
+    )
+    monkeypatch.setattr(atoms_store, "_conn", lambda *a, **k: _FakeAtomsConnCtx(conn))
+    monkeypatch.setattr(confidence_calibration, "apply_calibration", lambda x: min(1.0, x + 0.1))
+    monkeypatch.setattr(recall_mod, "get_vector_store", lambda: _FakeVectorStore(points=[]))
+
+    fused = [
+        {"id": "atm_1", "collection": "semantic_memory"},
+        {"id": "atm_2", "collection": "semantic_memory"},
+        {"id": "doc_1", "collection": "canonical"},  # untouched
+    ]
+    ms = _apply_metacognitive_surface_inplace(fused, top_n=3)
+
+    assert isinstance(ms, int) and ms >= 0
+    assert fused[0]["confidence"] == 0.9  # 0.8 + 0.1 calibration
+    assert fused[0]["confidence_raw"] == 0.8
+    assert fused[0]["trust_score_current"] == 0.9
+    assert fused[1]["confidence_raw"] == 0.2
+    assert fused[1]["trust_score_current"] == 0.4
+    # canonical row must NOT pick up confidence — only semantic_memory.
+    assert "confidence" not in fused[2]
+    assert "trust_score_current" not in fused[2]
+
+
+def test_metacognitive_surface_skips_when_no_semantic_memory(monkeypatch):
+    """If none of the top-N rows are semantic_memory, atoms_store._conn
+    must not be opened (sm_ids list is empty)."""
+    import atoms_store
+    from routes import recall as recall_mod
+    from routes.recall import _apply_metacognitive_surface_inplace
+
+    conn_calls: list = []
+
+    def _fake_conn(*a, **k):
+        conn_calls.append(True)
+        return _FakeAtomsConnCtx(_FakeAtomsConn(rows=[]))
+
+    monkeypatch.setattr(atoms_store, "_conn", _fake_conn)
+    monkeypatch.setattr(recall_mod, "get_vector_store", lambda: _FakeVectorStore(points=[]))
+
+    fused = [{"id": "x", "collection": "canonical"}]
+    _apply_metacognitive_surface_inplace(fused, top_n=1)
+    assert conn_calls == [], "_conn opened with no semantic_memory rows"
+    assert "confidence" not in fused[0]
+
+
+def test_metacognitive_surface_atoms_failure_does_not_crash(monkeypatch):
+    """Pass 1 swallowing: if atoms_store._conn raises, the helper must
+    still return an int and not raise — Pass 2 still runs."""
+    import atoms_store
+    from routes import recall as recall_mod
+    from routes.recall import _apply_metacognitive_surface_inplace
+
+    def _boom(*a, **k):
+        raise RuntimeError("atoms.db unavailable")
+
+    monkeypatch.setattr(atoms_store, "_conn", _boom)
+    monkeypatch.setattr(recall_mod, "get_vector_store", lambda: _FakeVectorStore(points=[]))
+
+    fused = [{"id": "atm_1", "collection": "semantic_memory"}]
+    ms = _apply_metacognitive_surface_inplace(fused, top_n=1)
+    assert isinstance(ms, int)
+    assert "confidence" not in fused[0]
+
+
+def test_metacognitive_surface_calibration_import_failure_falls_back(monkeypatch):
+    """If confidence_calibration can't be imported, the helper uses an
+    identity calibration — confidence == confidence_raw."""
+    import sys as _sys
+
+    import atoms_store
+    from routes import recall as recall_mod
+    from routes.recall import _apply_metacognitive_surface_inplace
+
+    conn = _FakeAtomsConn(rows=[{"chroma_id": "atm_1", "confidence": 0.7, "trust_score": 0.6}])
+    monkeypatch.setattr(atoms_store, "_conn", lambda *a, **k: _FakeAtomsConnCtx(conn))
+    monkeypatch.setattr(recall_mod, "get_vector_store", lambda: _FakeVectorStore(points=[]))
+    # Remove the cached module + force ImportError on next import.
+    monkeypatch.setitem(_sys.modules, "confidence_calibration", None)
+
+    fused = [{"id": "atm_1", "collection": "semantic_memory"}]
+    _apply_metacognitive_surface_inplace(fused, top_n=1)
+    assert fused[0]["confidence"] == 0.7
+    assert fused[0]["confidence_raw"] == 0.7
+
+
+def test_metacognitive_surface_counts_unresolved_contradictions(monkeypatch):
+    """Pass 2 happy path: count unresolved semantic_contradictions rows
+    keyed off memory_id_a / memory_id_b. Resolved rows must be ignored."""
+    import atoms_store
+    from routes import recall as recall_mod
+    from routes.recall import _apply_metacognitive_surface_inplace
+
+    monkeypatch.setattr(atoms_store, "_conn", lambda *a, **k: _FakeAtomsConnCtx(_FakeAtomsConn(rows=[])))
+    points = [
+        _FakeQdrantPoint({"memory_id_a": "atm_1", "memory_id_b": "atm_2", "resolved": False}),
+        _FakeQdrantPoint({"memory_id_a": "atm_1", "memory_id_b": "atm_3", "resolved": False}),
+        _FakeQdrantPoint({"memory_id_a": "atm_2", "memory_id_b": "atm_1", "resolved": True}),  # skipped
+    ]
+    fake_vs = _FakeVectorStore(points=points)
+    monkeypatch.setattr(recall_mod, "get_vector_store", lambda: fake_vs)
+
+    fused = [
+        {"id": "atm_1", "collection": "canonical"},
+        {"id": "atm_2", "collection": "canonical"},
+        {"id": "atm_3", "collection": "canonical"},
+    ]
+    _apply_metacognitive_surface_inplace(fused, top_n=3)
+
+    # atm_1 appears in both unresolved rows (a in row1, a in row2) → 2
+    assert fused[0]["pending_contradictions"] == 2
+    # atm_2 appears only in row1 (b), since row3 was resolved → 1
+    assert fused[1]["pending_contradictions"] == 1
+    # atm_3 appears only in row2 (b) → 1
+    assert fused[2]["pending_contradictions"] == 1
+
+    # Filter shape contract — must request both sides with $or / $in.
+    flt = fake_vs.last_call["filter"]
+    assert "$or" in flt and len(flt["$or"]) == 2
+    assert flt["$or"][0]["memory_id_a"]["$in"] == ["atm_1", "atm_2", "atm_3"]
+    assert flt["$or"][1]["memory_id_b"]["$in"] == ["atm_1", "atm_2", "atm_3"]
+
+
+def test_metacognitive_surface_vector_store_failure_does_not_crash(monkeypatch):
+    """Pass 2 swallowing: if get_vector_store().get() raises, the helper
+    still returns an int and doesn't surface pending_contradictions."""
+    import atoms_store
+    from routes import recall as recall_mod
+    from routes.recall import _apply_metacognitive_surface_inplace
+
+    monkeypatch.setattr(atoms_store, "_conn", lambda *a, **k: _FakeAtomsConnCtx(_FakeAtomsConn(rows=[])))
+    monkeypatch.setattr(
+        recall_mod, "get_vector_store", lambda: _FakeVectorStore(raise_exc=RuntimeError("qdrant down"))
+    )
+
+    fused = [{"id": "atm_1", "collection": "canonical"}]
+    ms = _apply_metacognitive_surface_inplace(fused, top_n=1)
+    assert isinstance(ms, int)
+    assert "pending_contradictions" not in fused[0]
+
+
+def test_metacognitive_surface_empty_fused_returns_int(monkeypatch):
+    """Empty input still returns an int ms timing and doesn't crash."""
+    import atoms_store
+    from routes import recall as recall_mod
+    from routes.recall import _apply_metacognitive_surface_inplace
+
+    monkeypatch.setattr(atoms_store, "_conn", lambda *a, **k: _FakeAtomsConnCtx(_FakeAtomsConn(rows=[])))
+    monkeypatch.setattr(recall_mod, "get_vector_store", lambda: _FakeVectorStore(points=[]))
+
+    ms = _apply_metacognitive_surface_inplace([], top_n=10)
+    assert isinstance(ms, int)
+    assert ms >= 0
+
+
+# ── _log_retrieval_inhibition ─────────────────────────────────────────
+
+
+class _FakeBgPool:
+    def __init__(self):
+        self.calls: list[tuple] = []
+
+    def submit(self, fn, *args, **kwargs):
+        self.calls.append((fn, args, kwargs))
+
+
+def test_inhibition_two_semantic_results_dispatches_competition(monkeypatch):
+    """At least 2 semantic_memory results in top-5 → bg-pool dispatch with
+    winner = top.id, losers = ranks 2..N (capped at 5 input rows)."""
+    import sys as _sys
+    import types
+
+    from routes.recall import _log_retrieval_inhibition
+
+    bg = _FakeBgPool()
+    _stub_ri = types.ModuleType("retrieval_inhibition")
+    _stub_ri.log_competition = lambda w, lo, q: ("called", w, lo, q)
+    monkeypatch.setitem(_sys.modules, "retrieval_inhibition", _stub_ri)
+
+    _stub_su = types.ModuleType("brain_core.search_unified")
+    _stub_su._search_bg_pool = bg
+    monkeypatch.setitem(_sys.modules, "brain_core.search_unified", _stub_su)
+
+    fused = [
+        {"id": "atm_1", "collection": "semantic_memory"},
+        {"id": "atm_2", "collection": "semantic_memory"},
+        {"id": "atm_3", "collection": "semantic_memory"},
+        {"id": "doc_4", "collection": "canonical"},  # skipped (wrong collection)
+        {"id": "atm_5", "collection": "semantic_memory"},
+    ]
+    _log_retrieval_inhibition(fused, "what is x")
+
+    assert len(bg.calls) == 1
+    fn, args, _kw = bg.calls[0]
+    assert fn is _stub_ri.log_competition
+    winner, losers, q = args
+    assert winner == "atm_1"
+    assert losers == ["atm_2", "atm_3", "atm_5"]
+    assert q == "what is x"
+
+
+def test_inhibition_fewer_than_two_semantic_results_no_dispatch(monkeypatch):
+    """If <2 semantic_memory results in top-5, no bg.submit must happen —
+    graph/canonical winners don't generate inhibition signals."""
+    import sys as _sys
+    import types
+
+    from routes.recall import _log_retrieval_inhibition
+
+    bg = _FakeBgPool()
+    _stub_ri = types.ModuleType("retrieval_inhibition")
+    _stub_ri.log_competition = lambda *a, **k: None
+    _stub_su = types.ModuleType("brain_core.search_unified")
+    _stub_su._search_bg_pool = bg
+    monkeypatch.setitem(_sys.modules, "retrieval_inhibition", _stub_ri)
+    monkeypatch.setitem(_sys.modules, "brain_core.search_unified", _stub_su)
+
+    # Only one semantic_memory hit in top 5 → no competition signal.
+    fused = [
+        {"id": "doc_1", "collection": "canonical"},
+        {"id": "atm_1", "collection": "semantic_memory"},
+        {"id": "doc_2", "collection": "canonical"},
+    ]
+    _log_retrieval_inhibition(fused, "q")
+    assert bg.calls == []
+
+
+def test_inhibition_empty_fused_no_dispatch(monkeypatch):
+    import sys as _sys
+    import types
+
+    from routes.recall import _log_retrieval_inhibition
+
+    bg = _FakeBgPool()
+    _stub_su = types.ModuleType("brain_core.search_unified")
+    _stub_su._search_bg_pool = bg
+    monkeypatch.setitem(_sys.modules, "brain_core.search_unified", _stub_su)
+
+    _log_retrieval_inhibition([], "q")
+    assert bg.calls == []
+
+
+def test_inhibition_import_failure_swallowed(monkeypatch):
+    """If retrieval_inhibition import fails, the helper must not raise."""
+    import sys as _sys
+
+    from routes.recall import _log_retrieval_inhibition
+
+    monkeypatch.setitem(_sys.modules, "retrieval_inhibition", None)
+    fused = [
+        {"id": "atm_1", "collection": "semantic_memory"},
+        {"id": "atm_2", "collection": "semantic_memory"},
+    ]
+    # Must not raise even though the import inside will fail.
+    _log_retrieval_inhibition(fused, "q")
+
+
+# ── _run_crag_retry ──────────────────────────────────────────────────
+
+
+class _FakeSecondHop:
+    def __init__(self, results: list[dict]):
+        self.results = results
+
+
+def _install_crag_stubs(
+    monkeypatch,
+    *,
+    score_return,
+    should_iterate: bool,
+    expanded_query: str | None = None,
+):
+    """Stub brain_core.crag with deterministic helpers. score_return may be
+    a single _FakeConfidenceReport (used for both first + second hop) or a
+    list (first call returns [0], second returns [1])."""
+    import sys as _sys
+    import types
+
+    stub = types.ModuleType("brain_core.crag")
+    if isinstance(score_return, list):
+        seq = list(score_return)
+
+        def _score(results, query=None):
+            return seq.pop(0) if seq else _FakeConfidenceReport(0.0, {})
+
+        stub.score_confidence = _score
+    else:
+        stub.score_confidence = lambda results, query=None: score_return
+    stub.should_iterate = lambda report: should_iterate
+    stub.expand_query = lambda query, top_results: expanded_query or query
+    monkeypatch.setitem(_sys.modules, "brain_core.crag", stub)
+    # Also disable self_rag so first-hop scoring is byte-equal to the heuristic
+    monkeypatch.setitem(_sys.modules, "brain_core.self_rag", None)
+    return stub
+
+
+def test_crag_retry_high_confidence_skips_retry(monkeypatch):
+    """When _crag_should_iterate returns False, no retry runs — telemetry
+    shows iterated=False and the input fused passes through unchanged."""
+    from routes.recall import _run_crag_retry
+
+    _install_crag_stubs(
+        monkeypatch,
+        score_return=_FakeConfidenceReport(0.9, {"c": "high"}),
+        should_iterate=False,
+    )
+
+    retry_calls: list = []
+    fused_in = [{"id": "doc_1", "score": 90}]
+    out, ms, tele, err = _run_crag_retry("q", n=5, fused=fused_in, retry_fn=lambda rq: retry_calls.append(rq))
+    assert err is None
+    assert out is fused_in
+    assert tele["iterated"] is False
+    assert tele["first_hop_confidence"] == 0.9
+    assert tele["first_hop_components"] == {"c": "high"}
+    assert isinstance(ms, int) and ms >= 0
+    assert retry_calls == [], "retry_fn called when iterate=False"
+
+
+def test_crag_retry_iterates_and_second_hop_wins(monkeypatch):
+    """should_iterate=True + expand_query returns a new query + second-hop
+    score > first-hop → fused replaced with second_hop.results, selected
+    = second_hop."""
+    from routes.recall import _run_crag_retry
+
+    _install_crag_stubs(
+        monkeypatch,
+        score_return=[
+            _FakeConfidenceReport(0.30, {"first": 1}),  # first-hop
+            _FakeConfidenceReport(0.80, {"second": 1}),  # second-hop
+        ],
+        should_iterate=True,
+        expanded_query="rewritten query",
+    )
+
+    retry_called_with: list = []
+
+    def _retry(rewritten_q: str):
+        retry_called_with.append(rewritten_q)
+        return _FakeSecondHop([{"id": "doc_better", "score": 100}])
+
+    fused_in = [{"id": "doc_1", "score": 50}]
+    out, _ms, tele, err = _run_crag_retry("orig q", n=5, fused=fused_in, retry_fn=_retry)
+
+    assert err is None
+    assert retry_called_with == ["rewritten query"]
+    assert tele["iterated"] is True
+    assert tele["expanded_query"] == "rewritten query"
+    assert tele["second_hop_confidence"] == 0.80
+    assert tele["selected"] == "second_hop"
+    assert len(out) == 1
+    assert out[0]["id"] == "doc_better"
+
+
+def test_crag_retry_iterates_but_first_hop_wins(monkeypatch):
+    """If second_hop score is NOT greater than first_hop, keep the original
+    fused; telemetry records selected=first_hop."""
+    from routes.recall import _run_crag_retry
+
+    _install_crag_stubs(
+        monkeypatch,
+        score_return=[
+            _FakeConfidenceReport(0.70, {"first": 1}),
+            _FakeConfidenceReport(0.40, {"second": 1}),
+        ],
+        should_iterate=True,
+        expanded_query="rewritten",
+    )
+
+    fused_in = [{"id": "doc_1", "score": 50}]
+    out, _ms, tele, err = _run_crag_retry(
+        "q", n=5, fused=fused_in, retry_fn=lambda rq: _FakeSecondHop([{"id": "loser"}])
+    )
+
+    assert err is None
+    assert out is fused_in  # fused unchanged
+    assert tele["iterated"] is True
+    assert tele["selected"] == "first_hop"
+
+
+def test_crag_retry_rewrite_returns_same_query_skips_retry(monkeypatch):
+    """If expand_query returns the same string (or empty), no retry runs."""
+    from routes.recall import _run_crag_retry
+
+    _install_crag_stubs(
+        monkeypatch,
+        score_return=_FakeConfidenceReport(0.30, {}),
+        should_iterate=True,
+        expanded_query="orig q",  # same as input
+    )
+
+    retry_calls: list = []
+    fused_in = [{"id": "doc_1"}]
+    out, _ms, tele, err = _run_crag_retry(
+        "orig q", n=5, fused=fused_in, retry_fn=lambda rq: retry_calls.append(rq)
+    )
+    assert err is None
+    assert out is fused_in
+    assert tele["iterated"] is False
+    assert "expanded_query" not in tele
+    assert retry_calls == []
+
+
+def test_crag_retry_crag_import_failure_returns_error(monkeypatch):
+    """If brain_core.crag is unavailable, helper returns
+    (fused_unchanged, 0, {}, error_str). Caller writes timing['crag_error']."""
+    import sys as _sys
+
+    from routes.recall import _run_crag_retry
+
+    monkeypatch.setitem(_sys.modules, "brain_core.crag", None)
+
+    fused_in = [{"id": "x"}]
+    out, ms, tele, err = _run_crag_retry("q", n=5, fused=fused_in, retry_fn=lambda rq: None)
+    assert out is fused_in
+    assert ms == 0
+    assert tele == {}
+    assert err is not None
+    assert len(err) <= 200
+
+
+def test_crag_retry_retry_fn_exception_returns_error(monkeypatch):
+    """If retry_fn raises during the second hop, the helper catches it,
+    returns (fused_unchanged, 0, {}, error_str) — no partial telemetry leak."""
+    from routes.recall import _run_crag_retry
+
+    _install_crag_stubs(
+        monkeypatch,
+        score_return=_FakeConfidenceReport(0.20, {}),
+        should_iterate=True,
+        expanded_query="new q",
+    )
+
+    def _boom(rq):
+        raise RuntimeError("recursive recall crashed")
+
+    fused_in = [{"id": "doc_1"}]
+    out, ms, tele, err = _run_crag_retry("q", n=5, fused=fused_in, retry_fn=_boom)
+    assert out is fused_in
+    assert ms == 0
+    assert tele == {}
+    assert err is not None and "recursive recall crashed" in err
+
+
+def test_crag_retry_error_str_truncated_to_200(monkeypatch):
+    """A very long exception message must be truncated to 200 chars."""
+    import sys as _sys
+
+    # Force crag import to fail with a long message
+    import types as _types
+
+    from routes.recall import _run_crag_retry
+
+    stub = _types.ModuleType("brain_core.crag")
+
+    def _long_score(*a, **k):
+        raise RuntimeError("x" * 1000)
+
+    stub.score_confidence = _long_score
+    stub.should_iterate = lambda r: False
+    stub.expand_query = lambda *a, **k: "y"
+    monkeypatch.setitem(_sys.modules, "brain_core.crag", stub)
+    monkeypatch.setitem(_sys.modules, "brain_core.self_rag", None)
+
+    out, _ms, _tele, err = _run_crag_retry("q", n=5, fused=[{"id": "x"}], retry_fn=lambda rq: None)
+    assert err is not None
+    assert len(err) == 200
+
+
+def test_crag_retry_passes_top_3_to_expand_query(monkeypatch):
+    """expand_query is called with fused[:3] (NOT max(n,5)) so the rewrite
+    sees only the strongest signal."""
+    import sys as _sys
+    import types
+
+    from routes.recall import _run_crag_retry
+
+    captured: list = []
+
+    stub = types.ModuleType("brain_core.crag")
+    stub.score_confidence = lambda r, query=None: _FakeConfidenceReport(0.2, {})
+    stub.should_iterate = lambda r: True
+
+    def _expand(query, top_results):
+        captured.append(list(top_results))
+        return "new"
+
+    stub.expand_query = _expand
+    monkeypatch.setitem(_sys.modules, "brain_core.crag", stub)
+    monkeypatch.setitem(_sys.modules, "brain_core.self_rag", None)
+
+    fused_in = [{"id": str(i)} for i in range(10)]
+    _run_crag_retry(
+        "q",
+        n=5,
+        fused=fused_in,
+        retry_fn=lambda rq: _FakeSecondHop([{"id": "x"}]),
+    )
+    # Only the first 3 docs are passed to expand_query
+    assert len(captured[0]) == 3
+    assert [r["id"] for r in captured[0]] == ["0", "1", "2"]
+
+
+# ── _decide_use_crag ─────────────────────────────────────────────────
+
+
+def test_decide_use_crag_router_disabled_returns_caller_flag(monkeypatch):
+    """When adaptive_rag is unavailable, helper falls back to caller's
+    iterative flag and returns reason=None."""
+    import sys as _sys
+
+    from routes.recall import _decide_use_crag
+
+    monkeypatch.setitem(_sys.modules, "brain_core.adaptive_rag", None)
+
+    use, reason = _decide_use_crag("q", True)
+    assert use is True
+    assert reason is None
+
+    use, reason = _decide_use_crag("q", False)
+    assert use is False
+    assert reason is None
+
+
+def test_decide_use_crag_router_overrides_caller(monkeypatch):
+    """When the router fires (e.g. SIMPLE override → CRAG off, or MULTI
+    auto-on), its (use, reason) replaces the caller flag."""
+    import sys as _sys
+    import types
+
+    from routes.recall import _decide_use_crag
+
+    stub = types.ModuleType("brain_core.adaptive_rag")
+    stub.should_use_crag = lambda q, caller_explicit: (False, "simple-skip")
+    monkeypatch.setitem(_sys.modules, "brain_core.adaptive_rag", stub)
+
+    use, reason = _decide_use_crag("simple q", True)
+    assert use is False
+    assert reason == "simple-skip"
+
+    # And MULTI auto-on, even with caller_explicit=False
+    stub.should_use_crag = lambda q, caller_explicit: (True, "multi-auto-on")
+    use, reason = _decide_use_crag("compare x and y", False)
+    assert use is True
+    assert reason == "multi-auto-on"
+
+
+def test_decide_use_crag_router_exception_falls_back(monkeypatch):
+    """If should_use_crag raises, fall back to caller flag with reason=None."""
+    import sys as _sys
+    import types
+
+    from routes.recall import _decide_use_crag
+
+    stub = types.ModuleType("brain_core.adaptive_rag")
+
+    def _boom(q, caller_explicit):
+        raise RuntimeError("router crash")
+
+    stub.should_use_crag = _boom
+    monkeypatch.setitem(_sys.modules, "brain_core.adaptive_rag", stub)
+
+    use, reason = _decide_use_crag("q", True)
+    assert use is True
+    assert reason is None
+
+
+# ── _score_crag_first_hop ────────────────────────────────────────────
+
+
+class _FakeConfidenceReport:
+    def __init__(self, score: float, components: dict | None = None):
+        self.score = score
+        self.components = components or {}
+
+
+class _FakeSelfRagReport:
+    def __init__(self, score: float, components: dict):
+        self.score = score
+        self.components = components
+
+
+def _stub_crag_score(monkeypatch, report_factory):
+    """Install brain_core.crag.score_confidence stub."""
+    import sys as _sys
+    import types
+
+    stub = types.ModuleType("brain_core.crag")
+    stub.score_confidence = report_factory
+    monkeypatch.setitem(_sys.modules, "brain_core.crag", stub)
+    return stub
+
+
+def test_crag_first_hop_no_self_rag_returns_raw_report(monkeypatch):
+    """If brain_core.self_rag is unavailable, return the raw heuristic
+    confidence report unchanged."""
+    import sys as _sys
+
+    from routes.recall import _score_crag_first_hop
+
+    _stub_crag_score(monkeypatch, lambda results, query: _FakeConfidenceReport(0.4, {"heuristic": "x"}))
+    monkeypatch.setitem(_sys.modules, "brain_core.self_rag", None)
+
+    rep = _score_crag_first_hop("q", [{"id": "a"}], n=5)
+    assert rep.score == 0.4
+    assert rep.components == {"heuristic": "x"}
+
+
+def test_crag_first_hop_self_rag_critique_blends_score(monkeypatch):
+    """Happy path: self_rag returns source=self_rag → blend fires and
+    components pick up self_rag_score + self_rag_components + blended=True."""
+    import sys as _sys
+    import types
+
+    from routes.recall import _score_crag_first_hop
+
+    _stub_crag_score(monkeypatch, lambda results, query: _FakeConfidenceReport(0.40, {"h": "raw"}))
+
+    stub_sr = types.ModuleType("brain_core.self_rag")
+    stub_sr.critique = lambda q, results: _FakeSelfRagReport(0.80, {"source": "self_rag", "x": 1})
+    stub_sr.blend_with_heuristic = lambda sr_score, heur_score: round((sr_score + heur_score) / 2, 3)
+    monkeypatch.setitem(_sys.modules, "brain_core.self_rag", stub_sr)
+
+    rep = _score_crag_first_hop("q", [{"id": "a"}], n=5)
+    assert rep.score == 0.60  # (0.80 + 0.40) / 2
+    assert rep.components["self_rag_score"] == 0.80
+    assert rep.components["blended"] is True
+    assert rep.components["self_rag_components"] == {"source": "self_rag", "x": 1}
+    # Original heuristic components preserved (merged with **)
+    assert rep.components["h"] == "raw"
+
+
+def test_crag_first_hop_self_rag_non_self_rag_source_skips_blend(monkeypatch):
+    """If self_rag.critique returns a report whose components.source is NOT
+    'self_rag' (e.g. fallback path), blending must NOT fire — the heuristic
+    score is preserved."""
+    import sys as _sys
+    import types
+
+    from routes.recall import _score_crag_first_hop
+
+    _stub_crag_score(monkeypatch, lambda r, query: _FakeConfidenceReport(0.40, {"h": "raw"}))
+
+    stub_sr = types.ModuleType("brain_core.self_rag")
+    stub_sr.critique = lambda q, r: _FakeSelfRagReport(0.90, {"source": "fallback"})
+    stub_sr.blend_with_heuristic = lambda *a, **k: 99.0  # should NEVER be called
+    monkeypatch.setitem(_sys.modules, "brain_core.self_rag", stub_sr)
+
+    rep = _score_crag_first_hop("q", [{"id": "a"}], n=5)
+    assert rep.score == 0.40  # not blended
+    assert "self_rag_score" not in rep.components
+    assert "blended" not in rep.components
+
+
+def test_crag_first_hop_self_rag_failure_swallowed(monkeypatch):
+    """A self_rag exception must not propagate — fall back to the raw
+    heuristic report."""
+    import sys as _sys
+    import types
+
+    from routes.recall import _score_crag_first_hop
+
+    _stub_crag_score(monkeypatch, lambda r, query: _FakeConfidenceReport(0.55, {}))
+
+    stub_sr = types.ModuleType("brain_core.self_rag")
+
+    def _boom(*a, **k):
+        raise RuntimeError("self_rag dispatch failed")
+
+    stub_sr.critique = _boom
+    monkeypatch.setitem(_sys.modules, "brain_core.self_rag", stub_sr)
+
+    rep = _score_crag_first_hop("q", [{"id": "a"}], n=5)
+    assert rep.score == 0.55  # unchanged
+    assert "self_rag_score" not in rep.components
+
+
+def test_crag_first_hop_passes_top_max_n_5_to_score(monkeypatch):
+    """Confidence is scored on fused[:max(n,5)] — verify the slice cap
+    floors at 5 for small n and uses n for large n."""
+    from routes.recall import _score_crag_first_hop
+
+    captured: list = []
+
+    def _fake_score(results, query):
+        captured.append((list(results), query))
+        return _FakeConfidenceReport(0.5, {})
+
+    _stub_crag_score(monkeypatch, _fake_score)
+    import sys as _sys
+
+    monkeypatch.setitem(_sys.modules, "brain_core.self_rag", None)
+
+    fused = [{"id": str(i)} for i in range(20)]
+    # n=2 → uses 5
+    _score_crag_first_hop("q", fused, n=2)
+    assert len(captured[0][0]) == 5
+    # n=10 → uses 10
+    _score_crag_first_hop("q", fused, n=10)
+    assert len(captured[1][0]) == 10
+    # query passed through
+    assert captured[0][1] == "q"
+
+
+# ── _apply_parent_child_expand ───────────────────────────────────────
+
+
+def test_parent_child_expand_delegates_to_module(monkeypatch):
+    """When parent_child_expand.expand_to_parents is available, the helper
+    returns its output verbatim."""
+    import sys as _sys
+    import types
+
+    from routes.recall import _apply_parent_child_expand
+
+    stub = types.ModuleType("brain_core.parent_child_expand")
+    stub.expand_to_parents = lambda f: [{"id": "expanded"}, *f]
+    monkeypatch.setitem(_sys.modules, "brain_core.parent_child_expand", stub)
+
+    out = _apply_parent_child_expand([{"id": "child"}])
+    assert out == [{"id": "expanded"}, {"id": "child"}]
+
+
+def test_parent_child_expand_import_failure_returns_input(monkeypatch):
+    """If parent_child_expand can't be imported, fused passes through
+    unchanged and the helper does not raise."""
+    import sys as _sys
+
+    from routes.recall import _apply_parent_child_expand
+
+    monkeypatch.setitem(_sys.modules, "brain_core.parent_child_expand", None)
+    fused_in = [{"id": "x"}]
+    out = _apply_parent_child_expand(fused_in)
+    assert out is fused_in
+
+
+def test_parent_child_expand_runtime_failure_returns_input(monkeypatch):
+    """A runtime error inside expand_to_parents must not propagate."""
+    import sys as _sys
+    import types
+
+    from routes.recall import _apply_parent_child_expand
+
+    stub = types.ModuleType("brain_core.parent_child_expand")
+
+    def _boom(f):
+        raise RuntimeError("expand crash")
+
+    stub.expand_to_parents = _boom
+    monkeypatch.setitem(_sys.modules, "brain_core.parent_child_expand", stub)
+
+    fused_in = [{"id": "x"}]
+    out = _apply_parent_child_expand(fused_in)
+    assert out is fused_in
+
+
+# ── _inject_community_summaries ──────────────────────────────────────
+
+
+class _FakeClassification:
+    def __init__(self, label: str):
+        self.label = label
+
+
+def _stub_adaptive_and_communities(monkeypatch, label: str, summaries: list[dict] | None):
+    """Install stubs for adaptive_rag.classify and
+    community_summaries.get_summaries_matching."""
+    import sys as _sys
+    import types
+
+    stub_ar = types.ModuleType("brain_core.adaptive_rag")
+    stub_ar.classify = lambda q: _FakeClassification(label)
+    monkeypatch.setitem(_sys.modules, "brain_core.adaptive_rag", stub_ar)
+
+    stub_cs = types.ModuleType("brain_core.community_summaries")
+    stub_cs.get_summaries_matching = lambda q, limit=2: summaries or []
+    monkeypatch.setitem(_sys.modules, "brain_core.community_summaries", stub_cs)
+
+
+def test_community_summaries_non_multi_query_is_noop(monkeypatch):
+    """Non-MULTI queries skip injection — fused is returned as-is, count=0."""
+    from routes.recall import _inject_community_summaries
+
+    _stub_adaptive_and_communities(monkeypatch, "simple", [{"entities": ["x"], "summary": "y"}])
+    fused_in = [{"id": "doc_1", "score": 10}]
+    out, injected = _inject_community_summaries("compare x and y", fused_in)
+    assert out is fused_in
+    assert injected == 0
+
+
+def test_community_summaries_multi_no_matches_is_noop(monkeypatch):
+    """MULTI query but get_summaries_matching returns [] → no injection."""
+    from routes.recall import _inject_community_summaries
+
+    _stub_adaptive_and_communities(monkeypatch, "multi", [])
+    fused_in = [{"id": "doc_1", "score": 10}]
+    out, injected = _inject_community_summaries("q", fused_in)
+    assert out is fused_in
+    assert injected == 0
+
+
+def test_community_summaries_multi_match_injects_synthetic(monkeypatch):
+    """MULTI + matching summaries → synthetic rows merged into fused with
+    score = 0.85 * top_score, clamped to [55, 100]."""
+    from routes.recall import _inject_community_summaries
+
+    summaries = [
+        {
+            "entities": ["openclaw", "brain", "jenna"],
+            "summary": "OpenClaw is a multi-agent system",
+            "atom_count": 12,
+            "generated_at": "2026-04-20T00:00:00Z",
+        }
+    ]
+    _stub_adaptive_and_communities(monkeypatch, "multi", summaries)
+
+    fused_in = [{"id": "doc_1", "score": 100.0}, {"id": "doc_2", "score": 90.0}]
+    out, injected = _inject_community_summaries("compare openclaw and brain", fused_in)
+    assert injected == 1
+    assert len(out) == 3
+    # Synthetic row gets score = 100 * 0.85 = 85.0
+    synth = next(r for r in out if r.get("collection") == "community_summaries")
+    assert synth["score"] == 85.0
+    assert synth["source_type"] == "community"
+    assert synth["trust_tier"] == 2
+    assert synth["title"].startswith("Community: ")
+    assert synth["path"].startswith("graph/community/")
+    assert synth["metadata"]["entities"] == ["openclaw", "brain", "jenna"]
+    assert synth["metadata"]["atom_count"] == 12
+    # Top result still leads (top score 100 > synthetic 85)
+    assert out[0]["id"] == "doc_1"
+    # Synthetic ranks ahead of doc_2 (85 > 80? no, 85 > 90? no — doc_2 is 90 so doc_2 leads)
+    # Actually with doc_2=90, synth=85: order is doc_1=100, doc_2=90, synth=85
+    assert out[1]["id"] == "doc_2"
+    assert out[2]["collection"] == "community_summaries"
+
+
+def test_community_summaries_score_clamped_to_55_floor(monkeypatch):
+    """Very-low top_score → synth_score clamped to 55.0 minimum (when top
+    score is non-zero)."""
+    from routes.recall import _inject_community_summaries
+
+    _stub_adaptive_and_communities(
+        monkeypatch,
+        "multi",
+        [{"entities": ["x"], "summary": "s", "generated_at": ""}],
+    )
+    # top_score = 10 → 10*0.85=8.5, clamped UP to 55
+    fused_in = [{"id": "doc_1", "score": 10.0}]
+    out, _ = _inject_community_summaries("q", fused_in)
+    synth = next(r for r in out if r.get("collection") == "community_summaries")
+    assert synth["score"] == 55.0
+
+
+def test_community_summaries_empty_fused_uses_70_score(monkeypatch):
+    """When fused is empty (no top_score signal), synth_score defaults to 70.0."""
+    from routes.recall import _inject_community_summaries
+
+    _stub_adaptive_and_communities(
+        monkeypatch,
+        "multi",
+        [{"entities": ["x"], "summary": "s", "generated_at": ""}],
+    )
+    out, injected = _inject_community_summaries("q", [])
+    assert injected == 1
+    synth = out[0]
+    assert synth["score"] == 70.0
+
+
+def test_community_summaries_classify_failure_returns_unchanged(monkeypatch):
+    """If adaptive_rag.classify raises, fall back to (fused, 0) — no crash,
+    no warning that breaks the request."""
+    import sys as _sys
+    import types
+
+    from routes.recall import _inject_community_summaries
+
+    stub_ar = types.ModuleType("brain_core.adaptive_rag")
+
+    def _boom(q):
+        raise RuntimeError("adaptive_rag down")
+
+    stub_ar.classify = _boom
+    monkeypatch.setitem(_sys.modules, "brain_core.adaptive_rag", stub_ar)
+
+    fused_in = [{"id": "x", "score": 5}]
+    out, injected = _inject_community_summaries("q", fused_in)
+    assert out is fused_in
+    assert injected == 0
+
+
+def test_community_summaries_id_truncated_to_64(monkeypatch):
+    """Synthetic id `community:<joined entities>` is truncated to 64 chars
+    on the joined-entities slice to avoid runaway audit row sizes."""
+    from routes.recall import _inject_community_summaries
+
+    long_entities = ["x" * 100, "y" * 100, "z" * 100]
+    _stub_adaptive_and_communities(
+        monkeypatch,
+        "multi",
+        [{"entities": long_entities, "summary": "s", "generated_at": ""}],
+    )
+    out, _ = _inject_community_summaries("q", [{"id": "doc", "score": 100}])
+    synth = next(r for r in out if r.get("collection") == "community_summaries")
+    # Inner truncation: ','.join(s['entities'][:3])[:64] keeps entity-portion ≤ 64
+    body_after_prefix = synth["id"][len("community:") :]
+    assert len(body_after_prefix) == 64
+
+
+# ── _to_dashed_uuid / _post_recall_side_effects / _dispatch_post_recall_side_effects ──
+
+
+def test_to_dashed_uuid_converts_hex32():
+    from routes.recall import _to_dashed_uuid
+
+    raw = "0123456789abcdef0123456789abcdef"  # 32 hex chars, no dashes
+    out = _to_dashed_uuid(raw)
+    assert out == "01234567-89ab-cdef-0123-456789abcdef"
+
+
+def test_to_dashed_uuid_passes_through_other_shapes():
+    from routes.recall import _to_dashed_uuid
+
+    # Already-dashed UUID passes through
+    dashed = "01234567-89ab-cdef-0123-456789abcdef"
+    assert _to_dashed_uuid(dashed) == dashed
+
+    # Non-hex string passes through
+    assert _to_dashed_uuid("not_a_uuid") == "not_a_uuid"
+
+    # Hex but wrong length passes through
+    assert _to_dashed_uuid("abc123") == "abc123"
+
+    # Empty / falsy passes through
+    assert _to_dashed_uuid("") == ""
+
+
+def test_post_recall_side_effects_calls_feedback_and_audit(monkeypatch):
+    """Happy path: _record_auto_feedback fires, insert_action_audit fires
+    with normalized retrieved_chroma_ids and capped at 20."""
+    from routes import recall as recall_mod
+    from routes.recall import _post_recall_side_effects
+
+    feedback_calls: list = []
+    monkeypatch.setattr(
+        recall_mod,
+        "_record_auto_feedback",
+        lambda q, results, agent: feedback_calls.append((q, results, agent)),
+    )
+
+    audit_calls: list = []
+    import sys as _sys
+    import types
+
+    stub_atoms = types.ModuleType("brain_core.atoms_store")
+    stub_atoms.insert_action_audit = lambda **kw: audit_calls.append(kw)
+    monkeypatch.setitem(_sys.modules, "brain_core.atoms_store", stub_atoms)
+
+    hex32 = "0123456789abcdef0123456789abcdef"
+    fused = [
+        {"id": hex32, "score": 0.9},
+        {"chroma_id": "already-dashed-uuid-id-2"},
+        # Out-of-window rows (n=2):
+        {"id": "dropped_1"},
+    ]
+    _post_recall_side_effects("hello", fused, n=2, agent="jenna")
+
+    assert len(feedback_calls) == 1
+    assert feedback_calls[0][0] == "hello"
+    assert feedback_calls[0][2] == "jenna"
+    assert len(feedback_calls[0][1]) == 2  # sliced fused[:n]
+
+    assert len(audit_calls) == 1
+    kw = audit_calls[0]
+    assert kw["route"] == "/recall/v2"
+    assert kw["tool"] == "brain_recall"
+    assert kw["actor"] == "jenna"
+    assert kw["query_text"] == "hello"
+    assert kw["retrieved_chroma_ids"][0] == "01234567-89ab-cdef-0123-456789abcdef"
+    assert kw["retrieved_chroma_ids"][1] == "already-dashed-uuid-id-2"
+    assert len(kw["retrieved_chroma_ids"]) == 2  # respects n=2 slice
+
+
+def test_post_recall_side_effects_audit_failure_does_not_kill_feedback(monkeypatch):
+    """insert_action_audit failure must not prevent _record_auto_feedback
+    (feedback runs FIRST, then audit). If audit fails, swallow."""
+    from routes import recall as recall_mod
+    from routes.recall import _post_recall_side_effects
+
+    feedback_calls: list = []
+    monkeypatch.setattr(
+        recall_mod, "_record_auto_feedback", lambda q, results, agent: feedback_calls.append(True)
+    )
+
+    import sys as _sys
+    import types
+
+    def _boom(**kw):
+        raise RuntimeError("audit db down")
+
+    stub_atoms = types.ModuleType("brain_core.atoms_store")
+    stub_atoms.insert_action_audit = _boom
+    monkeypatch.setitem(_sys.modules, "brain_core.atoms_store", stub_atoms)
+
+    _post_recall_side_effects("q", [{"id": "x"}], n=1, agent="claude")
+    assert feedback_calls == [True], "feedback was skipped when audit raised"
+
+
+def test_post_recall_side_effects_caps_retrieved_ids_at_20(monkeypatch):
+    """Audit retrieved_chroma_ids list is capped at 20 even when n > 20."""
+    from routes import recall as recall_mod
+    from routes.recall import _post_recall_side_effects
+
+    monkeypatch.setattr(recall_mod, "_record_auto_feedback", lambda *a, **k: None)
+
+    captured: list = []
+    import sys as _sys
+    import types
+
+    stub_atoms = types.ModuleType("brain_core.atoms_store")
+    stub_atoms.insert_action_audit = lambda **kw: captured.append(kw)
+    monkeypatch.setitem(_sys.modules, "brain_core.atoms_store", stub_atoms)
+
+    fused = [{"id": f"atm_{i}"} for i in range(50)]
+    _post_recall_side_effects("q", fused, n=50, agent="claude")
+    assert len(captured[0]["retrieved_chroma_ids"]) == 20
+
+
+def test_post_recall_side_effects_truncates_query_to_500(monkeypatch):
+    from routes import recall as recall_mod
+    from routes.recall import _post_recall_side_effects
+
+    monkeypatch.setattr(recall_mod, "_record_auto_feedback", lambda *a, **k: None)
+
+    captured: list = []
+    import sys as _sys
+    import types
+
+    stub_atoms = types.ModuleType("brain_core.atoms_store")
+    stub_atoms.insert_action_audit = lambda **kw: captured.append(kw)
+    monkeypatch.setitem(_sys.modules, "brain_core.atoms_store", stub_atoms)
+
+    long_q = "x" * 1000
+    _post_recall_side_effects(long_q, [{"id": "x"}], n=1, agent="claude")
+    assert len(captured[0]["query_text"]) == 500
+
+
+def test_dispatch_post_recall_uses_background_when_provided(monkeypatch):
+    """When FastAPI BackgroundTasks is present, dispatch must use add_task
+    and never touch the search bg pool."""
+    from routes.recall import _dispatch_post_recall_side_effects
+
+    class _FakeBackground:
+        def __init__(self):
+            self.tasks: list = []
+
+        def add_task(self, fn, *args, **kwargs):
+            self.tasks.append((fn, args, kwargs))
+
+    bg = _FakeBackground()
+    # Sentinel: if the search bg pool path is touched, raise loudly.
+    import sys as _sys
+    import types
+
+    stub_su = types.ModuleType("brain_core.search_unified")
+
+    def _boom(*a, **k):
+        raise AssertionError("should not have hit search bg pool")
+
+    stub_su._search_bg_pool = types.SimpleNamespace(submit=_boom)
+    monkeypatch.setitem(_sys.modules, "brain_core.search_unified", stub_su)
+
+    fused = [{"id": "x"}]
+    _dispatch_post_recall_side_effects("q", fused, 1, "claude", bg)
+
+    assert len(bg.tasks) == 1
+    fn, args, _ = bg.tasks[0]
+    from routes.recall import _post_recall_side_effects as _expected
+
+    assert fn is _expected
+    assert args == ("q", fused, 1, "claude")
+
+
+def test_dispatch_post_recall_falls_back_to_bg_pool_when_no_background(monkeypatch):
+    """When BackgroundTasks is None, submit to search bg pool instead."""
+    from routes.recall import _dispatch_post_recall_side_effects
+
+    submits: list = []
+
+    import sys as _sys
+    import types
+
+    stub_su = types.ModuleType("brain_core.search_unified")
+    stub_su._search_bg_pool = types.SimpleNamespace(
+        submit=lambda fn, *args, **kwargs: submits.append((fn, args, kwargs))
+    )
+    monkeypatch.setitem(_sys.modules, "brain_core.search_unified", stub_su)
+
+    fused = [{"id": "x"}]
+    _dispatch_post_recall_side_effects("q", fused, 1, "claude", None)
+
+    assert len(submits) == 1
+    fn, args, _ = submits[0]
+    from routes.recall import _post_recall_side_effects as _expected
+
+    assert fn is _expected
+    assert args == ("q", fused, 1, "claude")
+
+
+def test_dispatch_post_recall_swallows_bg_pool_failure(monkeypatch):
+    """If the search bg pool import or submit fails, dispatch must not raise."""
+    import sys as _sys
+
+    from routes.recall import _dispatch_post_recall_side_effects
+
+    monkeypatch.setitem(_sys.modules, "brain_core.search_unified", None)
+    # Must not raise — exception is swallowed.
+    _dispatch_post_recall_side_effects("q", [{"id": "x"}], 1, "claude", None)
+
+
+# ── _log_recall_gap ───────────────────────────────────────────────────
+
+
+def _gap_default_kwargs():
+    return dict(
+        collection=None,
+        domain=None,
+        entity=None,
+        source_type=None,
+        since=None,
+        until=None,
+        as_of=None,
+        include_history=False,
+        include_obsolete=False,
+    )
+
+
+def _read_gap_log(monkeypatch, tmp_path):
+    """Point BRAIN_DIR at tmp_path so the gap log file lands in the
+    test sandbox, and return a reader for its lines."""
+    import routes.recall as recall_mod
+
+    monkeypatch.setattr(recall_mod, "BRAIN_DIR", tmp_path)
+    return tmp_path / "logs" / "recall-gaps.jsonl"
+
+
+def test_gap_log_low_ce_score_writes_jsonl_line(monkeypatch, tmp_path):
+    """CE scores present but max < 0.52 → gap is logged."""
+    import json as _json
+
+    from routes.recall import _log_recall_gap
+
+    gap_path = _read_gap_log(monkeypatch, tmp_path)
+    fused = [
+        {"id": "1", "cross_encoder_score": 0.30, "score": 50},
+        {"id": "2", "cross_encoder_score": 0.40, "score": 40},
+    ]
+    _log_recall_gap("missing thing", fused, n=10, **_gap_default_kwargs())
+    assert gap_path.exists(), "gap log file was not created"
+    line = gap_path.read_text().strip()
+    record = _json.loads(line)
+    assert record["query"] == "missing thing"
+    assert record["max_ce_score"] == 0.40
+    assert record["n_results"] == 2
+    assert record["endpoint"] == "/recall/v2"
+
+
+def test_gap_log_high_ce_score_does_not_log(monkeypatch, tmp_path):
+    """When max CE score ≥ 0.52, no gap line is appended."""
+    from routes.recall import _log_recall_gap
+
+    gap_path = _read_gap_log(monkeypatch, tmp_path)
+    fused = [{"id": "1", "cross_encoder_score": 0.70, "score": 50}]
+    _log_recall_gap("good query", fused, n=10, **_gap_default_kwargs())
+    assert not gap_path.exists()
+
+
+def test_gap_log_no_ce_falls_back_to_blended_score(monkeypatch, tmp_path):
+    """If CE wasn't run, fall back to blended score threshold (< 30 = gap)."""
+    from routes.recall import _log_recall_gap
+
+    gap_path = _read_gap_log(monkeypatch, tmp_path)
+    # No cross_encoder_score keys anywhere; blended score 20 < 30 → gap
+    fused = [{"id": "1", "score": 20}]
+    _log_recall_gap("flat", fused, n=10, **_gap_default_kwargs())
+    assert gap_path.exists()
+
+
+def test_gap_log_no_ce_high_blended_score_does_not_log(monkeypatch, tmp_path):
+    from routes.recall import _log_recall_gap
+
+    gap_path = _read_gap_log(monkeypatch, tmp_path)
+    fused = [{"id": "1", "score": 50}]  # 50 ≥ 30 → not a gap
+    _log_recall_gap("decent", fused, n=10, **_gap_default_kwargs())
+    assert not gap_path.exists()
+
+
+def test_gap_log_empty_results_is_logged(monkeypatch, tmp_path):
+    """Zero-result query is ALWAYS a gap (filter-free check still applies)."""
+    from routes.recall import _log_recall_gap
+
+    gap_path = _read_gap_log(monkeypatch, tmp_path)
+    _log_recall_gap("nothing here", [], n=10, **_gap_default_kwargs())
+    assert gap_path.exists()
+
+
+def test_gap_log_filtered_query_skipped(monkeypatch, tmp_path):
+    """Filtered queries (with collection/domain/entity/etc.) skip gap log —
+    a filter producing 0 results is usually intentional, not a brain gap."""
+    from routes.recall import _log_recall_gap
+
+    gap_path = _read_gap_log(monkeypatch, tmp_path)
+    kw = _gap_default_kwargs()
+    kw["collection"] = "canonical"
+    _log_recall_gap("scoped", [], n=10, **kw)
+    assert not gap_path.exists()
+
+    # Same for each individual gate.
+    gap_path.unlink(missing_ok=True)
+    for k in ("domain", "entity", "source_type", "since", "until", "as_of"):
+        kw = _gap_default_kwargs()
+        kw[k] = "x"
+        _log_recall_gap("scoped", [], n=10, **kw)
+        assert not gap_path.exists(), f"gate {k} did not skip gap log"
+
+    for boolk in ("include_history", "include_obsolete"):
+        kw = _gap_default_kwargs()
+        kw[boolk] = True
+        _log_recall_gap("scoped", [], n=10, **kw)
+        assert not gap_path.exists(), f"gate {boolk} did not skip gap log"
+
+
+def test_gap_log_truncates_long_queries(monkeypatch, tmp_path):
+    """Query is truncated to 500 chars in the log to avoid runaway disk."""
+    import json as _json
+
+    from routes.recall import _log_recall_gap
+
+    gap_path = _read_gap_log(monkeypatch, tmp_path)
+    long_q = "x" * 1000
+    _log_recall_gap(long_q, [], n=10, **_gap_default_kwargs())
+    record = _json.loads(gap_path.read_text().strip())
+    assert len(record["query"]) == 500
+
+
+def test_gap_log_swallows_io_failure(monkeypatch, tmp_path):
+    """If the log file is unwritable, the helper must not raise."""
+    from routes.recall import _log_recall_gap
+
+    # Point BRAIN_DIR at a path where mkdir will fail (a file, not dir)
+    bogus_file = tmp_path / "blocker"
+    bogus_file.write_text("x")
+    import routes.recall as recall_mod
+
+    monkeypatch.setattr(recall_mod, "BRAIN_DIR", bogus_file)
+    # Must NOT raise — exception is swallowed by the helper
+    _log_recall_gap("q", [], n=10, **_gap_default_kwargs())
+
+
+def test_inhibition_only_inspects_top_5(monkeypatch):
+    """The competition slice is fused[:5] regardless of caller's n —
+    ranks 6+ never become losers."""
+    import sys as _sys
+    import types
+
+    from routes.recall import _log_retrieval_inhibition
+
+    bg = _FakeBgPool()
+    _stub_ri = types.ModuleType("retrieval_inhibition")
+    _stub_ri.log_competition = lambda *a, **k: None
+    _stub_su = types.ModuleType("brain_core.search_unified")
+    _stub_su._search_bg_pool = bg
+    monkeypatch.setitem(_sys.modules, "retrieval_inhibition", _stub_ri)
+    monkeypatch.setitem(_sys.modules, "brain_core.search_unified", _stub_su)
+
+    fused = [
+        {"id": "atm_1", "collection": "semantic_memory"},
+        {"id": "atm_2", "collection": "semantic_memory"},
+        {"id": "atm_3", "collection": "semantic_memory"},
+        {"id": "atm_4", "collection": "semantic_memory"},
+        {"id": "atm_5", "collection": "semantic_memory"},
+        {"id": "atm_6", "collection": "semantic_memory"},  # outside competition slice
+        {"id": "atm_7", "collection": "semantic_memory"},  # outside competition slice
+    ]
+    _log_retrieval_inhibition(fused, "q")
+    assert len(bg.calls) == 1
+    _, args, _kw = bg.calls[0]
+    winner, losers, _q = args
+    assert winner == "atm_1"
+    assert losers == ["atm_2", "atm_3", "atm_4", "atm_5"]
+
+
+def test_metacognitive_surface_top_n_cutoff_respected(monkeypatch):
+    """Only the first top_n rows are inspected for semantic_memory ids;
+    rows past the cutoff are not enriched with confidence."""
+    import atoms_store
+    import confidence_calibration
+    from routes import recall as recall_mod
+    from routes.recall import _apply_metacognitive_surface_inplace
+
+    conn = _FakeAtomsConn(rows=[{"chroma_id": "atm_1", "confidence": 0.9, "trust_score": 0.9}])
+    monkeypatch.setattr(atoms_store, "_conn", lambda *a, **k: _FakeAtomsConnCtx(conn))
+    monkeypatch.setattr(confidence_calibration, "apply_calibration", lambda x: x)
+    monkeypatch.setattr(recall_mod, "get_vector_store", lambda: _FakeVectorStore(points=[]))
+
+    fused = [
+        {"id": "atm_1", "collection": "semantic_memory"},
+        {"id": "atm_2", "collection": "semantic_memory"},  # outside top_n
+    ]
+    _apply_metacognitive_surface_inplace(fused, top_n=1)
+    assert "confidence" in fused[0]
+    assert "confidence" not in fused[1]
+    # Only atm_1 was passed to the SQL placeholder list.
+    assert conn.last_params == ["atm_1"]
