@@ -8,12 +8,13 @@ sys.path.insert(0, str(BRAIN_ROOT / "brain_core"))
 
 
 def _reload(tmp_path, monkeypatch):
-    for mod in [m for m in list(sys.modules) if m == "social_model"]:
+    for mod in [m for m in list(sys.modules) if m in ("social_model", "db")]:
         del sys.modules[mod]
+    import db
     import social_model as sm
 
     monkeypatch.setattr(sm, "DB_PATH", tmp_path / "autonomy.db")
-    monkeypatch.setattr(sm, "_schema_done", False)
+    db._schema_cache.clear()
     return sm
 
 

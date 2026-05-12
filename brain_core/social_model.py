@@ -39,16 +39,20 @@ import logging
 import sqlite3
 import sys
 import uuid
-from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+# 2026-05-12 migration to shared brain_core/db.py utility (extracted in
+# commit 9f6f258 as part of the post-D1-D10 architecture pass).
+from db import ensure_schema, now_iso, transaction
 
 try:
     from config import BRAIN_LOGS_DIR
 except ImportError:
     BRAIN_LOGS_DIR = Path("/Users/chrischo/server/brain/logs")
 
+# DB_PATH kept as a module-level path for tests that monkeypatch it.
 DB_PATH = BRAIN_LOGS_DIR / "autonomy.db"
 log = logging.getLogger("brain.social_model")
 
@@ -69,25 +73,25 @@ CREATE INDEX IF NOT EXISTS idx_social_active ON social_beliefs(subject)
     WHERE superseded_by IS NULL;
 """
 
-_schema_done = False
+
+def _open() -> sqlite3.Connection:
+    """Open the social_model DB respecting test monkeypatching of DB_PATH."""
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    return sqlite3.connect(str(DB_PATH))
 
 
 def _ensure_schema() -> None:
-    global _schema_done
-    if _schema_done:
-        return
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH))
+    """Idempotent schema init via shared ensure_schema."""
+    conn = _open()
     try:
-        conn.executescript(_SCHEMA)
-        conn.commit()
-        _schema_done = True
+        ensure_schema(conn, "social_model", _SCHEMA)
     finally:
         conn.close()
 
 
 def _now_iso() -> str:
-    return datetime.now(UTC).isoformat(timespec="seconds")
+    """Backwards-compat shim — delegates to shared now_iso()."""
+    return now_iso()
 
 
 def _gen_id() -> str:
@@ -114,22 +118,21 @@ def record_belief(
     confidence = max(0.0, min(1.0, float(confidence)))
     now = _now_iso()
     new_id = _gen_id()
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = _open()
     try:
-        conn.execute("BEGIN IMMEDIATE")
-        if supersedes:
+        with transaction(conn):
+            if supersedes:
+                conn.execute(
+                    "UPDATE social_beliefs SET superseded_by = ? WHERE id = ?",
+                    (new_id, supersedes),
+                )
             conn.execute(
-                "UPDATE social_beliefs SET superseded_by = ? WHERE id = ?",
-                (new_id, supersedes),
+                "INSERT INTO social_beliefs "
+                "(id, subject, subject_kind, belief, confidence, source, "
+                " last_observed_at, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (new_id, subject, subject_kind, belief[:1000], confidence, source[:200], now, now),
             )
-        conn.execute(
-            "INSERT INTO social_beliefs "
-            "(id, subject, subject_kind, belief, confidence, source, "
-            " last_observed_at, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (new_id, subject, subject_kind, belief[:1000], confidence, source[:200], now, now),
-        )
-        conn.commit()
         return {
             "ok": True,
             "id": new_id,
@@ -260,31 +263,30 @@ def seed_known_agents() -> dict:
     insert a duplicate between our SELECT and INSERT (D1-D10 review fix).
     """
     _ensure_schema()
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = _open()
     inserted = 0
     skipped = 0
     try:
-        conn.execute("BEGIN IMMEDIATE")
-        for seed in SEEDS:
-            existing = conn.execute(
-                "SELECT 1 FROM social_beliefs "
-                "WHERE subject = ? AND belief = ? AND superseded_by IS NULL "
-                "LIMIT 1",
-                (seed["subject"], seed["belief"]),
-            ).fetchone()
-            if existing:
-                skipped += 1
-                continue
-            now = _now_iso()
-            conn.execute(
-                "INSERT INTO social_beliefs "
-                "(id, subject, subject_kind, belief, confidence, source, "
-                " last_observed_at, created_at) "
-                "VALUES (?, ?, ?, ?, 0.9, 'seed:claude_md_canonical', ?, ?)",
-                (_gen_id(), seed["subject"], seed["kind"], seed["belief"], now, now),
-            )
-            inserted += 1
-        conn.commit()
+        with transaction(conn):
+            for seed in SEEDS:
+                existing = conn.execute(
+                    "SELECT 1 FROM social_beliefs "
+                    "WHERE subject = ? AND belief = ? AND superseded_by IS NULL "
+                    "LIMIT 1",
+                    (seed["subject"], seed["belief"]),
+                ).fetchone()
+                if existing:
+                    skipped += 1
+                    continue
+                now = _now_iso()
+                conn.execute(
+                    "INSERT INTO social_beliefs "
+                    "(id, subject, subject_kind, belief, confidence, source, "
+                    " last_observed_at, created_at) "
+                    "VALUES (?, ?, ?, ?, 0.9, 'seed:claude_md_canonical', ?, ?)",
+                    (_gen_id(), seed["subject"], seed["kind"], seed["belief"], now, now),
+                )
+                inserted += 1
         return {"inserted": inserted, "skipped": skipped, "total_seeds": len(SEEDS)}
     finally:
         conn.close()
