@@ -150,8 +150,8 @@ SOURCE_TRUST = {
 # stale curated notes that are about to be obsoleted by the new write anyway.
 # Floor at semantic_memory's 0.8 — never lower; the curation is still real.
 _TRUST_DECAY_PER_DAY = {
-    "canonical": 0.02,    # 1.0 -> 0.8 over 10 days
-    "distilled": 0.005,   # 0.9 -> 0.8 over 20 days
+    "canonical": 0.02,  # 1.0 -> 0.8 over 10 days
+    "distilled": 0.005,  # 0.9 -> 0.8 over 20 days
     "knowledge": 0.005,
 }
 _TRUST_FLOOR = 0.8
@@ -218,6 +218,7 @@ def _effective_trust(source_type: str, written_at: Any = None, _now_ts: float | 
     age_days = max(0.0, (now_ts - written_ts) / 86400.0)
     return max(_TRUST_FLOOR, base - decay * age_days)
 
+
 try:
     from tokenizer import tokenize
 except ImportError:
@@ -240,7 +241,9 @@ _CONDITIONAL_RELATION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ),
     (
         "depends_on",
-        re.compile(r"\b(depends?|dependency|dependencies|requires?|requirement|prereq|prerequisite|relies?)\b", re.I),
+        re.compile(
+            r"\b(depends?|dependency|dependencies|requires?|requirement|prereq|prerequisite|relies?)\b", re.I
+        ),
     ),
     (
         "manages",
@@ -450,7 +453,9 @@ def ontology_expansion_terms(query, adjacency, *, max_terms: int | None = None):
     return unique[:max_terms]
 
 
-def expand_with_ontology(query, adjacency, *, include_entity_graph: bool = True, max_terms: int | None = None):
+def expand_with_ontology(
+    query, adjacency, *, include_entity_graph: bool = True, max_terms: int | None = None
+):
     expansions = ontology_expansion_terms(query, adjacency, max_terms=max_terms)
     if include_entity_graph:
         # Also expand via entity graph (Zep/Graphiti pattern). search_all does
@@ -945,7 +950,9 @@ _TEMPORAL_PATTERNS = re.compile(
     r"(?:when\s+did|last\s+(?:week|month|year)|yesterday|this\s+(?:week|month)|days?\s+ago|\bhow\s+recent)",
     re.I,
 )
-_HISTORY_LOOKUP_PATTERNS = re.compile(r"\b(?:historical|history|decommissioned|superseded|previous|old|former)\b", re.I)
+_HISTORY_LOOKUP_PATTERNS = re.compile(
+    r"\b(?:historical|history|decommissioned|superseded|previous|old|former)\b", re.I
+)
 _PREFERENCE_PATTERNS = re.compile(
     r"(?:(?:does|what)\s+(?:chris\s+)?prefer|"
     r"what\s+does\s+chris\s+think\s+about|"
@@ -1128,7 +1135,12 @@ _CANONICAL_PRIMARY_DOCS = [
             r"\b(?:sensitive\s+keys|admin\s+keys|Ghost\s+Admin|rotatable|secret\s+stores?|hardcoded)\b",
             re.I,
         ),
-        [("/Users/chrischo/server/knowledge/canonical/archived/chris/openclaw-jenna-session-2026-04-01.md", 5000)],
+        [
+            (
+                "/Users/chrischo/server/knowledge/canonical/archived/chris/openclaw-jenna-session-2026-04-01.md",
+                5000,
+            )
+        ],
     ),
     (
         re.compile(r"\bgateway\b.*\b(?:restart|reinstall)\b|\b(?:restart|reinstall)\b.*\bgateway\b", re.I),
@@ -1142,18 +1154,30 @@ _CANONICAL_PRIMARY_DOCS = [
     ),
     (
         re.compile(r"\bIrvine\b.*\b(?:August\s+2024|since|residen)", re.I),
-        [("/Users/chrischo/server/knowledge/canonical/archived/chris/openclaw-jenna-session-2026-04-10.md", 5000)],
+        [
+            (
+                "/Users/chrischo/server/knowledge/canonical/archived/chris/openclaw-jenna-session-2026-04-10.md",
+                5000,
+            )
+        ],
     ),
     (
         re.compile(r"\bself[-\s]?learning\b.*\bmemory\s+extraction\b|\bmemory\s+extraction\b.*\blearn", re.I),
-        [("/Users/chrischo/server/knowledge/canonical/projects/project_personal_intelligence_system_v1.md", 5000)],
+        [
+            (
+                "/Users/chrischo/server/knowledge/canonical/projects/project_personal_intelligence_system_v1.md",
+                5000,
+            )
+        ],
     ),
     (
         re.compile(r"\bconventional\s+commits?\b|\bgit\s+workflow\b", re.I),
         [("/Users/chrischo/server/knowledge/canonical/live_state/recent_commits.md", 5000)],
     ),
     (
-        re.compile(r"\bsearch\s+pipeline\b|\bretrieval\s+pipeline\b|검색.*(?:파이프라인|구조)|파이프라인.*구조", re.I),
+        re.compile(
+            r"\bsearch\s+pipeline\b|\bretrieval\s+pipeline\b|검색.*(?:파이프라인|구조)|파이프라인.*구조", re.I
+        ),
         [
             ("/Users/chrischo/server/knowledge/canonical/infra/infra_rag_retrieval_stack.md", 5000),
             ("/Users/chrischo/server/knowledge/canonical/infra/rag-stack-role.md", 5000),
@@ -1170,7 +1194,10 @@ _CANONICAL_PRIMARY_DOCS = [
         ),
         [
             ("/Users/chrischo/server/knowledge/canonical/chris/_identity.md", 5000),
-            ("/Users/chrischo/server/knowledge/canonical/archived/chris/openclaw-jenna-session-2026-04-10.md", 5000),
+            (
+                "/Users/chrischo/server/knowledge/canonical/archived/chris/openclaw-jenna-session-2026-04-10.md",
+                5000,
+            ),
         ],
     ),
 ]
@@ -1197,6 +1224,7 @@ def _should_suppress_chris_identity_for_query(query: str) -> bool:
         and _RELATIONSHIP_NAME_QUERY_PATTERNS.search(query)
         and not _CHRIS_EXACT_IDENTITY_NAME_PATTERNS.search(query)
     )
+
 
 _AGENT_PRIMARY_DOCS = {
     "jenna": "/Users/chrischo/.openclaw/workspace-jenna/AGENTS.md",
@@ -1348,7 +1376,11 @@ def _is_stale_current_truth_result(result: dict) -> bool:
         content = str(result.get("content") or "")
         if not content:
             return False
-        return bool(find_current_truth_blockers_in_text(content, source=str(result.get("path") or result.get("id") or "")))
+        return bool(
+            find_current_truth_blockers_in_text(
+                content, source=str(result.get("path") or result.get("id") or "")
+            )
+        )
     except Exception:
         return False
 
@@ -1418,6 +1450,7 @@ def _primary_doc_hits(query: str) -> list[dict]:
                         hit["metadata"]["topic"] = topic
                         hits.append(hit)
     return hits
+
 
 # 2026-04-17 Phase 10 modality expansion (7 buckets) — inspired by friend's
 # SECONDBRAIN_MODALITY_WEIGHTS pattern. Each bucket shifts trust weights to
@@ -1628,7 +1661,11 @@ def _dedup_by_content_hash(results: list[dict]) -> list[dict]:
         existing = seen.get(key)
         current_primary = bool((r.get("metadata") or {}).get("primary_doc_lookup"))
         existing_primary = bool(((existing or {}).get("metadata") or {}).get("primary_doc_lookup"))
-        if existing is None or (current_primary and not existing_primary) or r.get("score", 0) > existing.get("score", 0):
+        if (
+            existing is None
+            or (current_primary and not existing_primary)
+            or r.get("score", 0) > existing.get("score", 0)
+        ):
             seen[key] = r
     return list(seen.values())
 
@@ -1705,6 +1742,231 @@ def _maybe_emit_search_trace(
         log.debug("search trace write failed: %s", _exc)
 
 
+# Raw agent/session dumps are ingested for history but flood the vector
+# space with query-like language that crowds out canonical answers. They
+# are excluded from RAG search by default; callers who want them can pass
+# source_type explicitly to bypass this.
+_RAW_DUMP_TYPES: tuple[str, ...] = (
+    "raw-openclaw_session",
+    "raw-claude_code_session",
+    "raw-browser",
+    "raw-git_activity",
+    "raw-screen_time",
+)
+
+
+def _compose_rrf_inputs(
+    rag_results: list[dict],
+    canonical_results: list[dict],
+    obsidian_results: list[dict],
+    graph_results: list[dict],
+    fts_results: list[dict],
+    graph_prefetch_results: list[dict],
+    raptor_results: list[dict],
+    intent_boost: dict[str, float],
+) -> tuple[list[list[dict]], list[float]]:
+    """Build (source_lists, trust_weights) for rrf_fuse from the per-source
+    result lists + the intent classifier's per-source boost.
+
+    Empty source lists are dropped from both arrays in parallel (rrf_fuse
+    contracts: each weight aligns with its source list 1:1). Trust weights:
+      rag:            0.9  * intent_boost["rag"]
+      canonical:      1.0  * intent_boost["canonical"]
+      obsidian:       0.6
+      graph:          0.5  * intent_boost["graph"]
+      fts:            0.4
+      graph_prefetch: 0.7  * intent_boost["graph"]
+      raptor:         0.85 * intent_boost["canonical"]
+                      (canonical-derived, inherits canonical trust a shade
+                      below canonical itself)
+
+    2026-04-18: raptor_results was previously fetched but never flowed into
+    RRF — both source_lists and trust_weights omitted it. Every broad query
+    wasted the RAPTOR fetch and lost the hierarchical-summary signal.
+    """
+    source_lists: list[list[dict]] = []
+    trust_weights: list[float] = []
+    if rag_results:
+        source_lists.append(rag_results)
+        trust_weights.append(0.9 * intent_boost.get("rag", 1.0))
+    if canonical_results:
+        source_lists.append(canonical_results)
+        trust_weights.append(1.0 * intent_boost.get("canonical", 1.0))
+    if obsidian_results:
+        source_lists.append(obsidian_results)
+        trust_weights.append(0.6)
+    if graph_results:
+        source_lists.append(graph_results)
+        trust_weights.append(0.5 * intent_boost.get("graph", 1.0))
+    if fts_results:
+        source_lists.append(fts_results)
+        trust_weights.append(0.4)
+    if graph_prefetch_results:
+        source_lists.append(graph_prefetch_results)
+        trust_weights.append(0.7 * intent_boost.get("graph", 1.0))
+    if raptor_results:
+        source_lists.append(raptor_results)
+        trust_weights.append(0.85 * intent_boost.get("canonical", 1.0))
+    return source_lists, trust_weights
+
+
+def _matches_entity(r: dict, entity_lower: str) -> bool:
+    """Case-insensitive substring match: does result row `r` mention the
+    entity in any of its searchable fields?
+
+    Fields checked (concatenated for one scan):
+      - metadata.agent
+      - metadata.service
+      - path
+      - title
+      - content (first 200 chars only; content can be huge)
+    """
+    haystack = " ".join(
+        [
+            str(r.get("metadata", {}).get("agent", "")),
+            str(r.get("metadata", {}).get("service", "")),
+            str(r.get("path", "")),
+            str(r.get("title", "")),
+            str(r.get("content", ""))[:200],
+        ]
+    ).lower()
+    return entity_lower in haystack
+
+
+def _apply_entity_filter_inplace(entity: str | None, *result_lists: list[dict]) -> None:
+    """Filter each result list IN PLACE so only rows mentioning the entity
+    survive. No-op when entity is falsy. Per-list `lst[:]` reassignment
+    preserves the caller's list reference (other code paths may hold the
+    same reference and observe the filter).
+    """
+    if not entity:
+        return
+    ent_lower = entity.lower()
+    for lst in result_lists:
+        lst[:] = [r for r in lst if _matches_entity(r, ent_lower)]
+
+
+_BROAD_QUERY_KEYWORDS: tuple[str, ...] = (
+    "overall",
+    "pattern",
+    "summary",
+    "history",
+    "philosophy",
+    "approach",
+    "compare",
+    "difference",
+    "trend",
+    "evolution",
+    "strategy",
+    "state of",
+    "what is chris",
+    "how does chris",
+)
+
+
+def _is_broad_query(query: str) -> bool:
+    """Cheap heuristic: a query is "broad" if it has >4 tokens OR
+    contains one of the comparison/pattern keywords. Used by the RAPTOR
+    hierarchical-summary path to decide whether to pull level-≥1 summary
+    nodes alongside leaf canonical (Sarthi 2024). Single-fact queries
+    don't benefit from level-2 summaries.
+
+    Empty/whitespace queries fall through to False — the >4 token check
+    and the keyword scan both miss.
+    """
+    q_lower = (query or "").lower()
+    token_count = len(q_lower.split())
+    return token_count > 4 or any(w in q_lower for w in _BROAD_QUERY_KEYWORDS)
+
+
+def _build_rag_where_clause(where: dict | None, source_type: str | None) -> dict:
+    """Compose the RAG where-clause from the caller's `where` + source_type.
+
+    Two layered behaviors:
+      1. Caller supplied source_type → AND a `{type: {$eq: source_type}}`
+         clause onto the existing where. This explicitly scopes the search
+         and bypasses the raw-dump exclusion (caller knows what they want).
+      2. No source_type → AND a `{type: {$nin: _RAW_DUMP_TYPES}}` clause
+         onto the existing where. This keeps raw dumps out of routine
+         searches without forcing callers to remember.
+
+    Empty input where becomes the clause directly (no $and wrap).
+    Result is always non-empty: the function never returns None or {}.
+    """
+    local_where: dict = dict(where) if where else {}
+    if source_type:
+        type_clause = {"type": {"$eq": source_type}}
+        # Compose both conditions so an existing "type" key in `where`
+        # isn't silently overwritten by the source_type filter.
+        if local_where:
+            return {"$and": [local_where, type_clause]}
+        return type_clause
+    raw_exclude = {"type": {"$nin": list(_RAW_DUMP_TYPES)}}
+    if local_where:
+        return {"$and": [local_where, raw_exclude]}
+    return raw_exclude
+
+
+def _apply_bilingual_expansion(query: str) -> tuple[str, list[str]]:
+    """Bilingual query expansion (free, no LLM) — helps Korean queries find
+    English docs.
+
+    2026-04-16 R-3 fix: original bug joined variants into a mixed-language
+    blob (broken on multilingual-e5); April-16 Tier-1 patch dropped
+    concatenation but also dropped the alternates entirely. Final:
+    primary query stays single-language; alternates are stashed on the
+    `bilingual_variants` list so _search_rag can fan out and RRF-fuse per
+    variant. Preserves Korean-query -> English-doc bridge without
+    corrupting the primary embedding.
+
+    Returns (possibly-replaced primary query, bilingual variants list).
+    When _RAG_IN_PROCESS is False or expand_query raises, returns the
+    original query and an empty variants list.
+    """
+    bilingual_variants: list[str] = []
+    try:
+        if _RAG_IN_PROCESS:
+            _v = _rag_search.expand_query(query)
+            if _v and len(_v) > 1:
+                query = _v[0]
+                bilingual_variants = [x for x in _v[1:] if x and x != query][:2]
+    except Exception:
+        pass
+    return query, bilingual_variants
+
+
+def _apply_ontology_expansion(query: str, source_timing: dict) -> tuple[str, str, list[str]]:
+    """Apply ontology-driven query expansion. Either rewrites the query
+    inline (when BRAIN_ONTOLOGY_EXPANSION_MODE != 'sidecar') or stashes
+    expansion terms into a sidecar query (when mode == 'sidecar').
+
+    Mutates `source_timing` in place with:
+      - ontology_expansion_terms (int)
+      - ontology_expansion_applied (bool)
+      - ontology_expansion_ms (int)
+      - ontology_expansion_sidecar_mode (int 0/1)
+
+    Returns (possibly-rewritten query, sidecar_query_or_empty, terms).
+    No-op when BRAIN_ONTOLOGY_EXPANSION_ENABLED is False.
+    """
+    ontology_sidecar_query = ""
+    ontology_terms: list[str] = []
+    if not BRAIN_ONTOLOGY_EXPANSION_ENABLED:
+        return query, ontology_sidecar_query, ontology_terms
+
+    expanded_query, terms, elapsed_ms = maybe_expand_query_with_ontology(query)
+    ontology_terms = terms
+    source_timing["ontology_expansion_terms"] = len(terms)
+    source_timing["ontology_expansion_applied"] = bool(terms)
+    source_timing["ontology_expansion_ms"] = elapsed_ms
+    source_timing["ontology_expansion_sidecar_mode"] = int(BRAIN_ONTOLOGY_EXPANSION_MODE == "sidecar")
+    if terms and BRAIN_ONTOLOGY_EXPANSION_MODE == "sidecar":
+        ontology_sidecar_query = expanded_query
+    else:
+        query = expanded_query
+    return query, ontology_sidecar_query, ontology_terms
+
+
 def search_all(
     query,
     limit=5,
@@ -1751,38 +2013,13 @@ def search_all(
     sources = _route_sources(original_query or query, sources)
     source_timing = {}
 
-    # Bilingual query expansion (free, no LLM) — helps Korean queries find English docs.
-    # 2026-04-16 R-3 fix: original bug joined variants into a mixed-language
-    # blob (broken on multilingual-e5); April-16 Tier-1 patch dropped
-    # concatenation but also dropped the alternates entirely. Final:
-    # primary query stays single-language; alternates are stashed on the
-    # `bilingual_variants` list so _search_rag can fan out and RRF-fuse
-    # per variant. Preserves Korean-query → English-doc bridge without
-    # corrupting the primary embedding.
-    bilingual_variants: list[str] = []
-    try:
-        if _RAG_IN_PROCESS:
-            _v = _rag_search.expand_query(query)
-            if _v and len(_v) > 1:
-                query = _v[0]
-                bilingual_variants = [x for x in _v[1:] if x and x != query][:2]
-    except Exception:
-        pass
+    # Bilingual variant expansion — see _apply_bilingual_expansion docstring.
+    query, bilingual_variants = _apply_bilingual_expansion(query)
 
     base_relevance_query = original_query or query
-    ontology_sidecar_query = ""
-    ontology_terms: list[str] = []
-    if BRAIN_ONTOLOGY_EXPANSION_ENABLED:
-        expanded_query, terms, elapsed_ms = maybe_expand_query_with_ontology(query)
-        ontology_terms = terms
-        source_timing["ontology_expansion_terms"] = len(terms)
-        source_timing["ontology_expansion_applied"] = bool(terms)
-        source_timing["ontology_expansion_ms"] = elapsed_ms
-        source_timing["ontology_expansion_sidecar_mode"] = int(BRAIN_ONTOLOGY_EXPANSION_MODE == "sidecar")
-        if terms and BRAIN_ONTOLOGY_EXPANSION_MODE == "sidecar":
-            ontology_sidecar_query = expanded_query
-        else:
-            query = expanded_query
+    # Ontology expansion — see _apply_ontology_expansion docstring for the
+    # sidecar-vs-inline mode contract.
+    query, ontology_sidecar_query, ontology_terms = _apply_ontology_expansion(query, source_timing)
 
     relevance_query = original_query or query
     if BRAIN_ONTOLOGY_EXPANSION_ENABLED:
@@ -1803,35 +2040,9 @@ def search_all(
         if "rag" not in sources:
             return []
         t0 = time.time()
-        local_where = dict(where) if where else {}
-        if source_type:
-            type_clause = {"type": {"$eq": source_type}}
-            if local_where:
-                # Compose both conditions so an existing "type" key in `where`
-                # isn't silently overwritten by the source_type filter.
-                local_where = {"$and": [local_where, type_clause]}
-            else:
-                local_where = type_clause
-        else:
-            # Default exclusion: raw agent/session dumps are ingested for history
-            # but flood the vector space with query-like language that crowds out
-            # canonical answers. Exclude them by default; callers who want them
-            # can pass source_type explicitly.
-            _raw_exclude = {
-                "type": {
-                    "$nin": [
-                        "raw-openclaw_session",
-                        "raw-claude_code_session",
-                        "raw-browser",
-                        "raw-git_activity",
-                        "raw-screen_time",
-                    ]
-                }
-            }
-            if local_where:
-                local_where = {"$and": [local_where, _raw_exclude]}
-            else:
-                local_where = _raw_exclude
+        # See _build_rag_where_clause for the source_type/raw-dump exclusion
+        # composition (always returns a non-empty where clause).
+        local_where = _build_rag_where_clause(where, source_type)
         # 2026-04-17 perf: raw-* types live exclusively in the `experience`
         # collection (verified 11,700 rows vs 0 elsewhere). Previously this
         # applied `$nin` filter to every collection's query, adding ~25ms per
@@ -1869,7 +2080,9 @@ def search_all(
             source_timing["ontology_sidecar_skipped_specific_lookup"] = int(sidecar_limit == 0)
             if sidecar_limit > 0 and plain_cols:
                 _futs.append(
-                    _pool.submit(search_rag, ontology_sidecar_query, sidecar_limit, plain_where or None, plain_cols)
+                    _pool.submit(
+                        search_rag, ontology_sidecar_query, sidecar_limit, plain_where or None, plain_cols
+                    )
                 )
         # 2026-04-16 R-3: bilingual-variant expansion in parallel with the
         # primary fan-outs — variants are independent queries so we can run
@@ -1878,7 +2091,9 @@ def search_all(
             for _alt in (bilingual_variants or [])[:1]:
                 alt_limit = max(limit, rag_limit // 2)
                 if filtered_cols:
-                    _futs.append(_pool.submit(search_rag, _alt, alt_limit, local_where or None, filtered_cols))
+                    _futs.append(
+                        _pool.submit(search_rag, _alt, alt_limit, local_where or None, filtered_cols)
+                    )
                 if plain_cols:
                     _futs.append(_pool.submit(search_rag, _alt, alt_limit, plain_where or None, plain_cols))
         except Exception:
@@ -2115,31 +2330,8 @@ def search_all(
         collection is empty (pre-first-build state)."""
         if collections:
             return []
-        # Cheap heuristic: only query RAPTOR when the query looks broad —
-        # > 4 tokens or contains comparison/pattern words. Single-fact
-        # queries don't benefit from level-2 summaries.
-        q_lower = (relevance_query or "").lower()
-        token_count = len(q_lower.split())
-        is_broad = token_count > 4 or any(
-            w in q_lower
-            for w in (
-                "overall",
-                "pattern",
-                "summary",
-                "history",
-                "philosophy",
-                "approach",
-                "compare",
-                "difference",
-                "trend",
-                "evolution",
-                "strategy",
-                "state of",
-                "what is chris",
-                "how does chris",
-            )
-        )
-        if not is_broad:
+        # See _is_broad_query docstring for the >4-token / keyword heuristic.
+        if not _is_broad_query(relevance_query):
             return []
         t0 = time.time()
         try:
@@ -2256,28 +2448,18 @@ def search_all(
             result_lists[bucket].insert(0, hit)
         source_timing["primary_doc_count"] = len(primary_doc_hits)
 
-    # Entity filter
-    if entity:
-        ent_lower = entity.lower()
-
-        def matches(r):
-            haystack = " ".join(
-                [
-                    str(r.get("metadata", {}).get("agent", "")),
-                    str(r.get("metadata", {}).get("service", "")),
-                    str(r.get("path", "")),
-                    str(r.get("title", "")),
-                    str(r.get("content", ""))[:200],
-                ]
-            ).lower()
-            return ent_lower in haystack
-
-        rag_results[:] = [r for r in rag_results if matches(r)]
-        canonical_results[:] = [r for r in canonical_results if matches(r)]
-        obsidian_results[:] = [r for r in obsidian_results if matches(r)]
-        graph_results[:] = [r for r in graph_results if matches(r)]
-        fts_results[:] = [r for r in fts_results if matches(r)]
-        graph_prefetch_results[:] = [r for r in graph_prefetch_results if matches(r)]
+    # Entity filter — see _apply_entity_filter_inplace docstring for the
+    # case-insensitive substring contract. Note: raptor_results is NOT
+    # filtered (matches the pre-extraction behavior).
+    _apply_entity_filter_inplace(
+        entity,
+        rag_results,
+        canonical_results,
+        obsidian_results,
+        graph_results,
+        fts_results,
+        graph_prefetch_results,
+    )
 
     # Intent-based trust weight adjustment
     _intent_boost = _classify_intent(relevance_query)
@@ -2304,39 +2486,17 @@ def search_all(
     try:
         from rrf import rrf_fuse
 
-        # 2026-04-18: raptor_results was fetched (_search_raptor populates it
-        # via the fan-out pool at line 1288) but never flowed into RRF —
-        # source_lists and trust_weights both omitted it. Every broad query
-        # wasted the RAPTOR fetch and lost the hierarchical-summary signal.
-        source_lists = [
-            l
-            for l in [
-                rag_results,
-                canonical_results,
-                obsidian_results,
-                graph_results,
-                fts_results,
-                graph_prefetch_results,
-                raptor_results,
-            ]
-            if l
-        ]
-        trust_weights = []
-        if rag_results:
-            trust_weights.append(0.9 * _intent_boost.get("rag", 1.0))
-        if canonical_results:
-            trust_weights.append(1.0 * _intent_boost.get("canonical", 1.0))
-        if obsidian_results:
-            trust_weights.append(0.6)
-        if graph_results:
-            trust_weights.append(0.5 * _intent_boost.get("graph", 1.0))
-        if fts_results:
-            trust_weights.append(0.4)
-        if graph_prefetch_results:
-            trust_weights.append(0.7 * _intent_boost.get("graph", 1.0))
-        if raptor_results:
-            # canonical-derived, inherit canonical trust a shade below canonical itself.
-            trust_weights.append(0.85 * _intent_boost.get("canonical", 1.0))
+        # See _compose_rrf_inputs docstring for the per-source weight contract.
+        source_lists, trust_weights = _compose_rrf_inputs(
+            rag_results,
+            canonical_results,
+            obsidian_results,
+            graph_results,
+            fts_results,
+            graph_prefetch_results,
+            raptor_results,
+            _intent_boost,
+        )
         if source_lists:
             all_results = rrf_fuse(source_lists, trust_weights=trust_weights, id_key="path")
         else:
@@ -2865,11 +3025,7 @@ def search_all(
             pass
 
     if _should_suppress_chris_identity_for_query(relevance_query):
-        unique = [
-            r
-            for r in unique
-            if not str(r.get("path") or "").endswith("canonical/chris/_identity.md")
-        ]
+        unique = [r for r in unique if not str(r.get("path") or "").endswith("canonical/chris/_identity.md")]
 
     final_results = unique[:limit]
 
