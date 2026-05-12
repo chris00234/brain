@@ -39,7 +39,13 @@ MIN_WINDOW_SAMPLES = 20
 
 
 def _now_iso() -> str:
-    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    """Z-suffix UTC timestamp. Delegates to db.now_iso(z_suffix=True)."""
+    try:
+        from brain_core.db import now_iso
+    except ImportError:
+        from db import now_iso
+
+    return now_iso(z_suffix=True)
 
 
 def _window_values(samples: deque) -> list[float]:

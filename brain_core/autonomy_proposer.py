@@ -76,10 +76,6 @@ AUTOGRADE_ALLOWLIST = {
 }
 
 
-def _now() -> str:
-    return datetime.now(UTC).isoformat(timespec="seconds")
-
-
 def _conn() -> sqlite3.Connection:
     conn = sqlite3.connect(str(AUTONOMY_DB))
     conn.row_factory = sqlite3.Row

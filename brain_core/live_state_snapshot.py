@@ -49,8 +49,7 @@ LIVE_STATE_DIR = KNOWLEDGE_DIR / "canonical" / "live_state"
 log = logging.getLogger("brain.live_state_snapshot")
 
 
-def _now_iso() -> str:
-    return datetime.now(UTC).isoformat(timespec="seconds")
+from db import now_iso as _now_iso  # noqa: E402  — single-source UTC stamp helper
 
 
 def _utcnow() -> datetime:

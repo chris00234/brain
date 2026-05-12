@@ -22,9 +22,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 
-def _now_iso() -> str:
-    return datetime.now(UTC).isoformat(timespec="seconds")
-
+from db import now_iso as _now_iso
 
 log = logging.getLogger("brain.eval_holdout_promote")
 

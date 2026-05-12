@@ -186,8 +186,7 @@ def _connect(autocommit: bool = True) -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
-def _now_iso() -> str:
-    return datetime.now(UTC).isoformat(timespec="seconds")
+from db import now_iso as _now_iso  # noqa: E402  — single-source UTC stamp helper
 
 
 def _hash_payload(kind: str, payload: dict) -> str:

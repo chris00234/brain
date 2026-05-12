@@ -596,4 +596,10 @@ def _default_task_queue(warnings: list[dict]) -> Any | None:
 
 
 def _now() -> str:
-    return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+    """Z-suffix UTC timestamp. Delegates to db.now_iso(z_suffix=True)."""
+    try:
+        from brain_core.db import now_iso
+    except ImportError:
+        from db import now_iso
+
+    return now_iso(z_suffix=True)
