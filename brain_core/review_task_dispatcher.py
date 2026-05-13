@@ -33,7 +33,7 @@ log = logging.getLogger("brain.review_task_dispatcher")
 
 MAX_DISPATCHES_PER_RUN = 2  # caps daily CLI spend on review work
 DISPATCH_TIMEOUT_SEC = 180
-SOURCES = ("outcome_feedback", "goal_subtask_scaffold")
+SOURCES = ("outcome_feedback", "goal_subtask_scaffold", "decision_feedback")
 # Brain-generated review/work tasks carry this label so the dispatcher
 # can filter them from operator- or agent-assigned tasks. The CLI path
 # (cli_llm.dispatch → codex/claude) ignores the agent label internally;

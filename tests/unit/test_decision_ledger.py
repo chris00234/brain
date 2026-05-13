@@ -268,5 +268,10 @@ def test_create_feedback_review_tasks_is_deduped_and_review_only(tmp_path):
     assert second["skipped"][0]["reason"] == "open_task_exists"
     assert tasks[0]["created_by"] == "decision_feedback"
     assert tasks[0]["metadata"]["mutates_policy"] is False
-    assert tasks[0]["metadata"]["uses_llm"] is False
+    # 2026-05-13: decision_feedback review tasks dispatched through cli_llm
+    # (codex → claude fallback). The report itself uses no LLM; the resulting
+    # task is processed via cli_llm.
+    assert tasks[0]["metadata"]["uses_llm"] is True
+    assert tasks[0]["metadata"]["llm_dispatch"] == "cli_llm"
+    assert tasks[0]["assigned_agent"] == "brain_cli"
     assert tasks[0]["metadata"]["decision_feedback_signature"]

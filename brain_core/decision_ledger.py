@@ -447,7 +447,11 @@ def create_feedback_review_tasks(
         task = tq.create_task(
             title=_candidate_task_title(candidate),
             description=_candidate_task_description(candidate),
-            assigned_agent="codex",
+            # 2026-05-13: aligned with outcome_feedback / goal_subtask_scaffold.
+            # All brain-generated review tasks share the brain_cli label and
+            # dispatch through cli_llm.cli_dispatch (codex → claude fallback)
+            # so the dispatcher can pick them up uniformly.
+            assigned_agent="brain_cli",
             priority=3,
             confidence=float(candidate.get("confidence_avg") or 0.0),
             confidence_reasoning="decision_feedback_report repeated/failed decision pattern",
@@ -459,7 +463,8 @@ def create_feedback_review_tasks(
                 "pattern": candidate.get("pattern") or {},
                 "recommended_actions": candidate.get("recommended_actions") or [],
                 "mutates_policy": False,
-                "uses_llm": False,
+                "uses_llm": True,
+                "llm_dispatch": "cli_llm",
             },
         )
         created.append({"signature": signature, "task_id": task.get("id"), "title": task.get("title")})
