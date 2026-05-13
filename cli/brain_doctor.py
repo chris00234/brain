@@ -145,6 +145,69 @@ def _recent_remediation(limit: int = 5) -> list[dict]:
     return out
 
 
+def _self_quality_snapshot() -> dict:
+    """Surface the self-quality learning loop's open signals so the daily
+    report reflects the new brain-cli pipelines instead of just SLOs.
+
+    Pulls the three brain-internal review-task counters + override
+    pattern summary + 7d trend alerts. All optional — any subpath that
+    raises is recorded with its error so the main report stays
+    deterministic.
+    """
+    snap: dict = {}
+    import urllib.request
+
+    headers = {"Authorization": f"Bearer {_bearer()}"}
+    for label, path in (
+        ("override_patterns", "/brain/outcomes/feedback?hours=168&min_overrides=2&limit=500"),
+        ("trend_alerts", "/brain/trend-alerts"),
+        ("wrong_rate_breakdown", "/brain/recall/wrong-rate-breakdown?hours=168"),
+    ):
+        try:
+            req = urllib.request.Request(  # noqa: S310 — local-only brain endpoint
+                f"{BRAIN_ENDPOINT}{path}",
+                headers=headers,
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:  # noqa: S310
+                snap[label] = json.loads(resp.read().decode())
+        except Exception as exc:
+            snap[label] = {"status": f"error:{str(exc)[:120]}"}
+
+    # Pending brain-cli task counters straight from autonomy.db so the
+    # snapshot reflects the dispatcher backlog without another HTTP hop.
+    try:
+        conn = sqlite3.connect(f"file:{AUTONOMY_DB}?mode=ro", uri=True, timeout=5)
+        try:
+            rows = conn.execute(
+                "SELECT created_by, status, COUNT(*) AS n FROM tasks "
+                "WHERE assigned_agent = 'brain_cli' "
+                "  AND created_at > datetime('now', '-30 days') "
+                "GROUP BY created_by, status"
+            ).fetchall()
+            by_status: dict[str, dict[str, int]] = {}
+            for created_by, status, n in rows:
+                by_status.setdefault(str(created_by or ""), {})[str(status or "")] = int(n)
+            snap["brain_cli_tasks_30d"] = by_status
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        snap["brain_cli_tasks_30d"] = {"status": f"error:{str(exc)[:120]}"}
+
+    # Compact summary for SessionStart hook surfaces.
+    op = snap.get("override_patterns") or {}
+    op_cands = op.get("learning_candidates") if isinstance(op, dict) else None
+    alerts = snap.get("trend_alerts") or {}
+    alerts_list = alerts.get("alerts") if isinstance(alerts, dict) else None
+    wrb = snap.get("wrong_rate_breakdown") or {}
+    snap["summary"] = {
+        "override_pattern_count": len(op_cands or []),
+        "trend_alert_count": len(alerts_list or []),
+        "wrong_rate": (wrb.get("wrong_rate") if isinstance(wrb, dict) else None),
+        "worst_slice": (wrb.get("worst_slice") if isinstance(wrb, dict) else None),
+    }
+    return snap
+
+
 def main() -> int:
     t0 = time.time()
     report: dict = {
@@ -169,6 +232,7 @@ def main() -> int:
     report["logs_dir_history"] = _growth_snapshot_history()
     report["calibration"] = _calibration_state()
     report["recent_remediation"] = _recent_remediation()
+    report["self_quality"] = _self_quality_snapshot()
     report["elapsed_ms"] = int((time.time() - t0) * 1000)
 
     serialized = json.dumps(report, indent=2, default=str)

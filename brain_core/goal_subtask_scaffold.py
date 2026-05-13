@@ -283,10 +283,14 @@ def ensure_brain_quality_subtasks(
     """Idempotently materialize brain-quality subtasks under the matching goal.
 
     If `goal_id` is None we pick the highest-priority active goal whose
-    title contains one of `goal_title_match`. Each subtask carries its
-    metric_name in metadata; existing pending/approved/running subtasks
-    with the same metric_name are treated as still satisfying the proposal
-    and skipped.
+    title contains one of `goal_title_match`. When no such goal exists we
+    auto-seed a fresh "Brain self-quality continuous improvement" goal so
+    the daily cron keeps surfacing measurable work without a human
+    re-seeding it after every auto-completion cascade.
+
+    Each subtask carries its metric_name in metadata; existing
+    pending/approved/running subtasks with the same metric_name are
+    treated as still satisfying the proposal and skipped.
     """
     tq = task_queue_obj or _default_task_queue()
     if tq is None:
@@ -294,7 +298,9 @@ def ensure_brain_quality_subtasks(
 
     goal = _resolve_goal(tq, goal_id, goal_title_match)
     if not goal:
-        return {"created": [], "skipped": [], "error": "no_matching_goal"}
+        goal = _autoseed_brain_quality_goal(tq)
+        if not goal:
+            return {"created": [], "skipped": [], "error": "no_matching_goal_and_autoseed_failed"}
 
     proposals = propose_brain_quality_subtasks(
         autonomy_db_path=autonomy_db_path,
@@ -345,6 +351,36 @@ def ensure_brain_quality_subtasks(
         "skipped": skipped,
         "proposals_total": len(proposals),
     }
+
+
+_AUTOSEED_GOAL_TITLE = "Brain self-quality continuous improvement"
+_AUTOSEED_GOAL_DESCRIPTION = (
+    "Auto-seeded by goal_subtask_scaffold when no active 'brain' goal exists. "
+    "Drives override_pct down, judge coverage up, and keeps SLOs clean via the "
+    "deterministic daily scaffold + subtask_evaluator loop. Re-seeded automatically "
+    "after each auto-completion cascade."
+)
+
+
+def _autoseed_brain_quality_goal(task_queue_obj: Any) -> dict | None:
+    """Create a fresh brain-quality goal when the previous one auto-completed.
+
+    The whole self-quality loop is anchored on having an active goal; without
+    one, the scaffold + evaluator + dispatcher chain has nowhere to attach.
+    Seeding it from inside the scaffold makes the loop survive completion
+    cascades without manual intervention.
+    """
+    try:
+        goal = task_queue_obj.create_goal(
+            _AUTOSEED_GOAL_TITLE,
+            _AUTOSEED_GOAL_DESCRIPTION,
+            metadata={"priority": 1, "auto_seeded": True, "source": "goal_subtask_scaffold"},
+        )
+        log.info("autoseeded brain-quality goal %s", goal.get("id"))
+        return goal
+    except Exception as exc:
+        log.debug("autoseed brain-quality goal failed: %s", exc)
+        return None
 
 
 def _resolve_goal(

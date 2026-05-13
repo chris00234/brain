@@ -44,9 +44,14 @@ def test_is_breach_pancake_confidence_stddev():
     import slos
 
     slo = slos.SLOS["atoms_confidence_stddev_1d"]
-    # target=0.05, higher is better (stddev too low = pancake)
-    assert slos._is_breach(slo, 0.01) is True
-    assert slos._is_breach(slo, 0.15) is False
+    # target=0.10 (raised 2026-05-13 from 0.05 to match observed bimodal
+    # distribution). Higher is better — stddev too low = pancake. Healthy
+    # steady-state ≈ 0.14, so 0.05 should still breach while 0.14/0.20 don't.
+    assert slo.target == 0.10
+    assert slos._is_breach(slo, 0.05) is True
+    assert slos._is_breach(slo, 0.10) is False
+    assert slos._is_breach(slo, 0.14) is False
+    assert slos._is_breach(slo, 0.20) is False
 
 
 def test_is_breach_info_only_never_breaches():

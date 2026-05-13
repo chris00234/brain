@@ -133,8 +133,16 @@ SLOS: dict[str, SLO] = {
     ),
     "atoms_confidence_stddev_1d": SLO(
         name="atoms_confidence_stddev_1d",
-        description="Population stddev of non-obsolete atoms.confidence (pancake detector)",
-        target=0.05,  # breach when BELOW
+        description=(
+            "Population stddev of non-obsolete atoms.confidence (pancake detector). "
+            "Target raised 2026-05-13 from 0.05 to 0.10: live distribution is bimodal "
+            "at 0.8-0.9 + dream_replay conjecture floor at 0.3, giving healthy "
+            "steady-state stddev ≈ 0.14. The 0.05 target was set before the bimodal "
+            "shape was characterized and flagged the natural distribution as a "
+            "breach. 0.10 sits below the observed floor: anything below it means "
+            "the conjecture floor disappeared or all atoms collapsed into one band."
+        ),
+        target=0.10,  # breach when BELOW; signals real pancake (everything in one band)
         severity="warning",
         metric_unit="stddev",
         consecutive_breaches_required=2,

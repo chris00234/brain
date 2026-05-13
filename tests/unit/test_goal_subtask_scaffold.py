@@ -182,19 +182,23 @@ def test_ensure_picks_goal_by_title_match(tmp_path: Path, stub_slo_and_judge: No
     assert len(subtasks) == 1
 
 
-def test_ensure_no_matching_goal(tmp_path: Path, stub_slo_and_judge: None) -> None:
+def test_ensure_autoseeds_when_no_matching_goal(tmp_path: Path, stub_slo_and_judge: None) -> None:
+    """When no active brain-quality goal exists, the scaffolder must auto-seed
+    one so the daily loop keeps producing measurable work — otherwise
+    progress freezes the first time a goal auto-completes."""
     db = tmp_path / "autonomy.db"
     _seed_outcomes(
         db,
         [
             {
-                "id": "o1",
-                "task_id": "t1",
+                "id": f"o{i}",
+                "task_id": f"t{i}",
                 "domain": "infra",
                 "chris_override": 1,
                 "override_reason": "wrong port",
-                "created_at": _iso(1),
+                "created_at": _iso(1 + i * 0.05),
             }
+            for i in range(3)
         ],
     )
     tq = TaskQueue(db)
@@ -203,5 +207,33 @@ def test_ensure_no_matching_goal(tmp_path: Path, stub_slo_and_judge: None) -> No
         task_queue_obj=tq,
         autonomy_db_path=db,
     )
-    assert result["error"] == "no_matching_goal"
-    assert result["created"] == []
+    assert "error" not in result
+    assert result["goal_id"]
+    seeded = tq.get_goal(result["goal_id"])
+    assert seeded is not None
+    assert "Brain" in seeded["title"] or "brain" in seeded["title"]
+    assert seeded["metadata"]["auto_seeded"] is True
+    assert len(result["created"]) == 1
+
+
+def test_autoseed_skipped_when_db_unavailable(tmp_path: Path, monkeypatch) -> None:
+    """If task_queue.create_goal fails, autoseed returns the documented
+    error code instead of raising — the daily job should keep going."""
+
+    class _BrokenQueue:
+        def list_goals(self, *_, **__):
+            return []
+
+        def get_goal(self, *_):
+            return None
+
+        def list_tasks(self, *_, **__):
+            return []
+
+        def create_goal(self, *_, **__):
+            raise RuntimeError("simulated outage")
+
+    result = goal_subtask_scaffold.ensure_brain_quality_subtasks(
+        task_queue_obj=_BrokenQueue(),
+    )
+    assert result["error"] == "no_matching_goal_and_autoseed_failed"
