@@ -176,7 +176,11 @@ def test_create_review_tasks_is_idempotent_via_signature(tmp_path: Path) -> None
     assert meta["source"] == "outcome_feedback"
     assert meta["override_signature"].startswith("ov_")
     assert meta["mutates_policy"] is False
-    assert meta["uses_llm"] is False
+    # 2026-05-13: review tasks now dispatch through cli_llm (codex →
+    # claude) rather than an OpenClaw persona — `uses_llm` is true and
+    # `llm_dispatch` names the path.
+    assert meta["uses_llm"] is True
+    assert meta["llm_dispatch"] == "cli_llm"
 
 
 def test_severity_prefers_recent_high_volume_patterns(tmp_path: Path) -> None:

@@ -302,13 +302,13 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         misfire_grace=600,
     ),
     # 2026-05-13: review task dispatcher. Dispatches up to 2 oldest pending
-    # `sage`-assigned review tasks (created by outcome_feedback +
-    # goal_subtask_scaffold) per day to OpenClaw. Caps quota burn at 2
-    # sage dispatches/day. Runs 6:30am after the daily review tasks have
-    # been generated and the subtask scaffold has refreshed.
+    # brain-generated review tasks (created by outcome_feedback +
+    # goal_subtask_scaffold) per day through cli_llm (codex → claude
+    # fallback on subscription quota). No OpenClaw agent persona —
+    # stateless CLI dispatch, like recall_judge and goal_decompose.
     ScheduledJob(
         name="review_task_dispatcher",
-        description="Daily 6:30am — dispatch up to 2 brain-generated review tasks to Sage",
+        description="Daily 6:30am — dispatch up to 2 brain-generated review tasks via cli_llm",
         trigger=CronTrigger(hour=6, minute=30),
         agent="system",
         misfire_grace=900,
@@ -1433,7 +1433,7 @@ RESOURCE_BUDGET_OVERRIDES: dict[str, tuple[str, tuple[str, ...]]] = {
     "metric_trend_snapshot": ("light", ("sqlite",)),
     "docker_volumes_backup_retention": ("light", ("backup",)),
     "recall_structural_judge_hourly": ("light", ("sqlite",)),
-    "review_task_dispatcher": ("standard", ("llm", "openclaw")),
+    "review_task_dispatcher": ("standard", ("llm", "cli_llm")),
     "raw_events_retention": ("standard", ("sqlite",)),
     "brain_doctor_daily": ("standard", ("sqlite", "http")),
     "memory_lifecycle": ("heavy", ("sqlite", "qdrant")),

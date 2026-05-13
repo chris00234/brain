@@ -228,7 +228,11 @@ def create_override_review_tasks(
         task = tq.create_task(
             title=_review_task_title(candidate),
             description=_review_task_description(candidate),
-            assigned_agent="sage",
+            # 2026-05-13: brain-generated review tasks dispatch through the
+            # CLI fallback chain (cli_llm.cli_dispatch → codex → claude),
+            # not OpenClaw agent personas. The "brain_cli" label flags the
+            # ownership; the dispatcher filters on created_by, not agent.
+            assigned_agent="brain_cli",
             priority=3,
             confidence=float(candidate.get("avg_confidence") or 0.0),
             confidence_reasoning=("outcome_feedback override pattern — review before autonomy promotion"),
@@ -246,7 +250,8 @@ def create_override_review_tasks(
                 },
                 "recommended_actions": candidate["recommended_actions"],
                 "mutates_policy": False,
-                "uses_llm": False,
+                "uses_llm": True,
+                "llm_dispatch": "cli_llm",
             },
         )
         created.append({"signature": signature, "task_id": task.get("id"), "title": task.get("title")})

@@ -493,13 +493,13 @@ is hard-capped at 2 dispatches/day.
 | Job | Time (UTC) | Module | Output |
 |---|---|---|---|
 | `docker_volumes_backup_retention` | 4:24 | `backup_retention` | Newest-7 per family kept under `logs/backups/docker-volumes/` |
-| `outcome_feedback_review` | 4:32 | `outcome_feedback` | Sage review tasks for chris_override patterns (signature dedupe) |
+| `outcome_feedback_review` | 4:32 | `outcome_feedback` | cli_llm review tasks for chris_override patterns (signature dedupe) |
 | `goal_subtask_scaffold_brain_quality` | 4:34 | `goal_subtask_scaffold` | Measurable subtasks under top brain-quality goal |
 | `subtask_evaluator_brain_quality` | 4:36 | `subtask_evaluator` | Auto-complete subtasks whose metric cleared target |
 | `metric_trend_snapshot` | 4:38 | `metric_trend_tracker` | Daily metric vector → `metric_trend.history` |
 | `wal_checkpoint_daily` | 4:55 | `db_maintenance` | TRUNCATE WAL + record logs_dir snapshot |
 | `wal_checkpoint_intraday` | every 4h :35 | `db_maintenance` | TRUNCATE WAL only (no snapshot) |
-| `review_task_dispatcher` | 6:30 | `review_task_dispatcher` | Dispatch ≤2 oldest sage review tasks |
+| `review_task_dispatcher` | 6:30 | `review_task_dispatcher` | Dispatch ≤2 oldest brain review tasks via cli_llm (codex → claude) |
 | `recall_structural_judge_hourly` | every hour :47 | `recall_structural_judge` | Score unlabeled /recall outcomes (no LLM) |
 
 ### HTTP surfaces
@@ -539,9 +539,10 @@ Inspect `brain_config_store.get('metric_trend.history')` for the list. If <2 ent
 - 1st guess: `action_audit.retrieved_atom_ids` is empty (normal — /recall/v2 stores Qdrant point IDs in `retrieved_chroma_ids`). The judge resolves either column against `atoms.id` / `atoms.chroma_id`. If both columns are empty, the recall didn't return any atoms; nothing to score.
 - 2nd guess: score band misconfigured. Threshold defaults `STRUCTURAL_GOOD=0.45`, `STRUCTURAL_WRONG=0.10`. Adjust in `recall_structural_judge.py`.
 
-**review_task_dispatcher hung sage call**
+**review_task_dispatcher hung cli_llm call**
 - Hard-capped at `DISPATCH_TIMEOUT_SEC=180s` per task, `MAX_DISPATCHES_PER_RUN=2`.
 - On failure the task transitions to `failed` with reason in `task.metadata.last_dispatch_error`.
+- The dispatcher uses `cli_llm.cli_dispatch` (codex → claude fallback), not OpenClaw. Inspect failures with `tail logs/server.err.log` for `cli_dispatch_failed` reason.
 - To replay: `uv run python brain_core/review_task_dispatcher.py --max 2`.
 
 **Recall judge volume too low (judged_pct < 1%)**

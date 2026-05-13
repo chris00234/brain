@@ -145,7 +145,9 @@ def test_ensure_is_idempotent(tmp_path: Path, stub_slo_and_judge: None) -> None:
     assert meta["brain_quality_metric"] == "override_pct.infra"
     assert meta["target"] == 50.0
     assert meta["mutates_policy"] is False
-    assert meta["uses_llm"] is False
+    # 2026-05-13: subtasks dispatched through cli_llm by review_task_dispatcher.
+    assert meta["uses_llm"] is True
+    assert meta["llm_dispatch"] == "cli_llm"
 
 
 def test_ensure_picks_goal_by_title_match(tmp_path: Path, stub_slo_and_judge: None) -> None:

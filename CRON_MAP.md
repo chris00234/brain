@@ -160,7 +160,7 @@
 | `release_readiness` | `cron(hour=6, minute=52)` | light | git, release | 900s | Daily non-mutating release hygiene snapshot for changed-file lanes and required evidence (06:52 PT) |
 | `retrieval_inhibition` | `cron(hour=3, minute=58)` | standard | qdrant, sqlite | 600s | Nightly Bjork-style inhibition of consistent retrieval losers (03:58am) |
 | `retrieval_regression` | `cron(hour=6, minute=57)` | standard | eval, qdrant | 900s | Daily bounded retrieval regression gate over stable eval queries (06:57 PT) |
-| `review_task_dispatcher` | `cron(hour=6, minute=30)` | standard | llm, openclaw | 900s | Daily 6:30am — dispatch up to 2 brain-generated review tasks to Sage |
+| `review_task_dispatcher` | `cron(hour=6, minute=30)` | standard | cli_llm, llm | 900s | Daily 6:30am — dispatch up to 2 brain-generated review tasks via cli_llm |
 | `schema_learner` | `cron(day_of_week=sun, hour=4, minute=40)` | heavy | llm, sqlite | 900s | CLS spectral clustering on atom coactivation -> compaction candidates (Sun 04:40) |
 | `schema_revision` | `cron(day_of_week=sun, hour=8, minute=50)` | heavy | llm, sqlite | 900s | Weekly free-energy schema revision (Sun 08:50 - staggered off eval_holdout_promote @8:45) |
 | `self_eval` | `cron(hour=3, minute=37)` | heavy | embedder, eval, qdrant | 900s | Nightly 03:37 PT: sample recent /recall queries, re-run, measure top-3 overlap drift. Populates self_eval_drift_7d SLO. |
@@ -314,7 +314,7 @@
 | `release_readiness` | `cron(hour=6, minute=52)` | system | light | git, release | 900s | Daily non-mutating release hygiene snapshot for changed-file lanes and required evidence (06:52 PT) |
 | `retrieval_inhibition` | `cron(hour=3, minute=58)` | system | standard | qdrant, sqlite | 600s | Nightly Bjork-style inhibition of consistent retrieval losers (03:58am) |
 | `retrieval_regression` | `cron(hour=6, minute=57)` | system | standard | eval, qdrant | 900s | Daily bounded retrieval regression gate over stable eval queries (06:57 PT) |
-| `review_task_dispatcher` | `cron(hour=6, minute=30)` | system | standard | llm, openclaw | 900s | Daily 6:30am — dispatch up to 2 brain-generated review tasks to Sage |
+| `review_task_dispatcher` | `cron(hour=6, minute=30)` | system | standard | cli_llm, llm | 900s | Daily 6:30am — dispatch up to 2 brain-generated review tasks via cli_llm |
 | `schema_learner` | `cron(day_of_week=sun, hour=4, minute=40)` | system | heavy | llm, sqlite | 900s | CLS spectral clustering on atom coactivation -> compaction candidates (Sun 04:40) |
 | `schema_revision` | `cron(day_of_week=sun, hour=8, minute=50)` | system | heavy | llm, sqlite | 900s | Weekly free-energy schema revision (Sun 08:50 - staggered off eval_holdout_promote @8:45) |
 | `screen_time_ingest` | `cron(day_of_week=sun, hour=4, minute=35)` | sage | standard | - | 300s | Screen Time daily patterns via Sage -> raw/inbox (weekly) |

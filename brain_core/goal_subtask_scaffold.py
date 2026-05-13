@@ -38,7 +38,10 @@ log = logging.getLogger("brain.goal_subtask_scaffold")
 
 
 _METRIC_SIGNATURE_KEY = "brain_quality_metric"
-_DEFAULT_SUBTASK_AGENT = "liz"
+# 2026-05-13: brain-quality subtasks now dispatch through cli_llm
+# (subscription codex → claude) rather than an OpenClaw persona. The
+# label flows through to review_task_dispatcher's eligibility filter.
+_DEFAULT_SUBTASK_AGENT = "brain_cli"
 
 
 # ---------------------------------------------------------------------------
@@ -325,7 +328,12 @@ def ensure_brain_quality_subtasks(
                 "metric_source": proposal["source"],
                 "evidence": proposal.get("evidence") or {},
                 "mutates_policy": False,
-                "uses_llm": False,
+                # subtasks themselves are deterministic proposals (no LLM
+                # to create them), but the dispatcher will route them
+                # through cli_llm for investigation, hence llm_dispatch
+                # is annotated for downstream observability.
+                "uses_llm": True,
+                "llm_dispatch": "cli_llm",
             },
         )
         existing.add(metric)
