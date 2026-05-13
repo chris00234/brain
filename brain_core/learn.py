@@ -281,7 +281,14 @@ _ASSISTANT_MSG_RE = re.compile(r"(?:^|\n)\s*(?:Assistant|Claude|AI)\s*:\s*(.+)",
 
 _SUMMARY_PROMPT = """Summarize this session in ONE sentence (under 180 chars).
 Capture WHAT the user was doing, not their last verbatim prompt.
-Respond in the same language the user used. No prose, no preamble — just the summary.
+
+Language rule:
+- Match the language of the user's MOST RECENT messages, not their first.
+- If the user mixed Korean and English, OR the work centers on English code/files/CLI/error messages, write the WHOLE sentence in English.
+- Only choose Korean when the user's recent prompts are clearly Korean AND the work is about intent/workflow/product reasoning (not English identifiers).
+- Never translation-mix: don't wrap English keywords in Korean grammar (e.g. avoid "X를 deterministic 하게 record하도록..."). Pick one language and stick with it.
+
+No prose, no preamble — just the summary.
 
 <transcript>
 {transcript}

@@ -50,14 +50,26 @@ def contradiction_drive() -> list[Observation]:
         log.debug("contradiction_drive sql error: %s", exc)
         return obs
     for r in rows:
-        short = (r["summary"] or "")[:200].replace("Unresolved contradiction: ", "")
+        # learn.py stores summary as "NEW: {new}\nOLD: {old}". Take the NEW
+        # line only — both lines together blow past the digest line budget
+        # and the trailing OLD always got cut mid-sentence. The "새" prefix
+        # below already conveys "new", so strip the redundant "NEW: " too.
+        raw = (r["summary"] or "").replace("Unresolved contradiction: ", "")
+        first_line = raw.split("\n", 1)[0].strip()
+        if first_line.startswith("NEW: "):
+            first_line = first_line[5:].strip()
+        # Word-boundary truncation at ~140 chars so Telegram lines fit
+        # without splitting mid-word.
+        if len(first_line) > 140:
+            cut = first_line[:140].rsplit(" ", 1)[0]
+            first_line = cut + "…"
         sev = 7.0 if r["severity"] == "critical" else 5.0
         obs.append(
             Observation(
                 drive="contradiction_drive",
                 category="contradiction",
                 severity=sev,
-                message=f"새 contradiction: {short}",
+                message=f"새 contradiction: {first_line}",
                 dedup_key=f"contradiction:{r['id']}",
                 payload={"attention_id": r["id"], "severity_raw": r["severity"]},
             )

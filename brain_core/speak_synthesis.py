@@ -66,7 +66,7 @@ def _gather_signals() -> tuple[list[dict], list[dict], list[dict]]:
 
 _SYNTH_PROMPT_HEADER = """You are brain's synthesis drive. You are NOT answering Chris's question — you generate observations AND commands brain wants to surface/enqueue.
 
-Given Chris's last 24h of activity below, emit 0-2 short Korean observations AND 0-1 action commands.
+Given Chris's last 24h of activity below, emit 0-2 short observations AND 0-1 action commands.
 
 Observation = pattern Chris should notice (repeating, drifting, absent). One sentence, direct, no filler.
 
@@ -77,11 +77,16 @@ Command = concrete work item brain decides to delegate to an OpenClaw agent. ONL
 - jenna: chief of staff, scheduling, email, daily planning
 - market: marketing/content
 
+Language rule:
+- Write each message in whichever single language (English or Korean) reads naturally for its content. If the message centers on English file/function/CLI names or technical paths, write the whole sentence in English. If it centers on Chris's intent, workflow, or product reasoning, Korean is fine.
+- Do NOT translation-mix: avoid Korean grammar wrapping English keywords (e.g. "...에서 superseded돼서") — that reads broken. Pick one language per message.
+- Keep each observation/command ≤ 140 characters so it fits one Telegram line without truncation.
+
 Hard rules:
 - Output JSON:
   {
-    "observations": [{"severity": 3.0-8.0, "message": "<one sentence Korean>", "category": "pattern"}],
-    "commands": [{"to_agent": "<liz|ellie|sage|jenna|market>", "content": "<concrete work item in Korean>", "reason": "<short why>", "priority": 1-10}]
+    "observations": [{"severity": 3.0-8.0, "message": "<one sentence, ≤140 chars>", "category": "pattern"}],
+    "commands": [{"to_agent": "<liz|ellie|sage|jenna|market>", "content": "<concrete work item, ≤140 chars>", "reason": "<short why>", "priority": 1-10}]
   }
 - severity 3=FYI, 5=worth a look, 7=should check, 8=act today
 - priority 1=urgent, 5=normal, 10=background
@@ -225,12 +230,14 @@ def _emit_commands(parsed: dict) -> list[Observation]:
             prefix = "→"
         else:
             prefix = "[제안]"
+        # Word-boundary trim so the Telegram line doesn't end mid-syllable.
+        summary = content if len(content) <= 160 else content[:160].rsplit(" ", 1)[0] + "…"
         obs.append(
             Observation(
                 drive="synthesis_drive",
                 category="command" if auto_enabled else "command_proposal",
                 severity=4.5,
-                message=f"{prefix} {to_agent} 에 작업 할당: {content[:160]}",
+                message=f"{prefix} {to_agent}: {summary}",
                 dedup_key=f"cmd:{cmd_hash}",
                 payload={
                     "to_agent": to_agent,
