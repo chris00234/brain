@@ -37,17 +37,20 @@ from config import BRAIN_DB
 
 log = logging.getLogger("brain.recall_judge")
 
-SAMPLE_SIZE = 50
+SAMPLE_SIZE = 100
 TIMEOUT_SEC = 30
 JUDGE_GOOD_RELEVANCE = 0.7
 JUDGE_WRONG_RELEVANCE = 0.3
 TOP_K_FOR_JUDGE = 3  # only evaluate the top-3 retrieved docs to keep prompts compact
 JUDGED_ACTORS = ("claude", "codex", "mcp", "jenna", "sage", "liz", "ellie", "market", "brain")
 JUDGED_ACTOR_PLACEHOLDERS = "?, ?, ?, ?, ?, ?, ?, ?, ?"
-# Wall-clock budget — 30 samples x (10s recall + 30s judge) worst-case is
-# 20 minutes. Cap the run so a slow LLM provider doesn't tie up the scheduler
-# thread indefinitely.
-MAX_RUN_SECONDS = 600
+# Wall-clock budget. 100 samples x (10s recall + 30s judge) worst-case is
+# ~67 minutes, but realistic average is ~10s/sample so the cap rarely
+# bites. 2026-05-13: raised 600→1500 along with the SAMPLE_SIZE bump
+# (50→100). The previous cap was hitting before the sample size — actual
+# 35 judged/day vs 50 cap. Cap stays well under the next scheduled job
+# slot so the scheduler thread is never blocked.
+MAX_RUN_SECONDS = 1500
 
 _PROMPT = """You are a relevance judge for a retrieval system. Given a USER QUERY and
 the top retrieved documents, score whether the documents actually answer the query.

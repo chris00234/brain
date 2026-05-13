@@ -49,6 +49,7 @@ def _insert_atom(
     trust_score: float = 0.8,
     canonical: int = 0,
     tier: str = "semantic",
+    kind: str = "preference",
     updated_at: str | None = None,
 ) -> None:
     with sqlite3.connect(path) as conn:
@@ -58,9 +59,9 @@ def _insert_atom(
                 id, text, kind, tier, canonical, confidence, trust_score,
                 quality_score, valid_until, provenance_json, updated_at, provisional
             )
-            VALUES (?, ?, 'preference', ?, ?, ?, ?, 0.7, NULL, '{}', ?, 0)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 0.7, NULL, '{}', ?, 0)
             """,
-            (atom_id, text, tier, canonical, confidence, trust_score, updated_at or _iso()),
+            (atom_id, text, kind, tier, canonical, confidence, trust_score, updated_at or _iso()),
         )
         conn.commit()
 
@@ -152,6 +153,35 @@ def test_belief_state_marks_stale_canonical_as_uncertainty(tmp_path):
     assert state["uncertainties"][0]["id"] == "stale-canonical"
     assert state["uncertainties"][0]["reason"] == "stale_canonical"
     assert state["uncertainties"][0]["freshness"] == "stale"
+
+
+def test_belief_state_excludes_dream_conjectures_from_uncertainties(tmp_path):
+    """dream_replay emits kind='conjecture' atoms at confidence=0.3 by design.
+    Surfacing them as uncertainties drowns real low-confidence beliefs and
+    stale canonicals (the things actually worth reviewing)."""
+    brain_db = tmp_path / "brain.db"
+    _init_atoms(brain_db)
+    _insert_atom(
+        brain_db,
+        atom_id="dream-conjecture-1",
+        text="Dream conjecture (foo x bar): hypothetical link.",
+        confidence=0.3,
+        kind="conjecture",
+        tier="episodic",
+    )
+    _insert_atom(
+        brain_db,
+        atom_id="real-low-confidence",
+        text="Actual unverified preference.",
+        confidence=0.25,
+        kind="preference",
+    )
+
+    state = build_belief_state(brain_db=brain_db, task_queue_obj=TaskQueue(tmp_path / "a.db"))
+
+    uncertainty_ids = [u["id"] for u in state["uncertainties"]]
+    assert "dream-conjecture-1" not in uncertainty_ids
+    assert "real-low-confidence" in uncertainty_ids
 
 
 def test_belief_state_fails_soft_when_atoms_db_missing(tmp_path):

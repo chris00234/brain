@@ -950,11 +950,26 @@ def _measure_logs_dir_growth_24h_mb() -> float:
             return 0.0
         # newest entry's mb minus the closest-to-24h-ago entry's mb
         latest = history[-1]
+        try:
+            latest_mb = float(latest.get("mb", 0.0))
+        except (TypeError, ValueError):
+            latest_mb = 0.0
+        if latest_mb <= 0.0:
+            return 0.0
         latest_ts = datetime.fromisoformat(str(latest["ts"]).replace("Z", "+00:00"))
         target_ts = latest_ts - timedelta(hours=24)
         baseline = None
         best_gap: float | None = None
+        # Baseline must have a real measurement (mb > 0). Cold-start or
+        # bug-injected mb=0 rows would otherwise produce a false 24h delta
+        # equal to the entire current logs/ size.
         for entry in history[:-1]:
+            try:
+                entry_mb = float(entry.get("mb", 0.0))
+            except (TypeError, ValueError):
+                continue
+            if entry_mb <= 0.0:
+                continue
             try:
                 ts = datetime.fromisoformat(str(entry["ts"]).replace("Z", "+00:00"))
             except (TypeError, ValueError):
@@ -971,7 +986,13 @@ def _measure_logs_dir_growth_24h_mb() -> float:
             return 0.0
         if best_gap > 18 * 3600:  # too far from 24h-ago
             return 0.0
-        delta = float(latest.get("mb", 0.0)) - float(baseline.get("mb", 0.0))
+        try:
+            baseline_mb = float(baseline.get("mb", 0.0))
+        except (TypeError, ValueError):
+            return 0.0
+        if baseline_mb <= 0.0:
+            return 0.0
+        delta = latest_mb - baseline_mb
         return round(delta, 1)
     except Exception as exc:
         log.debug("logs_dir_growth_24h_mb measurement failed: %s", exc)

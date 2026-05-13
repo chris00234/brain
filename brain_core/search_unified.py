@@ -41,7 +41,13 @@ _autonomy_conn_local = threading.local()
 
 
 def _get_autonomy_conn():
-    """Return a thread-local connection to autonomy.db (WAL mode)."""
+    """Return a thread-local connection to autonomy.db (WAL mode).
+
+    This connection is long-lived (thread-local cache across the brain
+    server lifetime). Without `apply_hot_db_pragmas`, the per-connection
+    `journal_size_limit` is unset and the WAL grows unbounded between the
+    daily TRUNCATE pass — observed up to 300 MB/day on autonomy.db.
+    """
     conn = getattr(_autonomy_conn_local, "conn", None)
     if conn is None:
         try:
@@ -51,6 +57,12 @@ def _get_autonomy_conn():
             conn = sqlite3.connect(str(autonomy_path), check_same_thread=False, isolation_level=None)
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA busy_timeout=5000")
+            try:
+                from db_maintenance import apply_hot_db_pragmas as _apply_hot_db_pragmas
+
+                _apply_hot_db_pragmas(conn)
+            except Exception:
+                pass
             _autonomy_conn_local.conn = conn
         except Exception:
             return None

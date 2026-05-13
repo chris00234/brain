@@ -85,11 +85,15 @@ def build_belief_state(
     goals = _load_goals(tq, safe_limit, warnings) if tq is not None else []
     recent_outcomes = _load_recent_outcomes(tq, safe_limit, warnings) if tq is not None else []
     decision_feedback = _load_decision_feedback(tq, safe_limit, warnings) if tq is not None else {}
+    override_patterns = _load_override_patterns(tq, safe_limit, warnings) if tq is not None else {}
+    trend_alerts = _load_trend_alerts(warnings)
     next_actions = _derive_next_actions(
         goals=goals,
         uncertainties=uncertainties,
         outcomes=recent_outcomes,
         decision_feedback=decision_feedback,
+        override_patterns=override_patterns,
+        trend_alerts=trend_alerts,
         limit=min(5, safe_limit),
     )
     world_model = _derive_world_model(
@@ -97,6 +101,8 @@ def build_belief_state(
         uncertainties=uncertainties,
         outcomes=recent_outcomes,
         decision_feedback=decision_feedback,
+        override_patterns=override_patterns,
+        trend_alerts=trend_alerts,
         next_actions=next_actions,
         autonomy_db_path=str(getattr(tq, "_db_path", None)) if tq is not None else None,
     )
@@ -116,6 +122,8 @@ def build_belief_state(
             "active_goals": len(goals),
             "recent_outcomes": len(recent_outcomes),
             "decision_feedback_candidates": len(decision_feedback.get("learning_candidates") or []),
+            "override_patterns": len(override_patterns.get("learning_candidates") or []),
+            "trend_alerts": len(trend_alerts),
             "warnings": len(warnings),
         },
         "world_model": world_model,
@@ -125,6 +133,8 @@ def build_belief_state(
         "goals": goals,
         "recent_outcomes": recent_outcomes,
         "decision_feedback": decision_feedback,
+        "override_patterns": override_patterns,
+        "trend_alerts": trend_alerts,
         "next_actions": next_actions,
         "warnings": warnings,
     }
@@ -151,6 +161,10 @@ def _load_beliefs(conn: sqlite3.Connection, limit: int) -> list[dict]:
 
 
 def _load_uncertainties(conn: sqlite3.Connection, limit: int) -> list[dict]:
+    # Exclude kind='conjecture': dream_replay emits low-confidence hypothesis
+    # atoms by design (CONJECTURE_CONFIDENCE=0.3 < LOW_CONFIDENCE_THRESHOLD=0.4),
+    # so they would otherwise dominate the uncertainty surface and drown out
+    # real low-confidence beliefs and stale canonicals that need review.
     uncertainties: list[dict] = []
     low_confidence = conn.execute(
         """
@@ -158,6 +172,7 @@ def _load_uncertainties(conn: sqlite3.Connection, limit: int) -> list[dict]:
                quality_score, valid_until, provenance_json, updated_at
         FROM atoms
         WHERE tier != 'obsolete'
+          AND (kind IS NULL OR kind != 'conjecture')
           AND confidence < ?
         ORDER BY confidence ASC, updated_at DESC
         LIMIT ?
@@ -301,12 +316,57 @@ def _load_decision_feedback(task_queue_obj: Any, limit: int, warnings: list[dict
         return {}
 
 
+def _load_trend_alerts(warnings: list[dict]) -> list[dict]:
+    """Drift alerts from metric_trend_tracker — surfaces "things got worse over 7d"."""
+    try:
+        from brain_core.metric_trend_tracker import compute_trend_alerts
+    except ImportError:
+        try:
+            from metric_trend_tracker import compute_trend_alerts
+        except Exception as exc:
+            warnings.append({"source": "metric_trend", "reason": "unavailable", "detail": str(exc)[:160]})
+            return []
+    try:
+        return compute_trend_alerts()
+    except Exception as exc:
+        warnings.append({"source": "metric_trend", "reason": "unavailable", "detail": str(exc)[:160]})
+        return []
+
+
+def _load_override_patterns(task_queue_obj: Any, limit: int, warnings: list[dict]) -> dict:
+    """Override patterns from the outcomes table — the missing twin of
+    decision_feedback. decision_ledger only sees brain_loop's own decisions;
+    chris_override traffic on outcomes (250+ rows/30d in infra) goes
+    nowhere unless this report fans it back into the belief state."""
+    try:
+        from brain_core.outcome_feedback import override_patterns_report
+    except ImportError:
+        try:
+            from outcome_feedback import override_patterns_report
+        except Exception as exc:
+            warnings.append({"source": "outcome_feedback", "reason": "unavailable", "detail": str(exc)[:160]})
+            return {}
+    try:
+        db_path = getattr(task_queue_obj, "_db_path", None)
+        return override_patterns_report(
+            hours=168,
+            min_overrides=2,
+            limit=max(200, limit * 20),
+            db_path=db_path,
+        )
+    except Exception as exc:
+        warnings.append({"source": "outcome_feedback", "reason": "unavailable", "detail": str(exc)[:160]})
+        return {}
+
+
 def _derive_next_actions(
     *,
     goals: list[dict],
     uncertainties: list[dict],
     outcomes: list[dict],
     decision_feedback: dict,
+    override_patterns: dict | None = None,
+    trend_alerts: list[dict] | None = None,
     limit: int,
 ) -> list[dict]:
     actions: list[dict] = []
@@ -319,6 +379,37 @@ def _derive_next_actions(
                 "reason": "failed_or_overridden_decision_pattern",
                 "target": top.get("pattern"),
                 "priority": round(min(1.0, 0.75 + float(top.get("severity") or 0) / 20), 3),
+            }
+        )
+    override_candidates = (override_patterns or {}).get("learning_candidates") or []
+    if override_candidates:
+        top_ov = override_candidates[0]
+        actions.append(
+            {
+                "type": "review_override_pattern",
+                "reason": "chris_override_pattern_detected",
+                "target": {
+                    "signature": top_ov.get("signature"),
+                    "domain": top_ov.get("domain"),
+                    "overrides": top_ov.get("overrides"),
+                    "override_rate": top_ov.get("override_rate"),
+                },
+                "priority": round(min(1.0, 0.7 + float(top_ov.get("severity") or 0) * 0.25), 3),
+            }
+        )
+    for alert in (trend_alerts or [])[:2]:
+        actions.append(
+            {
+                "type": "review_metric_drift",
+                "reason": f"7d_drift_on_{alert.get('metric')}",
+                "target": {
+                    "metric": alert.get("metric"),
+                    "label": alert.get("label"),
+                    "current": alert.get("current"),
+                    "baseline": alert.get("baseline"),
+                    "delta": alert.get("delta"),
+                },
+                "priority": 0.85,
             }
         )
     override_count = sum(1 for outcome in outcomes if outcome.get("chris_override"))
@@ -427,10 +518,13 @@ def _derive_world_model(
     outcomes: list[dict],
     decision_feedback: dict,
     next_actions: list[dict],
+    override_patterns: dict | None = None,
+    trend_alerts: list[dict] | None = None,
     autonomy_db_path: str | None = None,
 ) -> dict:
     top_goal = goals[0] if goals else None
     candidates = decision_feedback.get("learning_candidates") or []
+    override_candidates = (override_patterns or {}).get("learning_candidates") or []
     agency = _compute_per_domain_agency(autonomy_db_path)
     return {
         "version": 1,
@@ -438,12 +532,15 @@ def _derive_world_model(
         "open_loops": {
             "uncertainties": len(uncertainties),
             "decision_feedback_candidates": len(candidates),
+            "override_patterns": len(override_candidates),
+            "trend_alerts": len(trend_alerts or []),
             "recent_overrides": sum(1 for outcome in outcomes if outcome.get("chris_override")),
         },
-        "highest_risk": _highest_risk(uncertainties, candidates),
+        "highest_risk": _highest_risk(uncertainties, candidates, override_candidates),
         "next_best_action": next_actions[0] if next_actions else {"type": "observe", "priority": 0.1},
         "agency_level": agency["overall"],
         "per_domain_agency": agency["domains"],
+        "trend_alerts": trend_alerts or [],
     }
 
 
@@ -458,13 +555,31 @@ def _compact_goal(goal: dict | None) -> dict | None:
     }
 
 
-def _highest_risk(uncertainties: list[dict], candidates: list[dict]) -> dict:
+def _highest_risk(
+    uncertainties: list[dict],
+    candidates: list[dict],
+    override_candidates: list[dict] | None = None,
+) -> dict:
+    # Repeated chris_override patterns are a stronger correctness signal
+    # than a single low-confidence atom: brain mis-recommended N times in
+    # the same shape. They take precedence over single-atom uncertainties
+    # but defer to decision_feedback candidates (those already carry a
+    # severity score from a closed-loop decision outcome).
     if candidates:
         top = candidates[0]
         return {
             "type": "decision_feedback",
             "severity": top.get("severity"),
             "pattern": top.get("pattern"),
+        }
+    if override_candidates:
+        top_ov = override_candidates[0]
+        return {
+            "type": "override_pattern",
+            "severity": top_ov.get("severity"),
+            "signature": top_ov.get("signature"),
+            "domain": top_ov.get("domain"),
+            "override_reason": top_ov.get("override_reason"),
         }
     if uncertainties:
         return {

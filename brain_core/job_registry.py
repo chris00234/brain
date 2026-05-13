@@ -316,6 +316,63 @@ JOB_REGISTRY: dict[str, list[str]] = {
         "-c",
         f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from db_maintenance import run_wal_checkpoint; import json; print(json.dumps(run_wal_checkpoint()))",
     ],
+    # 2026-05-13 intra-day WAL checkpoint (every 4h). Same TRUNCATE op, but
+    # skips the dir-size snapshot — that one stays on the daily cadence so
+    # the growth-rate SLO baseline pairs are stable.
+    "wal_checkpoint_intraday": [
+        _py,
+        "-c",
+        f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from db_maintenance import run_wal_checkpoint_intraday; import json; print(json.dumps(run_wal_checkpoint_intraday()))",
+    ],
+    # 2026-05-13 outcome_feedback daily — read-only override pattern detector
+    # that materializes review tasks for repeated overrides. No LLM, no policy
+    # mutation. Caps at 5 tasks/day; subsequent runs dedupe by signature.
+    "outcome_feedback_review": [
+        _py,
+        "-c",
+        f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from outcome_feedback import create_override_review_tasks; import json; print(json.dumps(create_override_review_tasks(hours=168, min_overrides=2, max_tasks=5), default=str))",
+    ],
+    # 2026-05-13 brain self-quality goal scaffold. Deterministic, LLM-free —
+    # materializes measurable subtasks under the top brain-improvement goal
+    # so goal progress becomes computable and next-best-action surfaces a
+    # concrete target instead of "observe".
+    "goal_subtask_scaffold_brain_quality": [
+        _py,
+        "-c",
+        f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from goal_subtask_scaffold import ensure_brain_quality_subtasks; import json; print(json.dumps(ensure_brain_quality_subtasks(max_create=8), default=str))",
+    ],
+    # 2026-05-13 subtask metric evaluator. Closes the self-learning loop —
+    # subtasks auto-complete when the metric clears the target.
+    "subtask_evaluator_brain_quality": [
+        _py,
+        "-c",
+        f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from subtask_evaluator import evaluate_brain_quality_subtasks; import json; print(json.dumps(evaluate_brain_quality_subtasks(), default=str))",
+    ],
+    # 2026-05-13 metric trend snapshot — feeds belief_state.trend_alerts.
+    "metric_trend_snapshot": [
+        _py,
+        "-c",
+        f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from metric_trend_tracker import snapshot_now; import json; print(json.dumps(snapshot_now(), default=str))",
+    ],
+    # 2026-05-13 docker-volumes backup retention.
+    "docker_volumes_backup_retention": [
+        _py,
+        "-c",
+        f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from backup_retention import run_backup_retention; import json; print(json.dumps(run_backup_retention(keep_per_family=7), default=str))",
+    ],
+    # 2026-05-13 hourly structural recall judge (no LLM).
+    "recall_structural_judge_hourly": [
+        _py,
+        "-c",
+        f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from recall_structural_judge import run; import json; print(json.dumps(run(hours=2, limit=500), default=str))",
+    ],
+    # 2026-05-13 review task dispatcher — closes outcome_feedback +
+    # goal_subtask_scaffold → sage execution loop.
+    "review_task_dispatcher": [
+        _py,
+        "-c",
+        f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from review_task_dispatcher import dispatch_pending_review_tasks; import json; print(json.dumps(dispatch_pending_review_tasks(), default=str))",
+    ],
     # 2026-04-17 long-term sustainability: action_audit retention (90d).
     # Currently ~48K rows, growing per brain_store call. Keep 90d for
     # provenance; older data summarized in canonical if significant.
@@ -546,7 +603,9 @@ JOB_REGISTRY: dict[str, list[str]] = {
     ],
     "feedback_aggregate": [_py, f"{_bd}/brain_core/feedback_aggregator.py"],
     "recall_outcome_label": [_py, f"{_bd}/brain_core/recall_outcome_labeler.py", "--hours", "24"],
-    "recall_judge": [_py, f"{_bd}/brain_core/recall_judge.py", "--sample", "30", "--hours", "24"],
+    # 2026-05-13: sample 80 / 24h (was 30) so judge_rate moves from ~0.4% of
+    # daily recalls toward 1-2%. Run time bounded by recall_judge.MAX_RUN_SECONDS.
+    "recall_judge": [_py, f"{_bd}/brain_core/recall_judge.py", "--sample", "80", "--hours", "24"],
     "cross_agent_lessons": [_py, f"{_bd}/brain_core/cross_agent_lessons.py", "--hours", "48"],
     "prompt_survival_report": [_py, f"{_bd}/brain_core/prompt_attribution.py", "--days", "7"],
     "entity_resolution": [_py, f"{_bd}/pipeline/entity_resolution.py", "--apply"],

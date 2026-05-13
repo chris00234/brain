@@ -148,6 +148,83 @@ def test_wal_checkpoint_runs_and_reports_ok(monkeypatch: pytest.MonkeyPatch, tmp
     assert db_maintenance.WAL_JOURNAL_SIZE_LIMIT_BYTES > 0
 
 
+def test_wal_checkpoint_intraday_runs_without_snapshot(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The intraday checkpoint must truncate WALs but skip the dir snapshot.
+
+    Why no snapshot: the 24h-delta SLO baseline pairs daily snapshots, so
+    appending a sample every 4h would compress the pairing window and
+    distort the growth-rate signal.
+    """
+
+    db = tmp_path / "brain.db"
+    conn = sqlite3.connect(str(db))
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("CREATE TABLE t (id INTEGER)")
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.setattr(db_maintenance, "_HOT_DBS", (("brain.db", db),))
+    summary = db_maintenance.run_wal_checkpoint_intraday()
+    assert summary["dbs"][0]["status"] == "ok"
+    assert "logs_dir_snapshot" not in summary
+
+
+def test_record_logs_dir_snapshot_skips_zero_measurement(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A zero-mb measurement must NOT be appended — it would poison the
+    24h-delta baseline by giving the SLO a fake floor of 0."""
+    monkeypatch.setattr(db_maintenance, "_logs_dir_total_mb", lambda: 0.0)
+    captured: dict[str, str] = {}
+
+    class _FakeStore:
+        def get(self, _key: str) -> str:
+            return "[]"
+
+        def set(self, key: str, value: str, **_) -> None:
+            captured[key] = value
+
+    sys_modules_patch = {"brain_config_store": _FakeStore()}
+    monkeypatch.setitem(__import__("sys").modules, "brain_config_store", _FakeStore())
+    summary = db_maintenance.record_logs_dir_size_snapshot()
+    assert summary["status"] == "skipped:zero_mb_measurement"
+    assert "brain_config_store" not in captured  # no write attempted
+    _ = sys_modules_patch  # silence unused warning
+
+
+def test_record_logs_dir_snapshot_prunes_prior_zero_entries(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Stale mb=0 history rows from earlier bugs must be pruned on the
+    next successful snapshot so the SLO baseline picks a real measurement."""
+    state: dict[str, str] = {
+        "slo.logs_dir_history": '[{"ts":"2026-05-12T05:00:00Z","mb":0.0},'
+        '{"ts":"2026-05-12T11:55:00Z","mb":1701.9}]'
+    }
+
+    class _FakeStore:
+        def get(self, key: str) -> str | None:
+            return state.get(key)
+
+        def set(self, key: str, value: str, **_) -> None:
+            state[key] = value
+
+    monkeypatch.setattr(db_maintenance, "_logs_dir_total_mb", lambda: 2050.0)
+    monkeypatch.setitem(__import__("sys").modules, "brain_config_store", _FakeStore())
+    summary = db_maintenance.record_logs_dir_size_snapshot()
+    assert summary["status"] == "ok"
+    assert summary["mb"] == 2050.0
+    import json as _json
+
+    pruned = _json.loads(state["slo.logs_dir_history"])
+    assert all(entry["mb"] > 0 for entry in pruned)
+    assert {entry["mb"] for entry in pruned} == {1701.9, 2050.0}
+
+
 def test_raw_events_retention_keeps_referenced_and_protected(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

@@ -546,6 +546,27 @@ class TaskQueue:
             self._maybe_complete_goal(goal_id, by=by)
         return updated
 
+    def auto_complete_task(self, task_id: str, *, result: str = "", by: str = "system") -> dict:
+        """Skip the running→completed gate for system-driven evaluators.
+
+        Used by subtask_evaluator when a measurable metric clears its target
+        without anyone ever explicitly transitioning the subtask through
+        approved/running. Functionally the same as `complete_task`, but
+        allows any non-terminal source state.
+        """
+        updated = self._transition(
+            task_id,
+            {"pending", "approved", "assigned", "running", "resumed", "paused"},
+            "completed",
+            by=by,
+            result=result,
+            error="",
+        )
+        goal_id = updated.get("parent_goal_id")
+        if goal_id:
+            self._maybe_complete_goal(goal_id, by=by)
+        return updated
+
     def _maybe_complete_goal(self, goal_id: str, by: str = "system") -> None:
         """Complete goal if all child tasks are in terminal state (completed/failed)."""
         progress = self.get_goal_progress(goal_id)

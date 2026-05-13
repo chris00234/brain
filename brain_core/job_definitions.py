@@ -219,6 +219,100 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         agent="system",
         misfire_grace=900,
     ),
+    # 2026-05-13 intra-day cadence. Daily TRUNCATE clears WAL to 0, but
+    # under steady writes (autonomy.authorize, embedding_cache) the WAL
+    # rebuilds to 200-300 MB by midday on long-lived server connections.
+    # 4h pass keeps the in-day WAL ceiling around 50-100 MB total without
+    # disturbing the daily snapshot used by the growth-rate SLO. Offset 35
+    # past the hour to avoid colliding with hourly metric/health checks.
+    ScheduledJob(
+        name="wal_checkpoint_intraday",
+        description="Intra-day WAL checkpoint(TRUNCATE) on hot DBs (every 4h at :35)",
+        trigger=CronTrigger(hour="0,4,8,12,16,20", minute=35),
+        agent="system",
+        misfire_grace=600,
+    ),
+    # 2026-05-13: outcome_feedback closes the chris_override → review-task loop.
+    # decision_ledger.create_feedback_review_tasks only sees decisions that
+    # brain_loop itself recorded; the much larger override traffic (~250/30d
+    # in infra alone) lives in task_queue.outcomes and never made it back
+    # into any reviewable surface. Daily 4:32am — sits between the retention
+    # cascade (4:20-4:30) and brain-doctor (5:00) so the report sees the
+    # post-retention steady state and any spawned tasks are visible in the
+    # health snapshot.
+    ScheduledJob(
+        name="outcome_feedback_review",
+        description="Daily 4:32am — surface chris_override patterns as review tasks (no policy mutation, no LLM)",
+        trigger=CronTrigger(hour=4, minute=32),
+        agent="system",
+        misfire_grace=900,
+    ),
+    # 2026-05-13: brain self-quality subtasks. Deterministic mapping from SLO
+    # breaches, override patterns, and atom uncertainty to measurable subtasks
+    # under the top brain-improvement goal — so progress != 0/0 forever. Runs
+    # 4:34am, right after outcome_feedback_review (4:32) so any tasks created
+    # by that job are also visible to the scaffold check.
+    ScheduledJob(
+        name="goal_subtask_scaffold_brain_quality",
+        description="Daily 4:34am — ensure the top brain-quality goal has measurable subtasks (no LLM)",
+        trigger=CronTrigger(hour=4, minute=34),
+        agent="system",
+        misfire_grace=900,
+    ),
+    # 2026-05-13: brain-quality subtask metric evaluator. Auto-completes
+    # subtasks once their measured metric clears the target, refreshes
+    # `metadata.current` otherwise. Runs 4:36am after scaffold (4:34)
+    # so any newly-created subtasks are visible.
+    ScheduledJob(
+        name="subtask_evaluator_brain_quality",
+        description="Daily 4:36am — auto-complete brain-quality subtasks whose metric cleared target (no LLM)",
+        trigger=CronTrigger(hour=4, minute=36),
+        agent="system",
+        misfire_grace=900,
+    ),
+    # 2026-05-13: daily 4:38am metric trend snapshot. Records the full
+    # brain-quality metric vector to brain_config_store history so the
+    # 7d-drift alerts in belief_state.trend_alerts have a baseline.
+    ScheduledJob(
+        name="metric_trend_snapshot",
+        description="Daily 4:38am — append today's brain-quality metric vector for 7d-drift alerts (no LLM)",
+        trigger=CronTrigger(hour=4, minute=38),
+        agent="system",
+        misfire_grace=900,
+    ),
+    # 2026-05-13: docker-volumes backup retention. brain.db/autonomy.db
+    # already retain 4d; this passes the same 7d-newest-per-family policy
+    # over couchdb/ghost/uptime-kuma/vaultwarden tarballs that were
+    # accumulating unbounded (296MB by 2026-05-13).
+    ScheduledJob(
+        name="docker_volumes_backup_retention",
+        description="Daily 4:24am — keep newest 7 daily tarballs per docker-volumes family",
+        trigger=CronTrigger(hour=4, minute=24),
+        agent="system",
+        misfire_grace=900,
+    ),
+    # 2026-05-13: hourly structural recall judge — LLM-free score across
+    # every unlabeled /recall outcome so the wrong-rate signal isn't
+    # bottlenecked on the 100/day LLM budget.
+    ScheduledJob(
+        name="recall_structural_judge_hourly",
+        description="Every hour at :47 — deterministically score unlabeled /recall outcomes (no LLM)",
+        trigger=CronTrigger(minute=47),
+        agent="system",
+        misfire_grace=600,
+    ),
+    # 2026-05-13: review task dispatcher. Dispatches up to 2 oldest pending
+    # `sage`-assigned review tasks (created by outcome_feedback +
+    # goal_subtask_scaffold) per day to OpenClaw. Caps quota burn at 2
+    # sage dispatches/day. Runs 6:30am after the daily review tasks have
+    # been generated and the subtask scaffold has refreshed.
+    ScheduledJob(
+        name="review_task_dispatcher",
+        description="Daily 6:30am — dispatch up to 2 brain-generated review tasks to Sage",
+        trigger=CronTrigger(hour=6, minute=30),
+        agent="system",
+        misfire_grace=900,
+    ),
     ScheduledJob(
         name="action_audit_retention",
         description="Prune action_audit rows older than 90d (daily 4:20am)",
@@ -1332,6 +1426,14 @@ RESOURCE_BUDGET_OVERRIDES: dict[str, tuple[str, tuple[str, ...]]] = {
     # Exclusive-ish local maintenance budget.
     "db_vacuum_weekly": ("heavy", ("sqlite",)),
     "wal_checkpoint_daily": ("standard", ("sqlite",)),
+    "wal_checkpoint_intraday": ("light", ("sqlite",)),
+    "outcome_feedback_review": ("light", ("sqlite",)),
+    "goal_subtask_scaffold_brain_quality": ("light", ("sqlite",)),
+    "subtask_evaluator_brain_quality": ("light", ("sqlite",)),
+    "metric_trend_snapshot": ("light", ("sqlite",)),
+    "docker_volumes_backup_retention": ("light", ("backup",)),
+    "recall_structural_judge_hourly": ("light", ("sqlite",)),
+    "review_task_dispatcher": ("standard", ("llm", "openclaw")),
     "raw_events_retention": ("standard", ("sqlite",)),
     "brain_doctor_daily": ("standard", ("sqlite", "http")),
     "memory_lifecycle": ("heavy", ("sqlite", "qdrant")),

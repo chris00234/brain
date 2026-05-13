@@ -107,6 +107,11 @@ def record_logs_dir_size_snapshot() -> dict:
     Stores a bounded JSON list of `{ts, mb}` snapshots (max 14 entries),
     used by `logs_dir_growth_24h_mb` SLO to detect anomalous daily growth.
     O(1) memory: list never exceeds 14 entries.
+
+    Snapshots with mb<=0 are skipped: they only occur when the measurement
+    pass fails (permission error, races during VACUUM) and would otherwise
+    poison the 24h-delta SLO baseline. Also drops mb=0 entries from any
+    prior corrupted history before appending.
     """
     summary: dict = {"started_at": _now_iso()}
     try:
@@ -114,6 +119,11 @@ def record_logs_dir_size_snapshot() -> dict:
         import brain_config_store
 
         mb = _logs_dir_total_mb()
+        if mb <= 0.0:
+            summary["status"] = "skipped:zero_mb_measurement"
+            summary["mb"] = mb
+            summary["finished_at"] = _now_iso()
+            return summary
         raw = brain_config_store.get(LOGS_DIR_HISTORY_KEY) or "[]"
         try:
             history = json.loads(raw)
@@ -121,6 +131,11 @@ def record_logs_dir_size_snapshot() -> dict:
                 history = []
         except json.JSONDecodeError:
             history = []
+        # Drop any prior mb<=0 rows so the SLO baseline pairing only sees
+        # real measurements. Defense in depth — _measure_logs_dir_growth_24h_mb
+        # already filters them, but pruning here keeps the bounded list
+        # carrying signal rather than noise.
+        history = [e for e in history if _entry_has_positive_mb(e)]
         history.append({"ts": _now_iso(), "mb": mb})
         history = history[-LOGS_DIR_HISTORY_MAX_ENTRIES:]
         brain_config_store.set(
@@ -135,6 +150,15 @@ def record_logs_dir_size_snapshot() -> dict:
         summary["status"] = f"error:{str(exc)[:120]}"
     summary["finished_at"] = _now_iso()
     return summary
+
+
+def _entry_has_positive_mb(entry: object) -> bool:
+    if not isinstance(entry, dict):
+        return False
+    try:
+        return float(entry.get("mb", 0.0)) > 0.0
+    except (TypeError, ValueError):
+        return False
 
 
 def apply_hot_db_pragmas(conn: sqlite3.Connection) -> None:
@@ -183,7 +207,24 @@ def run_wal_checkpoint() -> dict:
     connection must call the helper after enabling WAL mode, or the
     in-day WAL ceiling regresses.
     """
-    summary: dict = {"started_at": _now_iso(), "dbs": []}
+    summary: dict = {"started_at": _now_iso(), "dbs": _truncate_hot_db_wals(timeout=30.0)}
+    # Daily logs_dir size snapshot for growth-rate SLO. Runs after the WAL
+    # truncate so the snapshot reflects the post-checkpoint steady state,
+    # not the mid-day WAL bulge.
+    summary["logs_dir_snapshot"] = record_logs_dir_size_snapshot()
+    summary["finished_at"] = _now_iso()
+    return summary
+
+
+def _truncate_hot_db_wals(timeout: float) -> list[dict]:
+    """Run PRAGMA wal_checkpoint(TRUNCATE) on every hot DB.
+
+    Shared by `run_wal_checkpoint` (daily, also snapshots logs_dir) and
+    `run_wal_checkpoint_intraday` (every 4h, no snapshot). TRUNCATE is the
+    SQLite default fallback — if the WAL is held open by a long-lived
+    reader, it degrades to PASSIVE instead of blocking the maintenance pass.
+    """
+    entries: list[dict] = []
     for label, path in _HOT_DBS:
         if not path.exists():
             continue
@@ -193,7 +234,7 @@ def run_wal_checkpoint() -> dict:
             "wal_size_before_mb": _sqlite_size_mb(wal),
         }
         try:
-            conn = sqlite3.connect(str(path), isolation_level=None, timeout=30.0)
+            conn = sqlite3.connect(str(path), isolation_level=None, timeout=timeout)
             try:
                 conn.execute(f"PRAGMA journal_size_limit = {WAL_JOURNAL_SIZE_LIMIT_BYTES}").fetchone()
                 row = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
@@ -204,13 +245,26 @@ def run_wal_checkpoint() -> dict:
             entry["status"] = "ok"
         except Exception as exc:
             entry["status"] = f"error:{str(exc)[:120]}"
-        summary["dbs"].append(entry)
-    # Daily logs_dir size snapshot for growth-rate SLO. Runs after the WAL
-    # truncate so the snapshot reflects the post-checkpoint steady state,
-    # not the mid-day WAL bulge.
-    summary["logs_dir_snapshot"] = record_logs_dir_size_snapshot()
-    summary["finished_at"] = _now_iso()
-    return summary
+        entries.append(entry)
+    return entries
+
+
+def run_wal_checkpoint_intraday() -> dict:
+    """Every-4h PRAGMA wal_checkpoint(TRUNCATE) on hot DBs.
+
+    Why a second job: the daily 4:55am pass clears WAL to 0 MB, but
+    `autonomy.db`'s steady write load (~48k autonomy.authorize/day) plus
+    embedding_cache inserts refill the WAL to 200-300 MB by midday under
+    long-lived server connections. The 4h cadence keeps the in-day WAL
+    ceiling around ~50-100 MB total, which is well inside the logs_dir
+    budget. Skips the dir snapshot — that one runs only at the daily pass
+    so the SLO baseline stays at a stable daily cadence.
+    """
+    return {
+        "started_at": _now_iso(),
+        "dbs": _truncate_hot_db_wals(timeout=10.0),
+        "finished_at": _now_iso(),
+    }
 
 
 def run_vacuum() -> dict:
@@ -634,6 +688,7 @@ if __name__ == "__main__":
     sub = p.add_subparsers(dest="cmd")
     sub.add_parser("vacuum")
     sub.add_parser("wal_checkpoint")
+    sub.add_parser("wal_checkpoint_intraday")
     sub.add_parser("retention_audit")
     sub.add_parser("retention_raw_events")
     sub.add_parser("retention_usage")
@@ -647,6 +702,8 @@ if __name__ == "__main__":
         print(json.dumps(run_vacuum(), indent=2))
     elif args.cmd == "wal_checkpoint":
         print(json.dumps(run_wal_checkpoint(), indent=2))
+    elif args.cmd == "wal_checkpoint_intraday":
+        print(json.dumps(run_wal_checkpoint_intraday(), indent=2))
     elif args.cmd == "retention_audit":
         print(json.dumps(run_action_audit_retention(), indent=2))
     elif args.cmd == "retention_raw_events":
