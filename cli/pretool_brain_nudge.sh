@@ -134,11 +134,20 @@ if [ -n "$RESP" ]; then
       (strip_prelude | .[:120]) as $head |
       ($head | test("^\\s*[\"{\\[]")) or
       ($head | test("\"(confidence|status|visibility|subtype|review_state)\"\\s*:"));
+    # Auto-generated distillation snapshots from event streams (file changes,
+    # commits, raw shell). These crowd recall results because they verbatim
+    # contain code paths / commit text, but they are stale by definition —
+    # the current file/git state is the truth. Drop at the hook layer.
+    def is_dist_received_snapshot:
+      ((.path // "") | test("dist_received_at_|/dist_author_chris_cho_body_|/dist_raw_shell_")) or
+      ((.title // "") | test("^\\{\"(_received_at|author|cwd|file_path)\"")) or
+      ((strip_prelude | .[:200]) | test("\\{\"(author|_received_at|cwd|file_path)\":\\s*\""));
     .results // []
     | map(select(
         (.score // 0) >= $min
         and ((.path // "") | length) >= 4
         and (pure_json_chunk | not)
+        and (is_dist_received_snapshot | not)
       ))
     | sort_by([-(.score // 0), (if is_generic_title then 1 else 0 end)])
     | .[0:2]

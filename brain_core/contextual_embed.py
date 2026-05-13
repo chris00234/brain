@@ -182,7 +182,22 @@ def _record_audit(
 
 def _list_canonical_docs() -> list[Path]:
     """Walk canonical + distilled dirs — canonical collection holds chunks
-    from both. Skip archived/ and live_state/ subtrees."""
+    from both. Skip archived/ and live_state/ subtrees.
+
+    Also skip auto-generated dist_* mirrors of event streams:
+    - `dist_received_at_*` — file-change mirror snapshots from coding_event distillation
+    - `dist_author_chris_cho_body_*` — commit-message body distillations (git log is the truth)
+    - `dist_raw_shell_*` — raw shell history captures (high-recall noise)
+
+    These all contain code paths / commit text verbatim and crowd recall results
+    for any brain-internal query, but the live file/git state is the truth.
+    Excluded from the canonical index entirely.
+    """
+    SKIP_PREFIXES = (
+        "dist_received_at_",
+        "dist_author_chris_cho_body_",
+        "dist_raw_shell_",
+    )
     docs: list[Path] = []
     for root in (KNOWLEDGE_CANONICAL_DIR, KNOWLEDGE_DISTILLED_DIR):
         if not root.exists():
@@ -193,6 +208,8 @@ def _list_canonical_docs() -> list[Path]:
             if "live_state" in p.parts:
                 continue
             if not p.is_file():
+                continue
+            if p.name.startswith(SKIP_PREFIXES):
                 continue
             docs.append(p)
     return sorted(docs)

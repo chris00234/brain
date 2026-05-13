@@ -478,9 +478,10 @@ def build_boot_context(agent_name, limit=3, prompt: str | None = None):
         )
     else:
         try:
-            recent_oc = get_recent_openclaw_distillations(hours=24, limit=5)
+            recent_oc = get_recent_openclaw_distillations(hours=24, limit=12)
             if recent_oc:
                 lines = []
+                seen_sigs: list[tuple[str, frozenset[str]]] = []
                 for rec in recent_oc:
                     ts = rec.get("timestamp", "")[:16].replace("T", " ")
                     src_ref = rec.get("source_ref", "")
@@ -499,7 +500,31 @@ def build_boot_context(agent_name, limit=3, prompt: str | None = None):
                             break
                     if not summary:
                         summary = body[:200]
+                    # Dedup near-identical entries — multiple raw inbox records
+                    # from the same agent in the same minute often capture the
+                    # same Chris correction from slightly different angles. Use
+                    # jaccard overlap on word tokens: ≥0.55 means "same event."
+                    # Tighter than exact prefix match, looser than full text.
+                    words = set(re.findall(r"[a-z0-9]{3,}", summary[:160].lower()))
+                    minute_key = f"{oc_agent}|{ts[:13]}"
+                    dup = False
+                    for prev_minute, prev_words in seen_sigs:
+                        if prev_minute != minute_key:
+                            continue
+                        if not (words and prev_words):
+                            continue
+                        union = words | prev_words
+                        if not union:
+                            continue
+                        if len(words & prev_words) / len(union) >= 0.55:
+                            dup = True
+                            break
+                    if dup:
+                        continue
+                    seen_sigs.append((minute_key, frozenset(words)))
                     lines.append(f"- [{ts} {oc_agent}] {summary[:300]}")
+                    if len(lines) >= 5:
+                        break
                 content = "\n".join(lines)
                 _cache_set("openclaw_recent_24h", content)
                 sections.append(
@@ -629,19 +654,30 @@ def build_boot_context(agent_name, limit=3, prompt: str | None = None):
         try:
             from attention import mark_shown, top_attention
 
-            top_items = top_attention(limit=3)
+            # Over-fetch then dedup near-identical summaries — attention_queue
+            # often holds the same alert phrasing multiple times with different
+            # source ids, and showing duplicates is just noise to the reader.
+            top_items = top_attention(limit=10)
             if top_items:
                 lines = []
+                seen_sigs: set[str] = set()
                 for item in top_items:
                     sev = str(item.get("severity", "info")).upper()
                     summary = str(item.get("summary", ""))[:200]
                     prio = item.get("priority", 0)
+                    sig = summary.strip().lower()
+                    if sig and sig in seen_sigs:
+                        continue
+                    if sig:
+                        seen_sigs.add(sig)
                     lines.append(f"[{sev} prio={prio:.2f}] {summary}")
                     # Mark shown for habituation — fails open.
                     try:
                         mark_shown(item.get("id", ""))
                     except Exception:
                         pass
+                    if len(lines) >= 3:
+                        break
                 content = "\n".join(lines)
                 _cache_set("attention_top", content)
                 sections.append(

@@ -599,6 +599,22 @@ def _is_noisy_semantic_result(title: str, content: str, path: str | None) -> boo
     haystack = f"{title}\n{path or ''}\n{content[:200]}".lower()
     if "raw_shell_" in haystack:
         return True
+    # Auto-generated dist_* mirrors: file-change snapshots, commit-message
+    # snapshots, raw shell. They verbatim contain code paths / commit bodies
+    # and recursively match any brain-internal query, but they're stale and
+    # the live file/git state is the truth. Drop from active recall.
+    path_low = (path or "").lower()
+    if (
+        "dist_received_at_" in path_low
+        or "/dist_author_chris_cho_body_" in path_low
+        or "/dist_raw_shell_" in path_low
+    ):
+        return True
+    title_stripped = (title or "").lstrip()
+    if title_stripped.startswith(('{"_received_at"', '{"author"', '{"cwd"', '{"file_path"')):
+        return True
+    if re.match(r'^\s*\{\s*"(author|_received_at|cwd|file_path)"\s*:', (content or "")[:200]):
+        return True
     if title.lstrip().startswith("### Metadata"):
         return True
     return bool(re.match(r"(?is)^\s*(?:#\s*)?metadata\b", content or ""))
