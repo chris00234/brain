@@ -480,3 +480,89 @@ New subsystems shipped this cycle. Each has its own failure + recovery pattern.
 - **Symptom:** top-K results include atoms with `kind=conjecture` or `dream:*` ids.
 - **Cause:** `include_provisional=True` passed to `search_all`.
 - **Fix:** default is False. Verify callers aren't overriding.
+
+---
+
+## Self-quality learning loop (2026-05-13)
+
+The brain's autonomous self-improvement is driven by eight jobs that
+form a closed loop: detect → propose → measure → execute → drift-check.
+All deterministic; no LLM except review_task_dispatcher (Sage), which
+is hard-capped at 2 dispatches/day.
+
+| Job | Time (UTC) | Module | Output |
+|---|---|---|---|
+| `docker_volumes_backup_retention` | 4:24 | `backup_retention` | Newest-7 per family kept under `logs/backups/docker-volumes/` |
+| `outcome_feedback_review` | 4:32 | `outcome_feedback` | Sage review tasks for chris_override patterns (signature dedupe) |
+| `goal_subtask_scaffold_brain_quality` | 4:34 | `goal_subtask_scaffold` | Measurable subtasks under top brain-quality goal |
+| `subtask_evaluator_brain_quality` | 4:36 | `subtask_evaluator` | Auto-complete subtasks whose metric cleared target |
+| `metric_trend_snapshot` | 4:38 | `metric_trend_tracker` | Daily metric vector → `metric_trend.history` |
+| `wal_checkpoint_daily` | 4:55 | `db_maintenance` | TRUNCATE WAL + record logs_dir snapshot |
+| `wal_checkpoint_intraday` | every 4h :35 | `db_maintenance` | TRUNCATE WAL only (no snapshot) |
+| `review_task_dispatcher` | 6:30 | `review_task_dispatcher` | Dispatch ≤2 oldest sage review tasks |
+| `recall_structural_judge_hourly` | every hour :47 | `recall_structural_judge` | Score unlabeled /recall outcomes (no LLM) |
+
+### HTTP surfaces
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /brain/state` | Includes `override_patterns`, `trend_alerts`, `world_model.next_best_action.type=review_override_pattern|review_metric_drift` |
+| `GET /brain/outcomes/feedback` | chris_override patterns from outcomes table |
+| `POST /brain/outcomes/feedback/tasks` | Materialize override patterns into review tasks |
+| `GET /brain/trend-alerts` | 7d drift alerts on tracked metrics |
+| `GET /brain/recall/wrong-rate-breakdown` | Per-slice wrong-rate (language/route/actor) + worst_slice |
+
+### Diagnostics
+
+**Override loop seems stuck**
+```bash
+SECRET=$(cat ~/.openclaw/credentials/.personal_webhook_secret)
+curl -s -H "Authorization: Bearer $SECRET" \
+  'http://127.0.0.1:8791/brain/outcomes/feedback?hours=168'
+```
+Expected: `learning_candidates` non-empty with `severity` and `signature` per candidate. Empty list = no override traffic OR autonomy.db missing.
+
+**Subtasks never auto-complete**
+```bash
+uv run python brain_core/subtask_evaluator.py --dry-run
+```
+Returns the metric snapshot the evaluator sees. If the value doesn't match what `/brain/state` shows, the evaluator and proposer disagree — usually because `outcome_feedback.override_patterns_report` aggregation differs by hours window.
+
+**Trend alerts empty after 7+ days**
+```bash
+uv run python brain_core/metric_trend_tracker.py snapshot
+uv run python brain_core/metric_trend_tracker.py alerts
+```
+Inspect `brain_config_store.get('metric_trend.history')` for the list. If <2 entries with 6-9h gap, `metric_trend_snapshot` cron isn't firing or is firing inside the same day.
+
+**Structural judge labels nothing**
+- 1st guess: `action_audit.retrieved_atom_ids` is empty (normal — /recall/v2 stores Qdrant point IDs in `retrieved_chroma_ids`). The judge resolves either column against `atoms.id` / `atoms.chroma_id`. If both columns are empty, the recall didn't return any atoms; nothing to score.
+- 2nd guess: score band misconfigured. Threshold defaults `STRUCTURAL_GOOD=0.45`, `STRUCTURAL_WRONG=0.10`. Adjust in `recall_structural_judge.py`.
+
+**review_task_dispatcher hung sage call**
+- Hard-capped at `DISPATCH_TIMEOUT_SEC=180s` per task, `MAX_DISPATCHES_PER_RUN=2`.
+- On failure the task transitions to `failed` with reason in `task.metadata.last_dispatch_error`.
+- To replay: `uv run python brain_core/review_task_dispatcher.py --max 2`.
+
+**Recall judge volume too low (judged_pct < 1%)**
+Recall_judge LLM samples are gated by `MAX_RUN_SECONDS=1500` (was 600). If still capped:
+```bash
+tail -20 logs/jobs/recall_judge.log | jq 'select(.budget_exit)'
+```
+Bump `MAX_RUN_SECONDS` or split the job into two daily runs.
+
+### Active goal anchor
+
+The scaffold + evaluator only do work when an active goal whose title
+contains "brain" / "Brain" / "뇌" exists. When one auto-completes
+(all subtasks done), seed a fresh one:
+```bash
+uv run python -c "
+import sys; sys.path.insert(0, 'brain_core')
+from task_queue import task_queue
+g = task_queue.create_goal('Brain self-quality continuous improvement',
+                           'Reduce override_pct, raise judge coverage, keep SLOs clean.',
+                           metadata={'priority': 1})
+print(g['id'])
+"
+```

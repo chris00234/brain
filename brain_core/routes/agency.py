@@ -113,6 +113,13 @@ class DecisionFeedbackTaskRequest(BaseModel):
     max_tasks: int = Field(default=5, ge=1, le=20)
 
 
+class OverridePatternsTaskRequest(BaseModel):
+    hours: int = Field(default=168, ge=1, le=24 * 90)
+    min_overrides: int = Field(default=2, ge=1, le=20)
+    limit: int = Field(default=500, ge=1, le=5000)
+    max_tasks: int = Field(default=5, ge=1, le=20)
+
+
 # ── Autonomy ───────────────────────────────────────────
 @router.get("/brain/autopilot", tags=["autonomy"])
 def get_autopilot() -> dict:
@@ -198,6 +205,83 @@ def create_brain_decision_feedback_tasks(req: DecisionFeedbackTaskRequest) -> di
         )
     except Exception as e:
         _log_failure(str(e), route="/brain/decisions/feedback/tasks")
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e)) from e
+
+
+@router.get("/brain/outcomes/feedback", tags=["autonomy"])
+def get_brain_outcome_feedback(
+    hours: int = Query(default=168, ge=1, le=24 * 90),
+    min_overrides: int = Query(default=2, ge=1, le=20),
+    limit: int = Query(default=500, ge=1, le=5000),
+) -> dict:
+    """chris_override pattern report from the task_queue outcomes table.
+
+    Twin of /brain/decisions/feedback for the outcomes table — surfaces
+    repeated overrides that decision_ledger never saw because the brain
+    didn't initiate the underlying decision.
+    """
+    try:
+        from brain_core.outcome_feedback import override_patterns_report
+
+        return override_patterns_report(hours=hours, min_overrides=min_overrides, limit=limit)
+    except Exception as e:
+        _log_failure(str(e), route="/brain/outcomes/feedback")
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e)) from e
+
+
+@router.post("/brain/outcomes/feedback/tasks", tags=["autonomy"])
+def create_brain_outcome_feedback_tasks(req: OverridePatternsTaskRequest) -> dict:
+    """Materialize override patterns into bounded review tasks.
+
+    Deduplicated by signature so repeated runs do not spawn duplicates.
+    Read-only with respect to autonomy policy.
+    """
+    try:
+        from brain_core.outcome_feedback import create_override_review_tasks
+
+        return create_override_review_tasks(
+            hours=req.hours,
+            min_overrides=req.min_overrides,
+            limit=req.limit,
+            max_tasks=req.max_tasks,
+        )
+    except Exception as e:
+        _log_failure(str(e), route="/brain/outcomes/feedback/tasks")
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e)) from e
+
+
+@router.get("/brain/trend-alerts", tags=["autonomy"])
+def get_brain_trend_alerts() -> dict:
+    """7d drift alerts on the tracked brain-quality metric vector.
+
+    Returns an empty list when fewer than 2 daily snapshots are present —
+    the metric_trend_snapshot job seeds history at 4:38am daily.
+    """
+    try:
+        from brain_core.metric_trend_tracker import compute_trend_alerts
+
+        return {"alerts": compute_trend_alerts()}
+    except Exception as e:
+        _log_failure(str(e), route="/brain/trend-alerts")
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e)) from e
+
+
+@router.get("/brain/recall/wrong-rate-breakdown", tags=["autonomy"])
+def get_brain_recall_wrong_rate_breakdown(
+    hours: int = Query(default=168, ge=1, le=24 * 30),
+) -> dict:
+    """Per-slice wrong-rate breakdown for /recall judged outcomes.
+
+    Slices: language (ko/en heuristic), route (/recall/v2 vs /recall/active),
+    actor. Identifies the single worst slice (>=5 samples) to focus
+    remediation work on.
+    """
+    try:
+        from brain_core.recall_wrong_rate_breakdown import breakdown
+
+        return breakdown(hours=hours)
+    except Exception as e:
+        _log_failure(str(e), route="/brain/recall/wrong-rate-breakdown")
         raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e)) from e
 
 
