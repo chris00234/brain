@@ -120,22 +120,36 @@ def dispatch_pending_review_tasks(
 
 
 def _candidate_tasks(task_queue_obj: Any) -> list[dict]:
-    """Oldest-first pending tasks created by the brain review pipelines.
+    """Oldest-first pending/approved tasks created by the brain review pipelines.
 
     Eligibility is gated by `created_by` (must be a brain-generated source)
     so operator- or agent-assigned tasks are never auto-dispatched.
+
+    Pulls both `pending` and `approved` because task_queue.process_pending
+    auto-approves brain_cli tasks before this dispatcher's cron fires. The
+    downstream `_transition` already accepts {pending, approved}, so the
+    candidate query just has to match.
     """
     out: list[dict] = []
-    try:
-        rows = task_queue_obj.list_tasks(status="pending") or []
-    except Exception:
-        return []
-    for task in rows:
-        if not isinstance(task, dict):
+    seen: set[str] = set()
+    for status in ("pending", "approved"):
+        try:
+            rows = task_queue_obj.list_tasks(status=status) or []
+        except Exception as exc:
+            log.debug("list_tasks(status=%s) failed: %s", status, exc)
             continue
-        if (task.get("created_by") or "") not in SOURCES:
-            continue
-        out.append(task)
+        for task in rows:
+            if not isinstance(task, dict):
+                continue
+            tid = task.get("id") or ""
+            if tid in seen:
+                continue
+            if (task.get("created_by") or "") not in SOURCES:
+                continue
+            if (task.get("assigned_agent") or "") != BRAIN_CLI_AGENT_LABEL:
+                continue
+            seen.add(tid)
+            out.append(task)
     out.sort(key=lambda t: str(t.get("created_at") or ""))
     return out
 

@@ -303,13 +303,17 @@ JOB_SCHEDULE: list[ScheduledJob] = [
     ),
     # 2026-05-13: review task dispatcher. Dispatches up to 2 oldest pending
     # brain-generated review tasks (created by outcome_feedback +
-    # goal_subtask_scaffold) per day through cli_llm (codex → claude
+    # goal_subtask_scaffold) per run through cli_llm (codex → claude
     # fallback on subscription quota). No OpenClaw agent persona —
     # stateless CLI dispatch, like recall_judge and goal_decompose.
+    # 2026-05-13 (later): bumped to every 8h. Daily was too slow — review
+    # tasks accumulate at ~4-6/day from the 04:32/04:34 review jobs plus
+    # ad-hoc brain_loop creations, so a 2/day ceiling left a perpetual
+    # backlog. 3 runs x 2 dispatches = 6/day soft cap, still subscription-bounded.
     ScheduledJob(
         name="review_task_dispatcher",
-        description="Daily 6:30am — dispatch up to 2 brain-generated review tasks via cli_llm",
-        trigger=CronTrigger(hour=6, minute=30),
+        description="Every 8h — dispatch up to 2 brain-generated review tasks via cli_llm",
+        trigger=CronTrigger(hour="6,14,22", minute=30),
         agent="system",
         misfire_grace=900,
     ),

@@ -1453,6 +1453,13 @@ class TaskQueue:
             title = task.get("title", "")
             desc = task.get("description", "")
 
+            # brain_cli is a label, not a real OpenClaw agent. These tasks
+            # belong to review_task_dispatcher (daily cli_llm path). Skip so
+            # the 30s executor doesn't race the daily cron and burn them
+            # against a non-existent OpenClaw agent.
+            if agent == "brain_cli":
+                continue
+
             # Phase 5: gate dispatch via autonomy.authorize("task.dispatch")
             if _autonomy_authorize is not None:
                 gate = _autonomy_authorize("task.dispatch", context={"task_id": tid, "agent": agent})
