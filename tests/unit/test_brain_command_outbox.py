@@ -1,8 +1,8 @@
 """Phase 3: brain → Codex command-and-outbox tests.
 
 Verifies that:
-  1. /brain/command rejects unknown agents (existing whitelist behaviour).
-  2. codex is the canonical outbox target; claude remains a deprecated alias.
+  1. /brain/command rejects unknown agents, including removed claude target.
+  2. codex is the canonical outbox target.
   3. codex dispatches drop a JSON envelope at
      ~/.brain_outbox/codex/pending/{msg_id}.json that brain-spawn-codex watches.
   4. The envelope is atomic and contains exactly the payload fields the
@@ -12,7 +12,6 @@ Verifies that:
 
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
 
@@ -62,35 +61,17 @@ def test_command_rejects_unknown_agent(monkeypatch, tmp_path):
     assert exc_info.value.status_code == 400
 
 
-def test_command_claude_alias_writes_codex_outbox(monkeypatch, tmp_path):
+def test_command_claude_target_is_removed(monkeypatch, tmp_path):
     cmd = _import_command_module(monkeypatch, tmp_path)
-    req = _make_request(
-        cmd,
-        to_agent="claude",
-        content="verify lessons surface",
-        message_type="task",
-        priority=3,
-        reason="end-to-end Phase 3 e2e check",
-    )
-    result = cmd.brain_command(req)
+    from fastapi import HTTPException
 
-    assert result["ok"] is True
-    assert result["to_agent"] == "codex"
-    assert result["requested_to_agent"] == "claude"
-    assert result["deprecated_alias"] == "claude"
-    assert result["outbox_path"] is not None
+    req = _make_request(cmd, to_agent="claude", content="verify lessons surface")
+    with pytest.raises(HTTPException) as exc_info:
+        cmd.brain_command(req)
 
-    pending = tmp_path / "codex" / "pending"
-    files = list(pending.glob("*.json"))
-    assert len(files) == 1, f"expected exactly one envelope, got {files}"
-    envelope = json.loads(files[0].read_text())
-    assert envelope["to_agent"] == "codex"
-    assert envelope["requested_to_agent"] == "claude"
-    assert envelope["deprecated_alias"] == "claude"
-    assert envelope["message_type"] == "task"
-    assert envelope["priority"] == 3
-    assert "verify lessons surface" in envelope["content"]
-    assert "end-to-end Phase 3" in envelope["content"]  # reason appended
+    assert exc_info.value.status_code == 400
+    assert not (tmp_path / "codex" / "pending").exists()
+    assert not (tmp_path / "claude").exists()
 
 
 def test_command_codex_target_writes_outbox(monkeypatch, tmp_path):
@@ -98,8 +79,6 @@ def test_command_codex_target_writes_outbox(monkeypatch, tmp_path):
     req = _make_request(cmd, to_agent="codex", content="codex test task")
     result = cmd.brain_command(req)
     assert result["to_agent"] == "codex"
-    assert result["requested_to_agent"] == "codex"
-    assert result["deprecated_alias"] is None
     assert result["outbox_path"] is not None
     files = list((tmp_path / "codex" / "pending").glob("*.json"))
     assert len(files) == 1

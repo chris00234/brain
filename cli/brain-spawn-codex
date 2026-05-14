@@ -1,19 +1,22 @@
 #!/bin/bash
 # Phase 3 (2026-04-27): outbox watcher for brain → Codex CLI task envelopes.
-# Mirror of brain-spawn-claude. See that file for design notes.
+# Canonical Codex outbox watcher for brain-originated filesystem tasks.
 # Defaults to disabled (BRAIN_AUTOSPAWN_CODEX != on → no-op).
 
 set -uo pipefail
 
-OUTBOX="$HOME/.brain_outbox/codex"
+OUTBOX="${BRAIN_CODEX_OUTBOX:-$HOME/.brain_outbox/codex}"
 PENDING="$OUTBOX/pending"
 DONE="$OUTBOX/done"
 FAILED="$OUTBOX/failed"
-LOG_DIR="/Users/chrischo/server/brain/logs/jobs"
+LOG_DIR="${BRAIN_SPAWN_LOG_DIR:-/Users/chrischo/server/brain/logs/jobs}"
 LOG_FILE="$LOG_DIR/brain_spawn_codex.log"
-SECRET_FILE="$HOME/.openclaw/credentials/.personal_webhook_secret"
+SECRET_FILE="${BRAIN_COMMAND_SECRET_FILE:-$HOME/.openclaw/credentials/.personal_webhook_secret}"
 BRAIN_URL="${BRAIN_URL:-http://127.0.0.1:8791}"
-CODEX_BIN="${CODEX_BIN:-/opt/homebrew/bin/codex}"
+CODEX_BIN="${BRAIN_CODEX_BIN:-${CODEX_BIN:-/opt/homebrew/bin/codex}}"
+CODEX_MODEL="${BRAIN_CODEX_PRIMARY_MODEL:-gpt-5.5}"
+SPAWN_TIMEOUT_S="${BRAIN_SPAWN_CODEX_TIMEOUT_S:-600}"
+ACK_ENABLED="${BRAIN_SPAWN_ACK_ENABLED:-on}"
 
 mkdir -p "$PENDING" "$DONE" "$FAILED" "$LOG_DIR"
 
@@ -29,16 +32,18 @@ fi
 
 [ -x "$CODEX_BIN" ] || { log "codex bin missing at $CODEX_BIN"; exit 0; }
 command -v jq >/dev/null 2>&1 || { log "jq missing"; exit 0; }
-[ -r "$SECRET_FILE" ] || { log "secret file missing"; exit 0; }
+if [ "$ACK_ENABLED" != "off" ]; then
+  [ -r "$SECRET_FILE" ] || { log "secret file missing"; exit 0; }
+fi
 
-LOCK_FILE="/tmp/.brain_spawn_codex.lock"
-exec 9>"$LOCK_FILE"
-if ! flock -n 9; then
+LOCK_DIR="/tmp/.brain_spawn_codex.lockdir"
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
   log "another spawn in flight — skipping this trigger"
   exit 0
 fi
+trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT INT TERM
 
-MAX_PER_RUN=3
+MAX_PER_RUN="${BRAIN_SPAWN_MAX_PER_RUN:-3}"
 processed=0
 
 for envelope in "$PENDING"/*.json; do
@@ -56,28 +61,71 @@ for envelope in "$PENDING"/*.json; do
   log "spawning codex for msg=$msg_id task='${task:0:80}…'"
 
   output_file=$(mktemp -t brain_spawn_codex_out_XXXXXX)
-  if timeout 600 "$CODEX_BIN" exec --skip-git-repo-check -m gpt-5.5 "$task" \
-        > "$output_file" 2>&1; then
+  task_file=$(mktemp -t brain_spawn_codex_task_XXXXXX)
+  printf '%s' "$task" > "$task_file"
+  if python3 - "$CODEX_BIN" "$CODEX_MODEL" "$SPAWN_TIMEOUT_S" "$task_file" "$output_file" <<'PY'
+import os
+import signal
+import subprocess
+import sys
+from pathlib import Path
+
+codex_bin, model, timeout_s, task_file, output_file = sys.argv[1:6]
+task = Path(task_file).read_text(encoding="utf-8")
+cmd = [codex_bin, "exec", "--skip-git-repo-check", "-m", model, "-"]
+proc = subprocess.Popen(
+    cmd,
+    stdin=subprocess.PIPE,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+    text=True,
+    start_new_session=True,
+)
+try:
+    stdout, stderr = proc.communicate(task, timeout=float(timeout_s))
+except subprocess.TimeoutExpired:
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        stdout, stderr = proc.communicate(timeout=10)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        stdout, stderr = proc.communicate()
+    Path(output_file).write_text((stdout or "") + (stderr or "") + "\nTIMEOUT\n", encoding="utf-8")
+    raise SystemExit(124)
+Path(output_file).write_text((stdout or "") + (stderr or ""), encoding="utf-8")
+raise SystemExit(proc.returncode)
+PY
+  then
     log "msg=$msg_id ok ($(wc -c < "$output_file") bytes output)"
     mv "$envelope" "$DONE/"
-    SECRET=$(cat "$SECRET_FILE")
-    curl -sS --max-time 5 -X POST \
-      -H "Authorization: Bearer $SECRET" \
-      -H 'Content-Type: application/json' \
-      -d "$(jq -nc --arg id "$msg_id" --arg note "spawn ok" '{status:"done", note:$note, agent:"codex"}')" \
-      "${BRAIN_URL}/brain/command/${msg_id}/ack" >/dev/null 2>&1 || true
+    if [ "$ACK_ENABLED" != "off" ]; then
+      SECRET=$(cat "$SECRET_FILE")
+      curl -sS --max-time 5 -X POST \
+        -H "Authorization: Bearer $SECRET" \
+        -H 'Content-Type: application/json' \
+        -d "$(jq -nc --arg id "$msg_id" --arg note "spawn ok" '{status:"done", note:$note, agent:"codex"}')" \
+        "${BRAIN_URL}/brain/command/${msg_id}/ack" >/dev/null 2>&1 || true
+    fi
   else
     rc=$?
     log "msg=$msg_id FAILED rc=$rc"
     mv "$envelope" "$FAILED/"
-    SECRET=$(cat "$SECRET_FILE")
-    curl -sS --max-time 5 -X POST \
-      -H "Authorization: Bearer $SECRET" \
-      -H 'Content-Type: application/json' \
-      -d "$(jq -nc --arg id "$msg_id" --arg note "spawn failed rc=$rc" '{status:"rejected", note:$note, agent:"codex"}')" \
-      "${BRAIN_URL}/brain/command/${msg_id}/ack" >/dev/null 2>&1 || true
+    if [ "$ACK_ENABLED" != "off" ]; then
+      SECRET=$(cat "$SECRET_FILE")
+      curl -sS --max-time 5 -X POST \
+        -H "Authorization: Bearer $SECRET" \
+        -H 'Content-Type: application/json' \
+        -d "$(jq -nc --arg id "$msg_id" --arg note "spawn failed rc=$rc" '{status:"rejected", note:$note, agent:"codex"}')" \
+        "${BRAIN_URL}/brain/command/${msg_id}/ack" >/dev/null 2>&1 || true
+    fi
   fi
-  rm -f "$output_file"
+  rm -f "$output_file" "$task_file"
   processed=$((processed + 1))
 done
 
