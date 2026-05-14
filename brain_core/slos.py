@@ -379,6 +379,19 @@ SLOS: dict[str, SLO] = {
         metric_unit="MB",
         consecutive_breaches_required=2,
     ),
+    "brain_server_rss_growth_1h_mb": SLO(
+        name="brain_server_rss_growth_1h_mb",
+        description=(
+            "Brain FastAPI server RSS growth rate in MB/hour for the current PID. "
+            "Catches leaks before the absolute 3 GB RSS ceiling trips; resets on "
+            "restart and stays silent until at least 30 minutes of same-PID "
+            "history exists."
+        ),
+        target=512.0,
+        severity="warning",
+        metric_unit="MB/hour",
+        consecutive_breaches_required=2,
+    ),
 }
 
 
@@ -1232,8 +1245,8 @@ def _rss_kb_for_pid(pid: int) -> int:
         return 0
 
 
-def _brain_server_rss_kb_from_process_table() -> int:
-    """Find the real long-running FastAPI server and return its current RSS.
+def _brain_server_process_from_process_table() -> tuple[int, int]:
+    """Find the real long-running FastAPI server and return (pid, rss_kb).
 
     Do not use `pgrep -f "brain/server.py"` here: the SLO runner itself can
     contain that literal in its command text, and pgrep may return the short-
@@ -1248,6 +1261,7 @@ def _brain_server_rss_kb_from_process_table() -> int:
         text=True,
         timeout=3,
     )
+    best_pid = 0
     best_rss = 0
     for line in (ps_out.stdout or "").splitlines():
         parts = line.strip().split(None, 2)
@@ -1272,8 +1286,27 @@ def _brain_server_rss_kb_from_process_table() -> int:
             continue
         if server_path not in argv[1:]:
             continue
-        best_rss = max(best_rss, rss_kb)
-    return best_rss
+        if rss_kb > best_rss:
+            best_pid = pid
+            best_rss = rss_kb
+    return best_pid, best_rss
+
+
+def _brain_server_rss_kb_from_process_table() -> int:
+    """Find the real long-running FastAPI server and return its current RSS."""
+
+    return _brain_server_process_from_process_table()[1]
+
+
+def _brain_server_pid_rss_kb() -> tuple[int, int]:
+    """Return (pid, rss_kb) for the brain server process, or (0, 0)."""
+
+    server_path = (BRAIN_DIR / "server.py").resolve()
+    argv0 = Path(sys.argv[0]).resolve() if sys.argv and sys.argv[0] else None
+    if argv0 == server_path:
+        pid = os.getpid()
+        return pid, _rss_kb_for_pid(pid)
+    return _brain_server_process_from_process_table()
 
 
 def _measure_brain_server_rss_mb() -> float:
@@ -1287,14 +1320,91 @@ def _measure_brain_server_rss_mb() -> float:
     a spurious breach at 0 < 3072.
     """
     try:
-        server_path = (BRAIN_DIR / "server.py").resolve()
-        argv0 = Path(sys.argv[0]).resolve() if sys.argv and sys.argv[0] else None
-        kb = _rss_kb_for_pid(os.getpid()) if argv0 == server_path else 0
-        if kb <= 0:
-            kb = _brain_server_rss_kb_from_process_table()
+        _, kb = _brain_server_pid_rss_kb()
         return round(kb / 1024.0, 1) if kb > 0 else 0.0
     except Exception as exc:
         log.warning("brain_server_rss_mb measurement failed: %s", exc)
+        return 0.0
+
+
+_BRAIN_SERVER_RSS_HISTORY_KEY = "slo.brain_server_rss_history"
+_BRAIN_SERVER_RSS_HISTORY_MAX_AGE_S = 6 * 3600
+_BRAIN_SERVER_RSS_HISTORY_MIN_BASELINE_AGE_S = 30 * 60
+_BRAIN_SERVER_RSS_HISTORY_MIN_WRITE_INTERVAL_S = 5 * 60
+_BRAIN_SERVER_RSS_HISTORY_MAX_ENTRIES = 72
+
+
+def _measure_brain_server_rss_growth_1h_mb() -> float:
+    """Same-PID brain-server RSS growth rate in MB/hour.
+
+    Uses a bounded brain_config history so an absolute RSS breach is not the
+    first time a leak becomes visible. Restart/PID changes reset the baseline;
+    cold start returns 0.0 so the SLO never false-positives before history
+    accumulates.
+    """
+
+    try:
+        pid, rss_kb = _brain_server_pid_rss_kb()
+        if pid <= 0 or rss_kb <= 0:
+            return 0.0
+        now = time.time()
+        current = {
+            "ts": now,
+            "pid": pid,
+            "rss_mb": round(rss_kb / 1024.0, 1),
+        }
+
+        import brain_config_store
+
+        raw = brain_config_store.get(_BRAIN_SERVER_RSS_HISTORY_KEY)
+        try:
+            history = json.loads(raw) if raw else []
+        except json.JSONDecodeError:
+            history = []
+        if not isinstance(history, list):
+            history = []
+
+        retained: list[dict] = []
+        for item in history:
+            if not isinstance(item, dict):
+                continue
+            try:
+                item_ts = float(item.get("ts", 0.0))
+                item_pid = int(item.get("pid", 0))
+                item_rss = float(item.get("rss_mb", 0.0))
+            except (TypeError, ValueError):
+                continue
+            if item_pid != pid or item_rss <= 0:
+                continue
+            if now - item_ts > _BRAIN_SERVER_RSS_HISTORY_MAX_AGE_S:
+                continue
+            retained.append({"ts": item_ts, "pid": item_pid, "rss_mb": round(item_rss, 1)})
+
+        if (
+            not retained
+            or now - float(retained[-1].get("ts", 0.0)) >= _BRAIN_SERVER_RSS_HISTORY_MIN_WRITE_INTERVAL_S
+        ):
+            retained.append(current)
+        retained = retained[-_BRAIN_SERVER_RSS_HISTORY_MAX_ENTRIES:]
+        brain_config_store.set(
+            _BRAIN_SERVER_RSS_HISTORY_KEY,
+            json.dumps(retained, separators=(",", ":")),
+            updated_by="slos",
+        )
+
+        baseline = None
+        for item in retained:
+            age_s = now - float(item["ts"])
+            if age_s >= _BRAIN_SERVER_RSS_HISTORY_MIN_BASELINE_AGE_S:
+                baseline = item
+                break
+        if baseline is None:
+            return 0.0
+        elapsed_h = max((now - float(baseline["ts"])) / 3600.0, 0.001)
+        growth_mb = max(0.0, current["rss_mb"] - float(baseline["rss_mb"]))
+        return round(growth_mb / elapsed_h, 1)
+    except Exception as exc:
+        log.debug("brain_server_rss_growth_1h_mb measurement failed: %s", exc)
         return 0.0
 
 
@@ -1328,6 +1438,7 @@ _MEASUREMENTS: dict[str, Callable[[], float]] = {
     "neo4j_backup_age_hours": _measure_neo4j_backup_age_hours,
     "backup_restore_drill_age_hours": _measure_backup_restore_drill_age_hours,
     "brain_server_rss_mb": _measure_brain_server_rss_mb,
+    "brain_server_rss_growth_1h_mb": _measure_brain_server_rss_growth_1h_mb,
 }
 
 

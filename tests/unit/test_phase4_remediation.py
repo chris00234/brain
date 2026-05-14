@@ -55,6 +55,24 @@ def test_slo_direct_remediation_rss_sets_throttle_config(monkeypatch, tmp_path):
     assert "BRAIN_SCHED_HEAVY_THROTTLE_UNTIL" in cfg
 
 
+def test_slo_direct_remediation_rss_growth_sets_throttle_config(monkeypatch, tmp_path):
+    monkeypatch.setenv("BRAIN_SLO_AUTOREMEDIATE", "on")
+    import slo_remediation
+
+    monkeypatch.setattr(slo_remediation, "LOG_FILE", tmp_path / "slo_remediation.jsonl")
+    monkeypatch.setattr(slo_remediation, "ESCALATION_LOG_FILE", tmp_path / "slo_escalations.jsonl")
+    cfg: dict = {}
+    fake_cfg = type(sys)("brain_config_store")
+    fake_cfg.set = lambda k, v, **_kw: cfg.update({k: v})
+    monkeypatch.setitem(sys.modules, "brain_config_store", fake_cfg)
+
+    import slo_monitor
+
+    slo_monitor._apply_direct_remediations([{"slo": "brain_server_rss_growth_1h_mb", "current": 700}])
+    assert cfg.get("BRAIN_SCHED_MAX_HEAVY_JOBS") == "0"
+    assert "BRAIN_SCHED_HEAVY_THROTTLE_UNTIL" in cfg
+
+
 def test_slo_direct_remediation_no_match_no_action(monkeypatch):
     monkeypatch.setenv("BRAIN_SLO_AUTOREMEDIATE", "on")
     import slo_monitor

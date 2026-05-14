@@ -156,6 +156,15 @@ PLAYBOOK: dict[str, RemediationRule] = {
         ttl_s=1800,
         reason="Brain server RSS is near ceiling; pause heavy scheduler work for 30 minutes.",
     ),
+    "brain_server_rss_growth_1h_mb": RemediationRule(
+        slo="brain_server_rss_growth_1h_mb",
+        kind="config",
+        threshold=512,
+        action="BRAIN_SCHED_MAX_HEAVY_JOBS",
+        config_value="0",
+        ttl_s=1800,
+        reason="Brain server RSS is growing too quickly; pause heavy scheduler work for 30 minutes before the absolute RSS ceiling trips.",
+    ),
     "telegram_direct_health": RemediationRule(
         slo="telegram_direct_health",
         kind="manual",

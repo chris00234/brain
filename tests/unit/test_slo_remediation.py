@@ -65,11 +65,12 @@ def test_playbook_new_2026_05_12_remediations_registered():
         "logs_dir_growth_24h_mb": "log_rotation",
         "atoms_confidence_stddev_1d": "confidence_calibration",
         "self_eval_drift_7d": "self_eval",
+        "brain_server_rss_growth_1h_mb": "BRAIN_SCHED_MAX_HEAVY_JOBS",
     }
     for slo_name, action in expected.items():
         rule = slo_remediation.PLAYBOOK.get(slo_name)
         assert rule is not None, f"{slo_name} should have a remediation rule"
-        assert rule.kind == "trigger"
+        assert rule.kind in {"trigger", "config"}
         assert rule.action == action
 
 

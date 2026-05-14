@@ -31,14 +31,14 @@ def test_slo_count(slos_module):
     # + 1 neo4j_backup_age_hours (round-3 parity fix)
     # + 2 additional watchers (2026-04-23: boot_context_degraded_1h,
     #   self_eval_drift_7d)
-    # + 1 brain_server_rss_mb (2026-04-26: FastAPI process memory watcher)
+    # + 2 brain_server_rss_* (FastAPI absolute + growth memory watchers)
     # + 3 source-aware entry / alert reliability watchers
     # + 1 backup_restore_drill_age_hours (restore-readiness watcher)
     # + 1 openclaw_gateway_health (agent-dispatch gateway watcher)
     # + 1 task_dispatch_stale_started_count (unclosed dispatch attempt watcher)
     # + 1 task_failure_lesson_missing_count (Reflexion lesson coverage watcher)
     # + 1 autonomous_work_visibility_gap_count (background work traceability)
-    assert len(slos_module.SLOS) == 29
+    assert len(slos_module.SLOS) == 30
     assert "logs_dir_growth_24h_mb" in slos_module.SLOS
     assert "atoms_write_throughput_1h" in slos_module.SLOS
     assert "calibration_brier_drift_7d" in slos_module.SLOS
@@ -51,6 +51,7 @@ def test_slo_count(slos_module):
     assert "neo4j_backup_age_hours" in slos_module.SLOS
     assert "backup_restore_drill_age_hours" in slos_module.SLOS
     assert "brain_server_rss_mb" in slos_module.SLOS
+    assert "brain_server_rss_growth_1h_mb" in slos_module.SLOS
     assert "entry_contract_missing_pct" in slos_module.SLOS
     assert "telegram_backlog_pending_count" in slos_module.SLOS
     assert "telegram_direct_health" in slos_module.SLOS
@@ -561,6 +562,7 @@ def test_brain_server_rss_ignores_checker_commands(slos_module, monkeypatch, tmp
 
     monkeypatch.setattr(slos_module.subprocess, "run", fake_run)
     assert slos_module._brain_server_rss_kb_from_process_table() == 3145728
+    assert slos_module._brain_server_process_from_process_table() == (789, 3145728)
 
 
 def test_brain_server_rss_uses_current_process_when_in_server(slos_module, monkeypatch, tmp_path):
@@ -575,6 +577,63 @@ def test_brain_server_rss_uses_current_process_when_in_server(slos_module, monke
     monkeypatch.setattr(slos_module, "_brain_server_rss_kb_from_process_table", lambda: 999999)
 
     assert slos_module._measure_brain_server_rss_mb() == 2.0
+
+
+def test_brain_server_rss_growth_cold_start_records_baseline(slos_module, monkeypatch):
+    cfg: dict[str, str] = {}
+    fake_bcs = type(sys)("brain_config_store")
+    fake_bcs.get = lambda k: cfg.get(k)
+    fake_bcs.set = lambda k, v, **_kw: cfg.update({k: v})
+    monkeypatch.setitem(sys.modules, "brain_config_store", fake_bcs)
+    monkeypatch.setattr(slos_module, "_brain_server_pid_rss_kb", lambda: (1234, 200 * 1024))
+    monkeypatch.setattr(slos_module.time, "time", lambda: 1_000.0)
+
+    value = slos_module._measure_brain_server_rss_growth_1h_mb()
+
+    assert value == 0.0
+    assert "slo.brain_server_rss_history" in cfg
+    slo = slos_module.SLOS["brain_server_rss_growth_1h_mb"]
+    assert slos_module._is_breach(slo, value) is False
+
+
+def test_brain_server_rss_growth_detects_same_pid_leak(slos_module, monkeypatch):
+    import json as _json
+
+    cfg: dict[str, str] = {
+        "slo.brain_server_rss_history": _json.dumps([{"ts": 1_000.0, "pid": 1234, "rss_mb": 200.0}])
+    }
+    fake_bcs = type(sys)("brain_config_store")
+    fake_bcs.get = lambda k: cfg.get(k)
+    fake_bcs.set = lambda k, v, **_kw: cfg.update({k: v})
+    monkeypatch.setitem(sys.modules, "brain_config_store", fake_bcs)
+    monkeypatch.setattr(slos_module, "_brain_server_pid_rss_kb", lambda: (1234, 900 * 1024))
+    monkeypatch.setattr(slos_module.time, "time", lambda: 4_600.0)
+
+    value = slos_module._measure_brain_server_rss_growth_1h_mb()
+
+    assert value == 700.0
+    slo = slos_module.SLOS["brain_server_rss_growth_1h_mb"]
+    assert slos_module._is_breach(slo, value) is True
+
+
+def test_brain_server_rss_growth_resets_on_pid_change(slos_module, monkeypatch):
+    import json as _json
+
+    cfg: dict[str, str] = {
+        "slo.brain_server_rss_history": _json.dumps([{"ts": 1_000.0, "pid": 1111, "rss_mb": 200.0}])
+    }
+    fake_bcs = type(sys)("brain_config_store")
+    fake_bcs.get = lambda k: cfg.get(k)
+    fake_bcs.set = lambda k, v, **_kw: cfg.update({k: v})
+    monkeypatch.setitem(sys.modules, "brain_config_store", fake_bcs)
+    monkeypatch.setattr(slos_module, "_brain_server_pid_rss_kb", lambda: (2222, 900 * 1024))
+    monkeypatch.setattr(slos_module.time, "time", lambda: 4_600.0)
+
+    value = slos_module._measure_brain_server_rss_growth_1h_mb()
+
+    assert value == 0.0
+    history = _json.loads(cfg["slo.brain_server_rss_history"])
+    assert history == [{"ts": 4600.0, "pid": 2222, "rss_mb": 900.0}]
 
 
 def test_run_invokes_direct_remediation_for_breaches(slos_module, monkeypatch):
