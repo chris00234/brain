@@ -2067,13 +2067,18 @@ def search_all(
         filtered_cols = [c for c in _active_cols if c in _raw_collections]
         plain_cols = [c for c in _active_cols if c not in _raw_collections]
 
-        # Preserve user-supplied `where` (source_type etc.) on plain side —
-        # strip only the auto-injected raw_exclude.
+        # Preserve user-supplied `where` on the plain side — strip only the
+        # auto-injected raw_exclude. Regression: when callers passed
+        # `where={...}` without `source_type`, the split fan-out sent
+        # `where=None` to non-`experience` collections, bypassing caller scope
+        # filters for semantic_memory/canonical-like collections.
         plain_where: dict | None = None
         if source_type:
             # Caller explicitly scoped by type — that filter belongs on every
             # collection, so plain_where carries it.
             plain_where = local_where
+        elif where:
+            plain_where = dict(where)
 
         # Run filtered + plain fan-outs concurrently. Two-call split only
         # pays off if the two halves overlap; otherwise this is sequential

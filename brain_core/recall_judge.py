@@ -26,7 +26,7 @@ import random
 import sqlite3
 import sys
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -184,6 +184,11 @@ def run(sample: int = SAMPLE_SIZE, hours: int = 24, dry_run: bool = False) -> di
         #   - exclude shell-command queries that slip past the actor filter
         #     (defense in depth — pretool_brain_nudge sometimes uses different
         #     actors)
+        cutoff = (
+            (datetime.now(UTC) - timedelta(hours=max(1, int(hours or 24))))
+            .isoformat(timespec="seconds")
+            .replace("+00:00", "Z")
+        )
         rows = conn.execute(
             "SELECT id, query_text "
             "FROM action_audit "
@@ -207,10 +212,10 @@ def run(sample: int = SAMPLE_SIZE, hours: int = 24, dry_run: bool = False) -> di
             "  AND query_text NOT LIKE '%.md %' "
             "  AND query_text NOT LIKE '{%' "
             "  AND query_text NOT LIKE '[%' "
-            "  AND created_at > datetime('now', ? || ' hours') "
+            "  AND created_at > ? "
             "ORDER BY created_at DESC "
             "LIMIT ?",
-            (*JUDGED_ACTORS, f"-{int(hours)}", sample * 4),  # over-fetch so random.sample has room
+            (*JUDGED_ACTORS, cutoff, sample * 4),  # over-fetch so random.sample has room
         ).fetchall()
         if not rows:
             log.info("recall_judge: no candidates")

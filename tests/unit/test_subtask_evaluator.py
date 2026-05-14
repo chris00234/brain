@@ -7,7 +7,9 @@ don't depend on live SLOs / outcomes traffic.
 
 from __future__ import annotations
 
+import sqlite3
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -115,3 +117,41 @@ def test_subtask_evaluator_skips_when_metric_absent(tmp_path, monkeypatch):
     assert result["refreshed"] == []
     assert result["skipped"][0]["task_id"] == task["id"]
     assert result["skipped"][0]["reason"] == "metric_unavailable"
+
+
+def test_judge_coverage_counts_structural_sidecar_without_action_outcome(tmp_path):
+    db = tmp_path / "brain.db"
+    now = datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+    with sqlite3.connect(db) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE action_audit (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                route TEXT NOT NULL,
+                outcome TEXT,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE recall_structural_judgments (
+                action_audit_id INTEGER PRIMARY KEY,
+                outcome TEXT NOT NULL,
+                structural_score REAL NOT NULL,
+                reason_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                judged_at TEXT NOT NULL
+            );
+            """
+        )
+        cur = conn.execute(
+            "INSERT INTO action_audit (route, outcome, created_at) VALUES ('/recall/v2', NULL, ?)",
+            (now,),
+        )
+        conn.execute(
+            "INSERT INTO recall_structural_judgments "
+            "(action_audit_id, outcome, structural_score, reason_json, created_at, judged_at) "
+            "VALUES (?, 'structural_neutral', 0.2, '{}', ?, ?)",
+            (cur.lastrowid, now, now),
+        )
+
+    snap = subtask_evaluator._judge_coverage_snapshot(db)
+
+    assert snap["recall_judge.judged_pct_7d"] == 100.0

@@ -382,6 +382,44 @@ def test_rag_where_empty_dict_caller_treated_as_no_where():
     assert out == {"type": {"$nin": list(search_unified._RAW_DUMP_TYPES)}}
 
 
+def test_search_all_preserves_caller_where_on_plain_rag_split(monkeypatch):
+    """Caller filters must survive the raw-dump split for non-experience collections."""
+    import search_unified
+
+    calls = []
+
+    def fake_search_rag(query, limit, where, collections):
+        calls.append({"query": query, "where": where, "collections": tuple(collections)})
+        return [
+            {
+                "id": "r1",
+                "collection": "semantic_memory",
+                "content": "infra memory",
+                "score": 1.0,
+                "metadata": {},
+            }
+        ]
+
+    monkeypatch.setattr(search_unified, "_route_sources", lambda _query, sources: sources)
+    monkeypatch.setattr(search_unified, "_apply_bilingual_expansion", lambda q: (q, []))
+    monkeypatch.setattr(search_unified, "_apply_ontology_expansion", lambda q, timing: (q, "", []))
+    monkeypatch.setattr(search_unified, "_primary_doc_hits", lambda _query: [])
+    monkeypatch.setattr(search_unified, "_maybe_emit_search_trace", lambda **_kwargs: None)
+    monkeypatch.setattr(search_unified, "search_rag", fake_search_rag)
+
+    search_unified.search_all(
+        "infra",
+        limit=1,
+        sources=["rag"],
+        collections=["semantic_memory"],
+        where={"domain": {"$eq": "infra"}},
+    )
+
+    assert calls
+    assert calls[0]["collections"] == ("semantic_memory",)
+    assert calls[0]["where"] == {"domain": {"$eq": "infra"}}
+
+
 def test_rag_where_raw_dump_types_complete():
     """Pin the exact raw-dump exclusion list — adding/removing entries
     here is a deliberate behavior change."""

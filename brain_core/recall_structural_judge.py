@@ -3,12 +3,12 @@ recent /recall outcomes.
 
 The LLM recall_judge only covers ~1% of recall traffic (50 samples/day
 on ~10k recalls/day) and bumping samples burns subscription quota.
-This module is the deterministic complement: every unlabeled
-/recall/v2 row gets a structural score from cheap signals — query/doc
-token overlap, top atom confidence, and basic freshness — and the
-outcome column is set to `structural_good` or `structural_wrong`
-based on a band. The LLM judge stays the high-precision arbiter for
-borderline cases; this widens the coverage floor.
+This module is the deterministic complement: every eligible unlabeled
+/recall row gets a structural score from cheap signals — query/doc token
+overlap, top atom confidence, and basic freshness — and the result is stored
+in a sidecar table. The LLM judge stays the high-precision arbiter; the
+sidecar widens coverage without writing heuristic labels into
+action_audit.outcome or blocking later LLM/manual judgment.
 
 Costs: pure SQLite reads + Python set-intersection per row.
 No new embedder calls. No outbound network. No LLM dispatch.
@@ -22,7 +22,7 @@ import logging
 import re
 import sqlite3
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -39,6 +39,8 @@ STRUCTURAL_GOOD_THRESHOLD = 0.45
 STRUCTURAL_WRONG_THRESHOLD = 0.10
 SAMPLE_LIMIT = 1000
 DEFAULT_HOURS = 6  # hourly cadence covers the last 6h with overlap
+JUDGED_ACTORS = ("claude", "codex", "mcp", "jenna", "sage", "liz", "ellie", "market", "brain")
+JUDGED_ACTOR_PLACEHOLDERS = "?, ?, ?, ?, ?, ?, ?, ?, ?"
 
 
 _TOKEN_RE = re.compile(r"[A-Za-z가-힣0-9]+")
@@ -106,16 +108,42 @@ def run(
         conn = sqlite3.connect(str(db_path))
         conn.row_factory = sqlite3.Row
         try:
+            if not dry_run:
+                _ensure_structural_table(conn)
+            sidecar_filter = (
+                "  AND NOT EXISTS ("
+                "      SELECT 1 FROM recall_structural_judgments rsj "
+                "      WHERE rsj.action_audit_id = action_audit.id"
+                "  ) "
+                if _table_exists(conn, "recall_structural_judgments")
+                else ""
+            )
+            cutoff = _cutoff_iso(hours)
             rows = conn.execute(
                 "SELECT id, query_text, retrieved_atom_ids, retrieved_chroma_ids, created_at "
                 "FROM action_audit "
-                "WHERE route IN ('/recall', '/recall/v2') "
+                "WHERE route IN ('/recall', '/recall/v2', '/recall/active') "
                 "  AND outcome IS NULL "
                 "  AND query_text IS NOT NULL "
                 "  AND length(query_text) >= 5 "
-                "  AND created_at > datetime('now', ? || ' hours') "
-                "ORDER BY created_at DESC LIMIT ?",
-                (f"-{int(hours)}", max(1, min(int(limit or SAMPLE_LIMIT), 5000))),
+                "  AND actor IN (" + JUDGED_ACTOR_PLACEHOLDERS + ") "
+                "  AND query_text NOT LIKE 'sed %' "
+                "  AND query_text NOT LIKE 'grep %' "
+                "  AND query_text NOT LIKE 'cat %' "
+                "  AND query_text NOT LIKE 'awk %' "
+                "  AND query_text NOT LIKE 'find %' "
+                "  AND query_text NOT LIKE 'ls %' "
+                "  AND query_text NOT LIKE 'echo %' "
+                "  AND query_text NOT LIKE 'curl %' "
+                "  AND query_text NOT LIKE 'rg %' "
+                "  AND query_text NOT LIKE 'python %' "
+                "  AND query_text NOT LIKE '/Users/%' "
+                "  AND query_text NOT LIKE '%.py %' "
+                "  AND query_text NOT LIKE '%.md %' "
+                "  AND query_text NOT LIKE '{%' "
+                "  AND query_text NOT LIKE '[%' "
+                "  AND created_at > ? " + sidecar_filter + "ORDER BY created_at DESC LIMIT ?",
+                (*JUDGED_ACTORS, cutoff, max(1, min(int(limit or SAMPLE_LIMIT), 5000))),
             ).fetchall()
             for row in rows:
                 counters["scanned"] += 1
@@ -139,18 +167,8 @@ def run(
                     counters["labeled_wrong"] += 1
                 else:
                     counters["labeled_neutral"] += 1
-                    continue  # don't write neutral — leave outcome NULL for LLM judge
                 if not dry_run:
-                    conn.execute(
-                        "UPDATE action_audit SET outcome = ?, outcome_reason = ?, "
-                        "resolved_at = ? WHERE id = ? AND outcome IS NULL",
-                        (
-                            outcome,
-                            json.dumps({"structural_score": round(score, 3)}),
-                            _now_iso(),
-                            row["id"],
-                        ),
-                    )
+                    _insert_structural_judgment(conn, row, outcome, score)
             if not dry_run:
                 conn.commit()
         finally:
@@ -165,6 +183,54 @@ def run(
 # ---------------------------------------------------------------------------
 # scoring
 # ---------------------------------------------------------------------------
+
+
+def _ensure_structural_table(conn: sqlite3.Connection) -> None:
+    """Create the sidecar judgment table owned by recall_structural_judge."""
+
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS recall_structural_judgments (
+            action_audit_id INTEGER PRIMARY KEY,
+            outcome TEXT NOT NULL,
+            structural_score REAL NOT NULL,
+            reason_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            judged_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_recall_structural_judgments_outcome
+          ON recall_structural_judgments(outcome, created_at);
+        """
+    )
+
+
+def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (table_name,),
+    ).fetchone()
+    return row is not None
+
+
+def _insert_structural_judgment(
+    conn: sqlite3.Connection,
+    row: sqlite3.Row,
+    outcome: str,
+    score: float,
+) -> None:
+    conn.execute(
+        "INSERT OR IGNORE INTO recall_structural_judgments "
+        "(action_audit_id, outcome, structural_score, reason_json, created_at, judged_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            row["id"],
+            outcome,
+            float(score),
+            json.dumps({"structural_score": round(score, 3)}),
+            row["created_at"] or _now_iso(),
+            _now_iso(),
+        ),
+    )
 
 
 def _structural_score(query: str, docs: list[dict]) -> float:
@@ -298,6 +364,21 @@ def _age_days(ts: object) -> float | None:
 
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
+
+
+def _cutoff_iso(hours: int) -> str:
+    """Return a cutoff in the same ISO shape as action_audit.created_at.
+
+    SQLite's datetime('now') uses a space separator. Most action_audit rows are
+    ISO-8601 with ``T``/``+00:00`` or ``Z``; lexicographic comparisons against
+    SQLite's space-form datetime incorrectly include older same-day rows.
+    """
+
+    return (
+        (datetime.now(UTC) - timedelta(hours=max(1, int(hours or DEFAULT_HOURS))))
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z")
+    )
 
 
 if __name__ == "__main__":

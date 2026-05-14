@@ -906,10 +906,17 @@ def test_exclude_already_used_sql_failure_logs_and_returns_unfiltered(monkeypatc
 # ── _apply_content_enrichment_inplace ──────────────────────────────────
 
 
-def test_content_enrichment_replaces_with_anchor_window(tmp_path):
+def _allow_content_enrichment_tmp(monkeypatch, tmp_path):
+    import routes.recall as recall
+
+    monkeypatch.setattr(recall, "_CONTENT_ENRICH_ALLOWED_ROOTS", (tmp_path,))
+    return recall
+
+
+def test_content_enrichment_replaces_with_anchor_window(tmp_path, monkeypatch):
     """When the chunk's anchor (first 120 chars) appears in the file,
     enrichment returns a window centered on it (up to ±500/MAX-500)."""
-    from routes.recall import _apply_content_enrichment_inplace
+    recall = _allow_content_enrichment_tmp(monkeypatch, tmp_path)
 
     p = tmp_path / "note.md"
     body = "HEADER\n\n" + ("ANCHOR" + "x" * 100) + "\n\nMIDDLE\n\nFOOTER"
@@ -923,15 +930,15 @@ def test_content_enrichment_replaces_with_anchor_window(tmp_path):
             "content": "ANCHOR" + "x" * 100,
         }
     ]
-    ms = _apply_content_enrichment_inplace(fused, top_n=1)
+    ms = recall._apply_content_enrichment_inplace(fused, top_n=1)
     assert "ANCHOR" in fused[0]["content"]
     assert isinstance(ms, int)
 
 
-def test_content_enrichment_falls_back_to_file_head_when_anchor_missing(tmp_path):
+def test_content_enrichment_falls_back_to_file_head_when_anchor_missing(tmp_path, monkeypatch):
     """If the chunk anchor isn't in the file (stale chunks, edits), return
     the first _CONTENT_ENRICH_MAX_FILE_BYTES of the file."""
-    from routes.recall import _apply_content_enrichment_inplace
+    recall = _allow_content_enrichment_tmp(monkeypatch, tmp_path)
 
     p = tmp_path / "note.md"
     p.write_text("STALE FILE HEAD\n\nbody body body")
@@ -943,7 +950,7 @@ def test_content_enrichment_falls_back_to_file_head_when_anchor_missing(tmp_path
             "content": "MISSING ANCHOR TEXT",
         }
     ]
-    _apply_content_enrichment_inplace(fused, top_n=1)
+    recall._apply_content_enrichment_inplace(fused, top_n=1)
     assert fused[0]["content"].startswith("STALE FILE HEAD")
 
 
@@ -961,10 +968,10 @@ def test_content_enrichment_skips_non_enrichable_types(tmp_path):
     assert fused[0]["content"] == original
 
 
-def test_content_enrichment_dedupes_paths(tmp_path):
+def test_content_enrichment_dedupes_paths(tmp_path, monkeypatch):
     """If two top-N results share the same path, only the first gets
     enriched — subsequent rows preserve their per-chunk content."""
-    from routes.recall import _apply_content_enrichment_inplace
+    recall = _allow_content_enrichment_tmp(monkeypatch, tmp_path)
 
     p = tmp_path / "shared.md"
     p.write_text("FILE BODY enriched content here")
@@ -972,7 +979,7 @@ def test_content_enrichment_dedupes_paths(tmp_path):
         {"id": "1", "path": str(p), "type": "canonical-note", "content": "ANCHOR1"},
         {"id": "2", "path": str(p), "type": "canonical-note", "content": "ANCHOR2"},
     ]
-    _apply_content_enrichment_inplace(fused, top_n=2)
+    recall._apply_content_enrichment_inplace(fused, top_n=2)
     assert "FILE BODY" in fused[0]["content"]
     assert fused[1]["content"] == "ANCHOR2"  # untouched
 
@@ -994,9 +1001,9 @@ def test_content_enrichment_skips_missing_files(tmp_path):
     assert fused[0]["content"] == "kept"
 
 
-def test_content_enrichment_respects_top_n_cutoff(tmp_path):
+def test_content_enrichment_respects_top_n_cutoff(tmp_path, monkeypatch):
     """Only the first top_n results are considered — extras stay raw."""
-    from routes.recall import _apply_content_enrichment_inplace
+    recall = _allow_content_enrichment_tmp(monkeypatch, tmp_path)
 
     p = tmp_path / "f.md"
     p.write_text("file body text")
@@ -1004,7 +1011,7 @@ def test_content_enrichment_respects_top_n_cutoff(tmp_path):
         {"id": "1", "path": str(p), "type": "canonical-note", "content": "raw1"},
         {"id": "2", "path": str(tmp_path / "g.md"), "type": "canonical-note", "content": "raw2"},
     ]
-    _apply_content_enrichment_inplace(fused, top_n=1)
+    recall._apply_content_enrichment_inplace(fused, top_n=1)
     assert "file body" in fused[0]["content"]
     assert fused[1]["content"] == "raw2"  # outside top_n window
 
@@ -1017,10 +1024,10 @@ def test_content_enrichment_empty_input_returns_zero_ms():
     assert ms >= 0
 
 
-def test_content_enrichment_metadata_type_fallback(tmp_path):
+def test_content_enrichment_metadata_type_fallback(tmp_path, monkeypatch):
     """If `r['type']` is missing, fall back to `r['metadata']['type']`
     (some upstream paths put it there)."""
-    from routes.recall import _apply_content_enrichment_inplace
+    recall = _allow_content_enrichment_tmp(monkeypatch, tmp_path)
 
     p = tmp_path / "x.md"
     p.write_text("file body")
@@ -1032,8 +1039,34 @@ def test_content_enrichment_metadata_type_fallback(tmp_path):
             "content": "raw",
         }
     ]
-    _apply_content_enrichment_inplace(fused, top_n=1)
+    recall._apply_content_enrichment_inplace(fused, top_n=1)
     assert "file body" in fused[0]["content"]
+
+
+def test_content_enrichment_rejects_paths_outside_allowed_roots(tmp_path, monkeypatch):
+    recall = _allow_content_enrichment_tmp(monkeypatch, tmp_path / "allowed")
+    outside = tmp_path / "outside.md"
+    outside.write_text("SECRET OUTSIDE ROOT")
+    fused = [{"id": "1", "path": str(outside), "type": "canonical-note", "content": "kept"}]
+
+    recall._apply_content_enrichment_inplace(fused, top_n=1)
+
+    assert fused[0]["content"] == "kept"
+
+
+def test_content_enrichment_rejects_symlink_escape(tmp_path, monkeypatch):
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    outside = tmp_path / "outside.md"
+    outside.write_text("SECRET OUTSIDE ROOT")
+    link = allowed / "link.md"
+    link.symlink_to(outside)
+    recall = _allow_content_enrichment_tmp(monkeypatch, allowed)
+    fused = [{"id": "1", "path": str(link), "type": "canonical-note", "content": "kept"}]
+
+    recall._apply_content_enrichment_inplace(fused, top_n=1)
+
+    assert fused[0]["content"] == "kept"
 
 
 def test_exclude_already_used_no_result_ids_short_circuits(monkeypatch):

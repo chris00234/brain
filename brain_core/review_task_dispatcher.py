@@ -6,8 +6,8 @@ labelled with `assigned_agent='brain_cli'`. Nothing was picking them up
 until this module shipped, so the override-pattern → action loop was
 still open.
 
-The dispatcher uses `cli_llm.dispatch` (codex → claude fallback through
-the ChatGPT/Claude subscription CLIs) instead of routing through an
+The dispatcher uses `cli_llm.dispatch` (Codex gpt-5.5 primary through
+the ChatGPT subscription CLI) instead of routing through an
 OpenClaw agent. Same brain-format that recall_judge, goal_decompose,
 and friends use — stateless prompt, subscription-bounded cost, no
 agent-persona side effects. Bounded by `MAX_DISPATCHES_PER_RUN` to
@@ -36,7 +36,7 @@ DISPATCH_TIMEOUT_SEC = 180
 SOURCES = ("outcome_feedback", "goal_subtask_scaffold", "decision_feedback")
 # Brain-generated review/work tasks carry this label so the dispatcher
 # can filter them from operator- or agent-assigned tasks. The CLI path
-# (cli_llm.dispatch → codex/claude) ignores the agent label internally;
+# (cli_llm.dispatch → Codex) ignores the agent label internally;
 # we keep it for visibility and to gate eligibility here.
 BRAIN_CLI_AGENT_LABEL = "brain_cli"
 
@@ -70,17 +70,49 @@ def dispatch_pending_review_tasks(
         except Exception as exc:
             skipped.append({"task_id": task["id"], "reason": f"claim_failed:{str(exc)[:80]}"})
             continue
+        attempt = _record_attempt_start(tq, task, message)
         try:
-            result = dispatcher(prompt=message, timeout=DISPATCH_TIMEOUT_SEC)
+            result = dispatcher(
+                prompt=message,
+                timeout=DISPATCH_TIMEOUT_SEC,
+                allow_openclaw_fallback=False,
+            )
         except Exception as exc:
             log.warning("cli_llm dispatch raised for %s: %s", task["id"], exc)
-            _safe_fail(tq, task["id"], f"dispatch_exception:{str(exc)[:200]}")
-            skipped.append({"task_id": task["id"], "reason": "dispatch_exception"})
+            err = f"dispatch_exception:{str(exc)[:200]}"
+            _finish_attempt(
+                tq,
+                attempt,
+                status="deferred" if _is_transient_dispatch_error(tq, err) else "failed",
+                error_class="dispatch_exception",
+                error=err,
+            )
+            if _is_transient_dispatch_error(tq, err):
+                _safe_defer(tq, task["id"], err)
+                skipped.append({"task_id": task["id"], "reason": "dispatch_deferred"})
+            else:
+                _safe_fail(tq, task["id"], err)
+                skipped.append({"task_id": task["id"], "reason": "dispatch_exception"})
             continue
         ok = bool(getattr(result, "ok", False))
         text = getattr(result, "text", "")
         if ok:
             try:
+                _finish_attempt(
+                    tq,
+                    attempt,
+                    status="completed",
+                    backend=getattr(result, "backend", "") or getattr(result, "provider", ""),
+                    model=getattr(result, "model", ""),
+                    result_preview=(text or "")[:500],
+                    response_chars=len(text or ""),
+                    duration_ms=getattr(result, "duration_ms", 0),
+                    metadata={
+                        "attempts": getattr(result, "attempts", 0),
+                        "provider": getattr(result, "provider", ""),
+                        "openclaw_fallback_allowed": False,
+                    },
+                )
                 tq.complete_task(
                     task["id"],
                     result=(text or "")[:3000],
@@ -99,11 +131,39 @@ def dispatch_pending_review_tasks(
                 )
             except Exception as exc:
                 log.warning("complete_task failed for %s: %s", task["id"], exc)
+                _finish_attempt(
+                    tq,
+                    attempt,
+                    status="failed",
+                    error_class="complete_failed",
+                    error=str(exc)[:500],
+                )
+                _safe_fail(tq, task["id"], f"complete_failed:{str(exc)[:200]}")
                 skipped.append({"task_id": task["id"], "reason": f"complete_failed:{str(exc)[:80]}"})
         else:
             err = getattr(result, "error", "") or "degraded"
-            _safe_fail(tq, task["id"], f"cli_dispatch_failed:{err[:200]}")
-            skipped.append({"task_id": task["id"], "reason": "cli_dispatch_failed"})
+            transient = _is_transient_dispatch_error(tq, err)
+            _finish_attempt(
+                tq,
+                attempt,
+                status="deferred" if transient else "failed",
+                backend=getattr(result, "backend", "") or getattr(result, "provider", ""),
+                model=getattr(result, "model", ""),
+                error_class="transient_dispatch" if transient else "terminal_dispatch",
+                error=err[:500],
+                duration_ms=getattr(result, "duration_ms", 0),
+                metadata={
+                    "attempts": getattr(result, "attempts", 0),
+                    "rate_limited": getattr(result, "rate_limited", False),
+                    "openclaw_fallback_allowed": False,
+                },
+            )
+            if transient:
+                _safe_defer(tq, task["id"], f"cli_dispatch_failed:{err[:200]}")
+                skipped.append({"task_id": task["id"], "reason": "cli_dispatch_deferred"})
+            else:
+                _safe_fail(tq, task["id"], f"cli_dispatch_failed:{err[:200]}")
+                skipped.append({"task_id": task["id"], "reason": "cli_dispatch_failed"})
 
     return {
         "dispatched": dispatched,
@@ -134,7 +194,14 @@ def _candidate_tasks(task_queue_obj: Any) -> list[dict]:
     seen: set[str] = set()
     for status in ("pending", "approved"):
         try:
-            rows = task_queue_obj.list_tasks(status=status) or []
+            rows = (
+                task_queue_obj.list_tasks(
+                    status=status,
+                    agent=BRAIN_CLI_AGENT_LABEL,
+                    limit=500,
+                )
+                or []
+            )
         except Exception as exc:
             log.debug("list_tasks(status=%s) failed: %s", status, exc)
             continue
@@ -147,6 +214,8 @@ def _candidate_tasks(task_queue_obj: Any) -> list[dict]:
             if (task.get("created_by") or "") not in SOURCES:
                 continue
             if (task.get("assigned_agent") or "") != BRAIN_CLI_AGENT_LABEL:
+                continue
+            if _retry_not_due(task):
                 continue
             seen.add(tid)
             out.append(task)
@@ -179,6 +248,98 @@ def _safe_fail(task_queue_obj: Any, task_id: str, error: str) -> None:
         task_queue_obj.fail_task(task_id, error=error[:500], by="review_task_dispatcher")
     except Exception as exc:
         log.debug("fail_task fallback raised for %s: %s", task_id, exc)
+
+
+def _safe_defer(task_queue_obj: Any, task_id: str, error: str) -> None:
+    try:
+        retry_after = _retry_delay_for_dispatch_error(task_queue_obj, error)
+        task_queue_obj.defer_task(
+            task_id,
+            error=error[:500],
+            retry_after_s=retry_after,
+            by="review_task_dispatcher",
+        )
+    except Exception as exc:
+        log.debug("defer_task fallback raised for %s: %s", task_id, exc)
+        _safe_fail(task_queue_obj, task_id, f"defer_failed:{str(exc)[:200]}; original={error[:200]}")
+
+
+def _record_attempt_start(task_queue_obj: Any, task: dict, message: str) -> dict | None:
+    try:
+        return task_queue_obj.record_dispatch_attempt_start(
+            task["id"],
+            agent=BRAIN_CLI_AGENT_LABEL,
+            backend="cli_llm",
+            prompt_chars=len(message),
+            metadata={
+                "source": "review_task_dispatcher",
+                "task_created_by": task.get("created_by", ""),
+                "openclaw_fallback_allowed": False,
+            },
+        )
+    except Exception as exc:
+        log.debug("record_dispatch_attempt_start failed for %s: %s", task.get("id"), exc)
+        return None
+
+
+def _finish_attempt(task_queue_obj: Any, attempt: dict | None, **kwargs: Any) -> None:
+    if not attempt:
+        return
+    try:
+        task_queue_obj.finish_dispatch_attempt(attempt["id"], **kwargs)
+    except Exception as exc:
+        log.debug("finish_dispatch_attempt failed for %s: %s", attempt.get("id"), exc)
+
+
+def _is_transient_dispatch_error(task_queue_obj: Any, error: str) -> bool:
+    fn = getattr(task_queue_obj, "_is_transient_dispatch_error", None)
+    if callable(fn):
+        try:
+            return bool(fn(error))
+        except Exception as exc:
+            log.debug("transient-dispatch classifier failed: %s", exc)
+    err = (error or "").lower()
+    return any(
+        marker in err
+        for marker in (
+            "breaker_",
+            "backend_cooldown",
+            "probe_in_flight",
+            "cli slots busy",
+            "timeout",
+            "rate limit",
+            "rate_limit",
+            "rate-limited",
+            "quota",
+            "overloaded",
+        )
+    )
+
+
+def _retry_delay_for_dispatch_error(task_queue_obj: Any, error: str) -> int:
+    fn = getattr(task_queue_obj, "_retry_delay_for_dispatch_error", None)
+    if callable(fn):
+        try:
+            return int(fn(error))
+        except Exception as exc:
+            log.debug("retry-delay classifier failed: %s", exc)
+    return 600
+
+
+def _retry_not_due(task: dict) -> bool:
+    meta = task.get("metadata") or {}
+    if not isinstance(meta, dict):
+        return False
+    raw = meta.get("next_attempt_at")
+    if not raw:
+        return False
+    try:
+        dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return False
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt > datetime.now(UTC)
 
 
 def _default_task_queue() -> Any | None:

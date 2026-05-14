@@ -182,6 +182,40 @@ def test_ensure_picks_goal_by_title_match(tmp_path: Path, stub_slo_and_judge: No
     assert len(subtasks) == 1
 
 
+def test_ensure_prefers_metadata_marked_quality_goal(tmp_path: Path, stub_slo_and_judge: None) -> None:
+    db = tmp_path / "autonomy.db"
+    _seed_outcomes(
+        db,
+        [
+            {
+                "id": f"o{i}",
+                "task_id": f"t{i}",
+                "domain": "coding",
+                "chris_override": 1,
+                "override_reason": "wrong API",
+                "created_at": _iso(1 + i * 0.05),
+            }
+            for i in range(4)
+        ],
+    )
+    tq = TaskQueue(db)
+    misleading = tq.create_goal("Brainstorm vacation plan", "Title contains brain but is unrelated.")
+    target = tq.create_goal(
+        "Operational quality loop",
+        "Brain self-quality drive.",
+        metadata={"kind": "brain_quality_goal", "priority": 1},
+    )
+
+    result = goal_subtask_scaffold.ensure_brain_quality_subtasks(
+        task_queue_obj=tq,
+        autonomy_db_path=db,
+    )
+
+    assert result["goal_id"] == target["id"]
+    assert tq.list_tasks(parent_goal_id=misleading["id"]) == []
+    assert len(tq.list_tasks(parent_goal_id=target["id"])) == 1
+
+
 def test_ensure_autoseeds_when_no_matching_goal(tmp_path: Path, stub_slo_and_judge: None) -> None:
     """When no active brain-quality goal exists, the scaffolder must auto-seed
     one so the daily loop keeps producing measurable work — otherwise
@@ -213,6 +247,7 @@ def test_ensure_autoseeds_when_no_matching_goal(tmp_path: Path, stub_slo_and_jud
     assert seeded is not None
     assert "Brain" in seeded["title"] or "brain" in seeded["title"]
     assert seeded["metadata"]["auto_seeded"] is True
+    assert seeded["metadata"]["kind"] == "brain_quality_goal"
     assert len(result["created"]) == 1
 
 
@@ -237,3 +272,43 @@ def test_autoseed_skipped_when_db_unavailable(tmp_path: Path, monkeypatch) -> No
         task_queue_obj=_BrokenQueue(),
     )
     assert result["error"] == "no_matching_goal_and_autoseed_failed"
+
+
+def test_judge_volume_proposal_counts_structural_sidecar_coverage(tmp_path: Path) -> None:
+    db = tmp_path / "brain.db"
+    now = datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+    with sqlite3.connect(db) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE action_audit (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                route TEXT NOT NULL,
+                outcome TEXT,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE recall_structural_judgments (
+                action_audit_id INTEGER PRIMARY KEY,
+                outcome TEXT NOT NULL,
+                structural_score REAL NOT NULL,
+                reason_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                judged_at TEXT NOT NULL
+            );
+            """
+        )
+        for _ in range(20):
+            conn.execute(
+                "INSERT INTO action_audit (route, outcome, created_at) VALUES ('/recall/v2', NULL, ?)",
+                (now,),
+            )
+        first_id = conn.execute("SELECT MIN(id) FROM action_audit").fetchone()[0]
+        conn.execute(
+            "INSERT INTO recall_structural_judgments "
+            "(action_audit_id, outcome, structural_score, reason_json, created_at, judged_at) "
+            "VALUES (?, 'structural_good', 0.8, '{}', ?, ?)",
+            (first_id, now, now),
+        )
+
+    proposals = goal_subtask_scaffold._judge_volume_proposals(db)
+
+    assert proposals == []

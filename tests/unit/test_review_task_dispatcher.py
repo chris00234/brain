@@ -2,9 +2,9 @@
 
 Locks the contract: oldest-first selection over brain-generated tasks
 (filter on `created_by`, not on agent label), cap honoured, success →
-completed / failure → failed, no dispatcher invocation when zero
+completed / transient failure → deferred, no dispatcher invocation when zero
 eligible tasks exist. The dispatcher uses `cli_llm.cli_dispatch`
-(codex → claude fallback) and accepts a `prompt=` keyword.
+(Codex gpt-5.5 primary) and accepts a `prompt=` keyword.
 """
 
 from __future__ import annotations
@@ -67,10 +67,14 @@ def test_dispatcher_completes_successful_cli_run(tmp_path):
     assert "prompt" in calls[0]
     assert "outcome_feedback" in calls[0]["prompt"]
     assert "agent" not in calls[0]
+    assert calls[0]["allow_openclaw_fallback"] is False
     assert tq.get_task(task["id"])["status"] == "completed"
+    attempts = tq.list_dispatch_attempts(task_id=task["id"])
+    assert attempts[0]["status"] == "completed"
+    assert attempts[0]["metadata"]["openclaw_fallback_allowed"] is False
 
 
-def test_dispatcher_fails_task_on_cli_error(tmp_path):
+def test_dispatcher_defers_task_on_transient_cli_error(tmp_path):
     tq = TaskQueue(tmp_path / "autonomy.db")
     task = _seed_task(tq, created_by="goal_subtask_scaffold")
 
@@ -80,8 +84,28 @@ def test_dispatcher_fails_task_on_cli_error(tmp_path):
     result = dispatch_pending_review_tasks(max_dispatches=2, task_queue_obj=tq, dispatch_fn=fake_dispatch)
     assert result["dispatched"] == []
     assert result["skipped"][0]["task_id"] == task["id"]
+    assert result["skipped"][0]["reason"] == "cli_dispatch_deferred"
+    stored = tq.get_task(task["id"])
+    assert stored["status"] == "approved"
+    assert stored["metadata"]["next_attempt_at"]
+    attempts = tq.list_dispatch_attempts(task_id=task["id"])
+    assert attempts[0]["status"] == "deferred"
+
+
+def test_dispatcher_fails_task_on_terminal_cli_error(tmp_path):
+    tq = TaskQueue(tmp_path / "autonomy.db")
+    task = _seed_task(tq, created_by="goal_subtask_scaffold")
+
+    def fake_dispatch(**_kwargs):
+        return _StubCliResult(ok=False, error="invalid task prompt")
+
+    result = dispatch_pending_review_tasks(max_dispatches=2, task_queue_obj=tq, dispatch_fn=fake_dispatch)
+    assert result["dispatched"] == []
+    assert result["skipped"][0]["task_id"] == task["id"]
     assert result["skipped"][0]["reason"] == "cli_dispatch_failed"
     assert tq.get_task(task["id"])["status"] == "failed"
+    attempts = tq.list_dispatch_attempts(task_id=task["id"])
+    assert attempts[0]["status"] == "failed"
 
 
 def test_dispatcher_filters_non_review_created_by(tmp_path):
@@ -122,8 +146,22 @@ def test_dispatcher_records_backend_and_model_in_result(tmp_path):
     _seed_task(tq, created_by="outcome_feedback")
 
     def fake_dispatch(**_kwargs):
-        return _StubCliResult(ok=True, text="ok", backend="claude", model="claude-opus-4-7")
+        return _StubCliResult(ok=True, text="ok", backend="codex", model="gpt-5.5")
 
     result = dispatch_pending_review_tasks(max_dispatches=2, task_queue_obj=tq, dispatch_fn=fake_dispatch)
-    assert result["dispatched"][0]["backend"] == "claude"
-    assert result["dispatched"][0]["model"] == "claude-opus-4-7"
+    assert result["dispatched"][0]["backend"] == "codex"
+    assert result["dispatched"][0]["model"] == "gpt-5.5"
+
+
+def test_dispatcher_queries_brain_cli_agent_beyond_default_limit(tmp_path):
+    tq = TaskQueue(tmp_path / "autonomy.db")
+    for i in range(60):
+        _seed_task(tq, created_by="manual", agent="other", title=f"manual {i}")
+    target = _seed_task(tq, created_by="outcome_feedback", agent="brain_cli", title="eligible")
+
+    def fake_dispatch(**_kwargs):
+        return _StubCliResult(ok=True, text="ok")
+
+    result = dispatch_pending_review_tasks(max_dispatches=2, task_queue_obj=tq, dispatch_fn=fake_dispatch)
+
+    assert [d["task_id"] for d in result["dispatched"]] == [target["id"]]

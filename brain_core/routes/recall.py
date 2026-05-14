@@ -32,7 +32,14 @@ from pydantic import BaseModel, Field
 from rate_limit import limiter
 from vector_store import get_vector_store
 
-from config import BRAIN_DIR
+from config import (
+    BRAIN_DIR,
+    KNOWLEDGE_DIR,
+    OBSIDIAN_VAULT,
+    OBSIDIAN_VAULT_ICLOUD,
+    OBSIDIAN_VAULT_LOCAL,
+    OPENCLAW_DIR,
+)
 
 # First-failure flag so hook telemetry bugs surface once in logs instead of
 # being silently swallowed on every request.
@@ -667,6 +674,14 @@ _CONTENT_ENRICHABLE_TYPES = frozenset(
     }
 )
 _CONTENT_ENRICH_MAX_FILE_BYTES = 4000
+_CONTENT_ENRICH_ALLOWED_ROOTS = (
+    BRAIN_DIR,
+    KNOWLEDGE_DIR,
+    OBSIDIAN_VAULT,
+    OBSIDIAN_VAULT_ICLOUD,
+    OBSIDIAN_VAULT_LOCAL,
+    OPENCLAW_DIR,
+)
 
 
 def _apply_content_enrichment_inplace(fused: list[dict], top_n: int) -> int:
@@ -695,8 +710,8 @@ def _apply_content_enrichment_inplace(fused: list[dict], top_n: int) -> int:
         if rtype not in _CONTENT_ENRICHABLE_TYPES:
             continue
         try:
-            p = Path(path)
-            if not p.is_file():
+            p = _resolve_enrichable_path(path)
+            if p is None:
                 continue
             txt = p.read_text(errors="ignore")
         except Exception:
@@ -712,6 +727,31 @@ def _apply_content_enrichment_inplace(fused: list[dict], top_n: int) -> int:
             r["content"] = txt[:_CONTENT_ENRICH_MAX_FILE_BYTES]
         seen_paths.add(path)
     return int((time.time() - t_enrich) * 1000)
+
+
+def _resolve_enrichable_path(path: str) -> Path | None:
+    """Return a safe, resolved source path for content enrichment.
+
+    Recall results can come from mutable vector-store metadata. Never trust a
+    result's ``path`` field enough to read arbitrary local files; only enrich
+    files that resolve under known Brain/knowledge/Obsidian/OpenClaw roots and
+    reject symlinks escaping those roots.
+    """
+
+    try:
+        resolved = Path(path).expanduser().resolve(strict=True)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if not resolved.is_file():
+        return None
+    for root in _CONTENT_ENRICH_ALLOWED_ROOTS:
+        try:
+            root_resolved = Path(root).expanduser().resolve(strict=False)
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if resolved == root_resolved or resolved.is_relative_to(root_resolved):
+            return resolved
+    return None
 
 
 def _apply_exclude_already_used(

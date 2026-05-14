@@ -5,8 +5,9 @@ Today /brain/state surfaces a single judge wrong-rate scalar.  "30% wrong"
 is a noisy stat by itself — the brain can't tell whether Korean queries
 are worse than English, whether `claude` corrections drive most of the
 volume, or whether `/recall/active` differs from `/recall/v2`.  This
-module groups recall_judgments + recall_structural_judge outcomes into
-slices so the worst slice can be targeted.
+module groups LLM/manual recall outcomes plus sidecar structural-judge
+outcomes into slices so the worst slice can be targeted without hiding label
+source.
 
 Deterministic, read-only, no LLM.
 """
@@ -18,6 +19,7 @@ import re
 import sqlite3
 import sys
 from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -64,6 +66,7 @@ def breakdown(
         "by_language": {},
         "by_route": {},
         "by_actor": {},
+        "by_label_source": {},
         "worst_slice": None,
     }
     if not db.exists():
@@ -73,14 +76,12 @@ def breakdown(
         conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
         conn.row_factory = sqlite3.Row
         try:
-            rows = conn.execute(
-                "SELECT id, query_text, actor, route, outcome "
-                "FROM action_audit "
-                "WHERE outcome IN (?, ?, ?, ?) "
-                "  AND created_at > datetime('now', ? || ' hours') "
-                "  AND length(query_text) >= 5 ",
-                (*_WRONG_OUTCOMES, *_GOOD_OUTCOMES, f"-{int(hours)}"),
-            ).fetchall()
+            cutoff = (
+                (datetime.now(UTC) - timedelta(hours=out["window_hours"]))
+                .isoformat(timespec="seconds")
+                .replace("+00:00", "Z")
+            )
+            rows = _fetch_label_rows(conn, cutoff)
         finally:
             conn.close()
     except sqlite3.Error as exc:
@@ -95,13 +96,58 @@ def breakdown(
     out["by_language"] = _group(rows, _classify_language)
     out["by_route"] = _group(rows, lambda r: r["route"] or "(unknown)")
     out["by_actor"] = _group(rows, lambda r: (r["actor"] or "(unknown)").strip() or "(unknown)")
+    out["by_label_source"] = _group(rows, lambda r: r.get("label_source") or "(unknown)")
 
     out["worst_slice"] = _worst_slice(out)
     out["status"] = "ok"
     return out
 
 
-def _classify_language(row: sqlite3.Row) -> str:
+def _fetch_label_rows(conn: sqlite3.Connection, cutoff: str) -> list[dict]:
+    rows: list[dict] = [
+        dict(r)
+        | {
+            "label_source": (
+                "structural_legacy" if str(r["outcome"]).startswith("structural_") else "llm_or_manual"
+            )
+        }
+        for r in conn.execute(
+            "SELECT id, query_text, actor, route, outcome "
+            "FROM action_audit "
+            "WHERE outcome IN (?, ?, ?, ?) "
+            "  AND created_at > ? "
+            "  AND length(query_text) >= 5 ",
+            (*_WRONG_OUTCOMES, *_GOOD_OUTCOMES, cutoff),
+        ).fetchall()
+    ]
+    if _table_exists(conn, "recall_structural_judgments"):
+        rows.extend(
+            dict(r) | {"label_source": "structural_sidecar"}
+            for r in conn.execute(
+                "SELECT aa.id, aa.query_text, aa.actor, aa.route, rsj.outcome "
+                "FROM recall_structural_judgments rsj "
+                "JOIN action_audit aa ON aa.id = rsj.action_audit_id "
+                "WHERE rsj.outcome IN ('structural_good', 'structural_wrong') "
+                "  AND aa.created_at > ? "
+                "  AND length(aa.query_text) >= 5 "
+                "  AND (aa.outcome IS NULL OR aa.outcome NOT IN ("
+                "      'judged_good', 'judged_wrong', 'structural_good', 'structural_wrong'"
+                "  ))",
+                (cutoff,),
+            ).fetchall()
+        )
+    return rows
+
+
+def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (table_name,),
+    ).fetchone()
+    return row is not None
+
+
+def _classify_language(row: dict) -> str:
     q = row["query_text"] or ""
     if _HANGUL_RE.search(q):
         return "ko"
@@ -109,8 +155,8 @@ def _classify_language(row: sqlite3.Row) -> str:
 
 
 def _group(
-    rows: list[sqlite3.Row],
-    key_fn: Callable[[sqlite3.Row], str],
+    rows: list[dict],
+    key_fn: Callable[[dict], str],
 ) -> dict[str, dict]:
     groups: dict[str, dict] = {}
     for r in rows:

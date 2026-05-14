@@ -25,6 +25,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -186,18 +187,35 @@ def _judge_coverage_snapshot(brain_db_path: Path | str | None) -> dict[str, floa
     try:
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
         try:
+            cutoff = (
+                (datetime.now(UTC) - timedelta(days=7)).isoformat(timespec="seconds").replace("+00:00", "Z")
+            )
             recalls = conn.execute(
                 "SELECT COUNT(*) FROM action_audit "
                 "WHERE route IN ('/recall', '/recall/v2') "
-                "  AND created_at > datetime('now', '-7 days')"
+                "  AND created_at > ?",
+                (cutoff,),
             ).fetchone()[0]
             judged = conn.execute(
                 "SELECT COUNT(*) FROM action_audit "
                 "WHERE route IN ('/recall', '/recall/v2') "
-                "  AND created_at > datetime('now', '-7 days') "
+                "  AND created_at > ? "
                 "  AND outcome IN ('judged_good', 'judged_wrong', "
-                "                 'structural_good', 'structural_wrong')"
+                "                 'structural_good', 'structural_wrong')",
+                (cutoff,),
             ).fetchone()[0]
+            if _table_exists(conn, "recall_structural_judgments"):
+                judged = conn.execute(
+                    "SELECT COUNT(DISTINCT aa.id) FROM action_audit aa "
+                    "LEFT JOIN recall_structural_judgments rsj ON rsj.action_audit_id = aa.id "
+                    "WHERE aa.route IN ('/recall', '/recall/v2') "
+                    "  AND aa.created_at > ? "
+                    "  AND (aa.outcome IN ('judged_good', 'judged_wrong', "
+                    "                     'structural_good', 'structural_wrong') "
+                    "       OR rsj.outcome IN ('structural_good', 'structural_wrong', "
+                    "                          'structural_neutral'))",
+                    (cutoff,),
+                ).fetchone()[0]
         finally:
             conn.close()
     except sqlite3.Error:
@@ -205,6 +223,14 @@ def _judge_coverage_snapshot(brain_db_path: Path | str | None) -> dict[str, floa
     if not recalls:
         return {}
     return {"recall_judge.judged_pct_7d": round((judged / recalls) * 100, 2)}
+
+
+def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (table_name,),
+    ).fetchone()
+    return row is not None
 
 
 def _low_confidence_snapshot(brain_db_path: Path | str | None) -> dict[str, float]:

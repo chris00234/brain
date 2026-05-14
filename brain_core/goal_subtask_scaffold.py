@@ -28,7 +28,9 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -38,8 +40,10 @@ log = logging.getLogger("brain.goal_subtask_scaffold")
 
 
 _METRIC_SIGNATURE_KEY = "brain_quality_metric"
+_QUALITY_GOAL_KIND_KEY = "kind"
+_QUALITY_GOAL_KIND = "brain_quality_goal"
 # 2026-05-13: brain-quality subtasks now dispatch through cli_llm
-# (subscription codex → claude) rather than an OpenClaw persona. The
+# (subscription Codex gpt-5.5) rather than an OpenClaw persona. The
 # label flows through to review_task_dispatcher's eligibility filter.
 _DEFAULT_SUBTASK_AGENT = "brain_cli"
 
@@ -168,22 +172,36 @@ def _judge_volume_proposals(brain_db_path: Path | str | None) -> list[dict]:
     db_path = Path(brain_db_path or BRAIN_DB)
     if not db_path.exists():
         return []
-    import sqlite3
-
     try:
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
         try:
+            cutoff = (
+                (datetime.now(UTC) - timedelta(days=7)).isoformat(timespec="seconds").replace("+00:00", "Z")
+            )
             recalls = conn.execute(
                 "SELECT COUNT(*) FROM action_audit "
                 "WHERE route IN ('/recall', '/recall/v2') "
-                "  AND created_at > datetime('now', '-7 days')"
+                "  AND created_at > ?",
+                (cutoff,),
             ).fetchone()[0]
             judged = conn.execute(
                 "SELECT COUNT(*) FROM action_audit "
                 "WHERE route IN ('/recall', '/recall/v2') "
-                "  AND created_at > datetime('now', '-7 days') "
-                "  AND outcome IN ('judged_good', 'judged_wrong')"
+                "  AND created_at > ? "
+                "  AND outcome IN ('judged_good', 'judged_wrong')",
+                (cutoff,),
             ).fetchone()[0]
+            if _table_exists(conn, "recall_structural_judgments"):
+                judged = conn.execute(
+                    "SELECT COUNT(DISTINCT aa.id) FROM action_audit aa "
+                    "LEFT JOIN recall_structural_judgments rsj ON rsj.action_audit_id = aa.id "
+                    "WHERE aa.route IN ('/recall', '/recall/v2') "
+                    "  AND aa.created_at > ? "
+                    "  AND (aa.outcome IN ('judged_good', 'judged_wrong') "
+                    "       OR rsj.outcome IN ('structural_good', 'structural_wrong', "
+                    "                          'structural_neutral'))",
+                    (cutoff,),
+                ).fetchone()[0]
         finally:
             conn.close()
     except sqlite3.Error as exc:
@@ -202,11 +220,11 @@ def _judge_volume_proposals(brain_db_path: Path | str | None) -> list[dict]:
                 f"(currently {round(judge_pct, 2)}% over 7d, {judged}/{recalls})"
             ),
             "description": (
-                "recall_judge currently samples too few /recall calls for the "
-                "wrong-rate signal to be reliable. Options without extra LLM "
-                "spend: bump SAMPLE_SIZE, run twice per day, or add a "
-                "deterministic structural judge that runs on every recall "
-                "and stores a heuristic score in action_audit.outcome."
+                "recall quality labeling currently covers too few /recall calls "
+                "for the wrong-rate signal to be reliable. Options without extra "
+                "LLM spend: tune the deterministic structural judge sidecar, "
+                "improve its calibration thresholds, or increase LLM judge "
+                "sampling when quota allows."
             ),
             "direction": "raise_above",
             "current": round(judge_pct, 2),
@@ -216,6 +234,14 @@ def _judge_volume_proposals(brain_db_path: Path | str | None) -> list[dict]:
             "evidence": {"window_days": 7, "judged": judged, "recalls": recalls},
         }
     ]
+
+
+def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (table_name,),
+    ).fetchone()
+    return row is not None
 
 
 def _uncertainty_proposals(brain_db_path: Path | str | None) -> list[dict]:
@@ -374,7 +400,12 @@ def _autoseed_brain_quality_goal(task_queue_obj: Any) -> dict | None:
         goal = task_queue_obj.create_goal(
             _AUTOSEED_GOAL_TITLE,
             _AUTOSEED_GOAL_DESCRIPTION,
-            metadata={"priority": 1, "auto_seeded": True, "source": "goal_subtask_scaffold"},
+            metadata={
+                "priority": 1,
+                "auto_seeded": True,
+                "source": "goal_subtask_scaffold",
+                _QUALITY_GOAL_KIND_KEY: _QUALITY_GOAL_KIND,
+            },
         )
         log.info("autoseeded brain-quality goal %s", goal.get("id"))
         return goal
@@ -395,11 +426,23 @@ def _resolve_goal(
     except Exception as exc:
         log.debug("list_goals failed: %s", exc)
         return None
-    matches = [
+    metadata_matches = [
         g
         for g in goals or []
-        if isinstance(g, dict) and any(token in str(g.get("title") or "") for token in title_match)
+        if isinstance(g, dict)
+        and isinstance(g.get("metadata"), dict)
+        and g["metadata"].get(_QUALITY_GOAL_KIND_KEY) == _QUALITY_GOAL_KIND
     ]
+    if metadata_matches:
+        matches = metadata_matches
+    else:
+        # Backward-compatible migration path for pre-kind goals: only fall
+        # back to title matching when no explicit brain-quality goal exists.
+        matches = [
+            g
+            for g in goals or []
+            if isinstance(g, dict) and any(token in str(g.get("title") or "") for token in title_match)
+        ]
     if not matches:
         return None
     # Lower priority numbers represent higher priority in the task queue;
