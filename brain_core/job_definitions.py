@@ -394,6 +394,16 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         agent="system",
         misfire_grace=900,
     ),
+    # 2026-05-14 conflict surfacer — pairs of non-superseded atoms with
+    # divergent polarity/numbers inside the same topic_key. Queues at most
+    # 5 review tasks per day; existing-signature dedupe keeps reruns idempotent.
+    ScheduledJob(
+        name="atom_conflict_surfacer",
+        description="Surface candidate atom-pair conflicts as review tasks (daily 4:46am)",
+        trigger=CronTrigger(hour=4, minute=46),
+        agent="system",
+        misfire_grace=900,
+    ),
     # 2026-04-26 stale atoms: auto-mark `tier='obsolete'` for atoms whose
     # valid_until passed >60 days ago AND who have a recorded
     # superseded_by chain AND were never reinforced. Conservative — we

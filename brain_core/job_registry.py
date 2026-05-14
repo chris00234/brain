@@ -436,6 +436,14 @@ JOB_REGISTRY: dict[str, list[str]] = {
         "-c",
         f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from db_maintenance import run_sidecar_backup_retention; import json; print(json.dumps(run_sidecar_backup_retention()))",
     ],
+    # 2026-05-14 conflict surfacer: find non-superseded atom pairs in the
+    # same topic_key with overlapping text but divergent polarity or numbers.
+    # Queues bounded review tasks via brain_cli. Pure SQLite, no LLM.
+    "atom_conflict_surfacer": [
+        _py,
+        "-c",
+        f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from conflict_surfacer import run_default; import json; print(json.dumps(run_default(), default=str))",
+    ],
     # 2026-04-26 stale-atoms auto-obsolete: only targets atoms with a real
     # supersede chain + 60d expired + never reinforced. Conservative.
     "obsolete_expired_atoms": [
