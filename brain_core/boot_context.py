@@ -466,6 +466,24 @@ def build_boot_context(agent_name, limit=3, prompt: str | None = None):
     except Exception:
         pass
 
+    # Background work status — running / failed / deferred scheduler jobs.
+    # Only injected when there is something to report so quiet operation
+    # stays quiet (boot context already loads ~15 blocks).
+    try:
+        from work_status import boot_context_block as _work_status_block
+
+        ws = _work_status_block()
+        if ws:
+            sections.append(
+                {
+                    "section": "Background Work",
+                    "content": ws,
+                    "source": "brain/scheduler",
+                }
+            )
+    except Exception:
+        pass
+
     # Recent OpenClaw agent conversations (last 24h) — cached 5min
     oc_cached = _cache_get("openclaw_recent_24h", DYNAMIC_TTL)
     if oc_cached is not None:
