@@ -384,6 +384,16 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         agent="system",
         misfire_grace=900,
     ),
+    # 2026-05-14 sidecar repair backups (`*.pre_*` / `*.pre-*`) accumulate
+    # hot-DB-sized files in logs/ root. 7d retention; runs at 4:44am so the
+    # daily logs_dir snapshot at 4:55am sees the pruned state.
+    ScheduledJob(
+        name="sidecar_backup_retention",
+        description="Prune ad-hoc DB repair sidecars older than 7d (daily 4:44am)",
+        trigger=CronTrigger(hour=4, minute=44),
+        agent="system",
+        misfire_grace=900,
+    ),
     # 2026-04-26 stale atoms: auto-mark `tier='obsolete'` for atoms whose
     # valid_until passed >60 days ago AND who have a recorded
     # superseded_by chain AND were never reinforced. Conservative — we

@@ -351,3 +351,50 @@ def test_obsolete_expired_atoms_db_missing(monkeypatch: pytest.MonkeyPatch, tmp_
     monkeypatch.setattr(db_maintenance, "BRAIN_DB", tmp_path / "missing.db")
     summary = db_maintenance.run_obsolete_expired_atoms(days=60)
     assert summary["status"] == "db_missing"
+
+
+def test_sidecar_backup_retention_removes_only_aged_top_level_files(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Prune `*.pre_*` / `*.pre-*` older than N days, leave fresh ones and
+    files in subdirs untouched. Sidecars are flat in logs/, never nested."""
+    import os
+    import time
+
+    old = tmp_path / "autonomy.db.pre_slo_repair_20260513T150349Z"
+    old.write_bytes(b"x" * 1024)
+    aged_ts = time.time() - 8 * 86400
+    os.utime(old, (aged_ts, aged_ts))
+
+    fresh = tmp_path / "brain.db.pre-structural-sidecar-20260514T032448Z.bak.gz"
+    fresh.write_bytes(b"y" * 2048)
+
+    nested_dir = tmp_path / "backups"
+    nested_dir.mkdir()
+    nested = nested_dir / "autonomy-20260513.db.pre_slo_repair"
+    nested.write_bytes(b"z" * 4096)
+    os.utime(nested, (aged_ts, aged_ts))
+
+    unrelated = tmp_path / "scheduler_history.db"
+    unrelated.write_bytes(b"w" * 512)
+    os.utime(unrelated, (aged_ts, aged_ts))
+
+    monkeypatch.setattr(db_maintenance, "BRAIN_LOGS_DIR", tmp_path)
+    summary = db_maintenance.run_sidecar_backup_retention(days=7)
+    assert summary["status"] == "ok"
+    assert not old.exists()
+    assert fresh.exists()
+    assert nested.exists()
+    assert unrelated.exists()
+    assert summary["kept"] == 1
+    assert any(r["name"] == old.name for r in summary["removed"])
+    assert summary["bytes_freed"] == 1024
+
+
+def test_sidecar_backup_retention_handles_empty_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(db_maintenance, "BRAIN_LOGS_DIR", tmp_path)
+    summary = db_maintenance.run_sidecar_backup_retention(days=7)
+    assert summary["status"] == "ok"
+    assert summary["removed"] == []
+    assert summary["kept"] == 0
+    assert summary["bytes_freed"] == 0

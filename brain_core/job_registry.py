@@ -428,6 +428,14 @@ JOB_REGISTRY: dict[str, list[str]] = {
         "-c",
         f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from db_maintenance import run_session_context_retention; import json; print(json.dumps(run_session_context_retention()))",
     ],
+    # 2026-05-14 retention: ad-hoc repair sidecars (`*.pre_*` / `*.pre-*`)
+    # at the top of logs/. Each one is hot-DB-sized; without retention they
+    # stack to GB. 7d window lets a migration prove itself before pruning.
+    "sidecar_backup_retention": [
+        _py,
+        "-c",
+        f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from db_maintenance import run_sidecar_backup_retention; import json; print(json.dumps(run_sidecar_backup_retention()))",
+    ],
     # 2026-04-26 stale-atoms auto-obsolete: only targets atoms with a real
     # supersede chain + 60d expired + never reinforced. Conservative.
     "obsolete_expired_atoms": [

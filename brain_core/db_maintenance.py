@@ -67,6 +67,13 @@ SESSION_CONTEXT_RETENTION_DAYS = 30
 # we trust the supersession chain (set by ingest_mirror's semantic gate or
 # explicit AI replaces=); we don't blanket-obsolete every expired atom.
 EXPIRED_ATOM_OBSOLETE_DAYS = 60
+# Sidecar backups left next to hot DBs by ad-hoc repair scripts
+# (`*.pre_*` / `*.pre-*`). 2026-05-14: two 289 MB autonomy.db.pre_slo_repair_*
+# files + a 51 MB brain.db.pre-structural-sidecar gz drove logs_dir_growth_24h
+# from <100 MB to 643 MB in a single day. Sidecars served their rollback
+# purpose; if the brain is still running after 7 days, the migration stuck.
+SIDECAR_BACKUP_RETENTION_DAYS = 7
+SIDECAR_BACKUP_PATTERNS = ("*.pre_*", "*.pre-*")
 
 
 def _sqlite_size_mb(path: Path) -> float:
@@ -647,6 +654,56 @@ def run_metrics_history_retention(days: int = METRICS_HISTORY_RETENTION_DAYS) ->
     return summary
 
 
+def run_sidecar_backup_retention(days: int = SIDECAR_BACKUP_RETENTION_DAYS) -> dict:
+    """Prune top-level repair sidecar files (`*.pre_*` / `*.pre-*`) older than N days.
+
+    Repair scripts copy hot DBs to timestamped sidecars before destructive
+    migrations. Without retention they accumulate at hot-DB scale — a single
+    pre_slo_repair backup is ~289 MB. Only top-level files in BRAIN_LOGS_DIR
+    are considered; nothing inside subdirs (`backups/`, `jobs/`, `training/`)
+    is touched.
+    """
+    import time
+
+    summary: dict = {
+        "days_kept": days,
+        "patterns": list(SIDECAR_BACKUP_PATTERNS),
+        "started_at": _now_iso(),
+        "removed": [],
+        "kept": 0,
+        "bytes_freed": 0,
+    }
+    try:
+        cutoff = time.time() - float(days) * 86400.0
+        seen: set[Path] = set()
+        for pattern in SIDECAR_BACKUP_PATTERNS:
+            for path in BRAIN_LOGS_DIR.glob(pattern):
+                if not path.is_file() or path in seen:
+                    continue
+                seen.add(path)
+                try:
+                    stat = path.stat()
+                except OSError:
+                    continue
+                if stat.st_mtime >= cutoff:
+                    summary["kept"] += 1
+                    continue
+                size = stat.st_size
+                try:
+                    path.unlink()
+                except OSError as exc:
+                    summary.setdefault("errors", []).append(f"{path.name}:{exc}")
+                    continue
+                summary["removed"].append({"name": path.name, "mb": round(size / 1048576, 2)})
+                summary["bytes_freed"] += size
+        summary["mb_freed"] = round(summary["bytes_freed"] / 1048576, 2)
+        summary["status"] = "ok"
+    except Exception as exc:
+        summary["status"] = f"error:{str(exc)[:150]}"
+    summary["finished_at"] = _now_iso()
+    return summary
+
+
 def growth_stats() -> dict:
     """One-shot health: row counts + sizes across all brain SQLite DBs.
     Used by /brain/health and growth-rate SLO."""
@@ -695,6 +752,7 @@ if __name__ == "__main__":
     sub.add_parser("retention_decisions")
     sub.add_parser("retention_metrics")
     sub.add_parser("retention_session_context")
+    sub.add_parser("retention_sidecar_backups")
     sub.add_parser("obsolete_expired_atoms")
     sub.add_parser("stats")
     args = p.parse_args()
@@ -716,6 +774,8 @@ if __name__ == "__main__":
         print(json.dumps(run_metrics_history_retention(), indent=2))
     elif args.cmd == "retention_session_context":
         print(json.dumps(run_session_context_retention(), indent=2))
+    elif args.cmd == "retention_sidecar_backups":
+        print(json.dumps(run_sidecar_backup_retention(), indent=2))
     elif args.cmd == "obsolete_expired_atoms":
         print(json.dumps(run_obsolete_expired_atoms(), indent=2))
     elif args.cmd == "stats":
