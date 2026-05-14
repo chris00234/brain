@@ -1,11 +1,10 @@
-"""Phase 3: brain → Claude / Codex command-and-outbox tests.
+"""Phase 3: brain → Codex command-and-outbox tests.
 
 Verifies that:
   1. /brain/command rejects unknown agents (existing whitelist behaviour).
-  2. claude / codex are now valid targets (Phase 3 extension).
-  3. claude / codex dispatches drop a JSON envelope at
-     ~/.brain_outbox/{agent}/pending/{msg_id}.json that brain-spawn-{agent}
-     watches.
+  2. codex is the canonical outbox target; claude remains a deprecated alias.
+  3. codex dispatches drop a JSON envelope at
+     ~/.brain_outbox/codex/pending/{msg_id}.json that brain-spawn-codex watches.
   4. The envelope is atomic and contains exactly the payload fields the
      spawner expects (message_id, content, message_type, priority).
   5. Pure agent_messenger targets (jenna/liz/etc) do NOT get an outbox file.
@@ -63,7 +62,7 @@ def test_command_rejects_unknown_agent(monkeypatch, tmp_path):
     assert exc_info.value.status_code == 400
 
 
-def test_command_claude_target_writes_outbox(monkeypatch, tmp_path):
+def test_command_claude_alias_writes_codex_outbox(monkeypatch, tmp_path):
     cmd = _import_command_module(monkeypatch, tmp_path)
     req = _make_request(
         cmd,
@@ -76,13 +75,18 @@ def test_command_claude_target_writes_outbox(monkeypatch, tmp_path):
     result = cmd.brain_command(req)
 
     assert result["ok"] is True
+    assert result["to_agent"] == "codex"
+    assert result["requested_to_agent"] == "claude"
+    assert result["deprecated_alias"] == "claude"
     assert result["outbox_path"] is not None
 
-    pending = tmp_path / "claude" / "pending"
+    pending = tmp_path / "codex" / "pending"
     files = list(pending.glob("*.json"))
     assert len(files) == 1, f"expected exactly one envelope, got {files}"
     envelope = json.loads(files[0].read_text())
-    assert envelope["to_agent"] == "claude"
+    assert envelope["to_agent"] == "codex"
+    assert envelope["requested_to_agent"] == "claude"
+    assert envelope["deprecated_alias"] == "claude"
     assert envelope["message_type"] == "task"
     assert envelope["priority"] == 3
     assert "verify lessons surface" in envelope["content"]
@@ -93,6 +97,9 @@ def test_command_codex_target_writes_outbox(monkeypatch, tmp_path):
     cmd = _import_command_module(monkeypatch, tmp_path)
     req = _make_request(cmd, to_agent="codex", content="codex test task")
     result = cmd.brain_command(req)
+    assert result["to_agent"] == "codex"
+    assert result["requested_to_agent"] == "codex"
+    assert result["deprecated_alias"] is None
     assert result["outbox_path"] is not None
     files = list((tmp_path / "codex" / "pending").glob("*.json"))
     assert len(files) == 1
@@ -110,9 +117,9 @@ def test_command_jenna_target_no_outbox(monkeypatch, tmp_path):
 def test_outbox_write_is_atomic(monkeypatch, tmp_path):
     """No partial / .tmp file should survive a successful write."""
     cmd = _import_command_module(monkeypatch, tmp_path)
-    req = _make_request(cmd, to_agent="claude", content="atomicity check")
+    req = _make_request(cmd, to_agent="codex", content="atomicity check")
     cmd.brain_command(req)
-    pending = tmp_path / "claude" / "pending"
+    pending = tmp_path / "codex" / "pending"
     tmp_files = list(pending.glob(".*.tmp"))
     real_files = list(pending.glob("*.json"))
     assert tmp_files == [], f"leftover tempfile(s): {tmp_files}"

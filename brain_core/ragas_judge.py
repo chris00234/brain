@@ -21,8 +21,7 @@ which is the actual contract for any RAG system.
 
 Cost: 1-4 LLM dispatches per (query, answer) pair through cli_llm's
 subscription-backed fallback chain: Codex gpt-5.5 primary,
-gpt-5.3-codex-spark quota fallback, configured Claude CLI accounts, then
-OpenClaw only if every CLI route fails.
+gpt-5.3-codex-spark quota fallback, then OpenClaw only if every CLI route fails.
 
 Default OFF — only fires when called explicitly from cli/eval_compare.py
 with --ragas. Not on the hot path.

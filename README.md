@@ -27,8 +27,8 @@ endpoints not exposed through MCP, such as readiness, SLOs, job control, and
 OpenClaw task execution evidence.
 
 Autonomous/background LLM work is CLI-first through `brain_core/cli_llm.py`:
-Codex `gpt-5.5` primary, `gpt-5.3-codex-spark` fallback, then configured
-Claude accounts; OpenClaw is only the integration/emergency fallback lane.
+Codex `gpt-5.5` primary, `gpt-5.3-codex-spark` fallback; OpenClaw is only
+the integration/emergency fallback lane.
 `GET /brain/usage` reports this current `cli_llm` surface (`source=cli_llm`,
 `primary_model=gpt-5.5`) rather than the legacy OpenClaw wrapper.
 

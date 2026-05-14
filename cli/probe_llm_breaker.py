@@ -48,7 +48,7 @@ def _eligible_backends(max_backends: int) -> list[tuple[str, str, str]]:
     # Prefer stateless subscription CLIs for a cheap health probe; avoid the
     # OpenClaw fallback path because this breaker protects Brain LLM dispatch,
     # not interactive OpenClaw sessions.
-    entries = [(b, m, d) for b, m, d in FALLBACK_CHAIN if b in {"codex", "claude"}]
+    entries = [(b, m, d) for b, m, d in FALLBACK_CHAIN if b == "codex"]
     return entries[: max(1, max_backends)]
 
 

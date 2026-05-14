@@ -52,7 +52,7 @@ Evidence:
 Fixes landed:
 
 - `brain_core/task_queue.py`: autonomous background task execution now uses the subscription CLI fallback chain first (Codex `gpt-5.5` primary) with OpenClaw as a fallback/integration lane; transient dispatch problems are deferred with `next_attempt_at`; running orphans requeue at scheduler startup.
-- `brain_core/cli_llm.py`: OpenClaw gateway calls no longer take the local Codex/Claude CLI slot; timeouts/empty responses preserve real error details; transient provider/gateway/slot errors do not trip the coarse global breaker.
+- `brain_core/cli_llm.py`: OpenClaw gateway calls no longer take the local Codex CLI slot; timeouts/empty responses preserve real error details; transient provider/gateway/slot errors do not trip the coarse global breaker.
 - `brain_core/breakers.py`: stale half-open probes reopen and half-open-probing failures count correctly.
 - `brain_core/scheduler.py`: startup requeues orphaned running tasks.
 - `brain_core/agent_messenger.py`: handoff task descriptions preserve the full message and source metadata.
@@ -297,7 +297,7 @@ Evidence:
 
 Fix applied:
 
-- Updated `brain/ARCHITECTURE.md` to document CLI-first LLM/background dispatch: Codex `gpt-5.5` primary, Spark/Claude fallbacks, OpenClaw as integration/emergency fallback.
+- Updated `brain/ARCHITECTURE.md` to document CLI-first LLM/background dispatch: Codex `gpt-5.5` primary and Spark fallback, OpenClaw as integration/emergency fallback.
 - Updated `brain/ARCHITECTURE.md` SLO and scheduler sections to current scale: 27 SLOs and 139 scheduled jobs, including dispatch truth, Reflexion lesson coverage, source/privacy governance, UI parity, CRAG/RAGAS/adversarial/holdout gates, and maintenance.
 - Updated `brain/DEPLOY.md` to document direct Telegram Bot API alert delivery with backlog replay and deterministic remediation first.
 - Updated `AGENT_HARNESS.md` to say MCP is the default interactive path, HTTP is for batch/readiness/execution-truth endpoints, and autonomous/task-helper execution is CLI-first with OpenClaw as integration/emergency fallback.
@@ -451,7 +451,7 @@ Priority is based on Chris's concerns, observed failure impact, and ability to v
 3. **Breaker semantics audit**
    - Problem: global breaker should not hide backend-specific cooldowns or local capacity constraints.
    - Current fix: transient errors no longer trip global breaker; half-open probes stale out.
-   - Implemented now: `brain_core/cli_llm.py` exposes `failure_taxonomy_snapshot()` through `/brain/usage.llm.failure_taxonomy`, covering Codex, Claude, and OpenClaw provider classes plus auth, billing, model-missing, context-overflow, rate-limit, overloaded, and unknown recovery semantics.
+   - Implemented now: `brain_core/cli_llm.py` exposes `failure_taxonomy_snapshot()` through `/brain/usage.llm.failure_taxonomy`, covering Codex and OpenClaw provider classes plus auth, billing, model-missing, context-overflow, rate-limit, overloaded, and unknown recovery semantics.
    - Current fix: tests prove the failure taxonomy is static/hermetic and does not invoke CLI backends.
    - Next: add a dedicated Brain UI card if the usage panel is not enough for day-to-day operations.
 
@@ -685,7 +685,7 @@ Chris's concern was correct: several scheduled/background paths still looked lik
 
 Changes made:
 
-- Added `ingest/llm_dispatch.py`, a shared JSON helper that calls `brain_core.cli_llm.dispatch` with the default fallback chain (`codex/gpt-5.5` primary, `gpt-5.3-codex-spark`, configured Claude fallback, OpenClaw only as central emergency fallback).
+- Added `ingest/llm_dispatch.py`, a shared JSON helper that calls `brain_core.cli_llm.dispatch` with the default fallback chain (`codex/gpt-5.5` primary, `gpt-5.3-codex-spark`, OpenClaw only as central emergency fallback).
 - Migrated scheduled ingest adapters from direct `openclaw agent` subprocess calls to the shared helper:
   - `ingest/screen_time.py`
   - `ingest/git_activity.py`
@@ -754,7 +754,7 @@ After the code-level CLI-first migration, the remaining risk was documentation d
 
 Changes made:
 
-- `README.md` now states autonomous/background LLM work is CLI-first through `brain_core/cli_llm.py`, with Codex `gpt-5.5` primary, Spark/Claude fallback, and OpenClaw only as integration/emergency fallback. It also states `/brain/usage` reports `source=cli_llm`, `primary_model=gpt-5.5`, and task-evaluation notifications are action summaries, not approval requests.
+- `README.md` now states autonomous/background LLM work is CLI-first through `brain_core/cli_llm.py`, with Codex `gpt-5.5` primary, Spark fallback, and OpenClaw only as integration/emergency fallback. It also states `/brain/usage` reports `source=cli_llm`, `primary_model=gpt-5.5`, and task-evaluation notifications are action summaries, not approval requests.
 - `AGENT_HARNESS.md` now tells agents to verify `/brain/usage` as the CLI-first accounting surface and identifies `task_queue:evaluation_action_summary` plus `TASK EVALUATION ACTION` wording as the evaluation notification contract.
 - `brain/ARCHITECTURE.md` now documents that `/brain/usage` is backed by `cli_llm.get_usage_stats` and should report `source=cli_llm`, `primary_model=gpt-5.5`.
 - `tests/unit/test_cli_first_dispatch_contract.py` now asserts those docs contain the CLI-first usage and task-evaluation action-summary contract.

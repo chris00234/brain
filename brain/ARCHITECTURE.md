@@ -61,7 +61,7 @@ A single-user, local-first second brain that combines RAG, episodic + semantic m
                        │
        ┌───────────────┴──────────────────┐
        │ cli_llm fallback chain (CB+retry)│
-       │ Codex gpt-5.5 → Spark → Claude   │
+       │ Codex gpt-5.5 → Spark   │
        │ OpenClaw gateway as integration  │
        │ / emergency fallback lane        │
        └──────────────────────────────────┘
@@ -105,7 +105,7 @@ Cross-encoder scoring runs in an isolated local worker (`brain_core/reranker_wor
 523+ canonical atoms with SM-2 spaced repetition (`easiness_factor`, `interval_days`, `next_review_at`, `reinforcement_count`), tier promotion (`episodic → semantic → core → obsolete`), supersession chains (`supersedes` / `superseded_by` / `valid_from` / `valid_until`), per-atom provenance + raw_event lineage. Gated by `BRAIN_ATOMS_ENABLED` for write-side, `BRAIN_ATOMS_READ` for read-side filtering.
 
 ### 6. LLM dispatch (`brain_core/cli_llm.py`, `brain_core/openclaw_dispatch.py`)
-Mechanical text LLM calls and autonomous Brain background work route through subscription CLIs via `brain_core/cli_llm.py`: Codex `gpt-5.5` first, then `gpt-5.3-codex-spark`, then Claude CLI fallback accounts. Tool/session-heavy agent work can still use OpenClaw through `brain_core/openclaw_dispatch.py`, but OpenClaw is the integration / emergency fallback lane rather than the default executor. Both paths use breakers/backlog so quota degradation queues catch-up work instead of paging Chris. Hard rule: no direct OpenAI/Anthropic SDK billing and no local generation model duty.
+Mechanical text LLM calls and autonomous Brain background work route through the subscription Codex CLI via `brain_core/cli_llm.py`: Codex `gpt-5.5` first, then `gpt-5.3-codex-spark`. Tool/session-heavy agent work can still use OpenClaw through `brain_core/openclaw_dispatch.py`, but OpenClaw is the integration / emergency fallback lane rather than the default executor. Both paths use breakers/backlog so quota degradation queues catch-up work instead of paging Chris. Hard rule: no direct OpenAI/Anthropic SDK billing and no local generation model duty.
 Usage/accounting is exposed through `/brain/usage`, backed by `cli_llm.get_usage_stats`, and should report `source=cli_llm` with `primary_model=gpt-5.5` for mechanical dispatch.
 
 `brain_core/escalation_policy.py` gates all Chris-facing notification paths. The default target is LLM/agent self-handling; Telegram is reserved for blockers the LLM cannot resolve itself: missing private/current knowledge, credentials/account access, physical access, irreversible authority, or human-only judgment. If a subscription LLM review returns `HUMAN_NEEDED: ...`, the original path may notify Chris with that specific blocker; `HANDLEABLE: ...` stays inside Brain.
@@ -166,7 +166,7 @@ operator → MCP brain_recall(q="how do we deploy ghost?")
 | `brain_core/reranker_worker.py` | Isolated Torch/MPS cross-encoder worker with RSS/request/lifetime recycling |
 | `brain_core/reranker_client.py` | Main-server HTTP client for the local reranker worker |
 | `brain_core/atoms_store.py` | SQLite truth layer + action_audit |
-| `brain_core/cli_llm.py` | CLI-first LLM fallback chain: Codex gpt-5.5 → Spark → Claude → OpenClaw fallback |
+| `brain_core/cli_llm.py` | CLI-first LLM fallback chain: Codex gpt-5.5 → Spark → OpenClaw fallback |
 | `brain_core/openclaw_dispatch.py` | OpenClaw gateway integration / emergency fallback for agent-session-heavy work |
 | `brain_core/scheduler.py` | 138 APScheduler cron jobs |
 | `brain_core/slos.py` | 27 SLOs + measurement + alert dispatch |
@@ -195,4 +195,4 @@ operator → MCP brain_recall(q="how do we deploy ghost?")
 - The brain runs on Chris's M4 Max Mac Studio. Single user, single tenant, single token. `~/.openclaw/credentials/.personal_webhook_secret` is the auth root.
 - All storage backends native via launchd: `ai.openclaw.qdrant-native` (source-built v1.17 binary at `~/.local/bin/qdrant`), `ai.openclaw.ollama-native`, `ai.openclaw.neo4j-native`. Brain server itself native via `ai.openclaw.brain-server.plist`. OrbStack is used only for ancillary services (not brain-critical).
 - Cloudflare tunnel exposes `brain.chrischodev.com` for remote access. Bearer auth required.
-- Text LLM dispatch uses Chris's existing subscriptions through CLI-first routing (`codex exec` gpt-5.5 primary, Spark/Claude fallback); OpenClaw remains available as an integration / emergency fallback. Vision captioning defaults to Codex subscription CLI; Gemini REST is explicit opt-in only.
+- Text LLM dispatch uses Chris's existing subscription through CLI-first routing (`codex exec` gpt-5.5 primary, Spark fallback); OpenClaw remains available as an integration / emergency fallback. Vision captioning defaults to Codex subscription CLI; Gemini REST is explicit opt-in only.

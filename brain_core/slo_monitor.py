@@ -366,7 +366,7 @@ def monitor_cycle() -> dict:
             sys.path.insert(0, str(Path(__file__).resolve().parent))
             if _should_dispatch_alert(alerts):
                 # 2026-04-18: previously routed through cli_llm.dispatch(agent="jenna")
-                # which ran the full codex→spark→claude fallback chain for a
+                # which ran the full codex→spark fallback chain for a
                 # notification whose body was fully pre-formatted. No LLM value;
                 # just 2-6s + tokens before Telegram. Direct Bot API send has
                 # its own backlog fallback on rate-limit/outage.

@@ -229,7 +229,7 @@ def create_override_review_tasks(
             title=_review_task_title(candidate),
             description=_review_task_description(candidate),
             # 2026-05-13: brain-generated review tasks dispatch through the
-            # CLI fallback chain (cli_llm.cli_dispatch → codex → claude),
+            # CLI fallback chain (cli_llm.cli_dispatch → Codex),
             # not OpenClaw agent personas. The "brain_cli" label flags the
             # ownership; the dispatcher filters on created_by, not agent.
             assigned_agent="brain_cli",

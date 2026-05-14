@@ -96,7 +96,7 @@ def urgent_scan() -> dict:
     # Keep the real-time interrupt path rule-based only. The synthesis drive
     # calls subscription CLIs and was accidentally running from every
     # brain_loop tick, which made "urgent" checks compete with foreground work
-    # and created extra Codex/Claude helper processes. Morning digest still
+    # and created extra Codex helper processes. Morning digest still
     # uses synthesis via collect_observations(include_synthesis=True).
     obs = collect_observations(include_synthesis=False)
     urgent = [o for o in obs if o.severity >= URGENT_SEVERITY_THRESHOLD]

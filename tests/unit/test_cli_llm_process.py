@@ -291,6 +291,25 @@ def test_cli_dispatch_uses_openclaw_final_fallback_and_closes_breaker(monkeypatc
     assert recorded == [{"kind": cli_llm.BREAKER_KIND, "ok": True}]
 
 
+def test_cli_dispatch_can_disable_openclaw_fallback(monkeypatch):
+    monkeypatch.setattr(cli_llm, "_peek_breaker", lambda kind: _fake_open_snapshot("closed", 0.0))
+    cli_llm._BACKEND_COOLDOWN_UNTIL.clear()
+    monkeypatch.setattr(cli_llm, "_record_breaker", lambda *a, **k: None)
+    calls: list[str] = []
+
+    def fake_backend(backend, model, prompt, timeout):
+        calls.append(backend)
+        return cli_llm.CliResult(ok=False, error="not available", backend=backend, model=model)
+
+    monkeypatch.setattr(cli_llm, "_try_backend", fake_backend)
+
+    r = cli_llm.cli_dispatch("hi", timeout=5, allow_openclaw_fallback=False)
+
+    assert r.ok is False
+    assert "openclaw" not in calls
+    cli_llm._BACKEND_COOLDOWN_UNTIL.clear()
+
+
 def test_cli_dispatch_skips_backend_on_cooldown(monkeypatch):
     monkeypatch.setattr(cli_llm, "_peek_breaker", lambda kind: _fake_open_snapshot("closed", 0.0))
     cli_llm._BACKEND_COOLDOWN_UNTIL.clear()
@@ -557,29 +576,32 @@ def test_single_openclaw_empty_rate_limited_response_carries_error(monkeypatch):
     assert "rate limit" in r.error.lower()
 
 
-def test_single_claude_uses_account_token_env(monkeypatch):
+def test_legacy_claude_backend_compat_routes_to_codex_primary(monkeypatch):
     captured: dict = {}
-
-    monkeypatch.setenv("CLAUDE_TOKEN_1", "token-one")
-    cli_llm._SHELL_EXPORT_CACHE.clear()
 
     def fake_run(cmd, timeout, **kwargs):
         captured["cmd"] = cmd
-        captured["env"] = kwargs.get("env") or {}
+        captured["input_text"] = kwargs.get("input_text")
+        captured["env"] = kwargs.get("env")
         return subprocess.CompletedProcess(cmd, 0, "OK\n", ""), 0
 
+    monkeypatch.setattr(cli_llm, "CODEX_PRIMARY_MODEL", "gpt-5.5")
     monkeypatch.setattr(cli_llm, "_run_cli_process", fake_run)
     monkeypatch.setattr(cli_llm, "_record_usage", lambda *a, **k: None)
 
-    r = cli_llm._single_claude("hi", "claude-opus-4-7@claude1", timeout=5)
+    r = cli_llm._legacy_claude_backend_via_codex("hi", "ignored-legacy-claude-model", timeout=5)
 
     assert r.ok is True
     assert r.text == "OK"
-    assert captured["cmd"][captured["cmd"].index("--model") + 1] == "claude-opus-4-7"
-    assert captured["env"][cli_llm.CLAUDE_TOKEN_TARGET_ENV] == "token-one"
+    assert r.backend == "codex"
+    assert r.model == "gpt-5.5"
+    assert captured["cmd"][0:2] == [cli_llm.CODEX_BIN, "exec"]
+    assert captured["cmd"][captured["cmd"].index("-m") + 1] == "gpt-5.5"
+    assert captured["input_text"] == "hi"
+    assert captured["env"] is None
 
 
-def test_cli_dispatch_tries_claude2_after_claude1_quota(monkeypatch):
+def test_cli_dispatch_normalizes_claude_backend_hint_to_codex(monkeypatch):
     monkeypatch.setattr(cli_llm, "_peek_breaker", lambda kind: _fake_open_snapshot("closed", 0.0))
     cli_llm._BACKEND_COOLDOWN_UNTIL.clear()
     monkeypatch.setattr(cli_llm, "_record_breaker", lambda *a, **k: None)
@@ -587,31 +609,24 @@ def test_cli_dispatch_tries_claude2_after_claude1_quota(monkeypatch):
         cli_llm,
         "FALLBACK_CHAIN",
         [
-            ("claude", "claude-opus-4-7@claude1", "Claude account 1"),
-            ("claude", "claude-opus-4-7@claude2", "Claude account 2"),
+            ("codex", "gpt-5.5", "Codex primary"),
+            ("openclaw", "jenna", "Emergency fallback"),
         ],
     )
-    calls: list[str] = []
+    calls: list[tuple[str, str]] = []
 
     def fake_backend(backend, model, prompt, timeout):
-        calls.append(model)
-        if model.endswith("@claude1"):
-            return cli_llm.CliResult(
-                ok=False,
-                error="usage limit reached",
-                backend=backend,
-                model=model,
-                rate_limited=True,
-            )
+        calls.append((backend, model))
         return cli_llm.CliResult(ok=True, text="OK", backend=backend, model=model)
 
     monkeypatch.setattr(cli_llm, "_try_backend", fake_backend)
 
-    r = cli_llm.cli_dispatch("hi", backend="claude", timeout=5)
+    r = cli_llm.cli_dispatch("hi", backend="claude", timeout=5, max_backends=1)
 
     assert r.ok is True
-    assert r.model == "claude-opus-4-7@claude2"
-    assert calls == ["claude-opus-4-7@claude1", "claude-opus-4-7@claude2"]
+    assert r.backend == "codex"
+    assert r.model == "gpt-5.5"
+    assert calls == [("codex", "gpt-5.5")]
     cli_llm._BACKEND_COOLDOWN_UNTIL.clear()
 
 
@@ -646,7 +661,7 @@ def test_failure_taxonomy_snapshot_covers_all_provider_classes_without_cli_calls
 
     assert snapshot["version"] == "cli-failure-taxonomy-v1"
     assert snapshot["dashboard_surface"] == "/brain/usage.llm.failure_taxonomy"
-    assert set(snapshot["provider_classes"]) == {"codex", "claude", "openclaw"}
+    assert set(snapshot["provider_classes"]) == {"codex", "openclaw"}
     assert [row["reason"] for row in snapshot["classes"]] == list(cli_llm.FAILOVER_REASONS)
     assert {row["reason"] for row in snapshot["classes"]} >= {
         "auth",
@@ -679,4 +694,4 @@ def test_usage_stats_exposes_failure_taxonomy(monkeypatch, tmp_path):
 
     assert stats["source"] == "cli_llm"
     assert stats["failure_taxonomy"]["version"] == "cli-failure-taxonomy-v1"
-    assert stats["failure_taxonomy"]["provider_classes"] == ["codex", "claude", "openclaw"]
+    assert stats["failure_taxonomy"]["provider_classes"] == ["codex", "openclaw"]

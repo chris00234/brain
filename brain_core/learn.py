@@ -313,7 +313,7 @@ def _extract_session_summary(transcript: str) -> str | None:
 
     The prior implementation was pure regex that grabbed the last user prompt
     verbatim, so recent_sessions showed the same Korean question 5 times in a
-    row. Now routes through cli_dispatch (codex primary, claude fallback) with
+    row. Now routes through cli_dispatch (Codex primary, Spark fallback) with
     a 15s timeout; on failure falls back to the heuristic so summaries are
     always written.
     """

@@ -382,7 +382,7 @@ def test_autograde_cooldown_expired_allows_promotion(monkeypatch):
 
 def test_brain_command_rejects_dash_prefixed_content_for_outbox_targets(monkeypatch, tmp_path):
     """A spawn-target task starting with '-' could be parsed as a CLI flag by
-    claude/codex. Reject at the API boundary.
+    codex. Reject at the API boundary, including deprecated aliases.
     """
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "brain_core" / "routes"))
     if "command" in sys.modules:

@@ -499,7 +499,7 @@ is hard-capped at 2 dispatches/day.
 | `metric_trend_snapshot` | 4:38 | `metric_trend_tracker` | Daily metric vector → `metric_trend.history` |
 | `wal_checkpoint_daily` | 4:55 | `db_maintenance` | TRUNCATE WAL + record logs_dir snapshot |
 | `wal_checkpoint_intraday` | every 4h :35 | `db_maintenance` | TRUNCATE WAL only (no snapshot) |
-| `review_task_dispatcher` | 6:30 | `review_task_dispatcher` | Dispatch ≤2 oldest brain review tasks via cli_llm (codex → claude) |
+| `review_task_dispatcher` | 6:30 | `review_task_dispatcher` | Dispatch ≤2 oldest brain review tasks via cli_llm (Codex gpt-5.5 primary) |
 | `recall_structural_judge_hourly` | every hour :47 | `recall_structural_judge` | Score unlabeled /recall outcomes (no LLM) |
 
 ### HTTP surfaces
@@ -542,7 +542,7 @@ Inspect `brain_config_store.get('metric_trend.history')` for the list. If <2 ent
 **review_task_dispatcher hung cli_llm call**
 - Hard-capped at `DISPATCH_TIMEOUT_SEC=180s` per task, `MAX_DISPATCHES_PER_RUN=2`.
 - On failure the task transitions to `failed` with reason in `task.metadata.last_dispatch_error`.
-- The dispatcher uses `cli_llm.cli_dispatch` (codex → claude fallback), not OpenClaw. Inspect failures with `tail logs/server.err.log` for `cli_dispatch_failed` reason.
+- The dispatcher uses `cli_llm.cli_dispatch` (Codex gpt-5.5 primary), not OpenClaw. Inspect failures with `tail logs/server.err.log` for `cli_dispatch_failed` reason.
 - To replay: `uv run python brain_core/review_task_dispatcher.py --max 2`.
 
 **Recall judge volume too low (judged_pct < 1%)**

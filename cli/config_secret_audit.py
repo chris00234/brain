@@ -22,7 +22,6 @@ REQUIRED_FILES = {
 }
 REQUIRED_ENV_OR_FILE_HINTS = {
     "telegram_token": ("TELEGRAM_JENNA_TOKEN", OPENCLAW_DIR / ".env"),
-    "claude_token_export": ("CLAUDE_TOKEN_1|CLAUDE1|CLAUDE_TOKEN_2|CLAUDE2", Path.home() / ".zshrc"),
 }
 
 

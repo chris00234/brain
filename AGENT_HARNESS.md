@@ -20,7 +20,7 @@ call the same FastAPI backend.
 
 Autonomous Brain task execution and stateless task-helper endpoints are
 CLI-first through `brain_core/cli_llm.py` (Codex `gpt-5.5` primary, then
-Spark/Claude fallbacks). OpenClaw remains an agent integration / emergency
+Spark fallback). OpenClaw remains an agent integration / emergency
 fallback lane and depends on the local gateway at `127.0.0.1:18789`.
 `GET /brain/usage` is the usage/accounting proof surface for this path and must
 report `llm.source=cli_llm` plus `llm.primary_model=gpt-5.5`. Task-evaluation

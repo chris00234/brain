@@ -1,4 +1,4 @@
-"""Subscription-backed LLM dispatch via codex CLI + claude CLI with
+"""Subscription-backed LLM dispatch via Codex CLI with
 comprehensive fallback chain and llm_backlog integration.
 
 Replaces openclaw_dispatch.dispatch for ALL brain mechanical calls. The
@@ -10,9 +10,8 @@ output (no agent persona pollution).
 
     1. codex exec (gpt-5.5, ChatGPT Pro sub) — primary, 2-6s
     2. codex exec -m gpt-5.3-codex-spark — lighter fallback if primary hit quota
-    3. claude1 then claude2 via Claude CLI setup-token subscriptions — provider-level fallback
-    4. openclaw agent — authenticated, heavier context, emergency fallback
-    5. llm_backlog.enqueue — if every provider is exhausted, queue the work
+    3. openclaw agent — authenticated, heavier context, emergency fallback
+    4. llm_backlog.enqueue — if every provider is exhausted, queue the work
        so it catches up automatically when quota resets
 
 Rate-limit detection patterns match openclaw_dispatch.RATE_LIMIT_PATTERNS
@@ -29,6 +28,8 @@ accounting for the new llm_daily_spend_usd SLO.
 - Use `cli_dispatch` for: HyDE, classify, atom compression, entity
   extraction, reflection, synthesis, SLO notifications — anything that
   doesn't need OpenClaw's agent persona, session continuity, or skills.
+  Claude CLI prompt mode is intentionally not used; stale `backend="claude"`
+  hints are treated as Codex gpt-5.5 compatibility aliases.
 - Use `cli_dispatch_with_schema` for structured JSON output with retry.
 - Keep `openclaw_dispatch` for: Chris↔Jenna Telegram interactive chat,
   skill-heavy agent turns (imsg/things/obsidian), multi-agent messages.
@@ -92,15 +93,9 @@ _usage_warned = False
 
 LLM_USAGE_DB = Path("/Users/chrischo/server/brain/logs/llm_usage.db")
 CLI_LLM_LOCK = Path(os.getenv("BRAIN_CLI_LLM_LOCK_PATH", "/Users/chrischo/server/brain/logs/cli_llm.lock"))
-CODEX_BIN = "/opt/homebrew/bin/codex"
-CLAUDE_BIN = "/Users/chrischo/.local/bin/claude"
-CLAUDE_MODEL = os.getenv("BRAIN_CLAUDE_MODEL", "claude-opus-4-7")
-CLAUDE_TOKEN_TARGET_ENV = os.getenv("BRAIN_CLAUDE_TOKEN_TARGET_ENV", "CLAUDE_CODE_OAUTH_TOKEN")
-CLAUDE_SHELL_EXPORT_FILES = tuple(
-    Path(p).expanduser()
-    for p in os.getenv("BRAIN_CLAUDE_TOKEN_EXPORT_FILES", "~/.zshrc").split(":")
-    if p.strip()
-)
+CODEX_BIN = os.getenv("BRAIN_CODEX_BIN", "/opt/homebrew/bin/codex")
+CODEX_PRIMARY_MODEL = os.getenv("BRAIN_CODEX_PRIMARY_MODEL", "gpt-5.5")
+CODEX_FALLBACK_MODEL = os.getenv("BRAIN_CODEX_FALLBACK_MODEL", "gpt-5.3-codex-spark")
 OPENCLAW_BIN = os.getenv("BRAIN_OPENCLAW_BIN", "/Users/chrischo/.local/bin/openclaw")
 OPENCLAW_FALLBACK_AGENT = os.getenv("BRAIN_OPENCLAW_FALLBACK_AGENT", "jenna")
 OPENCLAW_TIMEOUT_FLOOR_S = max(5, int(os.getenv("BRAIN_OPENCLAW_TIMEOUT_FLOOR_S", "45")))
@@ -117,7 +112,7 @@ OPENCLAW_FALLBACK_ENABLED = os.getenv("BRAIN_OPENCLAW_FALLBACK_ENABLED", "1").lo
 # other brain dispatch behind a global flock; the per-call timeout was eating
 # into the subprocess budget while waiting for that lock, producing 80-94%
 # spurious-timeout failures across thousands of calls. Bounded concurrency
-# preserves the original memory contract (cap on simultaneous codex/claude
+# preserves the original memory contract (cap on simultaneous Codex/OpenClaw
 # helper processes) without single-caller starvation. Lock-wait is tracked
 # separately from the subprocess timeout so a slow CLI never bleeds into the
 # next dispatch's budget.
@@ -132,7 +127,6 @@ LOCK_WAIT_WARN_S = float(os.getenv("BRAIN_CLI_LLM_LOCK_WAIT_WARN_S", "10"))
 # We cache the override for 5 s so dispatch hot-path stays fast.
 _CONCURRENCY_OVERRIDE_CACHE: tuple[float, int] | None = None
 _CONCURRENCY_OVERRIDE_TTL_S = 5.0
-_SHELL_EXPORT_CACHE: dict[str, str | None] = {}
 
 
 def _effective_concurrency() -> int:
@@ -167,107 +161,11 @@ def _effective_concurrency() -> int:
     return val
 
 
-def _read_shell_export_var(name: str) -> str | None:
-    """Read simple `export NAME=value` lines without logging or shell eval.
-
-    Launchd services do not inherit interactive zsh exports. Chris stores the
-    long-lived Claude Max tokens in shell exports, so the brain server may need
-    to read those specific names directly after restart. This parser is narrow
-    on purpose: no command substitution, no variable expansion, no sourcing the
-    whole shell rc file.
-    """
-
-    if name in _SHELL_EXPORT_CACHE:
-        return _SHELL_EXPORT_CACHE[name]
-    pattern = re.compile(rf"^\s*(?:export\s+)?{re.escape(name)}=(.*)\s*$")
-    for path in CLAUDE_SHELL_EXPORT_FILES:
-        try:
-            text = path.read_text(encoding="utf-8")
-        except OSError:
-            continue
-        for line in text.splitlines():
-            match = pattern.match(line)
-            if not match:
-                continue
-            value = match.group(1).strip()
-            if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
-                value = value[1:-1]
-            _SHELL_EXPORT_CACHE[name] = value or None
-            return _SHELL_EXPORT_CACHE[name]
-    _SHELL_EXPORT_CACHE[name] = None
-    return None
-
-
-def _secret_env(name: str) -> str | None:
-    return os.getenv(name) or _read_shell_export_var(name)
-
-
-def _claude_account_specs() -> list[tuple[str, tuple[str, ...]]]:
-    raw = os.getenv("BRAIN_CLAUDE_ACCOUNT_ENVS", "").strip()
-    if raw:
-        specs: list[tuple[str, tuple[str, ...]]] = []
-        for idx, item in enumerate(raw.split(","), 1):
-            item = item.strip()
-            if not item:
-                continue
-            if ":" in item:
-                label, envs = item.split(":", 1)
-                specs.append(
-                    (label.strip() or f"claude{idx}", tuple(e.strip() for e in envs.split("|") if e.strip()))
-                )
-            else:
-                specs.append((f"claude{idx}", (item,)))
-        return specs
-    return [
-        ("claude1", ("CLAUDE_TOKEN_1", "CLAUDE1")),
-        ("claude2", ("CLAUDE_TOKEN_2", "CLAUDE2")),
-    ]
-
-
-def _claude_token_for_account(label: str) -> str | None:
-    for account_label, env_names in _claude_account_specs():
-        if account_label == label:
-            for env_name in env_names:
-                token = _secret_env(env_name)
-                if token:
-                    return token
-    return None
-
-
-def _claude_account_labels() -> list[str]:
-    # Chris does not use the ambient/default Claude CLI identity for dispatch.
-    # Only explicit Max subscription accounts (claude1, then claude2) are valid.
-    return [label for label, _envs in _claude_account_specs() if _claude_token_for_account(label)]
-
-
-def _claude_model_label(model: str, account_label: str) -> str:
-    return model if account_label == "default" else f"{model}@{account_label}"
-
-
-def _split_claude_model_label(model: str) -> tuple[str, str]:
-    if "@" not in model:
-        return model, "default"
-    base_model, account_label = model.rsplit("@", 1)
-    return base_model, account_label or "default"
-
-
-def _claude_chain_entries() -> list[tuple[str, str, str]]:
-    return [
-        (
-            "claude",
-            _claude_model_label(CLAUDE_MODEL, label),
-            f"Claude Max account {label} — provider fallback",
-        )
-        for label in _claude_account_labels()
-    ]
-
-
 # ── Fallback chain (ordered by preference) ────────────────────
 # Each entry: (backend, model, description)
 FALLBACK_CHAIN: list[tuple[str, str, str]] = [
-    ("codex", "gpt-5.5", "ChatGPT Pro primary — frontier quality"),
-    ("codex", "gpt-5.3-codex-spark", "ChatGPT Pro lightweight — quota fallback"),
-    *_claude_chain_entries(),
+    ("codex", CODEX_PRIMARY_MODEL, "ChatGPT Pro primary — frontier quality"),
+    ("codex", CODEX_FALLBACK_MODEL, "ChatGPT Pro lightweight — quota fallback"),
     ("openclaw", OPENCLAW_FALLBACK_AGENT, "OpenClaw authenticated emergency fallback"),
 ]
 
@@ -335,7 +233,7 @@ def _run_cli_process(
 ) -> tuple[subprocess.CompletedProcess[str], int]:
     """Run a subscription CLI with a process-group timeout.
 
-    `subprocess.run(..., timeout=...)` kills only the direct child. Codex/Claude
+    `subprocess.run(..., timeout=...)` kills only the direct child. Codex/OpenClaw
     CLIs can leave helper descendants behind when the parent wedges, which is
     how stale "brain synthesis drive" processes survived for hours. A new
     session lets us terminate the whole group deterministically.
@@ -473,7 +371,7 @@ FAILOVER_REASONS = (
 )
 
 FAILURE_TAXONOMY_VERSION = "cli-failure-taxonomy-v1"
-_PROVIDER_FAILURE_CLASSES = ("codex", "claude", "openclaw")
+_PROVIDER_FAILURE_CLASSES = ("codex", "openclaw")
 _FAILURE_CLASS_PROBES = {
     "auth": "not logged in",
     "billing": "payment required",
@@ -863,7 +761,7 @@ def _single_codex(prompt: str, model: str, timeout: int) -> CliResult:
     codex refuses to run outside trusted repos by default. Without this
     flag the subprocess fails in ~10ms with 'Not inside a trusted
     directory', which was causing every dispatch from brain-server to
-    fall through to claude fallback.
+    fall through to the next Codex/OpenClaw fallback.
     """
     t0 = time.time()
     # Feed the prompt through stdin (`-`) instead of argv. Codex v0.128 can
@@ -917,73 +815,16 @@ def _single_codex(prompt: str, model: str, timeout: int) -> CliResult:
     )
 
 
-def _single_claude(prompt: str, model: str, timeout: int) -> CliResult:
-    """One claude -p attempt with a specific model/account label.
+def _legacy_claude_backend_via_codex(prompt: str, model: str, timeout: int) -> CliResult:
+    """Compatibility shim for stale callers that still request Claude.
 
-    Model labels may be `claude-opus-4-7@claude1` or
-    `claude-opus-4-7@claude2`. The account suffix selects Chris's exported
-    long-lived Claude Max token. Plain model names are treated as claude1 so
-    brain dispatch never uses the ambient/default Claude CLI identity.
+    Chris moved Claude prompt-mode CLI execution to Codex so the
+    brain can use gpt-5.5 consistently.  Do not invoke Claude CLI here; route
+    the work through the Codex primary model and let the returned result report
+    its real backend/model.
     """
-    t0 = time.time()
-    base_model, account_label = _split_claude_model_label(model)
-    if account_label == "default":
-        account_label = "claude1"
-    token = _claude_token_for_account(account_label)
-    if not token:
-        return CliResult(
-            ok=False,
-            error=f"claude token missing for {account_label}",
-            duration_ms=0,
-            backend="claude",
-            model=model,
-        )
-    env = os.environ.copy()
-    env[CLAUDE_TOKEN_TARGET_ENV] = token
-    cmd = [CLAUDE_BIN, "-p", prompt, "--model", base_model, "--no-session-persistence"]
-    try:
-        proc, lock_wait_ms = _run_cli_process(cmd, timeout=timeout, env=env)
-    except subprocess.TimeoutExpired as exc:
-        dur = int((time.time() - t0) * 1000)
-        _record_usage("claude", model, 0, dur, False)
-        err = _timeout_error(exc, timeout)[:500]
-        return CliResult(
-            ok=False,
-            error=err,
-            duration_ms=dur,
-            backend="claude",
-            model=model,
-            lock_wait_ms=getattr(exc, "lock_wait_ms", 0),
-        )
-    dur = int((time.time() - t0) * 1000)
-    rate_limited = _is_quota_error(proc.stderr, proc.stdout)
-    if proc.returncode != 0:
-        _record_usage("claude", model, 0, dur, False, rate_limited)
-        return CliResult(
-            ok=False,
-            error=(proc.stderr or proc.stdout)[:500],
-            duration_ms=dur,
-            backend="claude",
-            model=model,
-            rate_limited=rate_limited,
-            lock_wait_ms=lock_wait_ms,
-        )
-    text = proc.stdout.strip()
-    _record_usage("claude", model, 0, dur, bool(text), rate_limited)
-    return CliResult(
-        ok=bool(text),
-        text=text,
-        error=(
-            ""
-            if text
-            else _empty_response_error("claude", proc.stderr, proc.stdout, rate_limited=rate_limited)
-        ),
-        duration_ms=dur,
-        backend="claude",
-        model=model,
-        rate_limited=rate_limited,
-        lock_wait_ms=lock_wait_ms,
-    )
+
+    return _single_codex(prompt, CODEX_PRIMARY_MODEL, timeout)
 
 
 def _parse_openclaw_payload(stdout: str) -> tuple[str, int]:
@@ -1111,7 +952,7 @@ def _try_backend(
     if backend == "codex":
         return _single_codex(prompt, model, timeout)
     if backend == "claude":
-        return _single_claude(prompt, model, timeout)
+        return _legacy_claude_backend_via_codex(prompt, model, timeout)
     if backend == "openclaw":
         return _single_openclaw(prompt, model, timeout, session_id=openclaw_session_id)
     return CliResult(ok=False, error=f"unknown backend {backend}", backend=backend, model=model)
@@ -1122,6 +963,7 @@ def cli_dispatch(
     *,
     timeout: int = 30,
     backend: str | None = None,
+    allow_openclaw_fallback: bool = True,
     openclaw_agent: str | None = None,
     openclaw_session_id: str | None = None,
     backlog_kind: str | None = None,
@@ -1139,9 +981,14 @@ def cli_dispatch(
     ----------
     prompt          : raw user message (system prompt + task)
     timeout         : per-attempt seconds
-    backend         : hint to PREFER a specific backend ('codex' | 'claude' | 'openclaw')
-                      as the first attempt. Fallback chain still fires on
+    backend         : hint to PREFER a specific backend ('codex' | 'openclaw').
+                      Legacy 'claude' hints are normalized to Codex gpt-5.5.
+                      Fallback chain still fires on
                       failure. None = use FALLBACK_CHAIN default order.
+    allow_openclaw_fallback
+                    : when False, constrain the fallback chain to stateless
+                      subscription CLI path (Codex) and never invoke the
+                      persona/session-heavy OpenClaw emergency lane.
     backlog_kind    : optional llm_backlog kind. When provided, a total
                       failure enqueues the work with this kind for later
                       catch-up. One of: classify | entities | distill |
@@ -1205,8 +1052,14 @@ def cli_dispatch(
                 log.warning("backlog enqueue failed during probe-skip: %s", exc)
         return skipped
 
-    # Build attempt order — optionally front-load a preferred backend
+    # Build attempt order — optionally front-load a preferred backend.
+    # Compatibility: old callers may still pass backend="claude"; route those
+    # through Codex instead of spawning Claude prompt-mode CLI.
+    if backend == "claude":
+        backend = "codex"
     chain = [(b, (openclaw_agent or m) if b == "openclaw" else m, d) for (b, m, d) in FALLBACK_CHAIN]
+    if not allow_openclaw_fallback:
+        chain = [(b, m, d) for (b, m, d) in chain if b != "openclaw"]
     if backend:
         preferred = [(b, m, d) for (b, m, d) in chain if b == backend]
         rest = [(b, m, d) for (b, m, d) in chain if b != backend]

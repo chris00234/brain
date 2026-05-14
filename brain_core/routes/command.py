@@ -1,13 +1,15 @@
-"""/brain/command/* — brain originates work items to OpenClaw agents.
+"""/brain/command/* — brain originates work items to OpenClaw/Codex agents.
 
-Phase 3 (2026-04-27) extension: claude + codex are now valid targets. For
-those, the dispatch ALSO writes an outbox file at
-~/.brain_outbox/{agent}/pending/{msg_id}.json. A launchd WatchPaths watcher
-(brain-spawn-claude / brain-spawn-codex) picks the file up and — only if
-BRAIN_AUTOSPAWN_{AGENT}=on at the OS level — spawns a fresh CLI session with
-the task as prompt. Default OFF: file just sits there as an audit trail
-unless Chris flips the flag, so this whitelist change is safe to ship before
-the spawner is wired up.
+Phase 3 (2026-04-27) extension: codex is a filesystem-outbox target. A
+launchd WatchPaths watcher (brain-spawn-codex) picks the file up and — only if
+BRAIN_AUTOSPAWN_CODEX=on at the OS level — spawns a fresh Codex CLI session
+with the task as prompt.
+
+The historical `claude` target is now a deprecated compatibility alias for
+`codex`; new envelopes are written under ~/.brain_outbox/codex so Claude
+prompt-mode CLI is not used. Default OFF: file just sits there as an audit
+trail unless Chris flips the flag, so this whitelist change is safe to ship
+before the spawner is wired up.
 """
 
 from __future__ import annotations
@@ -30,7 +32,8 @@ router = APIRouter(dependencies=[Depends(verify_bearer)])
 
 class BrainCommandRequest(BaseModel):
     to_agent: str = Field(
-        ..., description="Target agent: jenna | liz | ellie | sage | market | claude | codex"
+        ...,
+        description="Target agent: jenna | liz | ellie | sage | market | codex (claude is a deprecated alias)",
     )
     content: str = Field(..., description="The instruction/work item body")
     message_type: str = Field("task", description="info | task | question | alert")
@@ -44,12 +47,17 @@ class BrainCommandAck(BaseModel):
     agent: str = Field(..., description="Acking agent — must match to_agent on the message")
 
 
-_BRAIN_COMMAND_AGENTS = {"jenna", "liz", "ellie", "sage", "market", "claude", "codex"}
+_CANONICAL_COMMAND_AGENTS = {"jenna", "liz", "ellie", "sage", "market", "codex"}
+_DEPRECATED_AGENT_ALIASES = {"claude": "codex"}
+_BRAIN_COMMAND_AGENTS = _CANONICAL_COMMAND_AGENTS | set(_DEPRECATED_AGENT_ALIASES)
 # Agents that consume work via filesystem outbox (no live message inbox the
-# way openclaw agents do). Each gets its own pending dir; the brain-spawn-*
-# wrapper scripts (cli/brain-spawn-{claude,codex}) watch these dirs.
-_OUTBOX_AGENTS = {"claude", "codex"}
+# way openclaw agents do). Deprecated aliases are normalized before write.
+_OUTBOX_AGENTS = {"codex"}
 _OUTBOX_ROOT = _Path("~/.brain_outbox").expanduser()
+
+
+def _canonical_command_agent(agent: str) -> str:
+    return _DEPRECATED_AGENT_ALIASES.get(agent, agent)
 
 
 def _write_outbox_envelope(agent: str, message_id: str, payload: dict) -> _Path | None:
@@ -81,10 +89,12 @@ def brain_command(payload: BrainCommandRequest) -> dict:
         )
     if not payload.content.strip():
         raise HTTPException(status_code=400, detail="content required")
+    requested_agent = payload.to_agent
+    target_agent = _canonical_command_agent(requested_agent)
     # 2026-04-27 review fix: outbox-targeted content is later passed as a
-    # positional arg to `claude -p` / `codex exec`. Reject leading-dash content
+    # prompt input to `codex exec`. Reject leading-dash content
     # so a brain-generated task can never accidentally land as a CLI flag.
-    if payload.to_agent in _OUTBOX_AGENTS and payload.content.lstrip().startswith("-"):
+    if target_agent in _OUTBOX_AGENTS and payload.content.lstrip().startswith("-"):
         raise HTTPException(
             status_code=400,
             detail="content for spawn-target agents must not start with '-' (flag-injection guard)",
@@ -98,7 +108,7 @@ def brain_command(payload: BrainCommandRequest) -> dict:
             body += f"\n\n[brain reasoning]: {payload.reason}"
         msg = send_message(
             from_agent="brain",
-            to_agent=payload.to_agent,
+            to_agent=target_agent,
             content=body,
             message_type=payload.message_type,
             priority=payload.priority,
@@ -109,7 +119,11 @@ def brain_command(payload: BrainCommandRequest) -> dict:
 
             _insert_raw_event(
                 event_id=f"brain_command_{msg['id']}",
-                content=f"brain -> {payload.to_agent}: {body[:400]}",
+                content=(
+                    f"brain -> {target_agent}: {body[:400]}"
+                    if requested_agent == target_agent
+                    else f"brain -> {target_agent} (alias:{requested_agent}): {body[:400]}"
+                ),
                 timestamp=msg["created_at"],
                 source_type="brain_command",
                 source_ref=f"brain:{msg['id']}",
@@ -121,10 +135,12 @@ def brain_command(payload: BrainCommandRequest) -> dict:
             log.debug("brain_command atom write failed: %s", exc)
 
         outbox_path = None
-        if payload.to_agent in _OUTBOX_AGENTS:
+        if target_agent in _OUTBOX_AGENTS:
             envelope = {
                 "message_id": msg["id"],
-                "to_agent": payload.to_agent,
+                "to_agent": target_agent,
+                "requested_to_agent": requested_agent,
+                "deprecated_alias": requested_agent if requested_agent != target_agent else "",
                 "content": body,
                 "message_type": payload.message_type,
                 "priority": payload.priority,
@@ -132,7 +148,7 @@ def brain_command(payload: BrainCommandRequest) -> dict:
                 "created_at": msg["created_at"],
                 "origin": "brain/command",
             }
-            written = _write_outbox_envelope(payload.to_agent, msg["id"], envelope)
+            written = _write_outbox_envelope(target_agent, msg["id"], envelope)
             if written is not None:
                 outbox_path = str(written)
 
@@ -140,6 +156,9 @@ def brain_command(payload: BrainCommandRequest) -> dict:
             "ok": True,
             "message_id": msg["id"],
             "action": msg.get("_action", "stored"),
+            "requested_to_agent": requested_agent,
+            "to_agent": target_agent,
+            "deprecated_alias": requested_agent if requested_agent != target_agent else None,
             "outbox_path": outbox_path,
         }
     except HTTPException:
@@ -220,7 +239,7 @@ def brain_command_ack(
                 raise HTTPException(status_code=404, detail="message not found")
             if row["from_agent"] != "brain":
                 raise HTTPException(status_code=400, detail="not a brain-originated command")
-            if row["to_agent"] != payload.agent:
+            if _canonical_command_agent(row["to_agent"]) != _canonical_command_agent(payload.agent):
                 raise HTTPException(
                     status_code=403,
                     detail=f"only {row['to_agent']} can ack this message",

@@ -1,6 +1,6 @@
 """brain_core/speak_synthesis.py — the thinking drive.
 
-Uses cli_llm (codex primary, claude fallback) to read recent brain state and
+Uses cli_llm (Codex primary, Spark fallback) to read recent brain state and
 surface PATTERNS the rule-based drives miss. Also proposes commands that can
 be auto-dispatched when BRAIN_SYNTHESIS_AUTO_DISPATCH=1.
 

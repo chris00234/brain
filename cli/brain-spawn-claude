@@ -1,15 +1,18 @@
 #!/bin/bash
-# Phase 3 (2026-04-27): outbox watcher for brain → Claude Code task envelopes.
+# Phase 3 (2026-04-27): outbox watcher for brain → Claude-targeted task envelopes.
+# 2026-05-14: execution backend switched from Claude prompt-mode CLI to Codex
+# gpt-5.5. The script name/outbox path remain for backward compatibility with
+# existing launchd WatchPaths and /brain/command target semantics.
 #
 # Triggered by launchd WatchPaths on ~/.brain_outbox/claude/pending/. Each
 # pending JSON file represents a brain-issued task. Behavior:
 #
 # 1. If BRAIN_AUTOSPAWN_CLAUDE != on, leave the file alone (audit-only).
-# 2. Otherwise, read the envelope, invoke `claude -p <task>` headlessly,
-#    capture stdout, ack the brain message, move file to done/ on success
-#    or failed/ on error.
+# 2. Otherwise, read the envelope, invoke Codex gpt-5.5 headlessly, capture
+#    stdout, ack the brain message, move file to done/ on success or failed/
+#    on error.
 #
-# Default OFF: spawning Claude sessions is high-cost (LLM tokens) and high
+# Default OFF: spawning agent sessions is high-cost (LLM tokens) and high
 # blast-radius (writes files / commits / etc.). Chris must opt in:
 #
 #   echo "BRAIN_AUTOSPAWN_CLAUDE=on" >> ~/.openclaw/credentials/.env
@@ -27,9 +30,8 @@ LOG_DIR="/Users/chrischo/server/brain/logs/jobs"
 LOG_FILE="$LOG_DIR/brain_spawn_claude.log"
 SECRET_FILE="$HOME/.openclaw/credentials/.personal_webhook_secret"
 BRAIN_URL="${BRAIN_URL:-http://127.0.0.1:8791}"
-CLAUDE_BIN="${CLAUDE_BIN:-/Users/chrischo/.local/bin/claude}"
-CLAUDE_MODEL="${BRAIN_CLAUDE_MODEL:-claude-opus-4-7}"
-CLAUDE_TOKEN_TARGET_ENV="${BRAIN_CLAUDE_TOKEN_TARGET_ENV:-CLAUDE_CODE_OAUTH_TOKEN}"
+CODEX_BIN="${BRAIN_CODEX_BIN:-${CODEX_BIN:-/opt/homebrew/bin/codex}}"
+CODEX_MODEL="${BRAIN_CODEX_PRIMARY_MODEL:-gpt-5.5}"
 
 mkdir -p "$PENDING" "$DONE" "$FAILED" "$LOG_DIR"
 
@@ -37,84 +39,11 @@ log() {
   printf '%s %s\n' "$(date +%Y-%m-%dT%H:%M:%SZ)" "$1" >> "$LOG_FILE"
 }
 
-read_exported_secret() {
-  local name="$1"
-  python3 - "$name" <<'PY'
-import os
-import re
-import sys
-from pathlib import Path
-
-name = sys.argv[1]
-value = os.environ.get(name)
-if value:
-    print(value)
-    raise SystemExit(0)
-
-pattern = re.compile(rf"^\s*(?:export\s+)?{re.escape(name)}=(.*)\s*$")
-for raw_path in os.environ.get("BRAIN_CLAUDE_TOKEN_EXPORT_FILES", "~/.zshrc").split(":"):
-    path = Path(raw_path).expanduser()
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        continue
-    for line in lines:
-        match = pattern.match(line)
-        if not match:
-            continue
-        token = match.group(1).strip()
-        if len(token) >= 2 and token[0] == token[-1] and token[0] in ("'", '"'):
-            token = token[1:-1]
-        if token:
-            print(token)
-            raise SystemExit(0)
-raise SystemExit(1)
-PY
-}
-
-run_claude_once() {
-  local account="$1"
-  local token="$2"
-  local task="$3"
-  local output_file="$4"
-  if [ -n "$token" ]; then
-    env "$CLAUDE_TOKEN_TARGET_ENV=$token" timeout 600 "$CLAUDE_BIN" -p "$task" \
-      --model "$CLAUDE_MODEL" --no-session-persistence > "$output_file" 2>&1
-  else
-    timeout 600 "$CLAUDE_BIN" -p "$task" \
-      --model "$CLAUDE_MODEL" --no-session-persistence > "$output_file" 2>&1
-  fi
-}
-
-is_quota_error() {
-  grep -Eiq 'rate[_ ]?limit|quota.*exceed|out of.*usage|429|too many requests|usage limit|cooldown' "$1"
-}
-
-run_claude_with_failover() {
+run_codex() {
   local task="$1"
   local output_file="$2"
-  local token1 token2 rc
-  token1="$(read_exported_secret CLAUDE_TOKEN_1 2>/dev/null || read_exported_secret CLAUDE1 2>/dev/null || true)"
-  token2="$(read_exported_secret CLAUDE_TOKEN_2 2>/dev/null || read_exported_secret CLAUDE2 2>/dev/null || true)"
-
-  if [ -n "$token1" ]; then
-    run_claude_once "claude1" "$token1" "$task" "$output_file"; rc=$?
-    [ "$rc" -eq 0 ] && return 0
-    if is_quota_error "$output_file" && [ -n "$token2" ]; then
-      log "claude1 quota-limited; retrying with claude2"
-      : > "$output_file"
-      run_claude_once "claude2" "$token2" "$task" "$output_file"
-      return $?
-    fi
-    return "$rc"
-  fi
-
-  if [ -n "$token2" ]; then
-    run_claude_once "claude2" "$token2" "$task" "$output_file"
-    return $?
-  fi
-
-  run_claude_once "ambient" "" "$task" "$output_file"
+  printf '%s' "$task" | timeout 600 "$CODEX_BIN" exec --skip-git-repo-check -m "$CODEX_MODEL" - \
+    > "$output_file" 2>&1
 }
 
 # Guard: spawn disabled by default
@@ -124,7 +53,7 @@ if [ "$ENABLED" != "on" ]; then
   exit 0
 fi
 
-[ -x "$CLAUDE_BIN" ] || { log "claude bin missing at $CLAUDE_BIN"; exit 0; }
+[ -x "$CODEX_BIN" ] || { log "codex bin missing at $CODEX_BIN"; exit 0; }
 command -v jq >/dev/null 2>&1 || { log "jq missing"; exit 0; }
 [ -r "$SECRET_FILE" ] || { log "secret file missing"; exit 0; }
 
@@ -153,20 +82,17 @@ for envelope in "$PENDING"/*.json; do
     continue
   fi
 
-  log "spawning claude for msg=$msg_id task='${task:0:80}…'"
+  log "spawning codex model=$CODEX_MODEL for claude-outbox msg=$msg_id task='${task:0:80}…'"
 
-  # Headless one-shot. --no-session-persistence so each task is independent.
-  # Prefer Chris's long-lived Claude Max token 1; if quota-limited, retry token 2.
   output_file=$(mktemp -t brain_spawn_claude_out_XXXXXX)
-  if run_claude_with_failover "$task" "$output_file"; then
+  if run_codex "$task" "$output_file"; then
     log "msg=$msg_id ok ($(wc -c < "$output_file") bytes output)"
     mv "$envelope" "$DONE/"
-    # Ack the brain message
     SECRET=$(cat "$SECRET_FILE")
     curl -sS --max-time 5 -X POST \
       -H "Authorization: Bearer $SECRET" \
       -H 'Content-Type: application/json' \
-      -d "$(jq -nc --arg id "$msg_id" --arg note "spawn ok" '{status:"done", note:$note, agent:"claude"}')" \
+      -d "$(jq -nc --arg id "$msg_id" --arg note "codex $CODEX_MODEL spawn ok" '{status:"done", note:$note, agent:"claude"}')" \
       "${BRAIN_URL}/brain/command/${msg_id}/ack" >/dev/null 2>&1 || true
   else
     rc=$?
@@ -176,7 +102,7 @@ for envelope in "$PENDING"/*.json; do
     curl -sS --max-time 5 -X POST \
       -H "Authorization: Bearer $SECRET" \
       -H 'Content-Type: application/json' \
-      -d "$(jq -nc --arg id "$msg_id" --arg note "spawn failed rc=$rc" '{status:"rejected", note:$note, agent:"claude"}')" \
+      -d "$(jq -nc --arg id "$msg_id" --arg note "codex $CODEX_MODEL spawn failed rc=$rc" '{status:"rejected", note:$note, agent:"claude"}')" \
       "${BRAIN_URL}/brain/command/${msg_id}/ack" >/dev/null 2>&1 || true
   fi
   rm -f "$output_file"

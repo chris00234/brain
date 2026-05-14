@@ -2,7 +2,7 @@
 
 Chris-facing notifications should be scarce. Most "escalations" are still
 LLM-handleable: debugging, analysis, retry planning, summaries, or routing to
-another agent can be handled by subscription-backed Codex/Claude CLIs without
+another agent can be handled by subscription-backed Codex CLI without
 extra API spend. When evaluation finds a true blocker, send Chris an action
 summary of what Brain did rather than an input-request alert.
 """
@@ -133,7 +133,7 @@ def llm_review_prompt(source: str, body: str) -> str:
     return (
         "Review this Brain escalation candidate.\n\n"
         "Policy:\n"
-        "- Use subscription-backed Codex/Claude CLI reasoning only; do not use paid API billing.\n"
+        "- Use subscription-backed Codex CLI reasoning only; do not use paid API billing.\n"
         "- Do not alert Chris if the issue is handleable by an LLM agent through reasoning, code review, "
         "debugging, retry planning, documentation lookup, or agent handoff.\n"
         "- Return HUMAN_NEEDED only if progress is blocked by missing private/current knowledge, credentials, "

@@ -193,7 +193,7 @@ _hyde_cache = _hyde_mem_cache
 
 # ── CLI dispatch helper (2026-04-17, hardened 2026-05-05) ─────────────
 # Mechanical HyDE/expansion calls use the central CLI-first dispatcher:
-# codex gpt-5.5 primary, codex spark/Claude fallbacks, OpenClaw only as the
+# codex gpt-5.5 primary, codex spark fallback, OpenClaw only as the
 # central emergency fallback managed by cli_llm. No direct agent shellout here.
 def _dispatch_to_jenna(prompt: str, thinking: str = "low", timeout: int = DISPATCH_TIMEOUT) -> str:
     """Stateless CLI-first LLM call. Returns "" on any failure.

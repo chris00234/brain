@@ -303,7 +303,7 @@ JOB_SCHEDULE: list[ScheduledJob] = [
     ),
     # 2026-05-13: review task dispatcher. Dispatches up to 2 oldest pending
     # brain-generated review tasks (created by outcome_feedback +
-    # goal_subtask_scaffold) per run through cli_llm (codex → claude
+    # goal_subtask_scaffold) per run through cli_llm (Codex gpt-5.5
     # fallback on subscription quota). No OpenClaw agent persona —
     # stateless CLI dispatch, like recall_judge and goal_decompose.
     # 2026-05-13 (later): bumped to every 8h. Daily was too slow — review

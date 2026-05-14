@@ -449,7 +449,7 @@ def create_feedback_review_tasks(
             description=_candidate_task_description(candidate),
             # 2026-05-13: aligned with outcome_feedback / goal_subtask_scaffold.
             # All brain-generated review tasks share the brain_cli label and
-            # dispatch through cli_llm.cli_dispatch (codex → claude fallback)
+            # dispatch through cli_llm.cli_dispatch (Codex gpt-5.5 primary)
             # so the dispatcher can pick them up uniformly.
             assigned_agent="brain_cli",
             priority=3,

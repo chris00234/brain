@@ -21,6 +21,8 @@ def test_cli_llm_default_chain_starts_with_gpt55_and_keeps_openclaw_last():
 
     assert (first_backend, first_model) == ("codex", "gpt-5.5")
     assert cli_llm.FALLBACK_CHAIN[1][:2] == ("codex", "gpt-5.3-codex-spark")
+    assert all(backend != "claude" for backend, _model, _desc in cli_llm.FALLBACK_CHAIN)
+    assert not hasattr(cli_llm, "CLAUDE_BIN")
     assert last_backend == "openclaw"
 
 

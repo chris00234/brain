@@ -145,6 +145,84 @@ def _recent_remediation(limit: int = 5) -> list[dict]:
     return out
 
 
+def _cli_llm_surface() -> dict:
+    """Read-only dispatch-surface snapshot for runtime smoke checks.
+
+    This intentionally imports the local module but does not call any LLM. It
+    proves which backend/model chain this checkout will use after restart.
+    """
+
+    try:
+        brain_core_dir = str(Path(__file__).resolve().parents[1] / "brain_core")
+        if brain_core_dir not in sys.path:
+            sys.path.insert(0, brain_core_dir)
+        import cli_llm
+
+        chain = [
+            {"backend": backend, "model": model, "description": desc}
+            for backend, model, desc in getattr(cli_llm, "FALLBACK_CHAIN", [])
+        ]
+        backend_set = {row["backend"] for row in chain}
+        return {
+            "status": "ok",
+            "primary_backend": chain[0]["backend"] if chain else None,
+            "primary_model": chain[0]["model"] if chain else None,
+            "fallback_chain": chain,
+            "claude_backend_present": "claude" in backend_set,
+            "claude_prompt_mode_removed": not hasattr(cli_llm, "CLAUDE_BIN"),
+        }
+    except Exception as exc:
+        return {"status": f"error:{str(exc)[:120]}"}
+
+
+def _recall_structural_judgments_snapshot() -> dict:
+    """Sidecar-table observability for the structural recall judge.
+
+    The table is lazy-created by recall_structural_judge, so doctor must never
+    create it as a read-only side effect. This snapshot also surfaces legacy
+    structural labels still present in action_audit.outcome so migration drift
+    is visible.
+    """
+
+    if not BRAIN_DB.exists():
+        return {"status": "no_brain_db", "table_exists": False}
+    try:
+        with sqlite3.connect(f"file:{BRAIN_DB}?mode=ro", uri=True, timeout=5) as conn:
+            table_exists = bool(
+                conn.execute(
+                    "SELECT 1 FROM sqlite_master " "WHERE type='table' AND name='recall_structural_judgments'"
+                ).fetchone()
+            )
+            legacy_rows = conn.execute(
+                "SELECT outcome, COUNT(*) FROM action_audit "
+                "WHERE outcome IN ('structural_good','structural_wrong','structural_neutral') "
+                "GROUP BY outcome"
+            ).fetchall()
+            out = {
+                "status": "ok",
+                "table_exists": table_exists,
+                "legacy_action_outcome_counts": {str(k): int(v) for k, v in legacy_rows},
+            }
+            if not table_exists:
+                return out
+            sidecar_rows = conn.execute(
+                "SELECT outcome, COUNT(*) FROM recall_structural_judgments GROUP BY outcome"
+            ).fetchall()
+            total_row = conn.execute(
+                "SELECT COUNT(*), MAX(judged_at) FROM recall_structural_judgments"
+            ).fetchone()
+            out.update(
+                {
+                    "total": int(total_row[0] or 0),
+                    "latest_judged_at": total_row[1],
+                    "outcome_counts": {str(k): int(v) for k, v in sidecar_rows},
+                }
+            )
+            return out
+    except sqlite3.Error as exc:
+        return {"status": f"error:{str(exc)[:120]}", "table_exists": False}
+
+
 def _self_quality_snapshot() -> dict:
     """Surface the self-quality learning loop's open signals so the daily
     report reflects the new brain-cli pipelines instead of just SLOs.
@@ -232,6 +310,8 @@ def main() -> int:
     report["logs_dir_history"] = _growth_snapshot_history()
     report["calibration"] = _calibration_state()
     report["recent_remediation"] = _recent_remediation()
+    report["cli_llm"] = _cli_llm_surface()
+    report["recall_structural_judgments"] = _recall_structural_judgments_snapshot()
     report["self_quality"] = _self_quality_snapshot()
     report["elapsed_ms"] = int((time.time() - t0) * 1000)
 
