@@ -414,6 +414,16 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         agent="system",
         misfire_grace=900,
     ),
+    # 2026-05-14 SLO self-replan — queue a brain_cli review task whenever an
+    # SLO has triggered remediation ≥3 times in 7 days. No auto-PR; the task
+    # asks for a structural fix and the operator decides.
+    ScheduledJob(
+        name="slo_self_replan",
+        description="Queue review tasks for repeat-breaching SLOs (daily 4:52am)",
+        trigger=CronTrigger(hour=4, minute=52),
+        agent="system",
+        misfire_grace=900,
+    ),
     # 2026-04-26 stale atoms: auto-mark `tier='obsolete'` for atoms whose
     # valid_until passed >60 days ago AND who have a recorded
     # superseded_by chain AND were never reinforced. Conservative — we

@@ -453,6 +453,14 @@ JOB_REGISTRY: dict[str, list[str]] = {
         "-c",
         f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from atom_deboost import run_default; import json; print(json.dumps(run_default(), default=str))",
     ],
+    # 2026-05-14 SLO self-replan — when the same SLO triggers remediation
+    # ≥3 times in 7 days, queue a single review task asking brain_cli to
+    # propose a structural fix. Never auto-PRs.
+    "slo_self_replan": [
+        _py,
+        "-c",
+        f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from slo_replan import run_default; import json; print(json.dumps(run_default(), default=str))",
+    ],
     # 2026-04-26 stale-atoms auto-obsolete: only targets atoms with a real
     # supersede chain + 60d expired + never reinforced. Conservative.
     "obsolete_expired_atoms": [
