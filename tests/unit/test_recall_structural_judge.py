@@ -156,6 +156,55 @@ def test_skipped_when_no_atom_or_chroma_ids(tmp_path: Path) -> None:
     assert counters["skipped_empty"] == 1
 
 
+def test_qdrant_payload_fallback_resolves_canonical_chunks(tmp_path: Path, monkeypatch) -> None:
+    """When chroma_ids miss the atoms table (canonical/obsidian chunks),
+    the judge should fall back to Qdrant payload text. Without the
+    fallback, coverage stalls at <1% because most recall results come
+    from non-semantic collections that have no atoms row."""
+    db = tmp_path / "brain.db"
+    _bootstrap_brain_db(db)
+
+    class _FakePoint:
+        def __init__(self, pid: str, text: str) -> None:
+            self.id = pid
+            self.payload = {"trust_score": 0.8}
+            self.document = text
+
+    class _FakeVS:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, tuple[str, ...]]] = []
+
+        def get(self, collection, ids, with_payload=True, with_documents=True):
+            self.calls.append((collection, tuple(ids)))
+            if collection == "canonical" and "qdrant-uuid-1" in ids:
+                return [
+                    _FakePoint(
+                        "qdrant-uuid-1",
+                        "Canonical chunk text about brain quality goal scaffold deterministic",
+                    )
+                ]
+            return []
+
+    fake_vs = _FakeVS()
+    monkeypatch.setattr(rsj, "get_vector_store", lambda: fake_vs, raising=False)
+    import vector_store as _vs
+
+    monkeypatch.setattr(_vs, "get_vector_store", lambda: fake_vs)
+
+    rid = _insert_audit(
+        db,
+        query="brain quality scaffold deterministic",
+        chroma_ids=["qdrant-uuid-1"],
+    )
+    counters = rsj.run(hours=1, brain_db_path=db)
+    assert counters["status"] == "ok"
+    assert counters["labeled_good"] + counters["labeled_neutral"] == 1
+    # Walked canonical first and found the point — no need to try further
+    # collections, but allow the helper to look at others too.
+    assert fake_vs.calls[0][0] == "canonical"
+    assert _structural_outcome(db, rid) in ("structural_good", "structural_neutral")
+
+
 def test_structural_judge_skips_shell_hook_noise(tmp_path: Path) -> None:
     db = tmp_path / "brain.db"
     _bootstrap_brain_db(db)

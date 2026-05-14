@@ -41,6 +41,21 @@ SAMPLE_LIMIT = 1000
 DEFAULT_HOURS = 6  # hourly cadence covers the last 6h with overlap
 JUDGED_ACTORS = ("claude", "codex", "mcp", "jenna", "sage", "liz", "ellie", "market", "brain")
 JUDGED_ACTOR_PLACEHOLDERS = "?, ?, ?, ?, ?, ?, ?, ?, ?"
+# Non-atom collections to fall back to when atom-table resolution returns
+# nothing. Canonical/obsidian/knowledge/distilled chunks are served from
+# Qdrant payload directly — they have no atoms row, so the structural
+# judge has to read text from Qdrant. Order is most-frequently-recalled
+# first; the first collection that returns a payload wins.
+QDRANT_FALLBACK_COLLECTIONS = (
+    "canonical",
+    "obsidian",
+    "distilled",
+    "knowledge",
+    "experience",
+    "code",
+    "semantic_memory",
+    "personal",
+)
 
 
 _TOKEN_RE = re.compile(r"[A-Za-z가-힣0-9]+")
@@ -340,6 +355,65 @@ def _fetch_atom_docs(
                 "updated_at": row["updated_at"],
             }
         )
+    if not out and chroma_ids:
+        out = _fetch_qdrant_payload_docs(chroma_ids)
+    return out
+
+
+def _fetch_qdrant_payload_docs(point_ids: list[str]) -> list[dict]:
+    """Resolve Qdrant point UUIDs against payload-only collections.
+
+    Canonical / obsidian / distilled / knowledge / experience / code chunks
+    are stored in Qdrant payloads without a corresponding atoms row, so
+    the atom-table lookup misses them. Walk the fallback collections in
+    order and stop as soon as one yields hits — Qdrant point UUIDs are
+    globally unique so a hit in canonical means the point isn't anywhere
+    else. Best-effort: any client/connection failure returns [].
+    """
+    if not point_ids:
+        return []
+    try:
+        from vector_store import get_vector_store
+
+        vs = get_vector_store()
+    except Exception:
+        return []
+    seen: set[str] = set()
+    out: list[dict] = []
+    for collection in QDRANT_FALLBACK_COLLECTIONS:
+        remaining = [pid for pid in point_ids if pid not in seen]
+        if not remaining:
+            break
+        try:
+            points = vs.get(collection, ids=remaining, with_payload=True, with_documents=True)
+        except Exception as exc:
+            log.debug("qdrant fallback miss for %s: %s", collection, exc)
+            continue
+        for p in points or []:
+            pid = str(getattr(p, "id", "") or "")
+            if not pid or pid in seen:
+                continue
+            payload = getattr(p, "payload", None) or {}
+            document = getattr(p, "document", "") or ""
+            text = (
+                document
+                or payload.get("text")
+                or payload.get("content")
+                or payload.get("body")
+                or payload.get("summary")
+                or ""
+            )
+            if not text:
+                continue
+            seen.add(pid)
+            out.append(
+                {
+                    "id": pid,
+                    "text": text,
+                    "confidence": payload.get("trust_score") or payload.get("confidence"),
+                    "updated_at": payload.get("updated_at") or payload.get("created_at"),
+                }
+            )
     return out
 
 
