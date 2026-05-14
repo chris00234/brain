@@ -404,6 +404,16 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         agent="system",
         misfire_grace=900,
     ),
+    # 2026-05-14 atom deboost — apply outcome-aware penalty/recovery weights
+    # from recall_judgments over the last 7d. Recall integration is opt-in,
+    # so this job just keeps the table fresh until callers consume it.
+    ScheduledJob(
+        name="atom_deboost_update",
+        description="Update outcome-aware atom deboost weights (daily 4:48am)",
+        trigger=CronTrigger(hour=4, minute=48),
+        agent="system",
+        misfire_grace=900,
+    ),
     # 2026-04-26 stale atoms: auto-mark `tier='obsolete'` for atoms whose
     # valid_until passed >60 days ago AND who have a recorded
     # superseded_by chain AND were never reinforced. Conservative — we

@@ -444,6 +444,15 @@ JOB_REGISTRY: dict[str, list[str]] = {
         "-c",
         f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from conflict_surfacer import run_default; import json; print(json.dumps(run_default(), default=str))",
     ],
+    # 2026-05-14 outcome-aware atom deboost — penalize atoms repeatedly
+    # involved in wrong-judged recalls; recover ones whose appearances
+    # are right-judged. Pure SQLite, no LLM. Recall consumes the map
+    # opt-in via load_weight_map().
+    "atom_deboost_update": [
+        _py,
+        "-c",
+        f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from atom_deboost import run_default; import json; print(json.dumps(run_default(), default=str))",
+    ],
     # 2026-04-26 stale-atoms auto-obsolete: only targets atoms with a real
     # supersede chain + 60d expired + never reinforced. Conservative.
     "obsolete_expired_atoms": [

@@ -96,6 +96,15 @@ BRAIN_DISPATCH_CACHE_ENABLED = os.getenv("BRAIN_DISPATCH_CACHE_ENABLED", "false"
 )
 BRAIN_AUTO_HEAL_ENABLED = os.getenv("BRAIN_AUTO_HEAL_ENABLED", "false").lower() in ("true", "1", "yes")
 BRAIN_FINETUNE_ENABLED = os.getenv("BRAIN_FINETUNE_ENABLED", "false").lower() in ("true", "1", "yes")
+# Outcome-aware atom deboost — multiplies post-rerank scores by per-atom
+# weights from atom_deboost. Default off until the daily update job has
+# accumulated enough evidence; flip to "true" after a week of background
+# data collection.
+BRAIN_ATOM_DEBOOST_ENABLED = os.getenv("BRAIN_ATOM_DEBOOST_ENABLED", "false").lower() in (
+    "true",
+    "1",
+    "yes",
+)
 # Round 10 — neuromorphic retrieval (enabled 2026-04-11 after manual verification)
 BRAIN_SPREADING_ACTIVATION_ENABLED = os.getenv("BRAIN_SPREADING_ACTIVATION_ENABLED", "true").lower() in (
     "true",
