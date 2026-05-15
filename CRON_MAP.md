@@ -3,7 +3,7 @@
 > Auto-generated from `brain_core/job_definitions.py` by `cli/render_cron_map.py`.
 > Do not hand-edit; run `.venv/bin/python cli/render_cron_map.py --write`.
 
-**Total jobs**: 152
+**Total jobs**: 156
 **Default `misfire_grace`**: 300s (5min). Heavy nightly jobs override per job.
 
 ## Jobs by owning agent
@@ -54,7 +54,7 @@
 | `screen_time_ingest` | `cron(day_of_week=sun, hour=4, minute=35)` | standard | - | 300s | Screen Time daily patterns via Sage -> raw/inbox (weekly) |
 | `weekly_synthesis` | `cron(day_of_week=sun, hour=4, minute=15)` | heavy | llm | 300s | Weekly arc (Sage, Sunday 4:15am) |
 
-### system (126 jobs)
+### system (130 jobs)
 
 | Name | Trigger | Budget | Tags | Misfire Grace | Description |
 |---|---|---|---|---|---|
@@ -62,6 +62,8 @@
 | `adversarial_memory_eval` | `cron(day_of_week=sun, hour=5, minute=5)` | medium | eval, memory, qdrant | 900s | Weekly adversarial memory eval for stale facts, multilingual recall, handoff state, and source coverage (Sun 05:05) |
 | `answer_canonicalize` | `cron(hour=4, minute=2)` | heavy | llm, qdrant | 900s | Nightly query->canonical promoter (04:02am - staggered off sleep_consolidate @03:55 which contends for local embedder/LLM) |
 | `apple_health_ingest` | `cron(hour=8, minute=0)` | standard | - | 900s | Apple Health daily recovery signal (sleep/HRV/RHR/kcal) -> raw/inbox (8:00am, after iPhone 7:30 Shortcut + iCloud sync) |
+| `atom_conflict_surfacer` | `cron(hour=4, minute=46)` | standard | - | 900s | Surface candidate atom-pair conflicts as review tasks (daily 4:46am) |
+| `atom_deboost_update` | `cron(hour=4, minute=48)` | standard | - | 900s | Update outcome-aware atom deboost weights (daily 4:48am) |
 | `atom_recall_quality` | `cron(hour=4, minute=35)` | standard | - | 900s | Daily per-atom recall accuracy aggregation (D7 predictive coding signal) |
 | `atoms_to_skills` | `cron(day_of_week=sun, hour=4, minute=58)` | heavy | llm, sqlite | 900s | Promote high-confidence atoms -> domain Claude Code skills (Sun 04:58 - staggered off llm_usage_purge @4:55) |
 | `auto_resolve_contradictions` | `cron(hour=6, minute=0)` | standard | - | 900s | Daily auto-resolve stale/low-confidence contradictions (6:00am) - v3 bumped from weekly to daily after finding 20-item pending backlog that should have been closed overnight |
@@ -167,11 +169,13 @@
 | `self_model_regen` | `cron(hour=5, minute=25)` | standard | - | 900s | Nightly DMN-like unified self-model atom regen (05:25 PT) |
 | `session_context_retention` | `cron(hour=4, minute=43)` | standard | - | 900s | Prune orphaned session_context rows older than 30d (daily 4:43am) |
 | `session_rotate` | `cron(day_of_week=sun, hour=4, minute=30)` | standard | - | 900s | Weekly: archive old agent session checkpoints; alert on oversized live sessions (Sun 4:30am) |
+| `sidecar_backup_retention` | `cron(hour=4, minute=44)` | standard | - | 900s | Prune ad-hoc DB repair sidecars older than 7d (daily 4:44am) |
 | `skill_extract` | `cron(day_of_week=sun, hour=7, minute=45)` | heavy | llm, sqlite | 900s | Weekly skill graph indexing (Sunday 7:45am) |
 | `skill_materialize_cleanup` | `cron(hour=4, minute=10)` | standard | - | 900s | T2.10: archive orphaned/stale auto-* SKILL.md files; enforce MAX_AUTO_SKILLS cap (daily 4:10am) |
 | `skill_sync` | `cron(day_of_week=sun, hour=7, minute=50)` | standard | - | 900s | Reconcile ~/.openclaw/skills disk ↔ openclaw.json entries + agent attach (Sunday 7:50am, after skill_extract) |
 | `sleep_consolidate` | `cron(hour=3, minute=55)` | heavy | qdrant, sqlite | 900s | CLS sleep consolidation: coactivation + A-MEM + promotion (3:55am, Phase N4) |
 | `slo_monitor` | `cron(minute=30)` | standard | - | 300s | Hourly SLO check with Telegram alerts on 3+ violations |
+| `slo_self_replan` | `cron(hour=4, minute=52)` | standard | - | 900s | Queue review tasks for repeat-breaching SLOs (daily 4:52am) |
 | `slos_check` | `interval(0:05:00)` | standard | - | 120s | Phase E1: SLO budget check + Telegram alert on breach (every 5 min) |
 | `sm2_nightly` | `cron(hour=3, minute=25)` | standard | - | 900s | SM-2 nightly: seed next_review_at + obsolete stale atoms (3:25am) |
 | `stale_cleanup` | `cron(day_of_week=sun, hour=3, minute=10)` | standard | - | 300s | Weekly incremental stale doc cleanup across collections (Sun 3:10am) |
@@ -194,6 +198,8 @@
 | `adversarial_memory_eval` | `cron(day_of_week=sun, hour=5, minute=5)` | system | medium | eval, memory, qdrant | 900s | Weekly adversarial memory eval for stale facts, multilingual recall, handoff state, and source coverage (Sun 05:05) |
 | `answer_canonicalize` | `cron(hour=4, minute=2)` | system | heavy | llm, qdrant | 900s | Nightly query->canonical promoter (04:02am - staggered off sleep_consolidate @03:55 which contends for local embedder/LLM) |
 | `apple_health_ingest` | `cron(hour=8, minute=0)` | system | standard | - | 900s | Apple Health daily recovery signal (sleep/HRV/RHR/kcal) -> raw/inbox (8:00am, after iPhone 7:30 Shortcut + iCloud sync) |
+| `atom_conflict_surfacer` | `cron(hour=4, minute=46)` | system | standard | - | 900s | Surface candidate atom-pair conflicts as review tasks (daily 4:46am) |
+| `atom_deboost_update` | `cron(hour=4, minute=48)` | system | standard | - | 900s | Update outcome-aware atom deboost weights (daily 4:48am) |
 | `atom_recall_quality` | `cron(hour=4, minute=35)` | system | standard | - | 900s | Daily per-atom recall accuracy aggregation (D7 predictive coding signal) |
 | `atoms_to_skills` | `cron(day_of_week=sun, hour=4, minute=58)` | system | heavy | llm, sqlite | 900s | Promote high-confidence atoms -> domain Claude Code skills (Sun 04:58 - staggered off llm_usage_purge @4:55) |
 | `auto_resolve_contradictions` | `cron(hour=6, minute=0)` | system | standard | - | 900s | Daily auto-resolve stale/low-confidence contradictions (6:00am) - v3 bumped from weekly to daily after finding 20-item pending backlog that should have been closed overnight |
@@ -323,11 +329,13 @@
 | `session_context_retention` | `cron(hour=4, minute=43)` | system | standard | - | 900s | Prune orphaned session_context rows older than 30d (daily 4:43am) |
 | `session_rotate` | `cron(day_of_week=sun, hour=4, minute=30)` | system | standard | - | 900s | Weekly: archive old agent session checkpoints; alert on oversized live sessions (Sun 4:30am) |
 | `shell_ingest` | `cron(hour=2, minute=15)` | ellie | standard | - | 300s | Shell history -> experience collection |
+| `sidecar_backup_retention` | `cron(hour=4, minute=44)` | system | standard | - | 900s | Prune ad-hoc DB repair sidecars older than 7d (daily 4:44am) |
 | `skill_extract` | `cron(day_of_week=sun, hour=7, minute=45)` | system | heavy | llm, sqlite | 900s | Weekly skill graph indexing (Sunday 7:45am) |
 | `skill_materialize_cleanup` | `cron(hour=4, minute=10)` | system | standard | - | 900s | T2.10: archive orphaned/stale auto-* SKILL.md files; enforce MAX_AUTO_SKILLS cap (daily 4:10am) |
 | `skill_sync` | `cron(day_of_week=sun, hour=7, minute=50)` | system | standard | - | 900s | Reconcile ~/.openclaw/skills disk ↔ openclaw.json entries + agent attach (Sunday 7:50am, after skill_extract) |
 | `sleep_consolidate` | `cron(hour=3, minute=55)` | system | heavy | qdrant, sqlite | 900s | CLS sleep consolidation: coactivation + A-MEM + promotion (3:55am, Phase N4) |
 | `slo_monitor` | `cron(minute=30)` | system | standard | - | 300s | Hourly SLO check with Telegram alerts on 3+ violations |
+| `slo_self_replan` | `cron(hour=4, minute=52)` | system | standard | - | 900s | Queue review tasks for repeat-breaching SLOs (daily 4:52am) |
 | `slos_check` | `interval(0:05:00)` | system | standard | - | 120s | Phase E1: SLO budget check + Telegram alert on breach (every 5 min) |
 | `sm2_nightly` | `cron(hour=3, minute=25)` | system | standard | - | 900s | SM-2 nightly: seed next_review_at + obsolete stale atoms (3:25am) |
 | `stale_cleanup` | `cron(day_of_week=sun, hour=3, minute=10)` | system | standard | - | 300s | Weekly incremental stale doc cleanup across collections (Sun 3:10am) |
