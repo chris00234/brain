@@ -74,6 +74,14 @@ DEFAULT_LEVELS: dict[str, str] = {
     # brain_config_store, auto-expires after 30 min. Disable with
     # BRAIN_LLM_COST_GOVERNOR=off.
     "brain_loop.cost_governor": "L3",
+    # 2026-05-20 W4 Phase 2 (codex round-7 spec): closed-loop policy
+    # controller. propose-only (L1) for v1 — every mutation lands in
+    # closed_loop_policy_mutations with status='proposed' and requires
+    # Chris ack via /brain/ops or a v2 apply-pass before it touches a
+    # real knob. policy_revert is L2 because reversals are strictly
+    # safer than mutations (revert returns to last-known-good).
+    "closed_loop.policy_mutation": "L1",
+    "closed_loop.policy_revert": "L2",
     # ── Hard L0 (never auto-execute) ─────────────────────────
     "write.canonical": "L0",  # canonical promotion is human-only
 }

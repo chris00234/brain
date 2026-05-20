@@ -916,6 +916,18 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         resource_class="standard",
         resource_tags=("qdrant", "eval", "crag"),
     ),
+    # 2026-05-20 W4 Phase 2 (codex round-7 spec): propose-only closed-loop
+    # self-quality controller. Runs 07:20 — after the 06:57/07:02/07:07 eval
+    # regression triplet so the controller reads fresh eval reports + current
+    # SLO state, then writes proposed knob mutations to
+    # closed_loop_policy_mutations for review (v1 propose-only).
+    ScheduledJob(
+        name="closed_loop_controller_daily",
+        description="W4 P2: propose self-quality knob mutations from SLO + eval breach signals (daily 7:20 PT)",
+        trigger=CronTrigger(hour=7, minute=20),
+        agent="system",
+        misfire_grace=900,
+    ),
     ScheduledJob(
         name="crag_llm_correction_sample",
         description="Weekly CRAG live LLM rewrite sample over correction holdout (Sun 07:12 PT)",

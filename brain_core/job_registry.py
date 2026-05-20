@@ -323,6 +323,20 @@ JOB_REGISTRY: dict[str, list[str]] = {
         "-c",
         f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from skill_security_audit import run_audit; import json; print(json.dumps(run_audit()))",
     ],
+    # 2026-05-20 W4 Phase 2 (codex round-7 spec): propose-only closed-loop
+    # self-quality controller. Reads SLO breaches + eval regression JSONs,
+    # writes proposed knob mutations (BRAIN_SCHED_MAX_HEAVY_JOBS,
+    # BRAIN_CLI_LLM_CONCURRENCY, DEFAULT_ITERATE_THRESHOLD,
+    # BRAIN_ONTOLOGY_EXPANSION_MAX_TERMS, BRAIN_MMR_LAMBDA) to
+    # closed_loop_policy_mutations. v1 is propose-only; an apply pass
+    # gated by autonomy.authorize lands in v2 after 7+ cycle review.
+    # Runs daily 07:20 PT, after the 06:57/07:02/07:07 eval regression
+    # triplet so the controller reads fresh eval reports.
+    "closed_loop_controller_daily": [
+        _py,
+        "-c",
+        f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from closed_loop_controller import run_controller; import json; print(json.dumps(run_controller()))",
+    ],
     # 2026-04-17 session_rotate: archive OpenClaw agent session checkpoints > 14d,
     # alert on live sessions > 100MB. Triggered after 103MB jenna session caused
     # 42.5% empty-envelope rate on Telegram alerts.
