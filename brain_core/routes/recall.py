@@ -1967,7 +1967,10 @@ _COMPOUND_OP_ALLOWLIST = frozenset({"search", "remember", "correct", "feedback"}
 
 
 class CompoundOp(BaseModel):
-    op: str = Field(..., description="One of: search, remember, correct, feedback")
+    # 2026-05-20 W3.5 round-4 defect D: cap op string length so a malformed
+    # request can't push an unbounded value into the action_audit query_text
+    # via the rejection path.
+    op: str = Field(..., max_length=64, description="One of: search, remember, correct, feedback")
     args: dict = Field(default_factory=dict)
 
 
@@ -2078,14 +2081,21 @@ def brain_ops_compound(request: Request, req: CompoundRequest) -> dict:
                         },
                     )
                 elif target_type == "recall":
+                    # /recall/feedback expects SearchFeedbackRequest:
+                    # {query, result_id, result_source, useful, agent}.
+                    # Codex round-4 defect E2: the prior payload used
+                    # {recall_id, useful, notes, agent} and 422'd every time.
+                    # Map target_id to result_id and use args.query / args.source
+                    # when present (else minimal stubs so the schema validates).
                     out = _http(
                         "POST",
                         "/recall/feedback",
                         {
-                            "recall_id": target_id,
+                            "query": (a.get("query") or "compound_recall_feedback")[:500],
+                            "result_id": target_id,
+                            "result_source": (a.get("result_source") or "")[:64],
                             "useful": success,
-                            "notes": notes,
-                            "agent": actor,
+                            "agent": actor[:32],
                         },
                     )
                 else:  # task

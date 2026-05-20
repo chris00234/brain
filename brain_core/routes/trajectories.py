@@ -122,6 +122,9 @@ def _decisions_for(actor: str | None, session_ref: str, since_iso: str) -> list[
         conn.close()
 
 
+_LESSONS_LOOKUP_BUDGET_S = 2.0
+
+
 def _lessons_for(actor: str | None, topic_hint: str | None = None, limit: int = 5) -> list[dict]:
     """Pull recent failure_memory lessons relevant to this trajectory.
 
@@ -129,20 +132,42 @@ def _lessons_for(actor: str | None, topic_hint: str | None = None, limit: int = 
     queried a ``lessons`` table in brain.db that does not exist — the join
     silently returned empty for every trajectory. Real lesson storage is in
     failure_memory (Neo4j-backed via failure_memory.get_similar_lessons).
-    We pass either the inferred goal or the actor name as the similarity
-    seed; failures degrade to an empty list so the export route never
-    blocks on lesson lookup errors.
+
+    2026-05-20 W3.5 round-4 defect C: failure_memory ultimately drives
+    Neo4j over a driver with a 30s acquisition timeout and no per-query
+    cap. A cold/down Neo4j would block this route up to 30s per
+    trajectory. Run the lookup on a daemon thread with a hard
+    ``_LESSONS_LOOKUP_BUDGET_S`` ceiling so trajectory export remains
+    bounded; failures degrade to []. The orphan worker keeps draining in
+    the background but cannot stall the response.
     """
+    import threading as _t
+
     seed = (topic_hint or "").strip() or (actor or "").strip()
     if not seed:
         return []
-    try:
-        import failure_memory as _fm
+    result: list[dict] = []
+    error_box: list[BaseException] = []
 
-        return _fm.get_similar_lessons(seed, agent_id=actor or "system", limit=limit) or []
-    except Exception as exc:
-        log.debug("trajectories lessons lookup failed: %s", exc)
+    def _worker() -> None:
+        try:
+            import failure_memory as _fm
+
+            out = _fm.get_similar_lessons(seed, agent_id=actor or "system", limit=limit) or []
+            result.extend(out)
+        except BaseException as exc:
+            error_box.append(exc)
+
+    t = _t.Thread(target=_worker, daemon=True, name="trajectories_lessons")
+    t.start()
+    t.join(timeout=_LESSONS_LOOKUP_BUDGET_S)
+    if t.is_alive():
+        log.debug("trajectories lessons lookup timed out after %.1fs", _LESSONS_LOOKUP_BUDGET_S)
         return []
+    if error_box:
+        log.debug("trajectories lessons lookup failed: %s", error_box[0])
+        return []
+    return result
 
 
 def _group_trajectories(

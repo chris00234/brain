@@ -143,21 +143,29 @@ def _compose_candidates(activity: dict, beliefs: dict, outcomes: list[dict]) -> 
         if names:
             candidates.append(f"top brain writers (7d): {', '.join(names)}")
 
-    # 2. Belief-state pulse — high-confidence themes that surfaced today
+    # 2. Belief-state pulse — high-confidence themes that surfaced today.
+    # belief_state._belief_from_row emits ``{text: ...}`` (see
+    # brain_core/belief_state.py:222). Older deepener versions guessed at
+    # ``content``/``subject``/``topic``, which always resolved to "" and
+    # produced blank claim text (codex round-4 defect A).
     high_conf = beliefs.get("beliefs") if isinstance(beliefs, dict) else None
     if isinstance(high_conf, list) and high_conf:
         themes = [
-            (b.get("content") or b.get("subject") or "")[:120] for b in high_conf[:2] if isinstance(b, dict)
+            (b.get("text") or b.get("content") or b.get("subject") or "")[:120]
+            for b in high_conf[:2]
+            if isinstance(b, dict)
         ]
         themes = [t for t in themes if t]
         if themes:
             candidates.append(f"top beliefs in current snapshot: {' | '.join(themes)}")
 
-    # 3. Uncertainty pulse — what brain is currently doubting
+    # 3. Uncertainty pulse — what brain is currently doubting. Same shape
+    # as beliefs: ``text`` is the canonical field, fall back to others for
+    # forward-compat across belief_state versions.
     uncertainties = beliefs.get("uncertainties") if isinstance(beliefs, dict) else None
     if isinstance(uncertainties, list) and uncertainties:
         u_summary = [
-            (u.get("topic") or u.get("subject") or u.get("content") or "")[:80]
+            (u.get("text") or u.get("topic") or u.get("subject") or u.get("content") or "")[:80]
             for u in uncertainties[:2]
             if isinstance(u, dict)
         ]

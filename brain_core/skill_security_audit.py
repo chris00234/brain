@@ -108,8 +108,25 @@ def audit_root(root: Path) -> dict[str, Any]:
 
         if not recorded_hash:
             # Legacy skill — no attestation. Stamp the current hash so
-            # future audits have a reference. Not a quarantine: pre-attestation
-            # materializations are trusted; we just start tracking them now.
+            # future audits have a reference. Codex round-4 defect E1: the
+            # original backfill path skipped the threat scanner via
+            # ``continue``, so a malicious legacy skill could be attested
+            # AS-IS and only get quarantined on the next cycle (a 24h
+            # window where the SKILL.md happily loads into agent context).
+            # Run the scanner inline before stamping so anything dangerous
+            # is quarantined on the very first audit.
+            try:
+                text = skill_md.read_text()
+            except Exception as exc:
+                summary["errors"].append(f"read_fail:{slug}:{exc}")
+                continue
+            threat = _scan_generated_skill_content(text)
+            if threat:
+                summary["threat_drift"] += 1
+                _quarantine(usage, slug, f"legacy_threat_pattern:{threat}")
+                summary["quarantined_now"].append(slug)
+                mutated = True
+                continue
             record["content_sha256"] = actual_hash
             record["content_sha256_at"] = datetime.now(UTC).isoformat(timespec="seconds")
             record["content_sha256_origin"] = "audit_backfill"
