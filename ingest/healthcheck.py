@@ -640,7 +640,10 @@ def main() -> None:
     # 5. Adapter watermark staleness (legacy check, kept for compat)
     ADAPTER_STATES = {
         "git_activity": (BRAIN_DIR / "logs" / "git-activity-state.json", 48),
-        "screen_time": (BRAIN_DIR / "logs" / "screen-time-state.json", 192),
+        # 2026-05-20: screen_time adapter removed — Chris no longer accumulates
+        # screen-time data, so the ingester + cron + state file are all gone.
+        # Keeping this freshness check would have started failing immediately
+        # once the 192h window elapsed past the last (Apr 26) write.
         "gmail": (Path("/Users/chrischo/.openclaw/workspace-jenna/.gmail_ingest_state.json"), 48),
         "browser": (
             Path("/Users/chrischo/.openclaw/workspace-sage/.brain_state/browser_ingest_state.json"),

@@ -1166,12 +1166,13 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         trigger=CronTrigger(hour=1, minute=45),
         agent="ellie",
     ),
-    ScheduledJob(
-        name="screen_time_ingest",
-        description="Screen Time daily patterns via Sage -> raw/inbox (weekly)",
-        trigger=CronTrigger(day_of_week="sun", hour=4, minute=35),
-        agent="sage",
-    ),
+    # 2026-05-20: screen_time_ingest removed — Chris is no longer accumulating
+    # Screen Time data, so the weekly Sunday 04:35 collector + dispatch entry +
+    # ingest/screen_time.py module + logs/screen-time-state.json freshness
+    # marker are all gone. Historical raw_events have zero screen_time rows
+    # so retrieval is unaffected; the type-name allowlists in source_policy /
+    # source_quality / search_unified / indexer are intentionally retained
+    # as harmless no-ops in case the source is ever re-added.
     ScheduledJob(
         name="active_contacts_ingest",
         description="Active iMessage contacts via Jenna -> raw/inbox (monthly)",

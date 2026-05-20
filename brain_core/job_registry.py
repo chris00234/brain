@@ -125,7 +125,8 @@ JOB_REGISTRY: dict[str, list[str]] = {
     ],
     "claude_code_sessions_ingest": [_py, f"{_bd}/ingest/claude_code_sessions.py"],
     "git_activity_ingest": [_py, f"{_bd}/ingest/git_activity.py"],
-    "screen_time_ingest": [_py, f"{_bd}/ingest/screen_time.py"],
+    # 2026-05-20: screen_time_ingest dispatcher removed — ingester deleted
+    # and cron entry removed from job_definitions.py. See sister comment there.
     "active_contacts_ingest": [_py, f"{_bd}/ingest/active_contacts.py"],
     # Synthesis
     "daily_synthesis": [_py, f"{_bd}/synthesis/daily.py"],
