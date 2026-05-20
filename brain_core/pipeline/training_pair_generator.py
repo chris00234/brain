@@ -129,6 +129,8 @@ def generate_pairs(since_days: int = 30) -> dict:
     negative_pairs: list[dict] = []
 
     for event in events:
+        if event.get("synthetic") is True:
+            continue
         query = (event.get("query") or "").strip()
         result_id = (event.get("result_id") or "").strip()
         source = (event.get("source") or "").strip()

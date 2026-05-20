@@ -150,6 +150,7 @@ class SearchFeedbackRequest(BaseModel):
     # Phase 7: eval auto-growth signal. When wrong_answer=true and `expected`
     # is set, the query is appended to eval_proposals for weekly review.
     wrong_answer: bool = Field(default=False)
+    synthetic: bool = Field(default=False)
     expected: str = Field(default="", max_length=2000)
 
 
@@ -2096,6 +2097,7 @@ def brain_ops_compound(request: Request, req: CompoundRequest) -> dict:
                             "result_source": (a.get("result_source") or "")[:64],
                             "useful": success,
                             "agent": actor[:32],
+                            "synthetic": bool(not a.get("query")),
                         },
                     )
                 else:  # task
@@ -2160,6 +2162,7 @@ def search_feedback(req: SearchFeedbackRequest):
                         "source": req.result_source,
                         "useful": req.useful,
                         "agent": req.agent,
+                        "synthetic": req.synthetic,
                     }
                 )
                 + "\n"

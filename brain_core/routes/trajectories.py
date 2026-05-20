@@ -36,6 +36,7 @@ from __future__ import annotations
 import logging
 import re
 import sqlite3
+import threading as _t
 from datetime import UTC, datetime, timedelta
 
 from api_deps import _safe_http_detail, verify_bearer
@@ -123,6 +124,7 @@ def _decisions_for(actor: str | None, session_ref: str, since_iso: str) -> list[
 
 
 _LESSONS_LOOKUP_BUDGET_S = 2.0
+_LESSONS_LOOKUP_SEMAPHORE = _t.BoundedSemaphore(8)
 
 
 def _lessons_for(actor: str | None, topic_hint: str | None = None, limit: int = 5) -> list[dict]:
@@ -141,22 +143,30 @@ def _lessons_for(actor: str | None, topic_hint: str | None = None, limit: int = 
     bounded; failures degrade to []. The orphan worker keeps draining in
     the background but cannot stall the response.
     """
-    import threading as _t
-
     seed = (topic_hint or "").strip() or (actor or "").strip()
     if not seed:
         return []
+    if not _LESSONS_LOOKUP_SEMAPHORE.acquire(timeout=0.5):
+        return []
+    _LESSONS_LOOKUP_SEMAPHORE.release()
     result: list[dict] = []
     error_box: list[BaseException] = []
 
     def _worker() -> None:
+        acquired = False
         try:
+            if not _LESSONS_LOOKUP_SEMAPHORE.acquire(timeout=0.5):
+                return
+            acquired = True
             import failure_memory as _fm
 
             out = _fm.get_similar_lessons(seed, agent_id=actor or "system", limit=limit) or []
             result.extend(out)
         except BaseException as exc:
             error_box.append(exc)
+        finally:
+            if acquired:
+                _LESSONS_LOOKUP_SEMAPHORE.release()
 
     t = _t.Thread(target=_worker, daemon=True, name="trajectories_lessons")
     t.start()
