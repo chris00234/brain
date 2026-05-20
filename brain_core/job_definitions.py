@@ -167,6 +167,19 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         agent="sage",
         misfire_grace=900,
     ),
+    # 2026-05-20 W3.5: profile_deepener — Honcho-equivalent daily distillation.
+    # Funnels agent activity + belief snapshot + decision outcomes through
+    # /memory so brain's governance gates handle classification + supersession
+    # instead of letting a parallel store accumulate. Runs 3:45am — after
+    # canonical_pipeline (3:00), before skill_materialize_cleanup (4:10) and
+    # the weekly profile_regen (Sun 4:00) so Sage sees fresh candidates.
+    ScheduledJob(
+        name="profile_deepener_daily",
+        description="W3.5: emit daily candidate profile atoms from activity + belief + outcomes (3:45am)",
+        trigger=CronTrigger(hour=3, minute=45),
+        agent="system",
+        misfire_grace=600,
+    ),
     # T2.10 auto-skill maintenance (2026-04-17): archive orphaned/stale auto-* skills
     # Runs daily at 4:10am - after 4:00 log_rotation, before 4:45 autonomy_proposer.
     ScheduledJob(
@@ -484,6 +497,19 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         name="eval_run_extended",
         description="Extended-track eval (daily 3:50am) - loose-content trend only, no heal, 10pt threshold",
         trigger=CronTrigger(hour=3, minute=50),
+        agent="system",
+        misfire_grace=900,
+    ),
+    # 2026-05-15 P1-4: nightly regression-diff over eval-history-extended.
+    # eval_run_extended starts at 03:50 and normally finishes ~04:06.
+    # Schedule at 04:30 so we have a 40-min buffer over normal runtime.
+    # If the upstream eval is delayed past 04:30 the diff job's freshness
+    # gate (FRESHNESS_THRESHOLD_HOURS=20) trips and the CLI exits nonzero,
+    # so the scheduler sees a real failure instead of a silent skip.
+    ScheduledJob(
+        name="eval_regression_diff_extended",
+        description="Daily 04:30 PT — diff yesterday's vs today's extended eval failures so regressed queries are surfaced",
+        trigger=CronTrigger(hour=4, minute=30),
         agent="system",
         misfire_grace=900,
     ),
@@ -1356,12 +1382,75 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         misfire_grace=900,
     ),
     # 2026-05-12: D7 — per-atom recall quality aggregation from action_audit.
-    # Lightweight SQL aggregation, no LLM. Runs daily 04:35 PT after
-    # conjecture_validate.
+    # Lightweight SQL aggregation, no LLM.
+    # 2026-05-15: moved 04:35 → 04:38 PT — wal_checkpoint_intraday TRUNCATE
+    # at :35 holds an EXCLUSIVE lock ~20s on brain.db. Co-scheduling caused
+    # BEGIN IMMEDIATE failures (task_failure_lesson_missing_count SLO root
+    # cause analysis 2026-05-15). 04:38 sits 3 min past checkpoint start.
     ScheduledJob(
         name="atom_recall_quality",
         description="Daily per-atom recall accuracy aggregation (D7 predictive coding signal)",
-        trigger=CronTrigger(hour=4, minute=35),
+        trigger=CronTrigger(hour=4, minute=38),
+        agent="system",
+        misfire_grace=900,
+    ),
+    # 2026-05-15: auto-supersede on chris_override outcomes — boosts trust_score
+    # on Chris's correction atoms so subsequent recall/decide ranks them higher.
+    # Ledger-tracked (logs/auto_supersede_ledger.json) for idempotency. Pairs
+    # with reasoning.py:_fetch_chris_corrections_for_domain force-include for
+    # high-override domains (infra/coding/brain).
+    ScheduledJob(
+        name="auto_supersede_overrides",
+        description="Daily 04:42 PT: boost trust_score on atoms matching chris_override correction text (closes correction → recall loop)",
+        trigger=CronTrigger(hour=4, minute=42),
+        agent="system",
+        misfire_grace=900,
+    ),
+    # 2026-05-19: mint LESSON nodes from override patterns so the pretool
+    # nudge hook surfaces the same warning before the next similar action.
+    # Pairs with auto_supersede_overrides (which acts on atom storage) and
+    # the deboost feed (which acts on recall scoring) — this surface is for
+    # action-time prevention, not retrieval ranking.
+    ScheduledJob(
+        name="override_pattern_lesson_mint",
+        description="Daily 04:48 PT: mint Neo4j LESSON nodes from repeating override signatures so mistake-guard can surface them",
+        trigger=CronTrigger(hour=4, minute=48),
+        agent="system",
+        misfire_grace=900,
+    ),
+    # 2026-05-19: persistent extended-eval failures → review tasks. Reads
+    # eval_regression_diff history; queries failing >=3 consecutive runs
+    # become bounded review tasks (max 3/day) so the 80% extended-eval
+    # accuracy ceiling has a path to improve instead of sitting unstuck.
+    ScheduledJob(
+        name="eval_persistent_failures_triage",
+        description="Daily 04:50 PT: surface eval queries that failed 3+ consecutive runs as review tasks (max 3/day)",
+        trigger=CronTrigger(hour=4, minute=50),
+        agent="system",
+        misfire_grace=900,
+    ),
+    # 2026-05-19: reconcile holdout pipeline. Sweeps lifecycle rows whose
+    # source proposal vanished (rejected/missing) and re-seeds the pending
+    # JSON from currently-promoted proposals so the nightly eval_gate
+    # scoring has work to do. Runs Sat 7:00 PT before the weekly Sun 7:30
+    # auto_graduate so this week's reconcile lands before promotion.
+    ScheduledJob(
+        name="holdout_lifecycle_reconcile",
+        description="Weekly Sat 07:00 PT: reject orphaned holdout lifecycle rows and re-seed pending JSON from promoted proposals",
+        trigger=CronTrigger(day_of_week="sat", hour=7, minute=0),
+        agent="system",
+        misfire_grace=900,
+    ),
+    # 2026-05-19: drop ghost atom_deboost rows (atom_id not in any Qdrant
+    # collection). Found 323/323 rows orphaned on the initial sweep — the
+    # ID-schema mismatch between audit/_to_dashed_uuid output and live
+    # Qdrant point IDs leaves the deboost table populated with dead state
+    # if not pruned. Runs after the daily atom_deboost_update so cleanup
+    # follows the writer.
+    ScheduledJob(
+        name="atom_deboost_cleanup",
+        description="Daily 04:55 PT: drop atom_deboost rows whose atom_id is not in any Qdrant collection",
+        trigger=CronTrigger(hour=4, minute=55),
         agent="system",
         misfire_grace=900,
     ),

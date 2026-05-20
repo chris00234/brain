@@ -1776,6 +1776,7 @@ def _compose_rrf_inputs(
     graph_prefetch_results: list[dict],
     raptor_results: list[dict],
     intent_boost: dict[str, float],
+    sessions_results: list[dict] | None = None,
 ) -> tuple[list[list[dict]], list[float]]:
     """Build (source_lists, trust_weights) for rrf_fuse from the per-source
     result lists + the intent classifier's per-source boost.
@@ -1791,10 +1792,20 @@ def _compose_rrf_inputs(
       raptor:         0.85 * intent_boost["canonical"]
                       (canonical-derived, inherits canonical trust a shade
                       below canonical itself)
+      sessions:       0.30 (raw_events transcripts — low trust by design;
+                            opt-in via sources=[...,"sessions"] or session
+                            filter args, so weight only kicks in when caller
+                            explicitly wants cross-agent transcript recall)
 
     2026-04-18: raptor_results was previously fetched but never flowed into
     RRF — both source_lists and trust_weights omitted it. Every broad query
     wasted the RAPTOR fetch and lost the hierarchical-summary signal.
+
+    2026-05-20 W3.5 (codex round 2 correction): sessions_results was the same
+    pattern — _search_sessions ran and populated the bucket, but rrf_fuse
+    never received it. Cross-agent transcript hits surfaced only in the
+    fallback concat path. Wired in here with conservative weight so canonical
+    + RAG retain ranking primacy.
     """
     source_lists: list[list[dict]] = []
     trust_weights: list[float] = []
@@ -1819,6 +1830,9 @@ def _compose_rrf_inputs(
     if raptor_results:
         source_lists.append(raptor_results)
         trust_weights.append(0.85 * intent_boost.get("canonical", 1.0))
+    if sessions_results:
+        source_lists.append(sessions_results)
+        trust_weights.append(0.30)
     return source_lists, trust_weights
 
 
@@ -1999,6 +2013,8 @@ def search_all(
     include_session_scope=False,
     include_low_trust=False,
     include_expired=False,
+    event_sink=None,
+    session_actor=None,
 ):
     """Unified search across all sources.
 
@@ -2413,6 +2429,34 @@ def search_all(
     # gating graph/fts/graph_prefetch here makes that hard rule real.
     # Fix 2026-04-16: previously even canonical_first mixed FTS + graph
     # results in, defeating the whole point of the flag.
+    # 2026-05-20 W3.5: opt-in cross-agent session search. Closure calls
+    # raw_events_fts.search with actor/source_type/session_id filters
+    # propagated from search_all args. Only runs when caller adds "sessions"
+    # to sources (or sets session_id / session_actor / agent-session
+    # source_type) — keeps default /recall/v2 behavior unchanged so existing
+    # callers don't suddenly see raw_events noise in their results.
+    sessions_results: list[dict] = []
+    _has_session_filters = bool(session_id) or bool(session_actor) or (
+        source_type and str(source_type).lower() in {"agent_session", "openclaw_session", "claude_code_session"}
+    )
+
+    def _search_sessions():
+        t0 = time.time()
+        try:
+            from raw_events_fts import search as _raw_fts_search
+
+            res = _raw_fts_search(
+                query,
+                limit=limit,
+                actor=session_actor,
+                source_type=source_type if source_type else None,
+                session_id=session_id if session_id else None,
+            ) or []
+        except Exception:
+            res = []
+        source_timing["sessions_ms"] = int((time.time() - t0) * 1000)
+        return res
+
     _canonical_only = list(sources) == ["canonical"]
     raptor_results: list[dict] = []
     search_fns = [
@@ -2429,6 +2473,13 @@ def search_all(
                 (_search_raptor, "raptor"),  # 2026-04-16 R-1
             ]
         )
+    # Sessions: opt-in only when caller explicitly asked OR session filters
+    # are present. trust_tier 1 + scoring inherits raw_events_fts defaults;
+    # it lands in result_lists["sessions"] and joins the linear fallback
+    # concat (RRF integration is deferred — would need _compose_rrf_inputs
+    # weight tuning to keep canonical wins from being diluted).
+    if (sources and "sessions" in sources) or _has_session_filters:
+        search_fns.append((_search_sessions, "sessions"))
     result_lists = {
         "rag": rag_results,
         "canonical": canonical_results,
@@ -2437,26 +2488,52 @@ def search_all(
         "fts": fts_results,
         "graph_prefetch": graph_prefetch_results,
         "raptor": raptor_results,
+        "sessions": sessions_results,
     }
 
     future_map = {_search_fanout_pool.submit(fn): name for fn, name in search_fns}
     # 2026-04-17 fix: as_completed can block forever if one source hangs.
     # Wall-clock bound the fan-out so /recall/v2 never wedges on a dead dep.
     _FANOUT_DEADLINE_S = 15
+
+    def _emit_source(name: str, res: list | None, error: str | None = None) -> None:
+        # 2026-05-20 W2: per-source completion event sink for SSE streaming.
+        # No-op when event_sink is None — preserves existing search_all callers.
+        if event_sink is None:
+            return
+        payload = {
+            "name": name,
+            "results": (res[:limit] if isinstance(res, list) else []),
+            "timing_ms": source_timing.get(name, 0),
+        }
+        if error:
+            payload["error"] = error[:200]
+        try:
+            event_sink("source", payload)
+        except Exception:
+            pass
+
     try:
         for fut in as_completed(future_map, timeout=_FANOUT_DEADLINE_S):
+            src_name = future_map[fut]
             try:
-                result_lists[future_map[fut]].extend(fut.result(timeout=1))
-            except Exception:
-                pass
+                res = fut.result(timeout=1)
+                result_lists[src_name].extend(res)
+                _emit_source(src_name, res)
+            except Exception as exc:
+                _emit_source(src_name, None, error=str(exc))
     except Exception:
         # timeout on as_completed — gather whatever already completed
         for fut, name in future_map.items():
             if fut.done():
                 try:
-                    result_lists[name].extend(fut.result(timeout=0.1))
-                except Exception:
-                    pass
+                    res = fut.result(timeout=0.1)
+                    result_lists[name].extend(res)
+                    _emit_source(name, res)
+                except Exception as exc:
+                    _emit_source(name, None, error=str(exc))
+            else:
+                _emit_source(name, None, error="fanout_deadline_exceeded")
 
     primary_doc_hits = _primary_doc_hits(relevance_query)
     if primary_doc_hits:
@@ -2499,6 +2576,9 @@ def search_all(
         # and dropped silently. The trace log never reported RAPTOR counts,
         # and the RRF fusion below didn't include them either.
         "raptor": len(raptor_results),
+        # 2026-05-20 W3.5: cross-agent session hits surface here when caller
+        # opts in via sources=[...,"sessions"] or session filter args.
+        "sessions": len(sessions_results),
     }
     try:
         from rrf import rrf_fuse
@@ -2513,6 +2593,7 @@ def search_all(
             graph_prefetch_results,
             raptor_results,
             _intent_boost,
+            sessions_results=sessions_results,
         )
         if source_lists:
             all_results = rrf_fuse(source_lists, trust_weights=trust_weights, id_key="path")
@@ -2528,6 +2609,7 @@ def search_all(
             + fts_results
             + graph_prefetch_results
             + raptor_results
+            + sessions_results
         )
         all_results.sort(key=lambda x: (x["score"], x["trust_tier"]), reverse=True)
         trust_weights = []
@@ -2586,6 +2668,94 @@ def search_all(
                 raw_f = 0.0
             r["score"] = max(0.0, min(100.0, raw_f))
     except ImportError:
+        pass
+
+    # 2026-05-19: Atom deboost — outcome-aware shadow weights.
+    # Multiplies post-rerank score by per-atom weights from atom_deboost
+    # (weights<0.5 = wrong-judged in /recall_judgments). Loop closure: the
+    # feedback signal had no consumer before this wiring; weights were
+    # computed nightly but never read.
+    #
+    # ID schema (the trap that made initial wiring a 0/323 no-op): audit
+    # writes id via _to_dashed_uuid → 32-char hex becomes UUID. atom_deboost
+    # inherits that UUID format from audit reads. But search_unified results
+    # still carry the raw 32-char hex (or `<col>:hex` for semantic_memory).
+    # To match, normalize the result id through the same transform before
+    # lookup. Severity-aware multiplier [0.05, 0.5] → [0.7, 0.95] caps
+    # max penalty at 30% so legit atoms judged wrong on one query aren't
+    # destroyed everywhere.
+    try:
+        from config import BRAIN_ATOM_DEBOOST_ENABLED, BRAIN_DB
+
+        if BRAIN_ATOM_DEBOOST_ENABLED:
+            from atom_deboost import load_weight_map
+
+            _deboost_map = load_weight_map(brain_db_path=BRAIN_DB, floor=0.5)
+            # 2026-05-19: log map size every 100 invocations so an empty
+            # map isn't silently invisible. Prior bug: deboost was a
+            # 0/323 no-op for weeks because nobody monitored it.
+            try:
+                import logging as _logging
+
+                _dlog = _logging.getLogger("brain.recall.deboost")
+                if not hasattr(_dlog, "_deboost_seen"):
+                    _dlog._deboost_seen = 0  # type: ignore[attr-defined]
+                _dlog._deboost_seen += 1  # type: ignore[attr-defined]
+                if _dlog._deboost_seen % 100 == 1:  # type: ignore[attr-defined]
+                    _dlog.info(
+                        "deboost map sample (every 100th recall): size=%d",
+                        len(_deboost_map),
+                    )
+            except Exception:
+                pass
+            if _deboost_map:
+
+                def _normalize_for_deboost(raw_id: str) -> list[str]:
+                    """Return the candidate ID forms to check against the
+                    deboost map. audit/deboost stores UUID-form (32-char hex
+                    dashed via _to_dashed_uuid). Results may be raw 32-char
+                    hex, `<col>:hex`, or already UUID-form. Try all variants
+                    so a single mismatched representation doesn't void the
+                    lookup."""
+                    if not raw_id:
+                        return []
+                    out = {raw_id}
+                    bare = raw_id.split(":", 1)[1] if ":" in raw_id else raw_id
+                    out.add(bare)
+                    if (
+                        len(bare) == 32
+                        and "-" not in bare
+                        and all(c in "0123456789abcdef" for c in bare.lower())
+                    ):
+                        out.add(f"{bare[:8]}-{bare[8:12]}-{bare[12:16]}-{bare[16:20]}-{bare[20:]}")
+                    return list(out)
+
+                _deboost_hits = 0
+                for r in unique:
+                    if not isinstance(r, dict):
+                        continue
+                    aid = r.get("id")
+                    if not aid:
+                        continue
+                    w = None
+                    for candidate in _normalize_for_deboost(str(aid)):
+                        w = _deboost_map.get(candidate)
+                        if w is not None:
+                            break
+                    if w is None or w >= 0.5:
+                        continue
+                    # Linear remap [0.05, 0.5] → [0.7, 0.95].
+                    effective = 0.7 + (w * (0.25 / 0.5))
+                    try:
+                        r["score"] = max(0.0, min(100.0, float(r.get("score", 0)) * effective))
+                        r["atom_deboost"] = round(effective, 3)
+                        r["atom_deboost_raw"] = round(w, 3)
+                        _deboost_hits += 1
+                    except (TypeError, ValueError):
+                        continue
+                if _deboost_hits:
+                    unique.sort(key=lambda x: float(x.get("score", 0) or 0), reverse=True)
+    except Exception:
         pass
 
     # 2026-04-17: Emotional valence boost (biological: amygdala).
@@ -2826,7 +2996,21 @@ def search_all(
             _dbg = dict(r.get("_debug") or {})
             _dbg["primary_doc_bonus"] = primary_bonus
             r["_debug"] = _dbg
-    unique.sort(key=lambda x: x.get("score", 0), reverse=True)
+    # 2026-05-19: tested trust_score additive tiebreaker; net -0.3pt on
+    # extended (within noise). Root cause of the strict/loose gap is not
+    # within-cluster paraphrase ties — it's that semantic_memory + experience
+    # content frequently outranks the verbatim canonical chunk by large
+    # margins (200 vs 75) when the query is multi-aspect. Trust data is
+    # mostly None on results so the signal has too little coverage to
+    # discriminate either way. Use recency as a stable-sort secondary key
+    # — that costs nothing and tiebreaks the rare exact ties.
+    unique.sort(
+        key=lambda x: (
+            float(x.get("score", 0) or 0),
+            str(x.get("updated_at") or x.get("created_at") or ""),
+        ),
+        reverse=True,
+    )
 
     # Preference category backfill (no second decay multiplication).
     # Older semantic_memory preferences often lack the `category` metadata
@@ -3198,7 +3382,65 @@ def search_all(
     except Exception:
         pass
 
+    # 2026-05-20 W2: fused event for SSE streaming consumers. Same payload the
+    # function returns, sent through the sink so iter_search_all_events can
+    # forward it to the wire before the generator terminates.
+    if event_sink is not None:
+        try:
+            event_sink("fused", payload)
+        except Exception:
+            pass
+
     return payload
+
+
+def iter_search_all_events(query, limit=5, **kwargs):
+    """Generator wrapper around search_all that yields SSE-shaped events.
+
+    Yields tuples of (event_name, payload_dict):
+      ("source", {name, results, timing_ms, error?}) — one per completed source
+      ("fused",  {query, results, sources_searched, total_candidates, source_timing})
+      ("end",    {latency_ms})
+
+    Runs search_all on a background thread with a Queue-backed event sink so
+    per-source completions stream in arrival order. Caller (routes/recall.py
+    /recall/stream) reshapes each tuple into SSE frames.
+
+    2026-05-20 W2: replaces the fake SSE that only emitted a single fused event
+    after the full pipeline finished. Mid-conversation context injection now
+    gets per-source partial results immediately.
+    """
+    import queue as _q
+    import threading as _t
+
+    event_q: _q.Queue = _q.Queue()
+    t_start = time.time()
+
+    def _sink(name: str, payload: dict) -> None:
+        event_q.put((name, payload))
+
+    def _worker() -> None:
+        try:
+            search_all(query, limit=limit, event_sink=_sink, **kwargs)
+        except Exception as exc:
+            event_q.put(("fused", {"error": str(exc)[:200]}))
+        finally:
+            event_q.put(("end", {"latency_ms": int((time.time() - t_start) * 1000)}))
+
+    _t.Thread(target=_worker, daemon=True, name="iter_search_all_events").start()
+
+    # Wall-clock cap matches the internal _FANOUT_DEADLINE_S + rerank budget.
+    deadline = time.time() + 25.0
+    while True:
+        timeout = max(0.05, deadline - time.time())
+        try:
+            evt = event_q.get(timeout=timeout)
+        except _q.Empty:
+            yield ("end", {"reason": "timeout", "latency_ms": int((time.time() - t_start) * 1000)})
+            return
+        yield evt
+        if evt[0] == "end":
+            return
 
 
 def main():

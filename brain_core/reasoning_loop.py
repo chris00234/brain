@@ -127,16 +127,37 @@ def _format_evidence(evidence_items: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def run_reasoning(question: str, thread_id: str | None = None, max_hops: int = MAX_HOPS) -> dict:
+def run_reasoning(
+    question: str,
+    thread_id: str | None = None,
+    max_hops: int = MAX_HOPS,
+    event_sink=None,
+) -> dict:
     """Run a multi-hop reasoning loop. Returns synthesis + all checkpoints.
 
     If thread_id is provided and exists, resumes from last checkpoint.
+
+    ``event_sink`` (2026-05-20 W2.2): optional callable invoked as the loop
+    progresses, with (event_name, payload) tuples — used by ``iter_reasoning``
+    to stream hop-by-hop progress over SSE. No-op when None, preserving the
+    existing synchronous contract for /brain/reason/multihop callers.
+
+    Events emitted: ``init``, ``hop_start``, ``plan``, ``search``,
+    ``synthesize``, ``final``, plus failure variants (``plan_failed``,
+    ``plan_parse_failed``, ``synth_failed``).
 
     Note: query embedding reuse across hops is handled implicitly by
     ``brain_core.search._embed_mem_cache`` (MD5-hashed on the prompted text).
     Re-searches for the same question or variant within a hop sequence hit the
     in-memory + SQLite embedding cache — no explicit plumbing needed here.
     """
+    def _emit(name: str, payload: dict) -> None:
+        if event_sink is None:
+            return
+        try:
+            event_sink(name, payload)
+        except Exception:
+            pass
     # Phase 5 autonomy gate: reasoning_loop is L2 by default
     try:
         from autonomy import authorize as _autonomy_authorize
@@ -178,6 +199,8 @@ def run_reasoning(question: str, thread_id: str | None = None, max_hops: int = M
         # Fresh start — save initial state
         _save_checkpoint(thread_id, 0, {"step": 0, "step_type": "init", "question": question})
 
+    _emit("init", {"thread_id": thread_id, "question": question, "resume_from_step": step})
+
     started_at = time.time()
     final_answer = None
 
@@ -189,6 +212,7 @@ def run_reasoning(question: str, thread_id: str | None = None, max_hops: int = M
             break
 
         is_last_hop = hop == max_hops
+        _emit("hop_start", {"hop": hop, "evidence_count": len(evidence), "is_last_hop": is_last_hop})
 
         # Ask Jenna: search more or synthesize? On last hop, skip planning and go straight to synthesis.
         if not is_last_hop:
@@ -198,6 +222,7 @@ def run_reasoning(question: str, thread_id: str | None = None, max_hops: int = M
                 _save_checkpoint(
                     thread_id, hop, {"step": hop, "step_type": "plan_failed", "error": plan_result.error}
                 )
+                _emit("plan_failed", {"hop": hop, "error": str(plan_result.error)[:200]})
                 break
 
             try:
@@ -213,9 +238,11 @@ def run_reasoning(question: str, thread_id: str | None = None, max_hops: int = M
                         "raw": plan_result.text[:500],
                     },
                 )
+                _emit("plan_parse_failed", {"hop": hop, "error": str(e)[:200]})
                 break
 
             action = plan.get("next_action", "synthesize")
+            _emit("plan", {"hop": hop, "action": action, "query": plan.get("query"), "reason": plan.get("reason")})
 
             if action == "search":
                 query = plan.get("query", question)
@@ -233,6 +260,7 @@ def run_reasoning(question: str, thread_id: str | None = None, max_hops: int = M
                     hop,
                     {"step": hop, "step_type": "search", "query": query, "results": results[:5]},
                 )
+                _emit("search", {"hop": hop, "query": query, "n_results": len(results)})
                 continue
 
         # Synthesize (either Jenna said so, or this is the last hop)
@@ -242,6 +270,7 @@ def run_reasoning(question: str, thread_id: str | None = None, max_hops: int = M
             _save_checkpoint(
                 thread_id, hop, {"step": hop, "step_type": "synth_failed", "error": synth_result.error}
             )
+            _emit("synth_failed", {"hop": hop, "error": str(synth_result.error)[:200]})
             break
 
         try:
@@ -250,9 +279,18 @@ def run_reasoning(question: str, thread_id: str | None = None, max_hops: int = M
             final_answer = {"answer": synth_result.text, "confidence": 0.5, "citations": []}
 
         _save_checkpoint(thread_id, hop, {"step": hop, "step_type": "synthesize", "answer": final_answer})
+        _emit(
+            "synthesize",
+            {
+                "hop": hop,
+                "answer": (final_answer or {}).get("answer", "")[:600],
+                "confidence": (final_answer or {}).get("confidence", 0),
+                "citations": (final_answer or {}).get("citations", []),
+            },
+        )
         break
 
-    return {
+    result_payload = {
         "thread_id": thread_id,
         "question": question,
         "answer": (final_answer or {}).get("answer", ""),
@@ -262,6 +300,63 @@ def run_reasoning(question: str, thread_id: str | None = None, max_hops: int = M
         "steps": _load_checkpoints(thread_id),
         "duration_ms": int((time.time() - started_at) * 1000),
     }
+    _emit(
+        "final",
+        {
+            "thread_id": thread_id,
+            "answer": result_payload["answer"],
+            "confidence": result_payload["confidence"],
+            "citations": result_payload["citations"],
+            "evidence_count": result_payload["evidence_count"],
+            "duration_ms": result_payload["duration_ms"],
+        },
+    )
+    return result_payload
+
+
+def iter_reasoning(question: str, thread_id: str | None = None, max_hops: int = MAX_HOPS):
+    """Generator wrapper around run_reasoning that yields hop-level events.
+
+    Yields (event_name, payload) tuples — same set as ``run_reasoning``'s
+    event_sink emissions plus an ``end`` terminator. Caller (typically
+    routes/reasoning.py /brain/reason/multihop/stream) reshapes each tuple
+    into SSE frames.
+
+    Backed by a Queue + background thread so events stream as Jenna LLM
+    dispatches complete, instead of clients waiting 10-60s for the full
+    multi-hop reply. Checkpoints continue to persist via the existing
+    INSERT OR REPLACE path; events themselves are ephemeral.
+    """
+    import queue as _q
+    import threading as _t
+
+    event_q: _q.Queue = _q.Queue()
+    t_start = time.time()
+
+    def _sink(name: str, payload: dict) -> None:
+        event_q.put((name, payload))
+
+    def _worker() -> None:
+        try:
+            run_reasoning(question, thread_id=thread_id, max_hops=max_hops, event_sink=_sink)
+        except Exception as exc:
+            event_q.put(("final", {"error": str(exc)[:200]}))
+        finally:
+            event_q.put(("end", {"latency_ms": int((time.time() - t_start) * 1000)}))
+
+    _t.Thread(target=_worker, daemon=True, name="iter_reasoning").start()
+
+    deadline = time.time() + (DEFAULT_TIMEOUT + 30)
+    while True:
+        timeout = max(0.05, deadline - time.time())
+        try:
+            evt = event_q.get(timeout=timeout)
+        except _q.Empty:
+            yield ("end", {"reason": "timeout", "latency_ms": int((time.time() - t_start) * 1000)})
+            return
+        yield evt
+        if evt[0] == "end":
+            return
 
 
 def resume_reasoning(thread_id: str) -> dict:

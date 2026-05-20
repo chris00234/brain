@@ -61,6 +61,16 @@ JOB_REGISTRY: dict[str, list[str]] = {
     # Self-eval: nightly sample of recent /recall calls; measures top-3
     # overlap drift when re-run. Surfaces via self_eval_drift_7d SLO.
     "self_eval": [_py, f"{_bd}/brain_core/self_eval.py"],
+    # 2026-05-15: auto-supersede daily — see job_definitions.py for rationale.
+    "auto_supersede_overrides": [_py, f"{_bd}/brain_core/auto_supersede_overrides.py"],
+    # 2026-05-19: mint Neo4j LESSON from override patterns so mistake-guard surfaces them.
+    "override_pattern_lesson_mint": [_py, f"{_bd}/brain_core/override_pattern_lesson_mint.py"],
+    # 2026-05-19: triage persistent extended-eval failures into review tasks.
+    "eval_persistent_failures_triage": [_py, f"{_bd}/brain_core/eval_persistent_failures_triage.py"],
+    # 2026-05-19: reconcile eval_holdout_lifecycle with eval_proposals + pending JSON.
+    "holdout_lifecycle_reconcile": [_py, f"{_bd}/brain_core/holdout_lifecycle_reconcile.py"],
+    # 2026-05-19: drop atom_deboost rows whose atom_id is not in any Qdrant collection.
+    "atom_deboost_cleanup": [_py, f"{_bd}/brain_core/atom_deboost_cleanup.py"],
     # Ingestion
     "personal_ingest": ["/bin/bash", f"{_bd}/ingest/run_personal.sh"],
     "gmail_ingest": [_py, f"{_bd}/ingest/gmail.py"],
@@ -186,6 +196,13 @@ JOB_REGISTRY: dict[str, list[str]] = {
         "--threshold",
         "10",
     ],
+    # 2026-05-15 P1-4: regression-diff over eval-history-extended.jsonl.
+    "eval_regression_diff_extended": [
+        _py,
+        f"{_bd}/brain_core/eval_regression_diff.py",
+        "--track",
+        "extended",
+    ],
     "ragas_eval_gate": [
         _py,
         f"{_bd}/cli/eval_compare.py",
@@ -284,6 +301,16 @@ JOB_REGISTRY: dict[str, list[str]] = {
         _py,
         "-c",
         f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from skill_materializer import cleanup_stale_auto_skills; import json; print(json.dumps(cleanup_stale_auto_skills()))",
+    ],
+    # 2026-05-20 W3.5: Honcho-equivalent daily profile distiller. Reads
+    # agent activity + belief snapshot + decision outcomes; emits up to
+    # 5 candidate observation atoms through /memory so brain's governance
+    # gates handle supersession + classification. Runs before profile_regen
+    # so weekly Sage canonical regen sees fresh candidates.
+    "profile_deepener_daily": [
+        _py,
+        "-c",
+        f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from profile_deepener import run; import json; print(json.dumps(run()))",
     ],
     # 2026-04-17 session_rotate: archive OpenClaw agent session checkpoints > 14d,
     # alert on live sessions > 100MB. Triggered after 103MB jenna session caused
@@ -740,7 +767,12 @@ _JOB_TIMEOUT_SECONDS = {
     # survive for the generic 1h subprocess cap, hold the process lock, and
     # tempt wake/scheduler paths into spawning more work. Keep this well above
     # the 30s in-process SIGALRM guard but far below the generic cap.
-    "brain_loop_tick": 45,
+    # 2026-05-15: raised 45 → 90s. wal_checkpoint_intraday holds an exclusive
+    # lock ~20s on brain.db at :35; the tick at :34:57 had been hitting the
+    # 45s wall and getting killed every cycle in the checkpoint window
+    # (24 failed runs over 7 days). 90s lets the tick wait out a checkpoint
+    # plus jitter without bumping into the generic cap.
+    "brain_loop_tick": 90,
     # Proactive checks are useful but non-critical. They call subscription CLI
     # LLMs and can wedge behind provider timeouts; do not let one run pin the
     # llm resource slot or hold ~250MB RSS for the generic 1h cap.
@@ -785,21 +817,59 @@ def dispatch_job(job_name: str) -> int:
             stderr_f.close()
 
 
+_NOISE_PREFIXES = (
+    "cost_governor engaged",  # brain_loop self-defense; not the root cause
+)
+
+
+def _summarize_stderr_tail(tail: str) -> str:
+    """Pick the most informative stderr line, skipping known self-defense noise.
+
+    `cost_governor engaged: cli concurrency capped...` is brain_loop's normal
+    defensive behavior; when the process is killed by a 45s timeout those
+    lines saturate the stderr tail and obscure the actual blocker. Prefer
+    the most recent non-noise line; fall back to the raw tail if everything
+    is noise.
+    """
+    if not tail:
+        return ""
+    lines = [line.strip() for line in tail.splitlines() if line.strip()]
+    for line in reversed(lines):
+        if not any(line.startswith(p) for p in _NOISE_PREFIXES):
+            return line
+    return lines[-1] if lines else ""
+
+
 def _wait_for_job(job_name: str, proc: subprocess.Popen, stderr_path: Path) -> None:
     """Background thread: wait for job completion, record exit code, alert on failure."""
+    timed_out = False
+    timeout_s = _JOB_TIMEOUT_SECONDS.get(job_name, 3600)
     try:
-        proc.wait(timeout=_JOB_TIMEOUT_SECONDS.get(job_name, 3600))
+        proc.wait(timeout=timeout_s)
     except subprocess.TimeoutExpired:
+        timed_out = True
         proc.kill()
         proc.wait()
 
     exit_code = proc.returncode
     error_msg: str | None = None
     if exit_code != 0:
+        # Distinguish timeout-kill (wedge — usually SQLite lock contention during
+        # wal_checkpoint) from a process that actually exited with an error.
+        # For real exits, surface the last stderr line that isn't repeating noise
+        # (e.g., brain_loop's cost_governor warnings spam stderr inside the
+        # wedge window). Pure timeouts get a clean reason; everything else
+        # gets the meaningful tail.
         try:
-            error_msg = stderr_path.read_text()[-500:] if stderr_path.exists() else f"exit code {exit_code}"
+            tail = stderr_path.read_text()[-2000:] if stderr_path.exists() else ""
         except Exception:
-            error_msg = f"exit code {exit_code}"
+            tail = ""
+        meaningful = _summarize_stderr_tail(tail)
+        if timed_out:
+            error_msg = f"timeout after {timeout_s}s" + (f"; last: {meaningful}" if meaningful else "")
+        else:
+            error_msg = meaningful or f"exit code {exit_code}"
+        error_msg = error_msg[:500]
 
     _metrics_buf.record_job_result(job_name, ok=(exit_code == 0), error=error_msg or "")
 

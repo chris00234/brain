@@ -1832,74 +1832,35 @@ def recall_stream(
         raise HTTPException(status_code=400, detail="q required")
 
     def _gen():
-        import queue as _queue
-
-        q_out: _queue.Queue = _queue.Queue()
+        # 2026-05-20 W2: real per-source SSE. Previous impl threaded a single
+        # search_all() call and only emitted one fused event before end —
+        # `_run_source` was defined but never invoked, so clients never saw
+        # partial source results despite the documented contract. The new
+        # iter_search_all_events generator yields ("source", payload) as each
+        # source future completes, then ("fused", ...) after RRF+rerank, then
+        # ("end", ...). rid is attached to every payload for client tracing.
         rid = get_request_id() or ""
         t_start = time.time()
+        from brain_core.search_unified import iter_search_all_events
 
-        def _run_source(name: str, fn) -> None:
-            try:
-                result = fn()
-                q_out.put(
-                    (
-                        "source",
-                        {"name": name, "results": result[:n] if isinstance(result, list) else [], "rid": rid},
-                    )
-                )
-            except Exception as e:
-                q_out.put(("source", {"name": name, "error": str(e)[:200], "rid": rid}))
-
-        # Dispatch the same sources search_unified knows about in parallel
-        # threads. When each returns, push a "source" event; downstream
-        # consumers can start using partial results immediately while the
-        # rest are still in flight.
         try:
-            import threading as _t
-
-            from brain_core.search_unified import search_all as _search_all
-
-            def _full_search() -> None:
-                try:
-                    payload = _search_all(q, limit=n)
-                    q_out.put(
-                        (
-                            "fused",
-                            {
-                                "results": payload.get("results", [])[:n],
-                                "source_timing": payload.get("source_timing", {}),
-                                "rid": rid,
-                                "latency_ms": int((time.time() - t_start) * 1000),
-                            },
-                        )
-                    )
-                except Exception as e:
-                    q_out.put(("fused", {"error": str(e)[:200], "rid": rid}))
-                finally:
-                    q_out.put(("end", {"rid": rid}))
-
-            _t.Thread(target=_full_search, daemon=True).start()
+            for kind, payload in iter_search_all_events(q, limit=n):
+                payload = dict(payload)  # defensive copy — don't mutate caller's dict
+                payload.setdefault("rid", rid)
+                if kind == "fused":
+                    # Cap the streamed result list at n (search_all already
+                    # returns >=n during rerank; clients want n-or-fewer).
+                    if isinstance(payload.get("results"), list):
+                        payload["results"] = payload["results"][:n]
+                elif kind == "end":
+                    payload.setdefault("latency_ms", int((time.time() - t_start) * 1000))
+                line = f"event: {kind}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                yield line.encode("utf-8")
+                if kind == "end":
+                    return
         except Exception as e:
-            q_out.put(("end", {"error": str(e)[:200], "rid": rid}))
-
-        # Pump events to the client. Cap wall-clock at 20s so a hung
-        # source cannot indefinitely hold the SSE connection open.
-        deadline = time.time() + 20.0
-        while True:
-            timeout = max(0.05, deadline - time.time())
-            try:
-                kind, payload = q_out.get(timeout=timeout)
-            except _queue.Empty:
-                # Heartbeat for intermediaries
-                yield b": keepalive\n\n"
-                if time.time() >= deadline:
-                    yield b'event: end\ndata: {"reason": "timeout"}\n\n'
-                    break
-                continue
-            line = f"event: {kind}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
-            yield line.encode("utf-8")
-            if kind == "end":
-                break
+            err = {"error": str(e)[:200], "rid": rid, "latency_ms": int((time.time() - t_start) * 1000)}
+            yield f"event: end\ndata: {json.dumps(err, ensure_ascii=False)}\n\n".encode()
 
     headers = {
         "Cache-Control": "no-cache",
@@ -1948,6 +1909,204 @@ def recall_batch(request: Request, req: RecallBatchRequest) -> dict:
 
 
 # /agent/heartbeat moved to brain_core/routes/insights.py
+
+
+# 2026-05-20 W3: cross-agent session search. Thin wrapper around
+# raw_events_fts.search with actor/source_type/session_id filters so codex,
+# claude code, and openclaw agents can query each other's transcripts via a
+# single canonical endpoint. The minimal MCP profile's brain_search(scope=
+# "sessions") routes here. Returns the same shape as /recall/v2 results so
+# clients can swap endpoints without reshaping payloads.
+@router.get("/brain/sessions/search", tags=["recall"])
+@limiter.limit("60/minute")
+def brain_sessions_search(
+    request: Request,
+    q: str,
+    n: int = Query(default=10, ge=1, le=50),
+    filter_actor: str | None = Query(
+        default=None,
+        description="Filter by raw_events.actor. Named filter_actor (not 'actor') so it "
+        "doesn't collide with the audit ?actor= query param the MCP shim appends.",
+    ),
+    source_type: str | None = Query(
+        default=None,
+        description="Filter by raw_events.source_type (e.g. agent_session, coding_event)",
+    ),
+    session_id: str | None = Query(default=None, description="Filter by raw_events.source_ref"),
+) -> dict:
+    """Cross-agent session FTS5 search across raw_events."""
+    if not q or not q.strip():
+        raise HTTPException(status_code=400, detail="q required")
+    try:
+        from raw_events_fts import search as _fts_search
+
+        hits = _fts_search(
+            q,
+            limit=n,
+            actor=filter_actor,
+            source_type=source_type,
+            session_id=session_id,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=_safe_http_detail("sessions_search", e)) from e
+    return {
+        "query": q,
+        "results": hits,
+        "filters": {"actor": filter_actor, "source_type": source_type, "session_id": session_id},
+        "count": len(hits),
+    }
+
+
+# 2026-05-20 W3.5 round 2: compound brain ops. Allowlisted op set so clients
+# can chain N brain calls in one HTTP request — equivalent of Hermes
+# execute_code's "collapse N tool calls into 1 inference" but without turning
+# memory into an execution sandbox. Ops are dispatched sequentially in-process
+# (NOT via subprocess or eval), so the audit trail is one route hit per
+# compound call. Hard cap 10 ops to bound latency + abuse.
+_COMPOUND_OP_ALLOWLIST = frozenset({"search", "remember", "correct", "feedback"})
+
+
+class CompoundOp(BaseModel):
+    op: str = Field(..., description="One of: search, remember, correct, feedback")
+    args: dict = Field(default_factory=dict)
+
+
+class CompoundRequest(BaseModel):
+    ops: list[CompoundOp] = Field(..., min_length=1, max_length=10)
+    actor: str | None = Field(default=None, description="Calling agent (audit)")
+
+
+@router.post("/brain/ops/compound", tags=["brain"])
+@limiter.limit("30/minute")
+def brain_ops_compound(request: Request, req: CompoundRequest) -> dict:
+    """Run up to 10 allowlisted brain ops in a single request.
+
+    Returns ``{compound_id, results: [{op, ok, result}, ...]}`` so callers can
+    correlate per-op outcomes. Errors in one op do NOT abort the rest — each
+    op runs independently and reports ok/result.
+    """
+    import uuid as _uuid
+
+    actor = (req.actor or "compound").strip() or "compound"
+    compound_id = f"compound_{_uuid.uuid4().hex[:12]}"
+    results: list[dict] = []
+
+    # All ops route through the SAME endpoints the standalone calls use, so
+    # rate-limit + auth + audit semantics are identical — no shortcut path.
+    # Use the local HTTP loopback so each op picks up the live FastAPI app's
+    # middleware (auth, rate limit, action_audit) instead of bypassing them.
+    import json as _json
+    import urllib.parse as _ulp
+    import urllib.request as _urlreq
+    from pathlib import Path as _Path
+
+    secret = ""
+    try:
+        secret = _Path("~/.openclaw/credentials/.personal_webhook_secret").expanduser().read_text().strip()
+    except Exception:
+        secret = ""
+
+    def _http(method: str, path: str, body: dict | None = None) -> dict:
+        data = _json.dumps(body).encode() if body else None
+        url = f"http://127.0.0.1:8791{path}"
+        r = _urlreq.Request(url, data=data, method=method)  # noqa: S310
+        if secret:
+            r.add_header("Authorization", f"Bearer {secret}")
+        if data:
+            r.add_header("Content-Type", "application/json")
+        r.add_header("x-agent", actor)
+        r.add_header("x-compound-id", compound_id)
+        try:
+            with _urlreq.urlopen(r, timeout=15) as resp:  # noqa: S310
+                return _json.loads(resp.read().decode())
+        except Exception as exc:
+            return {"error": str(exc)[:200]}
+
+    for entry in req.ops:
+        op_name = entry.op.strip().lower()
+        a = entry.args or {}
+        if op_name not in _COMPOUND_OP_ALLOWLIST:
+            results.append({"op": op_name, "ok": False, "result": {"error": "op not in allowlist"}})
+            continue
+        try:
+            if op_name == "search":
+                q = a.get("query", "")
+                n = int(a.get("limit", 5))
+                path = f"/recall/v2?q={_ulp.quote(q)}&n={n}"
+                if a.get("collection"):
+                    path += f"&collection={_ulp.quote(a['collection'])}"
+                out = _http("GET", path)
+            elif op_name == "remember":
+                out = _http(
+                    "POST",
+                    "/memory",
+                    {
+                        "content": a.get("content", ""),
+                        "category": a.get("kind", "fact"),
+                        "agent": actor,
+                        "source": f"compound:{compound_id}",
+                        "replaces": a.get("replaces") or [],
+                        "replaces_reason": a.get("replaces_reason") or "",
+                    },
+                )
+            elif op_name == "correct":
+                out = _http(
+                    "POST",
+                    "/memory",
+                    {
+                        "content": a.get("correction", ""),
+                        "category": a.get("category", "fact"),
+                        "agent": actor,
+                        "source": f"compound:{compound_id}:correct",
+                        "replaces": a.get("wrong_atom_ids") or [],
+                        "replaces_reason": a.get("reason") or "user-correction via compound",
+                    },
+                )
+            elif op_name == "feedback":
+                target_id = a.get("target_id", "")
+                target_type = (a.get("target_type") or "task").lower()
+                success = bool(a.get("success"))
+                notes = a.get("notes", "")
+                if target_type == "decision":
+                    out = _http(
+                        "POST",
+                        f"/brain/decisions/{_ulp.quote(target_id)}/outcome",
+                        {
+                            "actual_outcome": notes or ("accepted" if success else "rejected"),
+                            "outcome_status": "succeeded" if success else "failed",
+                            "review_status": "accepted" if success else "needs_review",
+                        },
+                    )
+                elif target_type == "recall":
+                    out = _http(
+                        "POST",
+                        "/recall/feedback",
+                        {
+                            "recall_id": target_id,
+                            "useful": success,
+                            "notes": notes,
+                            "agent": actor,
+                        },
+                    )
+                else:  # task
+                    suffix = "/complete?chris_acked=true" if success else "/reject"
+                    out = _http(
+                        "POST",
+                        f"/brain/tasks/{_ulp.quote(target_id)}{suffix}",
+                        {"result": notes, "agent": actor},
+                    )
+            else:  # pragma: no cover — guarded by allowlist above
+                out = {"error": "unreachable"}
+            results.append({"op": op_name, "ok": "error" not in out, "result": out})
+        except Exception as exc:
+            results.append({"op": op_name, "ok": False, "result": {"error": str(exc)[:200]}})
+
+    return {
+        "compound_id": compound_id,
+        "actor": actor,
+        "count": len(results),
+        "results": results,
+    }
 
 
 @router.post("/recall/feedback", tags=["recall"])

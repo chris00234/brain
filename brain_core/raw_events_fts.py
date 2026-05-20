@@ -68,8 +68,23 @@ def _sanitize(query: str) -> str:
     return " ".join(tokens)[:400]
 
 
-def search(query: str, limit: int = 10) -> list[dict]:
-    """Live FTS5 search over raw_events. Returns ranked hits or [] on error."""
+def search(
+    query: str,
+    limit: int = 10,
+    actor: str | None = None,
+    source_type: str | None = None,
+    session_id: str | None = None,
+) -> list[dict]:
+    """Live FTS5 search over raw_events. Returns ranked hits or [] on error.
+
+    Optional filters (2026-05-20 W3 cross-agent session search):
+      actor       — exact match on raw_events.actor (e.g. 'claude', 'codex', 'jenna')
+      source_type — exact match on raw_events.source_type (e.g. 'agent_session',
+                    'claude_code_session', 'openclaw_session')
+      session_id  — exact match on raw_events.source_ref. The openclaw / codex
+                    session ingesters write the session id into source_ref;
+                    this lets callers narrow to a single conversation.
+    """
     safe = _sanitize(query)
     if not safe:
         return []
@@ -86,21 +101,34 @@ def search(query: str, limit: int = 10) -> list[dict]:
             ).fetchone()
             if not exists:
                 return []
-            rows = conn.execute(
-                """
+            where_extra = []
+            params: list = [safe]
+            if actor:
+                where_extra.append("re.actor = ?")
+                params.append(actor)
+            if source_type:
+                where_extra.append("re.source_type = ?")
+                params.append(source_type)
+            if session_id:
+                where_extra.append("re.source_ref = ?")
+                params.append(session_id)
+            where_sql = ("AND " + " AND ".join(where_extra)) if where_extra else ""
+            params.append(limit)
+            sql = f"""
                 SELECT re.id AS id,
                        substr(re.content, 1, 500) AS content,
                        re.source_type AS source_type,
                        re.actor AS actor,
+                       re.source_ref AS source_ref,
                        re.timestamp AS timestamp,
                        rank AS fts_rank
                 FROM raw_events_fts
                 JOIN raw_events re ON raw_events_fts.rowid = re.rowid
                 WHERE raw_events_fts MATCH ?
+                {where_sql}
                 ORDER BY rank LIMIT ?
-                """,
-                (safe, limit),
-            ).fetchall()
+                """
+            rows = conn.execute(sql, params).fetchall()
         finally:
             conn.close()
     except sqlite3.OperationalError as exc:
@@ -117,6 +145,10 @@ def search(query: str, limit: int = 10) -> list[dict]:
     for r in rows:
         content = r["content"] or ""
         src_type = r["source_type"] or "raw"
+        # 2026-05-20 W3: surface source_ref so cross-agent session search can
+        # group hits by conversation/session id when present.
+        # sqlite3.Row `in` checks values not keys, so .keys() is required here.
+        source_ref = r["source_ref"] if "source_ref" in r.keys() else ""  # noqa: SIM118
         results.append(
             {
                 "id": r["id"],
@@ -126,6 +158,7 @@ def search(query: str, limit: int = 10) -> list[dict]:
                 "source_type": "raw_events_fts",
                 "raw_source_type": src_type,
                 "actor": r["actor"] or "",
+                "source_ref": source_ref or "",
                 "timestamp": r["timestamp"] or "",
                 # fts_rank is negative (lower = better). Mirror fts_index.py's scaling.
                 "score": -float(r["fts_rank"]) * 50,
@@ -133,6 +166,7 @@ def search(query: str, limit: int = 10) -> list[dict]:
                 "metadata": {
                     "source_type": src_type,
                     "actor": r["actor"] or "",
+                    "source_ref": source_ref or "",
                     "timestamp": r["timestamp"] or "",
                     "collection": "raw_events_fts",
                 },

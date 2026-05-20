@@ -515,26 +515,49 @@ def cleanup_stale_auto_skills(
     *,
     stale_days: int = STALE_DAYS,
     max_skills: int = MAX_AUTO_SKILLS,
+    soft_stale_days: int = 45,
+    success_grace_threshold: int = 5,
+    dry_run: bool = False,
 ) -> dict[str, Any]:
     """Walk auto-* skills, archive stale/orphaned/over-cap entries.
 
     Archival rules (in order):
       1. Backing procedure missing from autonomy.db → archive (reason: orphan)
-      2. Backing procedure last_used > stale_days → archive (reason: stale)
-      3. Count per root > max_skills → archive lowest-success-count overages
+      2. Soft-stale (last_used > soft_stale_days AND success_count <= 2 AND
+         no recent usage sidecar activity) → archive (reason: soft_stale)
+      3. Hard-stale (last_used > stale_days) → archive UNLESS the procedure has
+         success_count >= success_grace_threshold, which earns a stay of execution
+      4. Count per root > max_skills → archive lowest-success-count overages
          (reason: overload_cap)
+
+    2026-05-20 W3: added soft-stale tier + success-count grace + ``dry_run``
+    mode so the curator can be exercised without mutating disk. dry_run reports
+    what WOULD be archived under ``would_archive`` without invoking
+    ``_archive_skill_dir`` — matches Hermes Curator's preview semantics so the
+    cron job can ship a journal entry before live archival.
 
     Returns a summary suitable for the scheduler log.
     """
     summary: dict[str, Any] = {
         "scanned": 0,
         "orphaned": 0,
+        "soft_stale": 0,
         "stale": 0,
         "overload": 0,
+        "grace_granted": 0,
         "archived": 0,
+        "would_archive": 0,
         "kept": 0,
+        "dry_run": bool(dry_run),
         "errors": [],
     }
+
+    def _try_archive(path: Path, reason: str) -> bool:
+        if dry_run:
+            summary["would_archive"] += 1
+            return True
+        return bool(_archive_skill_dir(path, reason=reason))
+
     try:
         import sqlite3
 
@@ -553,6 +576,7 @@ def cleanup_stale_auto_skills(
 
         now = datetime.now(UTC)
         stale_cutoff_ts = now.timestamp() - (stale_days * 86400)
+        soft_stale_cutoff_ts = now.timestamp() - (soft_stale_days * 86400)
 
         dirs = _list_auto_skill_dirs()
         summary["scanned"] = len(dirs)
@@ -590,28 +614,59 @@ def cleanup_stale_auto_skills(
 
                 # Rule 1: orphan
                 if not proc:
-                    if _archive_skill_dir(d, reason=f"orphan:missing_procedure:{proc_id or 'empty'}"):
+                    if _try_archive(d, reason=f"orphan:missing_procedure:{proc_id or 'empty'}"):
                         summary["orphaned"] += 1
-                        summary["archived"] += 1
+                        if not dry_run:
+                            summary["archived"] += 1
                     continue
 
-                # Rule 2: stale
+                # Compose effective last_used from procedure + usage sidecar
                 last_used = proc.get("last_used") or ""
                 try:
                     last_ts = datetime.fromisoformat(last_used.replace("Z", "+00:00")).timestamp()
                 except Exception:
                     last_ts = 0
                 usage_activity = _latest_usage_activity(usage_record)
+                has_recent_usage = False
                 if usage_activity:
                     try:
                         usage_ts = datetime.fromisoformat(usage_activity.replace("Z", "+00:00")).timestamp()
+                        # "Recent" = within soft-stale window
+                        has_recent_usage = usage_ts > soft_stale_cutoff_ts
                         last_ts = max(last_ts, usage_ts)
                     except Exception:  # noqa: S110 - ignore malformed optional usage timestamps
                         pass
+
+                success_count = int(proc.get("success_count", 1) or 1)
+
+                # Rule 2 (NEW): soft-stale — between soft_stale_days and stale_days,
+                # archive only if success_count<=2 AND no recent usage sidecar
+                # activity. This matches Hermes Curator's "active→stale→archived"
+                # progression and rescues low-traffic-but-recently-touched skills.
+                if (
+                    last_ts
+                    and last_ts < soft_stale_cutoff_ts
+                    and last_ts >= stale_cutoff_ts
+                    and success_count <= 2
+                    and not has_recent_usage
+                ):
+                    if _try_archive(d, reason=f"soft_stale:last_used={last_used}:success={success_count}"):
+                        summary["soft_stale"] += 1
+                        if not dry_run:
+                            summary["archived"] += 1
+                    continue
+
+                # Rule 3: hard-stale — grant grace if procedure has earned a
+                # strong success record (>= success_grace_threshold).
                 if last_ts and last_ts < stale_cutoff_ts:
-                    if _archive_skill_dir(d, reason=f"stale:last_used={last_used}"):
+                    if success_count >= success_grace_threshold:
+                        summary["grace_granted"] += 1
+                        surviving.append((d, fm))
+                        continue
+                    if _try_archive(d, reason=f"stale:last_used={last_used}:success={success_count}"):
                         summary["stale"] += 1
-                        summary["archived"] += 1
+                        if not dry_run:
+                            summary["archived"] += 1
                     continue
 
                 surviving.append((d, fm))
@@ -634,9 +689,10 @@ def cleanup_stale_auto_skills(
             items.sort(key=_sc)
             evict_count = len(items) - max_skills
             for d, _fm in items[:evict_count]:
-                if _archive_skill_dir(d, reason="overload_cap"):
+                if _try_archive(d, reason="overload_cap"):
                     summary["overload"] += 1
-                    summary["archived"] += 1
+                    if not dry_run:
+                        summary["archived"] += 1
             summary["kept"] += max_skills
     except Exception as exc:
         summary["errors"].append(str(exc)[:200])
