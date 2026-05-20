@@ -445,6 +445,23 @@ def build_boot_context(agent_name, limit=3, prompt: str | None = None):
         except Exception:
             pass
 
+    # 2026-05-20 W4 round-6 codex #1 (10x pick): mandatory shared WM contract.
+    # Surfaces the 5-field protocol (goal / current_task / blocker / decision /
+    # next_action) the agent has been writing across sessions. boot_context
+    # doesn't know the new session_id, so render_for_boot falls back to the
+    # most recent N contract blobs this agent wrote so it reads "what I was
+    # last coordinating on" before composing its own.
+    try:
+        from wm_contract import render_for_boot as _wm_contract_render
+
+        contract_block = _wm_contract_render(session_id=None, agent=agent_name)
+        if contract_block:
+            sections.append(
+                {"section": "Session Contract", "content": contract_block, "source": "brain/wm_contract"}
+            )
+    except Exception:
+        pass
+
     # Recent session summaries — "what Chris was working on"
     try:
         from working_memory import get_session_summaries

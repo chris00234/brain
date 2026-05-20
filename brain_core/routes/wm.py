@@ -21,6 +21,51 @@ class WorkingMemorySetRequest(BaseModel):
     durable: bool = Field(default=False)
 
 
+# 2026-05-20 W4 round-6 codex #1 / 10x pick: mandatory shared WM contract.
+# Every agent (Codex / Claude Code / OpenClaw / Hermes) writes & reads the
+# same five fields per session — goal / current_task / blocker / decision /
+# next_action — so brain becomes the live coordination spine, not just a
+# nightly distillation store.
+#
+# These routes are declared BEFORE the generic /brain/wm/{session_id}/{agent}
+# and /brain/wm/{session_id}/{agent}/{key:path} routes because FastAPI
+# resolves in registration order — otherwise the key-catchall swallows the
+# contract URL space.
+class WMContractRequest(BaseModel):
+    goal: str = Field(default="", max_length=400)
+    current_task: str = Field(default="", max_length=400)
+    blocker: str = Field(default="", max_length=400)
+    decision: str = Field(default="", max_length=600)
+    next_action: str = Field(default="", max_length=400)
+
+
+@router.post("/brain/wm/contract/{session_id}/{agent}", tags=["memory"])
+@limiter.limit("120/minute")
+def wm_contract_set_route(
+    request: Request,
+    session_id: Annotated[str, PathParam()],
+    agent: Annotated[str, PathParam()],
+    req: WMContractRequest,
+) -> dict:
+    """Set the 5 mandatory contract fields atomically for (session_id, agent)."""
+    from brain_core import wm_contract
+
+    return wm_contract.set_contract(session_id, agent, req.model_dump())
+
+
+@router.get("/brain/wm/contract/{session_id}/{agent}", tags=["memory"])
+@limiter.limit("600/minute")
+def wm_contract_get_route(
+    request: Request,
+    session_id: Annotated[str, PathParam()],
+    agent: Annotated[str, PathParam()],
+) -> dict:
+    """Fetch the current 5-field contract payload for (session_id, agent)."""
+    from brain_core import wm_contract
+
+    return wm_contract.get_contract(session_id, agent)
+
+
 @router.post("/brain/wm", tags=["memory"])
 @limiter.limit("120/minute")
 def wm_set_route(request: Request, req: WorkingMemorySetRequest) -> dict:
