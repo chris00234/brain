@@ -312,6 +312,17 @@ JOB_REGISTRY: dict[str, list[str]] = {
         "-c",
         f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from profile_deepener import run; import json; print(json.dumps(run()))",
     ],
+    # 2026-05-20 W3.5 round 3 (codex gap 4): supply-chain audit of materialized
+    # auto-* SKILL.md files. Walks each runtime root, compares content_sha256
+    # against the stamped attestation, and quarantines drifted or threat-pattern-
+    # bearing skills before they load into agent context. Runs daily 04:05 PT —
+    # after profile_deepener (3:45) and before skill_materialize_cleanup (4:10)
+    # so the cleanup pass honors fresh quarantine flags.
+    "skill_security_audit_daily": [
+        _py,
+        "-c",
+        f"import sys; sys.path.insert(0, '{_bd}/brain_core'); from skill_security_audit import run_audit; import json; print(json.dumps(run_audit()))",
+    ],
     # 2026-04-17 session_rotate: archive OpenClaw agent session checkpoints > 14d,
     # alert on live sessions > 100MB. Triggered after 103MB jenna session caused
     # 42.5% empty-envelope rate on Telegram alerts.

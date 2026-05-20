@@ -180,6 +180,18 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         agent="system",
         misfire_grace=600,
     ),
+    # 2026-05-20 W3.5 round 3 (codex gap 4): supply-chain audit of materialized
+    # SKILL.md files. Walks each runtime root, compares disk content_sha256
+    # against the recorded attestation, and quarantines drifted or threat-
+    # pattern-bearing skills BEFORE the cleanup pass sees them. Runs 04:05 —
+    # between profile_deepener (3:45) and skill_materialize_cleanup (4:10).
+    ScheduledJob(
+        name="skill_security_audit_daily",
+        description="W3.5 g4: hash-attest skill drift detection + quarantine (daily 4:05am)",
+        trigger=CronTrigger(hour=4, minute=5),
+        agent="system",
+        misfire_grace=600,
+    ),
     # T2.10 auto-skill maintenance (2026-04-17): archive orphaned/stale auto-* skills
     # Runs daily at 4:10am - after 4:00 log_rotation, before 4:45 autonomy_proposer.
     ScheduledJob(

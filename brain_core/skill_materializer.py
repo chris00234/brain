@@ -184,8 +184,19 @@ def _latest_usage_activity(record: dict[str, Any]) -> str:
     return latest_raw
 
 
-def _upsert_usage_record(root: Path, slug: str, proc: dict[str, Any]) -> None:
-    """Track provenance/activity for generated skills, Hermes-curator style."""
+def _upsert_usage_record(
+    root: Path,
+    slug: str,
+    proc: dict[str, Any],
+    content_sha256: str | None = None,
+) -> None:
+    """Track provenance/activity for generated skills, Hermes-curator style.
+
+    2026-05-20 W3.5 round 3 (codex gap 4): records ``content_sha256`` and
+    ``quarantined`` flag for the skill_security_audit module. The attestation
+    lets the audit detect post-write tampering — disk content that no longer
+    hashes to the value brain stamped at materialization time.
+    """
     try:
         data = _load_usage(root)
         now_iso = datetime.now(UTC).isoformat(timespec="seconds")
@@ -203,8 +214,12 @@ def _upsert_usage_record(root: Path, slug: str, proc: dict[str, Any]) -> None:
                 "rollback_strategy": "archive_or_delete_auto_skill_dir_then_regenerate_from_brain_procedure",
                 "state": existing.get("state") or "active",
                 "pinned": bool(existing.get("pinned", False)),
+                "quarantined": bool(existing.get("quarantined", False)),
             }
         )
+        if content_sha256:
+            existing["content_sha256"] = content_sha256
+            existing["content_sha256_at"] = now_iso
         data[slug] = existing
         _save_usage(root, data)
     except Exception as exc:
@@ -387,8 +402,17 @@ def materialize(proc: dict[str, Any], *, min_success: int = MIN_SUCCESS_COUNT) -
         codex_path.write_text(skill_md)
         oc_path.write_text(skill_md)
         oc_meta_path.write_text(meta_json)
+
+        # 2026-05-20 W3.5 round 3 (codex gap 4): record content_sha256 attestation
+        # in the per-root usage sidecar so skill_security_audit can detect
+        # disk drift (post-write file tampering or replacement). The hash is
+        # computed once over the rendered text; identical across all 3 runtime
+        # paths because we write the same string.
+        import hashlib as _hashlib
+
+        content_sha256 = _hashlib.sha256(skill_md.encode("utf-8")).hexdigest()
         for root in (CLAUDE_SKILLS_DIR, CODEX_SKILLS_DIR, OPENCLAW_SKILLS_DIR):
-            _upsert_usage_record(root, slug, proc)
+            _upsert_usage_record(root, slug, proc, content_sha256=content_sha256)
 
         openclaw_sync = _sync_openclaw_registry()
 
@@ -609,6 +633,15 @@ def cleanup_stale_auto_skills(
                 # fence against automatic archival, even when the backing
                 # procedure looks stale or temporarily missing.
                 if usage_record.get("pinned"):
+                    surviving.append((d, fm))
+                    continue
+
+                # 2026-05-20 W3.5 round 3 (codex gap 4): quarantined skills
+                # stay materialized (so the security audit + manual review can
+                # inspect them) but are skipped by the stale/overload rules.
+                # Resolution is via skill_security_audit clearing the flag or
+                # the operator manually archiving.
+                if usage_record.get("quarantined"):
                     surviving.append((d, fm))
                     continue
 

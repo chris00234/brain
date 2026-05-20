@@ -196,8 +196,17 @@ def _journal_write(entry: dict) -> None:
 def run(dry_run: bool = False) -> dict:
     """One profile-deepening pass.
 
-    ``dry_run=True`` composes candidates and writes the journal entry but
-    does NOT submit atoms to /memory — used for offline preview + tests.
+    Two-phase pipeline (2026-05-20 W3.5 round 3, codex gap 2):
+      1. Record each candidate observation as a hypothesis via
+         profile_hypotheses.record_observation — fuzzy-matched + support
+         accumulating across runs. The same paraphrased claim accretes
+         support across days instead of spamming /memory with duplicates.
+      2. Check for promotable hypotheses (status=supported, support>=3,
+         confidence>=0.75) and canonicalize them through /memory. The
+         hypothesis row is then linked to the durable atom id.
+
+    ``dry_run=True`` records hypotheses + identifies promotables but does
+    NOT canonicalize. Used for offline preview + tests.
     """
     started = time.time()
     activity = _gather_activity()
@@ -205,24 +214,70 @@ def run(dry_run: bool = False) -> dict:
     outcomes = _gather_recent_outcomes()
     candidates = _compose_candidates(activity, beliefs, outcomes)
 
-    submissions: list[dict] = []
+    import profile_hypotheses
+
+    # Phase 1: record candidates as hypotheses (dialectic accrual)
+    hypothesis_results: list[dict] = []
+    for text in candidates:
+        evidence = {
+            "summary": text,
+            "signal": {
+                "activity_seen": bool(activity),
+                "beliefs_seen": bool(beliefs),
+                "outcomes_count": len(outcomes),
+            },
+        }
+        try:
+            res = profile_hypotheses.record_observation(text, evidence, actor="profile_deepener")
+        except Exception as exc:
+            res = {"error": str(exc)[:200]}
+        hypothesis_results.append({"claim": text[:200], **res})
+
+    # Phase 2: canonicalize promotable hypotheses
+    promotions: list[dict] = []
     if not dry_run:
-        for text in candidates:
-            result = _post_memory(text, source="profile_deepener:daily")
-            submissions.append(
+        try:
+            promotable = profile_hypotheses.find_promotable()
+        except Exception as exc:
+            log.warning("profile_hypotheses.find_promotable failed: %s", exc)
+            promotable = []
+        for hyp in promotable:
+            mem_result = _post_memory(
+                hyp.get("claim") or "",
+                source=f"profile_hypotheses:canonicalize:{hyp.get('id')}",
+            )
+            ok = "error" not in mem_result
+            atom_id = mem_result.get("id") if ok else ""
+            if ok and atom_id:
+                try:
+                    profile_hypotheses.mark_canonicalized(hyp.get("id") or "", atom_id)
+                except Exception as exc:
+                    log.warning("mark_canonicalized failed: %s", exc)
+            promotions.append(
                 {
-                    "content": text,
-                    "ok": "error" not in result,
-                    "result": result if "error" in result else {"id": result.get("id")},
+                    "hypothesis_id": hyp.get("id"),
+                    "claim": (hyp.get("claim") or "")[:120],
+                    "support_count": hyp.get("support_count"),
+                    "confidence": hyp.get("confidence"),
+                    "ok": ok,
+                    "atom_id": atom_id,
                 }
             )
+
+    try:
+        hyp_summary = profile_hypotheses.summary()
+    except Exception as exc:
+        log.warning("profile_hypotheses.summary failed: %s", exc)
+        hyp_summary = {}
 
     summary = {
         "ts": datetime.now(UTC).isoformat(),
         "duration_ms": int((time.time() - started) * 1000),
         "candidate_count": len(candidates),
         "candidates": candidates,
-        "submissions": submissions,
+        "hypotheses": hypothesis_results,
+        "promotions": promotions,
+        "hypothesis_summary": hyp_summary,
         "dry_run": bool(dry_run),
         "activity_seen": bool(activity),
         "beliefs_seen": bool(beliefs),
