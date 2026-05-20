@@ -23,6 +23,12 @@ BRAIN_ROOT = Path("/Users/chrischo/server/brain")
 LOG_FILE = BRAIN_ROOT / "logs" / "slo_remediation.jsonl"
 ESCALATION_LOG_FILE = BRAIN_ROOT / "logs" / "slo_escalations.jsonl"
 REMEDIATION_FLOOR_S = 30 * 60
+# After this many consecutive rate_limited check cycles for the same SLO+action
+# pair (default 6 ~= 3 hours at the 5-min slos_check cadence, or 30 min at 5-min
+# windowed checks plus REMEDIATION_FLOOR_S), the breach is escalated to manual
+# review so a stuck remediation (e.g. logs_dir_growth_24h_mb that fired 267
+# times without resolving) cannot silently loop forever.
+RATE_LIMITED_ESCALATION_THRESHOLD = 6
 
 ActionKind = Literal["trigger", "config", "manual"]
 
@@ -249,6 +255,10 @@ def _rate_key(rule: RemediationRule) -> str:
     return f"slo_remediation.{rule.slo}.{rule.action}.last_at"
 
 
+def _consecutive_rate_limited_key(rule: RemediationRule) -> str:
+    return f"slo_remediation.{rule.slo}.{rule.action}.consecutive_rate_limited"
+
+
 def _should_fire(rule: RemediationRule) -> bool:
     try:
         sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -266,8 +276,34 @@ def _record_fire(rule: RemediationRule) -> None:
         import brain_config_store
 
         brain_config_store.set(_rate_key(rule), f"{time.time():.3f}", updated_by="slo_remediation")
+        # Successful fire resets the rate_limited streak so we don't escalate
+        # right after a legitimate quiet period.
+        brain_config_store.set(_consecutive_rate_limited_key(rule), "0", updated_by="slo_remediation")
     except Exception as exc:
         log.debug("slo remediation rate marker failed: %s", exc)
+
+
+def _bump_rate_limited(rule: RemediationRule) -> int:
+    """Increment consecutive rate_limited counter and return new value.
+
+    Returns 0 on storage failure so callers do not escalate spuriously.
+    """
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import brain_config_store
+
+        key = _consecutive_rate_limited_key(rule)
+        raw = brain_config_store.get(key) or "0"
+        try:
+            current = int(raw)
+        except (TypeError, ValueError):
+            current = 0
+        new_value = current + 1
+        brain_config_store.set(key, str(new_value), updated_by="slo_remediation")
+        return new_value
+    except Exception as exc:
+        log.debug("slo remediation rate_limited counter failed: %s", exc)
+        return 0
 
 
 def _trigger(job_name: str) -> dict:
@@ -361,9 +397,49 @@ def apply_direct_remediations(violations: list[dict]) -> dict:
             "reason": rule.reason,
         }
 
+        # 2026-05-20 W4 Phase 4 (codex round-8 spec D): when log_rotation
+        # remediation fires, attach per-class attribution so the audit/log
+        # row names the culprit (database_primary / backups / training / …)
+        # instead of just "logs grew, run cleanup". The lookup is bounded
+        # (~30ms file walk on the current 1.7GB tree) and best-effort —
+        # any failure degrades to storage_top_class absent without blocking
+        # the remediation itself.
+        if rule.action == "log_rotation":
+            try:
+                from brain_core.storage_attribution import top_class as _storage_top
+
+                base["storage_top_class"] = _storage_top()
+            except Exception as exc:
+                log.debug("storage_attribution lookup failed: %s", exc)
+
         if rule.kind == "trigger":
             if not _should_fire(rule):
-                outcome = {"status": "rate_limited"}
+                streak = _bump_rate_limited(rule)
+                outcome = {"status": "rate_limited", "consecutive_rate_limited": streak}
+                # Emit a single escalation when the streak first crosses the
+                # threshold. Subsequent cycles at the same elevated streak
+                # don't re-spam — the breach is visible on the SLO dashboard
+                # already, and duplicate escalation rows would bury new
+                # incidents. The counter resets via _record_fire() after a
+                # successful remediation, so a future cycle CAN re-escalate
+                # if the issue resurfaces.
+                if streak == RATE_LIMITED_ESCALATION_THRESHOLD:
+                    escalations.append(
+                        _escalation_record(
+                            base,
+                            route="human",
+                            status="stuck_rate_limited",
+                            detail={
+                                "consecutive_rate_limited": streak,
+                                "threshold": RATE_LIMITED_ESCALATION_THRESHOLD,
+                                "guidance": (
+                                    "Remediation has been rate-limited for "
+                                    f"{streak} consecutive cycles without "
+                                    "resolving the breach. Investigate manually."
+                                ),
+                            },
+                        )
+                    )
             else:
                 outcome = _trigger(rule.action)
                 if outcome.get("status") == "ok":
@@ -382,9 +458,30 @@ def apply_direct_remediations(violations: list[dict]) -> dict:
             records.append(rec)
         elif rule.kind == "config":
             if not _should_fire(rule):
-                rec = {**base, "status": "rate_limited"}
-                actions.append({"slo": slo_name, "action": f"config:{rule.action}", "status": "rate_limited"})
+                streak = _bump_rate_limited(rule)
+                rec = {**base, "status": "rate_limited", "consecutive_rate_limited": streak}
+                actions.append(
+                    {
+                        "slo": slo_name,
+                        "action": f"config:{rule.action}",
+                        "status": "rate_limited",
+                        "consecutive_rate_limited": streak,
+                    }
+                )
                 records.append(rec)
+                # See trigger-branch comment: emit once at the crossing.
+                if streak == RATE_LIMITED_ESCALATION_THRESHOLD:
+                    escalations.append(
+                        _escalation_record(
+                            base,
+                            route="human",
+                            status="stuck_rate_limited",
+                            detail={
+                                "consecutive_rate_limited": streak,
+                                "threshold": RATE_LIMITED_ESCALATION_THRESHOLD,
+                            },
+                        )
+                    )
             else:
                 fired_ok = False
                 for outcome in _set_throttle(rule):

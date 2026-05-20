@@ -80,6 +80,22 @@ def trigger_slos_check() -> dict:
         raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e)) from e
 
 
+# 2026-05-20 W4 Phase 3 (codex round-6 #4): per-class storage breakdown.
+# Slot beside /brain/slos because operators reach for this exactly when
+# logs_dir_total_mb or logs_dir_growth_24h_mb breaches: "which class is
+# eating disk?". Computed fresh each call — the walk is bounded by file
+# count (currently ~150 entries under logs/, low-double-digit ms).
+@router.get("/brain/storage/attribution", tags=["observability"])
+def storage_attribution_route() -> dict:
+    """Per-class breakdown of brain logs/ size + top-contributor + budgets."""
+    try:
+        from brain_core.storage_attribution import compute_attribution
+
+        return compute_attribution()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e)) from e
+
+
 @router.get("/brain/ops/readiness", tags=["observability"])
 def ops_readiness() -> dict:
     """Read-only operational readiness snapshot for Brain UI/release checks."""

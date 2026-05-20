@@ -207,6 +207,7 @@ def _fetch_slos_via_http() -> list[dict]:
 def collect_slo_signals() -> list[dict]:
     """Pull current SLO breach state. Bumps consecutive_breaches per metric."""
     items: list[dict] = []
+    items_resolved = False
     try:
         import slos as _slos
 
@@ -215,10 +216,16 @@ def collect_slo_signals() -> list[dict]:
             if isinstance(report, dict):
                 raw = report.get("items")
                 if isinstance(raw, list):
+                    # 2026-05-20 W4 round-8 defect B: distinguish "got an
+                    # empty list" from "call failed entirely". The earlier
+                    # `if not items` collapsed both into the HTTP fallback,
+                    # so a healthy brain with zero breaches did a wasteful
+                    # loopback round-trip per controller tick.
                     items = raw
+                    items_resolved = True
     except Exception as exc:
         log.debug("slos.run direct call failed (%s), falling back to HTTP", exc)
-    if not items:
+    if not items_resolved:
         items = _fetch_slos_via_http()
     if not items:
         return []
@@ -370,7 +377,13 @@ _SIGNAL_TO_KNOB: dict[str, list[tuple[str, int, float]]] = {
     "logs_dir_growth_24h_mb": [("BRAIN_SCHED_MAX_HEAVY_JOBS", -1, 1.0)],
     "brain_server_rss_mb": [("BRAIN_SCHED_MAX_HEAVY_JOBS", -1, 1.0)],
     "brain_server_rss_growth_1h_mb": [("BRAIN_SCHED_MAX_HEAVY_JOBS", -1, 1.0)],
-    "recall_v2_p95_ms": [("BRAIN_ONTOLOGY_EXPANSION_MAX_TERMS", -1, 1.0)],
+    # 2026-05-20 W4 round-8 defect C: env-only knobs need restart to take
+    # effect; pair them with at least one dynamic knob so the proposal has
+    # immediate-acting reduction available on the same signal.
+    "recall_v2_p95_ms": [
+        ("BRAIN_SCHED_MAX_HEAVY_JOBS", -1, 1.0),  # dynamic, immediate
+        ("BRAIN_ONTOLOGY_EXPANSION_MAX_TERMS", -1, 1.0),  # env, deferred
+    ],
     # Evals
     "retrieval_regression": [
         ("BRAIN_ONTOLOGY_EXPANSION_MAX_TERMS", -1, 1.0),
