@@ -2101,6 +2101,31 @@ def brain_ops_compound(request: Request, req: CompoundRequest) -> dict:
         except Exception as exc:
             results.append({"op": op_name, "ok": False, "result": {"error": str(exc)[:200]}})
 
+    # 2026-05-20 W3.5 round 3 (codex defect 4): write a single batch row to
+    # action_audit so the compound_id is recoverable. Each sub-op still logs
+    # separately through its own endpoint middleware; this row provides the
+    # back-reference. compound_id is stuffed into session_id (already indexed)
+    # so existing audit queries can group ops without a schema migration.
+    try:
+        from atoms_store import insert_action_audit as _insert_audit
+
+        _insert_audit(
+            route="/brain/ops/compound",
+            tool="brain_compound",
+            actor=actor,
+            query_text=json.dumps(
+                {
+                    "compound_id": compound_id,
+                    "ops": [{"op": r["op"], "ok": r["ok"]} for r in results],
+                },
+                ensure_ascii=False,
+            ),
+            session_id=compound_id,
+        )
+    except Exception:
+        # Audit is best-effort — never block the response on it.
+        pass
+
     return {
         "compound_id": compound_id,
         "actor": actor,

@@ -33,6 +33,7 @@ Output shape:
 
 from __future__ import annotations
 
+import logging
 import re
 import sqlite3
 from datetime import UTC, datetime, timedelta
@@ -42,6 +43,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from rate_limit import limiter
 
 from config import BRAIN_DIR
+
+log = logging.getLogger("brain.routes.trajectories")
 
 router = APIRouter(dependencies=[Depends(verify_bearer)])
 
@@ -119,33 +122,27 @@ def _decisions_for(actor: str | None, session_ref: str, since_iso: str) -> list[
         conn.close()
 
 
-def _lessons_for(actor: str | None, limit: int = 10) -> list[dict]:
-    try:
-        conn = _connect()
-    except Exception:
+def _lessons_for(actor: str | None, topic_hint: str | None = None, limit: int = 5) -> list[dict]:
+    """Pull recent failure_memory lessons relevant to this trajectory.
+
+    2026-05-20 W3.5 round 3 (codex defect 3): the previous implementation
+    queried a ``lessons`` table in brain.db that does not exist — the join
+    silently returned empty for every trajectory. Real lesson storage is in
+    failure_memory (Neo4j-backed via failure_memory.get_similar_lessons).
+    We pass either the inferred goal or the actor name as the similarity
+    seed; failures degrade to an empty list so the export route never
+    blocks on lesson lookup errors.
+    """
+    seed = (topic_hint or "").strip() or (actor or "").strip()
+    if not seed:
         return []
     try:
-        # cross_agent_lessons is the consolidated lesson view; columns vary
-        # by release, so SELECT * keeps the route resilient. Filter by
-        # actor when the column exists.
-        cur = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='lessons'").fetchone()
-        if not cur:
-            return []
-        rows = conn.execute(
-            "SELECT * FROM lessons ORDER BY created_at DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
-        out = []
-        for r in rows:
-            d = dict(r)
-            if actor and "agent" in d and d["agent"] and d["agent"] != actor:
-                continue
-            out.append(d)
-        return out
-    except Exception:
+        import failure_memory as _fm
+
+        return _fm.get_similar_lessons(seed, agent_id=actor or "system", limit=limit) or []
+    except Exception as exc:
+        log.debug("trajectories lessons lookup failed: %s", exc)
         return []
-    finally:
-        conn.close()
 
 
 def _group_trajectories(
@@ -291,7 +288,7 @@ def trajectories_export(
             for d in t["decisions"]
             if (d.get("outcome_status") or d.get("review_status"))
         ]
-        t["lessons"] = _lessons_for(t["actor"] or actor, limit=5)
+        t["lessons"] = _lessons_for(t["actor"] or actor, topic_hint=t.get("goal"), limit=5)
 
     return {
         "actor": actor,

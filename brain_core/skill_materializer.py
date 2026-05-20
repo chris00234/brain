@@ -707,7 +707,19 @@ def cleanup_stale_auto_skills(
 
         # Rule 3: overload cap per root
         for _root, items in survivors_per_root.items():
-            if len(items) <= max_skills:
+            # 2026-05-20 W3.5 round 3 (codex defect 2): quarantined skills must
+            # also bypass overload eviction, otherwise capacity pressure
+            # silently archives the very entries the security audit flagged
+            # for operator review. Reload usage once per root to check the
+            # flag — cheaper than threading the dict through phase 1+2.
+            root_usage = _load_usage(_root)
+            quarantined_pairs = [
+                (d, fm) for d, fm in items if (root_usage.get(d.name) or {}).get("quarantined")
+            ]
+            evictable = [(d, fm) for d, fm in items if not (root_usage.get(d.name) or {}).get("quarantined")]
+            quarantine_held = len(quarantined_pairs)
+
+            if len(evictable) <= max_skills:
                 summary["kept"] += len(items)
                 continue
 
@@ -719,14 +731,14 @@ def cleanup_stale_auto_skills(
                 except ValueError:
                     return 1
 
-            items.sort(key=_sc)
-            evict_count = len(items) - max_skills
-            for d, _fm in items[:evict_count]:
+            evictable.sort(key=_sc)
+            evict_count = len(evictable) - max_skills
+            for d, _fm in evictable[:evict_count]:
                 if _try_archive(d, reason="overload_cap"):
                     summary["overload"] += 1
                     if not dry_run:
                         summary["archived"] += 1
-            summary["kept"] += max_skills
+            summary["kept"] += max_skills + quarantine_held
     except Exception as exc:
         summary["errors"].append(str(exc)[:200])
     return summary

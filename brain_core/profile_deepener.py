@@ -121,27 +121,27 @@ def _compose_candidates(activity: dict, beliefs: dict, outcomes: list[dict]) -> 
     """Template-based candidate text generation. No LLM in the hot path.
 
     Returns up to MAX_CANDIDATES_PER_RUN short observational sentences. The
-    brain's ingest_classifier decides kind/category; we just emit signal-rich
-    one-liners that capture the past 24h pattern.
+    claim text is DATE-FREE on purpose: profile_hypotheses.record_observation
+    hashes the normalized claim to derive ``hyp_id``, so a leading
+    ``YYYY-MM-DD`` would mint a fresh hypothesis every day and support could
+    never accrete past 1 (codex round-3 defect 1). The day-of-observation
+    lives in the support_json's ``at`` timestamp instead.
+
+    2026-05-20 W3.5 round 3 fix: also reads ``activity['agents']`` — the
+    actual key emitted by agent_activity_report.run() — rather than the
+    older ``per_agent`` placeholder that the v1 deepener guessed at.
     """
     candidates: list[str] = []
-    today = datetime.now(UTC).strftime("%Y-%m-%d")
 
-    # 1. Top-active agents (operational fact)
-    per_agent = activity.get("per_agent") if isinstance(activity, dict) else None
-    if isinstance(per_agent, dict) and per_agent:
-        ranked = sorted(
-            per_agent.items(),
-            key=lambda kv: int((kv[1] or {}).get("stores", 0) or 0),
-            reverse=True,
-        )[:3]
-        names = [
-            f"{name}({int((stats or {}).get('stores', 0))})"
-            for name, stats in ranked
-            if int((stats or {}).get("stores", 0) or 0) > 0
-        ]
+    # 1. Top-active agents (operational fact). Stable claim text — names are
+    # ordered by stores_7d so a single agent's burst doesn't reorder it day
+    # to day.
+    agents = activity.get("agents") if isinstance(activity, dict) else None
+    if isinstance(agents, list) and agents:
+        ranked = [a for a in agents if isinstance(a, dict) and int(a.get("stores_7d", 0) or 0) > 0][:3]
+        names = [a.get("agent", "?") for a in ranked]
         if names:
-            candidates.append(f"profile_deepener {today}: top brain writers (last 7d) — {', '.join(names)}")
+            candidates.append(f"top brain writers (7d): {', '.join(names)}")
 
     # 2. Belief-state pulse — high-confidence themes that surfaced today
     high_conf = beliefs.get("beliefs") if isinstance(beliefs, dict) else None
@@ -151,9 +151,7 @@ def _compose_candidates(activity: dict, beliefs: dict, outcomes: list[dict]) -> 
         ]
         themes = [t for t in themes if t]
         if themes:
-            candidates.append(
-                f"profile_deepener {today}: top beliefs in current snapshot — {' | '.join(themes)}"
-            )
+            candidates.append(f"top beliefs in current snapshot: {' | '.join(themes)}")
 
     # 3. Uncertainty pulse — what brain is currently doubting
     uncertainties = beliefs.get("uncertainties") if isinstance(beliefs, dict) else None
@@ -165,9 +163,12 @@ def _compose_candidates(activity: dict, beliefs: dict, outcomes: list[dict]) -> 
         ]
         u_summary = [s for s in u_summary if s]
         if u_summary:
-            candidates.append(f"profile_deepener {today}: open uncertainties — {' | '.join(u_summary)}")
+            candidates.append(f"open uncertainties: {' | '.join(u_summary)}")
 
-    # 4. Recent decision outcome aggregate
+    # 4. Recent decision outcome aggregate. The claim itself is the qualitative
+    # bucket (mostly_succeeded / mixed / mostly_failed) instead of raw counts,
+    # so day-over-day stability is the norm — only structural shifts mint a
+    # new hypothesis.
     if outcomes:
         succeeded = sum(
             1
@@ -177,9 +178,14 @@ def _compose_candidates(activity: dict, beliefs: dict, outcomes: list[dict]) -> 
         )
         total = len(outcomes)
         if total > 0:
-            candidates.append(
-                f"profile_deepener {today}: decision outcome window — {succeeded}/{total} succeeded"
-            )
+            ratio = succeeded / total
+            if ratio >= 0.75:
+                bucket = "mostly_succeeded"
+            elif ratio >= 0.4:
+                bucket = "mixed_outcomes"
+            else:
+                bucket = "mostly_failed"
+            candidates.append(f"recent decision outcomes trend: {bucket}")
 
     return candidates[:MAX_CANDIDATES_PER_RUN]
 
@@ -216,7 +222,10 @@ def run(dry_run: bool = False) -> dict:
 
     import profile_hypotheses
 
-    # Phase 1: record candidates as hypotheses (dialectic accrual)
+    # Phase 1: record candidates as hypotheses (dialectic accrual). dry_run
+    # short-circuits the DB write — codex round-3 flagged the earlier impl
+    # for being misleading: dry_run only skipped /memory promotion but still
+    # mutated profile_hypotheses.db, so "dry" runs left durable state behind.
     hypothesis_results: list[dict] = []
     for text in candidates:
         evidence = {
@@ -227,6 +236,9 @@ def run(dry_run: bool = False) -> dict:
                 "outcomes_count": len(outcomes),
             },
         }
+        if dry_run:
+            hypothesis_results.append({"claim": text[:200], "status": "would_record", "dry_run": True})
+            continue
         try:
             res = profile_hypotheses.record_observation(text, evidence, actor="profile_deepener")
         except Exception as exc:
