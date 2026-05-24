@@ -35,12 +35,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "brain_core"))
 
-BRAIN_ROOT = Path("/Users/chrischo/server/brain")
+BRAIN_ROOT = Path(__file__).resolve().parents[1]
 EVAL_COMPARE = BRAIN_ROOT / "cli" / "eval_compare.py"
 DEFAULT_EVAL_SET = BRAIN_ROOT / "cli" / "eval_set.json"
 DEFAULT_BASELINE = BRAIN_ROOT / "cli" / "eval_baseline.json"
 PENDING_HOLDOUT = BRAIN_ROOT / "cli" / "eval_holdout_pending.json"
-SECRET_FILE = Path("/Users/chrischo/.openclaw/credentials/.personal_webhook_secret")
+SECRET_FILE = Path("/Users/chrischo/.brain/credentials/.personal_webhook_secret")
 BRAIN_URL = "http://127.0.0.1:8791"
 
 def _content_metric_value(v2: dict, metric: str) -> float:

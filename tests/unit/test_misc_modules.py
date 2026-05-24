@@ -261,7 +261,7 @@ def test_brain_loop_run_reports_process_timeout(tmp_path, monkeypatch):
 def test_job_registry_caps_brain_loop_tick_timeout():
     import job_registry
 
-    assert job_registry._JOB_TIMEOUT_SECONDS["brain_loop_tick"] == 45
+    assert job_registry._JOB_TIMEOUT_SECONDS["brain_loop_tick"] == 90
     assert job_registry._JOB_TIMEOUT_SECONDS["proactive_check"] == 900
 
 

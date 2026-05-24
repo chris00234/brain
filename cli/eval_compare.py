@@ -28,10 +28,11 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-DEFAULT_EVAL_SET = Path("/Users/chrischo/server/brain/cli/eval_set.json")
-SECRET_FILE = Path("/Users/chrischo/.openclaw/credentials/.personal_webhook_secret")
+ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_EVAL_SET = ROOT / "cli" / "eval_set.json"
+SECRET_FILE = Path("/Users/chrischo/.brain/credentials/.personal_webhook_secret")
 BASE = "http://127.0.0.1:8791"
-BRAIN_CORE = Path("/Users/chrischo/server/brain/brain_core")
+BRAIN_CORE = ROOT / "brain_core"
 DIVERSITY_HIGH_COSINE_THRESHOLD = 0.92
 
 
@@ -796,7 +797,7 @@ def main() -> int:
     if args.ragas:
         import sys as _sys
 
-        _sys.path.insert(0, "/Users/chrischo/server/brain/brain_core")
+        _sys.path.insert(0, str(BRAIN_CORE))
         try:
             from ragas_judge import aggregate as _ragas_agg
             from ragas_judge import score_one as _ragas_score

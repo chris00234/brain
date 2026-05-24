@@ -221,6 +221,8 @@ TIMEOUT_CAPPED_TOOLS = {
     "brain_store",
     "brain_consolidate",
     "brain_correct",  # 2026-04-26: same POST /memory path, also 4s capped
+    "brain_remember",  # durable writes share the POST /memory cold path
+    "brain_think",  # decide/reason/think modes are LLM-backed
 }
 
 
@@ -280,6 +282,8 @@ def test_no_new_uncapped_tools_added():
         "brain_forget",
         "brain_tick",
         "brain_doubt",
+        "brain_search",  # recall/session/WM reads; slow semantic recall stays < MCP cap
+        "brain_feedback",  # outcome/recall feedback writes, no LLM/network dependency
     }
     unclassified = branch_names - TIMEOUT_CAPPED_TOOLS - FAST_TOOLS
     assert not unclassified, (

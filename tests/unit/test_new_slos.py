@@ -12,6 +12,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "brain_core"))
 def _slos():
     import importlib
 
+    brain_core = str(Path(__file__).resolve().parents[2] / "brain_core")
+    if brain_core in sys.path:
+        sys.path.remove(brain_core)
+    sys.path.insert(0, brain_core)
+    sys.modules.pop("slos", None)
     import slos
 
     importlib.reload(slos)

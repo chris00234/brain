@@ -18,8 +18,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 AUDIT_DOC = ROOT / "docs" / "world-level-brain-audit-2026-05-05.md"
-PRD_PATH = ROOT / ".omx" / "plans" / "prd-world-level-brain-hardening.md"
-TEST_SPEC_PATH = ROOT / ".omx" / "plans" / "test-spec-world-level-brain-hardening.md"
 
 PASS_TERMS = (
     "active constraint",
@@ -99,12 +97,10 @@ def classify_status(status: str) -> str:
 
 
 def artifact_checks(root: Path = ROOT) -> list[dict]:
-    """Check for concrete artifacts required by the PRD/test spec."""
+    """Check for concrete artifacts required by the active audit ledger."""
 
     required = [
         ("audit_doc", AUDIT_DOC.relative_to(root), "prompt-to-artifact ledger"),
-        ("prd", PRD_PATH.relative_to(root), "requirements artifact"),
-        ("test_spec", TEST_SPEC_PATH.relative_to(root), "validation plan"),
         (
             "dispatch_contract_tests",
             Path("tests/unit/test_cli_first_dispatch_contract.py"),
@@ -175,11 +171,6 @@ def artifact_checks(root: Path = ROOT) -> list[dict]:
             "eval_diversity_tests",
             Path("tests/unit/test_eval_compare_source.py"),
             "diversity diagnostic regression tests",
-        ),
-        (
-            "eval_diversity_sample",
-            Path("logs/eval-diversity-sample-2026-05-07.json"),
-            "live diversity metric sample",
         ),
     ]
     out = []

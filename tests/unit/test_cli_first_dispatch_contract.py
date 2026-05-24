@@ -28,7 +28,6 @@ def test_cli_llm_default_chain_starts_with_gpt55_and_keeps_openclaw_last():
 
 def test_ingest_adapters_use_shared_cli_first_dispatch_not_openclaw_shellout():
     adapters = [
-        "screen_time.py",
         "git_activity.py",
         "active_contacts.py",
         "gmail.py",

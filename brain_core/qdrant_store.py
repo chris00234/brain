@@ -435,7 +435,17 @@ class QdrantStore:
         return [c.name for c in (resp.collections or [])]
 
     def create_collection(self, name: str, metadata: dict[str, Any] | None = None) -> None:
-        from qdrant_client.models import Distance, VectorParams
+        try:
+            from qdrant_client.models import Distance, VectorParams
+        except ModuleNotFoundError:
+
+            class Distance:  # pragma: no cover - dependency-present production path
+                COSINE = "Cosine"
+
+            class VectorParams:  # pragma: no cover - test/fake-client fallback
+                def __init__(self, size: int, distance: str) -> None:
+                    self.size = size
+                    self.distance = distance
 
         del metadata  # Qdrant has no collection-level metadata dict; schema
         # lives in the named-vector config. Bootstrap script handles full
