@@ -865,5 +865,35 @@
     "collection": "all",
     "expected_source": "canonical",
     "expected_content": "dedup"
+  },
+  {
+    "query": "CODEX_HOME",
+    "collection": "all",
+    "expected_source": "codex",
+    "expected_content": "CODEX_HOME"
+  },
+  {
+    "query": "/Users/chrischo/.codex",
+    "collection": "all",
+    "expected_source": "codex",
+    "expected_content": ".codex"
+  },
+  {
+    "query": "claude1 claude2 claude3 claude4",
+    "collection": "all",
+    "expected_source": "claude",
+    "expected_content": "claude1"
+  },
+  {
+    "query": "조대현",
+    "collection": "all",
+    "expected_source": "canonical/chris",
+    "expected_content": "조대현"
+  },
+  {
+    "query": "Daehyun Cho Hangul",
+    "collection": "all",
+    "expected_source": "canonical/chris",
+    "expected_content": "Daehyun"
   }
 ]

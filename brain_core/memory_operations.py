@@ -61,7 +61,13 @@ def classify_operation(
     """Classify a new memory against existing ones.
 
     Returns:
-        (operation, superseded_id_if_update, diagnostics)
+        (operation, target_chroma_id_or_None, diagnostics)
+
+    The second tuple slot is the chroma_id of the existing memory that
+    triggered the verdict (or None when op == "ADD"). Pre-2026-05 the NOOP
+    path returned None here even though it knew the duplicate's id — that
+    asymmetry hid the duplicate from POST /memory's response, so callers
+    saw "duplicate of existing memory" with no handle to look it up.
 
     Diagnostics dict contains: top_distance, top_overlap, top_confidence, reason
 
@@ -146,7 +152,7 @@ def classify_operation(
                         cand_id,
                         {**diagnostics, "reason": "preference subject changed"},
                     )
-            return ("NOOP", None, {**diagnostics, "reason": "near-exact duplicate"})
+            return ("NOOP", cand_id, {**diagnostics, "reason": "near-exact duplicate"})
 
         # Near-duplicate — may be refinement (UPDATE) or new territory (ADD)
         if cand_dist < UPDATE_COSINE:
@@ -162,7 +168,7 @@ def classify_operation(
             # extending a supersession chain that contradiction detection then
             # flagged 100+ times for the same fact.
             if not is_pref and overlap >= 0.4 and abs(new_confidence - cand_conf) <= 0.1:
-                return ("NOOP", None, {**diagnostics, "reason": "paraphrase refresh"})
+                return ("NOOP", cand_id, {**diagnostics, "reason": "paraphrase refresh"})
 
             # Semantically similar but lexically different = refinement/update
             if overlap < TOKEN_OVERLAP_MAX and new_confidence >= (cand_conf - 0.1):
@@ -174,7 +180,7 @@ def classify_operation(
 
             # High token overlap + close embedding + lower confidence = NOOP
             if overlap >= TOKEN_OVERLAP_MAX and new_confidence <= cand_conf:
-                return ("NOOP", None, {**diagnostics, "reason": "lexical duplicate"})
+                return ("NOOP", cand_id, {**diagnostics, "reason": "lexical duplicate"})
 
         # Preference-specific: relaxed cosine + subject overlap
         if is_pref and cand_dist < PREFERENCE_UPDATE_COSINE:

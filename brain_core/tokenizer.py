@@ -104,3 +104,65 @@ def tokenize(text: str) -> set[str]:
     lower = (text or "").lower()
     tokens = set(_LATIN_RE.findall(lower)) | set(_KOREAN_RE.findall(text or ""))
     return tokens - _STOPWORDS
+
+
+# Exact-alias extractors. These preserve CASE and punctuation so a downstream
+# rerank/bridge layer can detect verbatim matches for code-ish identifiers
+# (env vars, account handles, paths) and personal names (Hangul, PascalCase).
+# The general `tokenize()` above is lowercased + jaccard-friendly; this helper
+# is the orthogonal "did the literal token appear?" check.
+_PATH_RE = re.compile(r"/[A-Za-z0-9_.\-~]+(?:/[A-Za-z0-9_.\-~]+)+/?")
+_ENV_VAR_RE = re.compile(r"\b[A-Z][A-Z0-9_]{2,}\b")
+_HANDLE_RE = re.compile(r"\b[a-z]+\d+\b")
+_PASCAL_RE = re.compile(r"\b[A-Z][a-z]{2,}\b")
+_HANGUL_RE = re.compile(r"[가-힣]{2,}")
+# Words inside a Hangul token that are too generic to be aliases by themselves.
+_PASCAL_STOPWORDS = frozenset(
+    {
+        "The",
+        "This",
+        "That",
+        "When",
+        "Where",
+        "What",
+        "From",
+        "With",
+    }
+)
+
+
+def extract_exact_aliases(text: str) -> list[str]:
+    """Return verbatim alias tokens worth pinning during recall/store debug.
+
+    Buckets:
+      - absolute / relative file paths (``/Users/chrischo/.codex``)
+      - SCREAMING_SNAKE_CASE env vars (``CODEX_HOME``, ``PATH``)
+      - account-style handles (``claude1``, ``claude4``)
+      - PascalCase / Proper nouns (``Daehyun``, ``Cho``)
+      - Hangul (Korean) ≥ 2 syllables (``조대현``)
+
+    Ordering is insertion-order across the buckets above (paths first since
+    they are the most specific). Duplicates are dropped while preserving
+    first-seen order so callers can build short, intent-anchored queries.
+    """
+    if not text:
+        return []
+    seen: dict[str, None] = {}
+
+    def _add(value: str) -> None:
+        if value and value not in seen:
+            seen[value] = None
+
+    for m in _PATH_RE.findall(text):
+        _add(m)
+    for m in _ENV_VAR_RE.findall(text):
+        _add(m)
+    for m in _HANDLE_RE.findall(text):
+        _add(m)
+    for m in _PASCAL_RE.findall(text):
+        if m not in _PASCAL_STOPWORDS:
+            _add(m)
+    for m in _HANGUL_RE.findall(text):
+        _add(m)
+
+    return list(seen.keys())

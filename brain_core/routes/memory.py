@@ -96,6 +96,15 @@ class MemoryCreateRequest(BaseModel):
         max_length=300,
         description="why the caller knows these atoms are superseded (e.g., user-correction)",
     )
+    # 2026-05-24 recall-store bridge: when the caller just ran a recall and
+    # is now storing follow-up content, they can pass the chroma_ids they
+    # received so the brain can detect "duplicate but the caller's recall
+    # never showed them this id" — that gap is the diagnostic that turns a
+    # silent NOOP into an actionable bridge query.
+    recall_context_ids: list[str] | None = Field(
+        default=None,
+        description="chroma_ids returned by the caller's most recent recall, used to flag duplicate_but_not_recalled",
+    )
 
 
 class MemoryPatchRequest(BaseModel):
@@ -130,6 +139,87 @@ class ContradictionResolveRequest(BaseModel):
 def _memory_collection_id() -> str:
     get_vector_store().create_collection(learn.SEMANTIC_COLLECTION)
     return learn.SEMANTIC_COLLECTION
+
+
+_NOOP_PREVIEW_CHARS = 240
+
+
+def _build_noop_metadata(
+    *,
+    supersede_target: str | None,
+    new_content: str,
+    recall_context_ids: list[str] | None,
+    collection: str,
+    store: Any,
+) -> dict[str, Any]:
+    """Build the enriched NOOP response payload.
+
+    Surfaces duplicate target metadata (id/path/title/preview) and, when
+    the caller provided their recall context ids, flags
+    ``duplicate_but_not_recalled`` + attaches a deterministic
+    ``suggested_bridge_query`` and ``recall_repair`` diagnostic. Without
+    recall context the bridge fields still ship so debug surfaces can
+    render them — but the flag stays absent (we can't decide).
+    """
+    metadata: dict[str, Any] = {
+        "operation": "NOOP",
+        "reason": "duplicate of existing memory",
+    }
+    if not supersede_target:
+        return metadata
+
+    # Pull the existing duplicate's payload + document so the response can
+    # describe what won, not just say "something". Best-effort: if the
+    # vector store is unreachable (or the row was already deleted out from
+    # under us), we still return the basic NOOP envelope.
+    dup_doc = ""
+    dup_meta: dict[str, Any] = {}
+    try:
+        points = store.get(
+            collection,
+            ids=[supersede_target],
+            with_payload=True,
+            with_documents=True,
+        )
+        if points:
+            dup_doc = points[0].document or ""
+            dup_meta = dict(points[0].payload or {})
+    except Exception:
+        pass
+
+    metadata["duplicate_id"] = supersede_target
+    metadata["duplicate_collection"] = collection
+    if dup_doc:
+        metadata["duplicate_content_preview"] = dup_doc[:_NOOP_PREVIEW_CHARS]
+    title = dup_meta.get("title") or dup_meta.get("document_title")
+    if title:
+        metadata["duplicate_title"] = title
+    src_path = dup_meta.get("source_path") or dup_meta.get("path") or dup_meta.get("source")
+    if src_path:
+        metadata["duplicate_path"] = src_path
+    if dup_meta.get("source"):
+        metadata["duplicate_source"] = dup_meta["source"]
+
+    # Bridge query + repair diagnostics. These are pure-python helpers — no
+    # vector or LLM call — so they always run when we have any signal at
+    # all about the duplicate (doc text OR explicit source_aliases on meta).
+    if dup_doc or dup_meta.get("source_aliases") or dup_meta.get("source_path"):
+        try:
+            from recall_bridge import build_suggested_bridge_query, compute_recall_repair
+
+            bridge = build_suggested_bridge_query(new_content, dup_doc, dup_meta)
+            if bridge:
+                metadata["suggested_bridge_query"] = bridge
+            repair = compute_recall_repair(new_content, dup_doc, dup_meta)
+            if repair.get("exact_aliases") or repair.get("missing_tokens"):
+                metadata["recall_repair"] = repair
+        except Exception:
+            pass
+
+    if recall_context_ids is not None:
+        metadata["duplicate_but_not_recalled"] = supersede_target not in set(recall_context_ids)
+
+    return metadata
 
 
 def _contradictions_collection_id() -> str:
@@ -443,12 +533,20 @@ def create_memory(request: Request, req: MemoryCreateRequest) -> MemoryEntry:
     except Exception:
         pass
 
-    # NOOP: don't store, return existing memory ID
+    # NOOP: don't store, return existing memory ID + duplicate target metadata
+    # + recall-bridge diagnostics so the caller can repair their next recall
+    # query when the duplicate wasn't in their recall context.
     if operation == "NOOP":
         return MemoryEntry(
-            id=mem_id,
+            id=supersede_target or mem_id,
             content=req.content,
-            metadata={"operation": "NOOP", "reason": "duplicate of existing memory"},
+            metadata=_build_noop_metadata(
+                supersede_target=supersede_target,
+                new_content=req.content,
+                recall_context_ids=req.recall_context_ids,
+                collection=collection,
+                store=store,
+            ),
         )
 
     # DELETE: invalidation phrase — remove target if found, don't store the phrase.

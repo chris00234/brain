@@ -29,7 +29,16 @@ try:
     from brain_core.source_quality import source_quality_multiplier
 except ImportError:  # pragma: no cover - top-level import in scripts/tests
     from source_quality import source_quality_multiplier
+from tokenizer import extract_exact_aliases as _extract_exact_aliases
 from tokenizer import tokenize as _tokenize
+
+# Cap on the exact-alias multiplier so a query mentioning many aliases can't
+# blow past the existing trust/source boosts and let a low-vector-score doc
+# walk away with rank 1 on lexical match alone. Empirically 1.8x is enough
+# to outrank a +25% base-score doc that has zero alias matches.
+_EXACT_ALIAS_BOOST_CAP = 1.8
+# Per-hit weight. With cap 1.8 a single alias hit ≈ 1.35x, two ≈ 1.7x.
+_EXACT_ALIAS_BOOST_PER_HIT = 0.35
 
 _CONCRETE_INFRA_QUERY = re.compile(
     r"\b(?:nginx|docker(?:-compose)?|compose|server\s+block|default\s+server|"
@@ -254,11 +263,21 @@ def score_result(query: str, result: dict[str, Any], debug: bool = False) -> flo
     # not erase the same source penalty later in the route.
     source_boost *= source_quality_multiplier(result, stage="lexical")
     metadata_boost, metadata_debug = _metadata_overlap_boost(query, q_tokens, result)
+    exact_alias_boost, exact_alias_debug = _exact_alias_boost(query, result)
     # Removed 2026-04-12: "## Statement" penalty was hitting EVERY canonical note
     # (standard heading) not just derivative proposals, causing 5 of 7 eval
     # regressions to be canonical misses. Canonical trust_boost now carries this.
 
-    reranked = base * relevance * pos_mult * trust_boost * semantic_boost * source_boost * metadata_boost
+    reranked = (
+        base
+        * relevance
+        * pos_mult
+        * trust_boost
+        * semantic_boost
+        * source_boost
+        * metadata_boost
+        * exact_alias_boost
+    )
 
     if debug:
         result.setdefault("_debug", {}).update(
@@ -270,12 +289,48 @@ def score_result(query: str, result: dict[str, Any], debug: bool = False) -> flo
                 "rerank_pos_mult": round(pos_mult, 3),
                 "rerank_relevance": round(relevance, 3),
                 "rerank_metadata_boost": round(metadata_boost, 3),
+                "rerank_exact_alias_boost": round(exact_alias_boost, 3),
                 "rerank_score": round(reranked, 2),
                 **metadata_debug,
+                **exact_alias_debug,
             }
         )
 
     return reranked
+
+
+def _exact_alias_boost(query: str, result: dict[str, Any]) -> tuple[float, dict[str, Any]]:
+    """Verbatim alias boost for code-ish / personal-name queries.
+
+    Only fires when the query itself carries at least one exact alias —
+    plain prose queries (``how to ship code``) extract no aliases and the
+    boost is a 1.0 no-op, keeping baseline rerank behavior untouched.
+
+    The boost scales with the number of query aliases that appear verbatim
+    in the candidate's title/path/content/source_aliases. Capped at
+    ``_EXACT_ALIAS_BOOST_CAP`` so a 5-alias query can't pin a single weak
+    candidate above strong vector hits — it just promotes the candidate
+    that *also* has the literal symbols.
+    """
+    query_aliases = _extract_exact_aliases(query or "")
+    if not query_aliases:
+        return 1.0, {}
+
+    title = result.get("title", "") or ""
+    content = result.get("content", "") or ""
+    path = result.get("path", "") or ""
+    meta = result.get("metadata") or {}
+    haystack_parts = [title, content[:2000], path]
+    for src_alias in meta.get("source_aliases") or []:
+        haystack_parts.append(str(src_alias))
+    haystack = " ".join(haystack_parts)
+
+    matched = [a for a in query_aliases if a and a in haystack]
+    if not matched:
+        return 1.0, {"rerank_exact_alias_matched": []}
+
+    boost = min(_EXACT_ALIAS_BOOST_CAP, 1.0 + _EXACT_ALIAS_BOOST_PER_HIT * len(matched))
+    return boost, {"rerank_exact_alias_matched": matched}
 
 
 def rerank(
