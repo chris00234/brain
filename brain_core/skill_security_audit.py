@@ -39,10 +39,10 @@ from skill_materializer import (  # noqa: E402 — sys.path inject required
     AUTO_PREFIX,
     CLAUDE_SKILLS_DIR,
     CODEX_SKILLS_DIR,
-    HERMES_SKILLS_DIR,
     _load_usage,
     _save_usage,
     _scan_generated_skill_content,
+    hermes_skill_roots,
 )
 
 
@@ -190,7 +190,7 @@ def run_audit() -> dict[str, Any]:
             "quarantined_now": [],
         },
     }
-    for root in (CLAUDE_SKILLS_DIR, CODEX_SKILLS_DIR, HERMES_SKILLS_DIR):
+    for root in (CLAUDE_SKILLS_DIR, CODEX_SKILLS_DIR, *hermes_skill_roots().values()):
         r = audit_root(root)
         results["per_root"][str(root)] = r
         for key in ("scanned", "ok", "drift", "missing", "threat_drift", "no_attestation"):
@@ -202,7 +202,7 @@ def run_audit() -> dict[str, Any]:
 def list_quarantined() -> dict[str, list[dict[str, Any]]]:
     """Report current quarantines across all roots — for operator review."""
     out: dict[str, list[dict[str, Any]]] = {}
-    for root in (CLAUDE_SKILLS_DIR, CODEX_SKILLS_DIR, HERMES_SKILLS_DIR):
+    for root in (CLAUDE_SKILLS_DIR, CODEX_SKILLS_DIR, *hermes_skill_roots().values()):
         if not root.exists():
             continue
         usage = _load_usage(root)
@@ -226,7 +226,7 @@ def list_quarantined() -> dict[str, list[dict[str, Any]]]:
 def clear_quarantine(slug: str) -> dict[str, Any]:
     """Operator action: remove the quarantine flag once a skill is reviewed."""
     cleared = []
-    for root in (CLAUDE_SKILLS_DIR, CODEX_SKILLS_DIR, HERMES_SKILLS_DIR):
+    for root in (CLAUDE_SKILLS_DIR, CODEX_SKILLS_DIR, *hermes_skill_roots().values()):
         usage = _load_usage(root)
         if slug in usage and usage[slug].get("quarantined"):
             usage[slug]["quarantined"] = False

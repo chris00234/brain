@@ -16,19 +16,29 @@ except Exception:  # pragma: no cover - standalone fallback
 from skill_materializer import (
     CLAUDE_SKILLS_DIR,
     CODEX_SKILLS_DIR,
-    HERMES_SKILLS_DIR,
     MIN_STEPS,
     MIN_SUCCESS_COUNT,
     PROMOTION_CONTRACT_VERSION,
     _load_usage,
     _parse_frontmatter,
+    hermes_skill_roots,
 )
 
 MIN_OUTCOME_LINKED_OUTCOMES = 5
 MIN_OUTCOME_PROCEDURES_WITH_OUTCOMES = 1
 MIN_OUTCOME_SUCCESS_RATE = 60.0
 
-REQUIRED_ROOTS = (CLAUDE_SKILLS_DIR, CODEX_SKILLS_DIR, HERMES_SKILLS_DIR)
+def required_roots() -> tuple[Path, ...]:
+    """Return required runtime roots, including all routed Hermes profiles.
+
+    This is intentionally dynamic so tests and dry-run callers that patch
+    ``skill_materializer.HERMES_SKILLS_DIR`` or
+    ``skill_materializer.HERMES_PROFILE_SKILLS_DIRS`` are honored after import.
+    """
+    return (CLAUDE_SKILLS_DIR, CODEX_SKILLS_DIR, *hermes_skill_roots().values())
+
+
+REQUIRED_ROOTS = required_roots()
 
 
 def _procedure_map(db_path: Path | None = None) -> dict[str, dict[str, Any]]:
@@ -180,7 +190,8 @@ def _outcome_maturity(outcome_delta: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _auto_skill_groups(roots: tuple[Path, ...] = REQUIRED_ROOTS) -> dict[str, dict[str, Any]]:
+def _auto_skill_groups(roots: tuple[Path, ...] | None = None) -> dict[str, dict[str, Any]]:
+    roots = roots or required_roots()
     groups: dict[str, dict[str, Any]] = defaultdict(lambda: {"paths": [], "frontmatter": {}, "usage": {}})
     for root in roots:
         usage = _load_usage(root)
@@ -205,8 +216,9 @@ def _auto_skill_groups(roots: tuple[Path, ...] = REQUIRED_ROOTS) -> dict[str, di
 
 
 def skill_promotion_audit_snapshot(
-    *, roots: tuple[Path, ...] = REQUIRED_ROOTS, db_path: Path | None = None
+    *, roots: tuple[Path, ...] | None = None, db_path: Path | None = None
 ) -> dict[str, Any]:
+    roots = roots or required_roots()
     procs = _procedure_map(db_path)
     groups = _auto_skill_groups(roots)
     skills: list[dict[str, Any]] = []
