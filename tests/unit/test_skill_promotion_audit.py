@@ -4,12 +4,20 @@ import json
 import sqlite3
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "brain_core"))
 
 import skill_materializer  # noqa: E402
 import skill_promotion_audit  # noqa: E402
+
+
+def _hermes_dirs(tmp_path: Path) -> dict[str, Path]:
+    return {
+        profile: tmp_path / ".hermes" / "profiles" / profile / "skills"
+        for profile in skill_materializer.HERMES_PROFILE_NAMES
+    }
 
 
 def _write_proc_db(path: Path, *, success_count: int = 3) -> None:
@@ -84,6 +92,33 @@ def test_skill_promotion_audit_ok_with_contract_all_runtimes(tmp_path):
     assert out["outcome_delta"]["status"] == "ok"
     assert out["outcome_maturity"]["status"] == "insufficient_data"
     assert out["outcome_maturity"]["readiness_blocking"] is True
+
+
+def test_skill_promotion_audit_default_roots_include_all_hermes_profiles(tmp_path):
+    claude = tmp_path / "claude"
+    codex = tmp_path / "codex"
+    hermes_dirs = _hermes_dirs(tmp_path)
+    for root in (claude, codex, *hermes_dirs.values()):
+        _write_skill(root, contract=True)
+    db = tmp_path / "autonomy.db"
+    _write_proc_db(db)
+
+    with (
+        patch.object(skill_promotion_audit, "CLAUDE_SKILLS_DIR", claude),
+        patch.object(skill_promotion_audit, "CODEX_SKILLS_DIR", codex),
+        patch.object(skill_materializer, "HERMES_PROFILE_SKILLS_DIRS", hermes_dirs),
+    ):
+        out = skill_promotion_audit.skill_promotion_audit_snapshot(db_path=db)
+
+    assert out["status"] == "ok"
+    assert out["coverage"]["required_runtimes"] == 2 + len(skill_materializer.HERMES_PROFILE_NAMES)
+    assert out["skills"][0]["present_runtime_count"] == out["coverage"]["required_runtimes"]
+    assert out["skills"][0]["usage_contract_count"] == out["coverage"]["required_runtimes"]
+    assert {Path(path).parent.parent for path in out["skills"][0]["runtime_paths"]} == {
+        claude,
+        codex,
+        *hermes_dirs.values(),
+    }
 
 
 def test_skill_promotion_audit_links_procedure_outcomes(tmp_path):

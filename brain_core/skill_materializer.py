@@ -2,8 +2,8 @@
 
 When a procedure in autonomy.db reaches a reuse threshold, write it out as a
 SKILL.md file that Claude Code (~/.claude/skills/auto-<slug>/), Codex
-(~/.codex/skills/auto-<slug>/), and OpenClaw (~/.openclaw/skills/auto-<slug>/)
-can discover and invoke.
+(~/.codex/skills/auto-<slug>/), and the routed Hermes profile skill root
+(~/.hermes/profiles/<profile>/skills/auto-<slug>/) can discover and invoke.
 
 Design principles:
   - Brain is source of truth. Files are materializations.
@@ -20,9 +20,9 @@ Trigger policy:
   - tier in {"extraction", "awm_session:*"} — extracted from real work
 
 Archival (future): a nightly job can walk ~/.claude/skills/auto-*/,
-~/.codex/skills/auto-*/, and ~/.openclaw/skills/auto-*/ and mark archived=true
-in their frontmatter when the backing procedure is deleted or has gone stale
-(last_used > 180 days).
+~/.codex/skills/auto-*/, and all routed ~/.hermes/profiles/*/skills/auto-*/
+roots and mark archived=true in their frontmatter when the backing procedure
+is deleted or has gone stale (last_used > 180 days).
 """
 
 from __future__ import annotations
@@ -37,9 +37,19 @@ from typing import Any
 
 log = logging.getLogger("brain.skill_materializer")
 
-CLAUDE_SKILLS_DIR = Path.home() / ".claude" / "skills"
-CODEX_SKILLS_DIR = Path.home() / ".codex" / "skills"
-OPENCLAW_SKILLS_DIR = Path.home() / ".openclaw" / "skills"
+USER_HOME = Path("/Users/chrischo")
+CLAUDE_SKILLS_DIR = USER_HOME / ".claude" / "skills"
+CODEX_SKILLS_DIR = USER_HOME / ".codex" / "skills"
+HERMES_PROFILES_ROOT = USER_HOME / ".hermes" / "profiles"
+HERMES_PROFILE_NAMES = ("ellie", "liz", "sage", "jenna", "market")
+HERMES_PROFILE_SKILLS_DIRS = {
+    profile: HERMES_PROFILES_ROOT / profile / "skills" for profile in HERMES_PROFILE_NAMES
+}
+_DEFAULT_HERMES_SKILLS_DIR = HERMES_PROFILE_SKILLS_DIRS["liz"]
+# Compatibility alias: older callers/tests patch HERMES_SKILLS_DIR directly.
+HERMES_SKILLS_DIR = _DEFAULT_HERMES_SKILLS_DIR
+# Compatibility alias for modules that still import the retired OpenClaw name.
+OPENCLAW_SKILLS_DIR = HERMES_SKILLS_DIR
 AUTO_PREFIX = "auto-"
 MIN_SUCCESS_COUNT = 2
 MIN_STEPS = 3
@@ -49,6 +59,42 @@ STALE_DAYS = 90  # skills backing procedures last_used > N days are archived
 MAX_AUTO_SKILLS = 50  # global cap per skill dir; lowest-success skills evicted first
 USAGE_FILE = ".brain_auto_skill_usage.json"
 PROMOTION_CONTRACT_VERSION = "skill-promotion-contract-v1"
+
+HERMES_PROFILE_DOMAIN_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "ellie": (
+        "infra",
+        "devops",
+        "homelab",
+        "gateway",
+        "backup",
+        "monitoring",
+        "observability",
+        "docker",
+        "launchd",
+        "nginx",
+        "cloudflare",
+        "qdrant",
+        "neo4j",
+        "ollama",
+    ),
+    "liz": (
+        "code",
+        "coding",
+        "debugging",
+        "architecture",
+        "frontend",
+        "backend",
+        "test",
+        "refactor",
+        "python",
+        "javascript",
+        "typescript",
+        "api",
+    ),
+    "sage": ("research", "docs", "fact_checking", "paper", "papers", "literature", "analysis"),
+    "jenna": ("scheduling", "email", "reminders", "planning", "admin", "calendar", "task_management"),
+    "market": ("marketing", "seo", "copy", "analytics", "growth", "content", "campaign"),
+}
 
 
 # Hermes-inspired guardrail: auto-generated skills are loaded into agent context,
@@ -83,14 +129,91 @@ _INVISIBLE_CHARS = {
 }
 
 
-def _sync_openclaw_registry() -> dict[str, Any]:
-    """Best-effort central OpenClaw registry/allowlist sync.
+def _hermes_profile_skill_dirs() -> dict[str, Path]:
+    """Return Hermes profile skill roots, honoring compatibility patches.
 
-    skill_materializer writes SKILL.md files for Claude, Codex, and OpenClaw.
-    Claude/Codex discover the files directly, but OpenClaw also has a strict
-    registry plus per-agent skill allowlists. Delegate that write path to the
-    single owner (`cli/skill_sync.py`) instead of duplicating config mutation
-    logic here.
+    Older callers/tests patch ``HERMES_SKILLS_DIR`` (the historical liz-only
+    constant). Newer code may patch ``HERMES_PROFILE_SKILLS_DIRS`` directly.
+    Prefer the patched profile map when present; otherwise let the legacy alias
+    override liz.
+    """
+    dirs = dict(HERMES_PROFILE_SKILLS_DIRS)
+    if HERMES_SKILLS_DIR != _DEFAULT_HERMES_SKILLS_DIR or dirs.get("liz") == _DEFAULT_HERMES_SKILLS_DIR:
+        dirs["liz"] = HERMES_SKILLS_DIR
+    return dirs
+
+
+def hermes_skill_roots(target_profiles: list[str] | tuple[str, ...] | None = None) -> dict[str, Path]:
+    """Public routing helper: profile -> skill root for all or selected profiles."""
+    dirs = _hermes_profile_skill_dirs()
+    if target_profiles is None:
+        return {profile: dirs[profile] for profile in HERMES_PROFILE_NAMES if profile in dirs}
+    return {profile: dirs[profile] for profile in target_profiles if profile in dirs}
+
+
+def _normalize_domain_token(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", str(value or "").lower()).strip("_")
+
+
+def _routing_haystack(proc: dict[str, Any]) -> str:
+    parts = [
+        proc.get("brain_domain"),
+        proc.get("domain"),
+        proc.get("task_type"),
+        proc.get("title"),
+    ]
+    return " ".join(str(p or "").lower() for p in parts)
+
+
+def _contains_keyword(haystack: str, keyword: str) -> bool:
+    normalized_haystack = f" {_normalize_domain_token(haystack)} "
+    normalized_keyword = _normalize_domain_token(keyword)
+    if "_" in normalized_keyword:
+        return f" {normalized_keyword} " in normalized_haystack or f"_{normalized_keyword}_" in f"_{normalized_haystack.strip()}_"
+    tokens = set(re.findall(r"[a-z0-9]+", haystack.lower()))
+    return normalized_keyword in tokens
+
+
+def route_hermes_profiles(proc: dict[str, Any]) -> dict[str, Any]:
+    """Deterministically route one Brain procedure to Hermes profile skill roots.
+
+    General/unknown tasks intentionally do *not* fan out. They fall back to liz,
+    which is the safest coding/default profile for existing Brain auto-skills.
+    """
+    explicit_domain = _normalize_domain_token(proc.get("brain_domain") or proc.get("domain"))
+    haystack = _routing_haystack(proc)
+    target_profiles: list[str] = []
+    matched_domain = explicit_domain or ""
+
+    for profile in HERMES_PROFILE_NAMES:
+        for keyword in HERMES_PROFILE_DOMAIN_KEYWORDS.get(profile, ()):
+            if _contains_keyword(haystack, keyword):
+                if profile not in target_profiles:
+                    target_profiles.append(profile)
+                if not matched_domain:
+                    matched_domain = _normalize_domain_token(keyword)
+                break
+
+    if not target_profiles:
+        target_profiles = ["liz"]
+        matched_domain = matched_domain or "general"
+
+    materialized_for = ["claude", "codex", *(f"hermes:{profile}" for profile in target_profiles)]
+    return {
+        "brain_domain": matched_domain,
+        "target_profiles": target_profiles,
+        "materialized_for": materialized_for,
+        "hermes_skill_roots": {profile: str(root) for profile, root in hermes_skill_roots(target_profiles).items()},
+    }
+
+
+def _sync_hermes_skill_indexes() -> dict[str, Any]:
+    """Best-effort Hermes profile skill telemetry/index sync.
+
+    skill_materializer writes SKILL.md files for Claude, Codex, and Hermes.
+    Hermes profile skills are filesystem-discovered; delegate telemetry/index
+    bookkeeping to `cli/skill_sync.py` instead of mutating retired OpenClaw
+    registries.
     """
     sync_path = Path(__file__).resolve().parents[1] / "cli" / "skill_sync.py"
     spec = importlib.util.spec_from_file_location("brain_skill_sync", sync_path)
@@ -101,6 +224,11 @@ def _sync_openclaw_registry() -> dict[str, Any]:
     registry = module.reconcile_registry(dry_run=False)
     attach = module.attach_generated_skills(dry_run=False)
     return {"ok": True, "registry": registry, "attach": attach}
+
+
+def _sync_openclaw_registry() -> dict[str, Any]:
+    """Compatibility alias for pre-Hermes callers; syncs Hermes telemetry."""
+    return _sync_hermes_skill_indexes()
 
 
 def _slug(task_type: str) -> str:
@@ -189,6 +317,10 @@ def _upsert_usage_record(
     slug: str,
     proc: dict[str, Any],
     content_sha256: str | None = None,
+    *,
+    brain_domain: str | None = None,
+    target_profiles: list[str] | None = None,
+    materialized_for: list[str] | None = None,
 ) -> None:
     """Track provenance/activity for generated skills, Hermes-curator style.
 
@@ -210,6 +342,9 @@ def _upsert_usage_record(
                 "last_materialized_at": now_iso,
                 "promotion_contract_version": PROMOTION_CONTRACT_VERSION,
                 "source_episode_count": int(proc.get("success_count") or 1),
+                "brain_domain": brain_domain or proc.get("brain_domain") or proc.get("domain") or "general",
+                "target_profiles": list(target_profiles or []),
+                "materialized_for": list(materialized_for or []),
                 "validation_status": "materialized_after_threshold_and_threat_scan",
                 "rollback_strategy": "archive_or_delete_auto_skill_dir_then_regenerate_from_brain_procedure",
                 "state": existing.get("state") or "active",
@@ -226,7 +361,11 @@ def _upsert_usage_record(
         log.debug("auto skill usage update failed for %s/%s: %s", root, slug, exc)
 
 
-def _render_claude_skill_md(proc: dict[str, Any], lessons: list[dict[str, Any]]) -> str:
+def _render_claude_skill_md(
+    proc: dict[str, Any],
+    lessons: list[dict[str, Any]],
+    routing: dict[str, Any] | None = None,
+) -> str:
     """Render Claude Code SKILL.md — YAML frontmatter + body."""
     task_type = proc.get("task_type", "")
     title = proc.get("title", task_type)
@@ -240,6 +379,13 @@ def _render_claude_skill_md(proc: dict[str, Any], lessons: list[dict[str, Any]])
     created_at = proc.get("created_at") or ""
 
     slug = _slug(task_type)
+    routing = routing or route_hermes_profiles(proc)
+    brain_domain = str(routing.get("brain_domain") or "general")
+    target_profiles = list(routing.get("target_profiles") or ["liz"])
+    materialized_for = list(
+        routing.get("materialized_for")
+        or ["claude", "codex", *(f"hermes:{profile}" for profile in target_profiles)]
+    )
     description = (
         f"Auto-materialized from brain procedure ({source}). "
         f"Used {success_count}x for task type: {task_type}. "
@@ -283,6 +429,9 @@ def _render_claude_skill_md(proc: dict[str, Any], lessons: list[dict[str, Any]])
         "auto_generated: true\n"
         f"brain_procedure_id: {proc_id}\n"
         f"brain_source: {source}\n"
+        f"brain_domain: {brain_domain}\n"
+        f"target_profiles: {json.dumps(target_profiles)}\n"
+        f"materialized_for: {json.dumps(materialized_for)}\n"
         f"generated_at: {now_iso}\n"
         f"success_count: {success_count}\n"
         f"promotion_contract_version: {PROMOTION_CONTRACT_VERSION}\n"
@@ -297,7 +446,8 @@ def _render_claude_skill_md(proc: dict[str, Any], lessons: list[dict[str, Any]])
         f"- **Outcome gate**: materialized only after `success_count >= {MIN_SUCCESS_COUNT}` "
         f"and at least {MIN_STEPS} recorded steps.\n"
         "- **Validation gate**: generated content passed deterministic unsafe-content scan before writing.\n"
-        "- **Runtime parity**: materialized for Claude, Codex, and OpenClaw; OpenClaw registry sync runs after write.\n"
+        f"- **Runtime parity**: materialized for Claude, Codex, and Hermes profile(s): "
+        f"{', '.join(target_profiles)}; Hermes skill index sync runs after write.\n"
         "- **Rollback**: archive or delete the generated `auto-*` skill directory; the backing Brain procedure "
         "remains the source of truth and can regenerate a clean copy.\n"
     )
@@ -326,10 +476,11 @@ def _render_claude_skill_md(proc: dict[str, Any], lessons: list[dict[str, Any]])
     return frontmatter + body
 
 
-def _render_openclaw_meta(proc: dict[str, Any]) -> str:
-    """Render _meta.json for ClawhubRegistry compatibility."""
+def _render_openclaw_meta(proc: dict[str, Any], routing: dict[str, Any] | None = None) -> str:
+    """Render _meta.json for historical ClawhubRegistry/Hermes compatibility."""
     success_count = int(proc.get("success_count") or 1)
     slug = _slug(proc.get("task_type", ""))
+    routing = routing or route_hermes_profiles(proc)
     return (
         json.dumps(
             {
@@ -339,6 +490,9 @@ def _render_openclaw_meta(proc: dict[str, Any]) -> str:
                 "publishedAt": int(datetime.now(UTC).timestamp() * 1000),
                 "autoGenerated": True,
                 "brainProcedureId": proc.get("id") or "",
+                "brainDomain": routing.get("brain_domain") or "general",
+                "targetProfiles": list(routing.get("target_profiles") or []),
+                "materializedFor": list(routing.get("materialized_for") or []),
             },
             indent=2,
         )
@@ -346,15 +500,29 @@ def _render_openclaw_meta(proc: dict[str, Any]) -> str:
     )
 
 
-def materialize(proc: dict[str, Any], *, min_success: int = MIN_SUCCESS_COUNT) -> dict[str, Any]:
-    """Write SKILL.md + _meta.json for Claude, Codex, and OpenClaw if threshold met.
+def materialize(
+    proc: dict[str, Any],
+    *,
+    min_success: int = MIN_SUCCESS_COUNT,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Write SKILL.md + _meta.json for Claude, Codex, and routed Hermes profiles.
 
     Returns {materialized: bool, slug: str, paths: [...], reason: str}.
     Fail-open: any exception is logged and swallowed so brain writes don't
     regress on filesystem issues. `min_success` lets callers (batch mode)
-    override the default reuse threshold.
+    override the default reuse threshold. ``dry_run=True`` performs the same
+    routing/render/threat checks and reports target paths without mutating any
+    skill directory or telemetry sidecar.
     """
-    result: dict[str, Any] = {"materialized": False, "slug": "", "paths": [], "reason": ""}
+    result: dict[str, Any] = {
+        "materialized": False,
+        "would_materialize": False,
+        "dry_run": bool(dry_run),
+        "slug": "",
+        "paths": [],
+        "reason": "",
+    }
     try:
         task_type = (proc.get("task_type") or "").strip()
         success_count = int(proc.get("success_count") or 1)
@@ -375,33 +543,47 @@ def materialize(proc: dict[str, Any], *, min_success: int = MIN_SUCCESS_COUNT) -
             result["reason"] = "slug_empty"
             return result
         result["slug"] = slug
+        routing = route_hermes_profiles(proc)
+        result["brain_domain"] = routing["brain_domain"]
+        result["target_profiles"] = routing["target_profiles"]
+        result["materialized_for"] = routing["materialized_for"]
+        result["hermes_skill_roots"] = routing["hermes_skill_roots"]
 
         # Enrich with lessons (best-effort)
         lessons = _fetch_related_lessons(proc.get("title") or task_type)
 
-        skill_md = _render_claude_skill_md(proc, lessons)
+        skill_md = _render_claude_skill_md(proc, lessons, routing)
         threat = _scan_generated_skill_content(skill_md)
         if threat:
             result["reason"] = f"blocked_unsafe_skill_content:{threat}"
             return result
-        meta_json = _render_openclaw_meta(proc)
+        meta_json = _render_openclaw_meta(proc, routing)
 
-        # Write to each runtime skill dir. OpenClaw additionally needs _meta.json.
+        # Write to each runtime skill dir. Hermes additionally receives _meta.json
+        # so Brain-owned auto skills keep provenance in the routed profile(s).
         cc_dir = CLAUDE_SKILLS_DIR / slug
         codex_dir = CODEX_SKILLS_DIR / slug
-        oc_dir = OPENCLAW_SKILLS_DIR / slug
-        for d in (cc_dir, codex_dir, oc_dir):
-            d.mkdir(parents=True, exist_ok=True)
+        hermes_dirs = [root / slug for root in hermes_skill_roots(routing["target_profiles"]).values()]
 
         cc_path = cc_dir / "SKILL.md"
         codex_path = codex_dir / "SKILL.md"
-        oc_path = oc_dir / "SKILL.md"
-        oc_meta_path = oc_dir / "_meta.json"
+        hermes_paths = [(d / "SKILL.md", d / "_meta.json") for d in hermes_dirs]
+        result["paths"] = [str(cc_path), str(codex_path), *(str(p) for pair in hermes_paths for p in pair)]
+        result["would_materialize"] = True
+        result["promotion_contract_version"] = PROMOTION_CONTRACT_VERSION
+
+        if dry_run:
+            result["reason"] = "dry_run"
+            return result
+
+        for d in (cc_dir, codex_dir, *hermes_dirs):
+            d.mkdir(parents=True, exist_ok=True)
 
         cc_path.write_text(skill_md)
         codex_path.write_text(skill_md)
-        oc_path.write_text(skill_md)
-        oc_meta_path.write_text(meta_json)
+        for skill_path, meta_path in hermes_paths:
+            skill_path.write_text(skill_md)
+            meta_path.write_text(meta_json)
 
         # 2026-05-20 W3.5 round 3 (codex gap 4): record content_sha256 attestation
         # in the per-root usage sidecar so skill_security_audit can detect
@@ -411,16 +593,22 @@ def materialize(proc: dict[str, Any], *, min_success: int = MIN_SUCCESS_COUNT) -
         import hashlib as _hashlib
 
         content_sha256 = _hashlib.sha256(skill_md.encode("utf-8")).hexdigest()
-        for root in (CLAUDE_SKILLS_DIR, CODEX_SKILLS_DIR, OPENCLAW_SKILLS_DIR):
-            _upsert_usage_record(root, slug, proc, content_sha256=content_sha256)
+        for root in (CLAUDE_SKILLS_DIR, CODEX_SKILLS_DIR, *hermes_skill_roots(routing["target_profiles"]).values()):
+            _upsert_usage_record(
+                root,
+                slug,
+                proc,
+                content_sha256=content_sha256,
+                brain_domain=routing["brain_domain"],
+                target_profiles=routing["target_profiles"],
+                materialized_for=routing["materialized_for"],
+            )
 
-        openclaw_sync = _sync_openclaw_registry()
+        hermes_sync = _sync_hermes_skill_indexes()
 
         result["materialized"] = True
-        result["paths"] = [str(cc_path), str(codex_path), str(oc_path), str(oc_meta_path)]
         result["reason"] = "ok"
-        result["openclaw_sync"] = openclaw_sync
-        result["promotion_contract_version"] = PROMOTION_CONTRACT_VERSION
+        result["hermes_sync"] = hermes_sync
         log.info(
             "materialized skill %s (success_count=%d, steps=%d)",
             slug,
@@ -493,6 +681,9 @@ def _parse_frontmatter(skill_md_path: Path) -> dict[str, Any]:
                 "auto_generated",
                 "generated_at",
                 "version",
+                "brain_domain",
+                "target_profiles",
+                "materialized_for",
                 "promotion_contract_version",
                 "source_episode_count",
                 "rollback_strategy",
@@ -504,9 +695,9 @@ def _parse_frontmatter(skill_md_path: Path) -> dict[str, Any]:
 
 
 def _list_auto_skill_dirs() -> list[Path]:
-    """Return all auto-* skill directories across Claude, Codex, and OpenClaw."""
+    """Return all auto-* skill directories across Claude, Codex, and Hermes."""
     dirs: list[Path] = []
-    for root in (CLAUDE_SKILLS_DIR, CODEX_SKILLS_DIR, OPENCLAW_SKILLS_DIR):
+    for root in (CLAUDE_SKILLS_DIR, CODEX_SKILLS_DIR, *hermes_skill_roots().values()):
         if not root.exists():
             continue
         for p in root.iterdir():

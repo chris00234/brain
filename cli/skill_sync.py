@@ -1,33 +1,17 @@
 #!/Users/chrischo/server/brain/.venv/bin/python
-"""cli/skill_sync.py — reconcile ~/.openclaw/skills disk state with
-~/.openclaw/openclaw.json registry + track per-skill telemetry in a
-brain-owned sidecar.
+"""cli/skill_sync.py — reconcile Brain-generated skills with Hermes profiles.
 
-Problem the script solves:
-  - `atoms_to_skills` and `skill_extractor` generate brain-learned-* skill
-    directories on disk, but none of them land in `skills.entries` — the
-    registry openclaw reads to decide which skills are enabled.
-  - No brain-side telemetry for whether generated skills actually get
-    exercised by any agent.
+OpenClaw was retired on 2026-05-23. This script no longer mutates
+``~/.openclaw/openclaw.json`` or OpenClaw per-agent skill allowlists. Hermes
+loads skills from profile-local ``skills/`` directories, so Brain's active
+responsibility is:
 
-Why two files:
-  - ``~/.openclaw/openclaw.json`` — openclaw's config. Its `skills.entries`
-    schema only accepts ``{enabled: bool}``. We stay inside that schema to
-    avoid "Config invalid" on every openclaw invocation.
-  - ``~/server/brain/logs/skill_telemetry.json`` — brain-owned sidecar
-    keyed by skill name. Stores description, path, registered_at,
-    last_used_at, use_count. Free-schema, safe to extend.
+  - inspect generated skills across all Hermes profile skill directories;
+  - keep a brain-owned telemetry sidecar for audit/usage tracking;
+  - expose compatibility functions used by skill_materializer/openclaw_dispatch.
 
-Runs weekly (scheduled after `skill_extract` so newly generated skills
-auto-register) and can also be invoked manually after `atoms_to_skills`.
-Idempotent.
-
-Usage:
-  skill_sync.py                 # reconcile registry + telemetry + attach
-  skill_sync.py --dry-run       # show what would change
-  skill_sync.py --bump-agent jenna   # stamp last_used_at + use_count for
-                                     # every brain-learned-* skill
-                                     # currently attached to jenna
+The historical function names are preserved to avoid a flag-day rename across
+Brain jobs, but their semantics are Hermes-current.
 """
 
 from __future__ import annotations
@@ -35,19 +19,22 @@ from __future__ import annotations
 import argparse
 import json
 import re
-import stat
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
-OPENCLAW_ROOT = Path("/Users/chrischo/.openclaw")
-SKILLS_DIR = OPENCLAW_ROOT / "skills"
-CONFIG_PATH = OPENCLAW_ROOT / "openclaw.json"
+USER_HOME = Path("/Users/chrischo")
+HERMES_PROFILES_ROOT = USER_HOME / ".hermes" / "profiles"
+HERMES_PROFILE_NAMES = ("jenna", "liz", "ellie", "sage", "market")
+HERMES_PROFILE_SKILLS_DIRS = {
+    profile: HERMES_PROFILES_ROOT / profile / "skills" for profile in HERMES_PROFILE_NAMES
+}
+_DEFAULT_SKILLS_DIR = HERMES_PROFILE_SKILLS_DIRS["liz"]
+SKILLS_DIR = HERMES_PROFILE_SKILLS_DIRS["liz"]
 
 BRAIN_LOGS = Path("/Users/chrischo/server/brain/logs")
 TELEMETRY_PATH = BRAIN_LOGS / "skill_telemetry.json"
 
-# Brain-generated skills share this prefix; auto-attached to every agent.
 BRAIN_PREFIX = "brain-learned-"
 AUTO_PREFIX = "auto-"
 
@@ -59,14 +46,8 @@ def _now_iso() -> str:
 
 
 def _parse_frontmatter_fields(block: str) -> dict[str, str]:
-    """Parse the small YAML subset used by SKILL.md frontmatter.
+    """Parse the small YAML subset used by SKILL.md frontmatter."""
 
-    Avoids a PyYAML dependency while correctly handling the block scalar form
-    emitted by auto-materialized skills:
-
-        description: |
-          Auto-materialized ...
-    """
     fields: dict[str, str] = {}
     lines = block.splitlines()
     i = 0
@@ -93,6 +74,27 @@ def _parse_frontmatter_fields(block: str) -> dict[str, str]:
     return fields
 
 
+def _parse_listish(value: str) -> list[str]:
+    value = (value or "").strip()
+    if not value:
+        return []
+    try:
+        parsed = json.loads(value)
+        if isinstance(parsed, list):
+            return [str(item) for item in parsed if str(item)]
+    except json.JSONDecodeError:
+        pass
+    return [part.strip().strip("'\"") for part in value.strip("[]").split(",") if part.strip()]
+
+
+def hermes_profile_skill_dirs() -> dict[str, Path]:
+    """Return Hermes profile skill roots, honoring legacy SKILLS_DIR patches."""
+    dirs = dict(HERMES_PROFILE_SKILLS_DIRS)
+    if SKILLS_DIR != _DEFAULT_SKILLS_DIR or dirs.get("liz") == _DEFAULT_SKILLS_DIR:
+        dirs["liz"] = SKILLS_DIR
+    return {profile: dirs[profile] for profile in HERMES_PROFILE_NAMES if profile in dirs}
+
+
 def _read_skill_meta(skill_dir: Path) -> dict | None:
     skill_md = skill_dir / "SKILL.md"
     if not skill_md.exists():
@@ -109,16 +111,19 @@ def _read_skill_meta(skill_dir: Path) -> dict | None:
     description = fields.get("description", "").strip()
     auto_generated = fields.get("auto_generated", "").strip().lower() in {"true", "1", "yes"}
     brain_procedure_id = fields.get("brain_procedure_id", "").strip()
+    brain_domain = fields.get("brain_domain", "").strip()
+    target_profiles = _parse_listish(fields.get("target_profiles", ""))
+    materialized_for = _parse_listish(fields.get("materialized_for", ""))
 
-    # OpenClaw marketplace skills can also carry _meta.json. Brain-generated
-    # auto-* skills written by skill_materializer include autoGenerated=true
-    # there too; human marketplace skills such as auto-updater do not.
     meta_path = skill_dir / "_meta.json"
     if meta_path.exists():
         try:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
             auto_generated = auto_generated or bool(meta.get("autoGenerated"))
             brain_procedure_id = brain_procedure_id or str(meta.get("brainProcedureId") or "")
+            brain_domain = brain_domain or str(meta.get("brainDomain") or "")
+            target_profiles = target_profiles or [str(p) for p in meta.get("targetProfiles") or []]
+            materialized_for = materialized_for or [str(p) for p in meta.get("materializedFor") or []]
         except (OSError, json.JSONDecodeError):
             pass
 
@@ -128,52 +133,10 @@ def _read_skill_meta(skill_dir: Path) -> dict | None:
         "path": str(skill_dir),
         "auto_generated": auto_generated,
         "brain_procedure_id": brain_procedure_id,
+        "brain_domain": brain_domain,
+        "target_profiles": target_profiles,
+        "materialized_for": materialized_for,
     }
-
-
-def _load_config() -> dict:
-    return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-
-
-# Brain-owned telemetry keys that must NEVER land in openclaw.json's
-# skills.entries — they'd trip openclaw's strict schema validator. Every
-# write scrubs them defensively. Keys like ``env`` or ``mcp`` that
-# openclaw itself accepts pass through unchanged.
-_BRAIN_TELEMETRY_KEYS = {"description", "path", "registered_at", "last_used_at", "use_count"}
-
-
-def _scrub_brain_keys(entries: dict) -> int:
-    """Remove keys this script previously (wrongly) stamped into
-    skills.entries. Returns count of entries modified."""
-    modified = 0
-    for _name, v in entries.items():
-        if not isinstance(v, dict):
-            continue
-        leaked = _BRAIN_TELEMETRY_KEYS & set(v.keys())
-        if leaked:
-            for k in leaked:
-                v.pop(k, None)
-            modified += 1
-    return modified
-
-
-def _atomic_write_config(data: dict) -> None:
-    entries = data.get("skills", {}).get("entries", {})
-    _scrub_brain_keys(entries)
-    rendered = json.dumps(data, indent=2, ensure_ascii=False)
-    parsed = json.loads(rendered)
-    required = {"meta", "agents", "skills"}
-    if not required.issubset(parsed):
-        raise RuntimeError(f"refusing to write config missing keys: {required - set(parsed)}")
-    tmp = CONFIG_PATH.with_suffix(".tmp.skill_sync")
-    tmp.write_text(rendered + "\n", encoding="utf-8")
-    if CONFIG_PATH.exists():
-        current_mode = stat.S_IMODE(CONFIG_PATH.stat().st_mode)
-        # openclaw.json carries credential refs and should never become
-        # group/world-readable due to atomic temp-file defaults or a past bad
-        # write. Preserve strict custom modes; otherwise clamp to 0600.
-        tmp.chmod(current_mode if current_mode & 0o077 == 0 else 0o600)
-    tmp.replace(CONFIG_PATH)
 
 
 def _load_telemetry() -> dict:
@@ -186,97 +149,157 @@ def _load_telemetry() -> dict:
 
 
 def _save_telemetry(data: dict) -> None:
-    BRAIN_LOGS.mkdir(parents=True, exist_ok=True)
+    TELEMETRY_PATH.parent.mkdir(parents=True, exist_ok=True)
     rendered = json.dumps(data, indent=2, ensure_ascii=False, sort_keys=True)
     tmp = TELEMETRY_PATH.with_suffix(".tmp.skill_sync")
     tmp.write_text(rendered + "\n", encoding="utf-8")
     tmp.replace(TELEMETRY_PATH)
 
 
+def _iter_skill_dirs(root: Path | None = None):
+    if root is not None:
+        roots = {"liz": root}
+    else:
+        roots = hermes_profile_skill_dirs()
+    for profile, skill_root in roots.items():
+        if not skill_root.exists():
+            continue
+        for child in sorted(skill_root.iterdir()):
+            if child.is_dir() and not child.name.startswith("_"):
+                yield profile, child
+
+
+def _merge_disk_skill(disk_skills: dict[str, dict], profile: str, meta: dict) -> None:
+    name = meta["name"]
+    existing = disk_skills.setdefault(
+        name,
+        {
+            "name": name,
+            "description": meta.get("description", ""),
+            "path": meta.get("path", ""),
+            "paths": {},
+            "profiles": [],
+            "auto_generated": False,
+            "brain_procedure_id": "",
+            "brain_domain": "",
+            "target_profiles": [],
+            "materialized_for": [],
+        },
+    )
+    existing["paths"][profile] = meta["path"]
+    if profile not in existing["profiles"]:
+        existing["profiles"].append(profile)
+    # Prefer liz as the compatibility single path, then the first deterministic profile.
+    if profile == "liz" or not existing.get("path"):
+        existing["path"] = meta["path"]
+    existing["description"] = existing.get("description") or meta.get("description", "")
+    existing["auto_generated"] = bool(existing.get("auto_generated") or meta.get("auto_generated"))
+    existing["brain_procedure_id"] = existing.get("brain_procedure_id") or meta.get("brain_procedure_id", "")
+    existing["brain_domain"] = existing.get("brain_domain") or meta.get("brain_domain", "")
+    for key in ("target_profiles", "materialized_for"):
+        values = list(existing.get(key) or [])
+        for value in meta.get(key) or []:
+            if value not in values:
+                values.append(value)
+        existing[key] = values
+
+
 def reconcile_registry(*, dry_run: bool = False) -> dict:
-    """Walk the skills dir and:
-    (a) ensure every on-disk skill has ``{enabled: true}`` in openclaw.json
-        skills.entries (schema-compliant minimal entry)
-    (b) populate the brain telemetry sidecar with name/description/path +
-        seeded last_used_at=None, use_count=0
-    """
-    cfg = _load_config()
-    entries: dict = cfg.setdefault("skills", {}).setdefault("entries", {})
+    """Reconcile Hermes profile skill files with Brain's telemetry sidecar."""
+
     telemetry = _load_telemetry()
-
     disk_skills: dict[str, dict] = {}
-    for child in sorted(SKILLS_DIR.iterdir()):
-        if not child.is_dir() or child.name.startswith("_"):
-            continue
+    for profile, child in _iter_skill_dirs() or ():
         meta = _read_skill_meta(child)
-        if meta is None:
-            continue
-        disk_skills[meta["name"]] = meta
+        if meta is not None:
+            _merge_disk_skill(disk_skills, profile, meta)
 
-    added_reg = 0
     added_tel = 0
     updated_tel = 0
-    # Always scrub brain-owned telemetry leakage from prior buggy runs of
-    # this script. _atomic_write_config also scrubs but doing it up-front
-    # keeps the "what changed" summary honest.
-    scrubbed = _scrub_brain_keys(entries)
     for name, meta in disk_skills.items():
-        # Registry side — schema-compliant minimal entry. Leave openclaw-
-        # native keys (env, mcp, etc.) on existing entries untouched.
-        if name not in entries or not isinstance(entries[name], dict):
-            entries[name] = {"enabled": True}
-            added_reg += 1
-        else:
-            entries[name].setdefault("enabled", True)
-
-        # Telemetry side — full metadata + counters.
         t = telemetry.get(name)
         if t is None:
             telemetry[name] = {
                 "description": meta["description"],
                 "path": meta["path"],
+                "paths": meta.get("paths", {}),
+                "profiles": sorted(meta.get("profiles", [])),
                 "auto_generated": meta.get("auto_generated", False),
                 "brain_procedure_id": meta.get("brain_procedure_id", ""),
+                "brain_domain": meta.get("brain_domain", ""),
+                "target_profiles": meta.get("target_profiles", []),
+                "materialized_for": meta.get("materialized_for", []),
                 "registered_at": _now_iso(),
                 "last_used_at": None,
                 "use_count": 0,
+                "runtime": "hermes",
             }
             added_tel += 1
-        else:
-            changed = False
-            for key in ("description", "path", "auto_generated", "brain_procedure_id"):
-                if meta.get(key) is not None and t.get(key) != meta.get(key):
-                    t[key] = meta.get(key)
-                    changed = True
-            t.setdefault("registered_at", _now_iso())
-            t.setdefault("last_used_at", None)
-            t.setdefault("use_count", 0)
-            if changed:
-                updated_tel += 1
+            continue
+        changed = False
+        for key in (
+            "description",
+            "path",
+            "paths",
+            "profiles",
+            "auto_generated",
+            "brain_procedure_id",
+            "brain_domain",
+            "target_profiles",
+            "materialized_for",
+        ):
+            if meta.get(key) is not None and t.get(key) != meta.get(key):
+                t[key] = meta.get(key)
+                changed = True
+        if t.get("runtime") != "hermes":
+            t["runtime"] = "hermes"
+            changed = True
+        t.setdefault("registered_at", _now_iso())
+        t.setdefault("last_used_at", None)
+        t.setdefault("use_count", 0)
+        if changed:
+            updated_tel += 1
 
-    # Drop registry entries that point at deleted skill dirs. Preserve
-    # marketplace installs (no disk counterpart under SKILLS_DIR).
     removed = 0
-    for name in list(entries.keys()):
+    profile_roots = tuple(str(root) for root in hermes_profile_skill_dirs().values())
+    for name in list(telemetry.keys()):
         t = telemetry.get(name, {})
-        path_claim = t.get("path", "")
-        if path_claim.startswith(str(SKILLS_DIR)) and not Path(path_claim).exists():
-            del entries[name]
+        if not isinstance(t, dict):
+            continue
+        paths = t.get("paths")
+        if isinstance(paths, dict):
+            changed = False
+            for profile, path_claim in list(paths.items()):
+                if str(path_claim).startswith(profile_roots) and not Path(str(path_claim)).exists():
+                    paths.pop(profile, None)
+                    changed = True
+            if changed:
+                t["paths"] = paths
+                t["profiles"] = sorted(paths)
+                if paths:
+                    t["path"] = paths.get("liz") or next(iter(paths.values()))
+                    updated_tel += 1
+                else:
+                    telemetry.pop(name, None)
+                    removed += 1
+                continue
+        path_claim = str(t.get("path", ""))
+        if path_claim.startswith(profile_roots) and not Path(path_claim).exists():
             telemetry.pop(name, None)
             removed += 1
 
     if not dry_run:
-        _atomic_write_config(cfg)
         _save_telemetry(telemetry)
 
     return {
-        "registry_added": added_reg,
+        "registry_added": 0,
         "telemetry_added": added_tel,
         "telemetry_updated": updated_tel,
-        "scrubbed_legacy": scrubbed,
+        "scrubbed_legacy": 0,
         "removed": removed,
         "total_on_disk": len(disk_skills),
-        "total_entries": len(entries),
+        "total_entries": len(telemetry),
+        "profiles": sorted(hermes_profile_skill_dirs()),
         "dry_run": dry_run,
     }
 
@@ -290,88 +313,55 @@ def _is_brain_generated_skill(name: str, telemetry_entry: dict) -> bool:
 
 
 def attach_generated_skills(*, dry_run: bool = False) -> dict:
-    """Ensure every OpenClaw agent can load every brain-generated skill.
+    """Compatibility no-op.
 
-    OpenClaw per-agent `skills` arrays are allowlists. Registering a skill in
-    `skills.entries` is not enough: a generated auto-* skill on disk can remain
-    invisible to Jenna/Liz/Ellie/Sage/Market unless it is attached to each
-    agent. Attach only brain-owned generated skills:
-      - brain-learned-* durable preference skills
-      - auto-* skills with auto_generated/brain_procedure_id metadata
-
-    Human/marketplace skills that merely start with `auto-` (for example
-    auto-updater) are intentionally not attached globally.
+    Hermes profiles discover skills from disk. No per-agent allowlist mutation is
+    needed here; return generated count for audit parity with the retired path.
     """
-    cfg = _load_config()
+
     telemetry = _load_telemetry()
     generated_skill_names = sorted(
         n for n, t in telemetry.items() if isinstance(t, dict) and _is_brain_generated_skill(n, t)
     )
-
-    attached = 0
-    touched_agents: list[str] = []
-    for agent in cfg.get("agents", {}).get("list", []):
-        if not isinstance(agent, dict):
-            continue
-        skills = list(agent.get("skills") or [])
-        changed = False
-        for name in generated_skill_names:
-            if name not in skills:
-                skills.append(name)
-                changed = True
-                attached += 1
-        if changed:
-            agent["skills"] = skills
-            touched_agents.append(agent.get("name", agent.get("id", "?")))
-
-    if not dry_run and attached:
-        _atomic_write_config(cfg)
-
     return {
-        "attached": attached,
-        "agents_touched": touched_agents,
+        "attached": 0,
+        "agents_touched": [],
         "generated_skills_registered": len(generated_skill_names),
+        "profiles": sorted(hermes_profile_skill_dirs()),
         "dry_run": dry_run,
     }
 
 
 def attach_brain_skills(*, dry_run: bool = False) -> dict:
-    """Backward-compatible alias for callers that predate auto-* support."""
     return attach_generated_skills(dry_run=dry_run)
 
 
 def bump_agent_usage(agent_name: str) -> dict:
-    """Stamp last_used_at + increment use_count on generated skills attached
-    to the named agent. Brain-side telemetry only — never touches openclaw.json."""
-    try:
-        cfg = _load_config()
-    except Exception:
-        return {"ok": False, "reason": "config_unreadable"}
+    """Stamp generated-skill usage for a Hermes profile agent."""
+
+    profile_dirs = hermes_profile_skill_dirs()
+    if agent_name not in profile_dirs:
+        return {"ok": False, "reason": "agent_not_found", "agent": agent_name}
     telemetry = _load_telemetry()
     now = _now_iso()
-
-    matching = None
-    for agent in cfg.get("agents", {}).get("list", []):
-        if not isinstance(agent, dict):
-            continue
-        names = {str(agent.get("name", "")).lower(), str(agent.get("id", "")).lower()}
-        if agent_name.lower() in names:
-            matching = agent
-            break
-    if matching is None:
-        return {"ok": False, "reason": "agent_not_found", "agent": agent_name}
-
     bumped = 0
-    for skill_name in matching.get("skills") or []:
-        t = telemetry.get(skill_name)
-        if t is None:
+    for skill_name, t in telemetry.items():
+        if not isinstance(t, dict) or not _is_brain_generated_skill(skill_name, t):
             continue
-        if not _is_brain_generated_skill(skill_name, t):
-            continue
+        paths = t.get("paths")
+        if isinstance(paths, dict):
+            if agent_name not in paths:
+                continue
+        else:
+            path_claim = Path(str(t.get("path", "")))
+            try:
+                if not path_claim.is_relative_to(profile_dirs[agent_name]):
+                    continue
+            except ValueError:
+                continue
         t["last_used_at"] = now
         t["use_count"] = int(t.get("use_count") or 0) + 1
         bumped += 1
-
     if bumped:
         try:
             _save_telemetry(telemetry)
@@ -383,9 +373,7 @@ def bump_agent_usage(agent_name: str) -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument(
-        "--bump-agent", help="stamp last_used_at for every brain-learned-* skill on one agent"
-    )
+    parser.add_argument("--bump-agent", help="stamp last_used_at for generated skills on one Hermes profile")
     args = parser.parse_args()
 
     if args.bump_agent:
@@ -393,14 +381,13 @@ def main() -> int:
         print(json.dumps(out, indent=2))
         return 0 if out.get("ok") else 1
 
-    print("[1/2] Reconciling registry (openclaw.json) + telemetry sidecar...")
+    print("[1/2] Reconciling Hermes profile skill telemetry...")
     reg = reconcile_registry(dry_run=args.dry_run)
     print(json.dumps(reg, indent=2))
 
-    print("\n[2/2] Attaching brain-generated skills to all agents...")
+    print("\n[2/2] Checking generated skill discoverability...")
     att = attach_generated_skills(dry_run=args.dry_run)
     print(json.dumps(att, indent=2))
-
     return 0
 
 
