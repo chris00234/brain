@@ -6,7 +6,8 @@ from pathlib import Path
 
 BRAIN_ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location(
-    "audit_openclaw_telegram_targets", BRAIN_ROOT / "cli" / "audit_openclaw_telegram_targets.py"
+    "audit_openclaw_telegram_targets",
+    BRAIN_ROOT / "archived" / "openclaw-2026-05-23" / "cli" / "audit_openclaw_telegram_targets.py",
 )
 audit = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None

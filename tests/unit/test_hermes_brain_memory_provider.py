@@ -1,12 +1,26 @@
 from __future__ import annotations
 
+import os
 import sys
 import threading
 from pathlib import Path
 
-HERMES_ROOT = Path.home() / ".hermes/hermes-agent"
-if str(HERMES_ROOT) not in sys.path:
-    sys.path.insert(0, str(HERMES_ROOT))
+BRAIN_ROOT = Path(__file__).resolve().parents[2]
+HERMES_ROOT_CANDIDATES = [
+    Path(p)
+    for p in (
+        os.environ.get("HERMES_AGENT_ROOT", ""),
+        os.environ.get("OMX_ADAPT_HERMES_ROOT", ""),
+        "/Users/chrischo/.hermes/hermes-agent",
+        str(Path.home() / ".hermes/hermes-agent"),
+        str(BRAIN_ROOT.parent / "hermes-agent"),
+    )
+    if p
+]
+for hermes_root in HERMES_ROOT_CANDIDATES:
+    if (hermes_root / "agent" / "memory_provider.py").exists():
+        sys.path.insert(0, str(hermes_root))
+        break
 
 from hermes_integration import brain_memory_provider as provider_mod  # noqa: E402
 from hermes_integration.brain_memory_provider import BrainMemoryProvider  # noqa: E402
