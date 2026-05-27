@@ -2,14 +2,15 @@
   {
     "query": "automation success proof before claiming",
     "collection": "all",
-    "expected_source": "automation",
+    "expected_source": "distilled/infra/dist_chris_assigns_infra_and_automation_ownership_to_ellie_for_homelab_serve.md",
     "expected_content": "proof",
     "expected_alternates": [
       "actual submit",
       "verification",
       "before the agent reports success"
     ],
-    "category": "anti_false_success"
+    "category": "anti_false_success",
+    "expected_source_legacy": "automation"
   },
   {
     "query": "stale fact correction superseded memory canonical layer",

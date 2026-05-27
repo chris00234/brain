@@ -3,7 +3,7 @@
 
 Owner: Market agent.
 
-Auth: Ghost Admin API key from ~/.openclaw/credentials/ghost-admin.json.
+Auth: Ghost Admin API key from ~/.brain/credentials/ghost-admin.json.
       Format: {"url": "https://blog.chrischodev.com", "key": "<id>:<secret>"}
 
 The Admin API key format is `<id>:<secret>` where secret is a 64-char hex
@@ -38,7 +38,7 @@ sys.path.insert(0, "/Users/chrischo/server/brain/brain_core")
 from indexer import get_embedding
 from vector_store import get_vector_store
 
-CREDENTIALS = Path("/Users/chrischo/.openclaw/credentials/ghost-admin.json")
+CREDENTIALS = Path("/Users/chrischo/.brain/credentials/ghost-admin.json")
 COLLECTION = "knowledge"
 SERVICE = "ghost"
 MAX_CHUNK_CHARS = 1800

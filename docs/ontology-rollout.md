@@ -64,7 +64,7 @@ The apply script:
 
 ## Scheduled gate
 
-The scheduled LaunchAgent `ai.openclaw.ontology-rollout-gate` runs daily at 04:45 with the same production config:
+The scheduled LaunchAgent `ai.brain.ontology-gate` runs daily at 04:45 with the same production config:
 
 ```bash
 uv run python cli/ontology_rollout_gate.py \
@@ -137,15 +137,15 @@ The same full typed relation set passed as `sidecar` with `sidecar-limit=2`, so 
 
 Use the timestamped backups written by `cli/apply_ontology_expansion.py` under `.omx/plans/`, copy the repo and installed plist backups back to:
 
-- `launchd/ai.openclaw.brain-server.plist`
-- `~/Library/LaunchAgents/ai.openclaw.brain-server.plist`
+- `launchd/ai.brain.server.plist`
+- `~/Library/LaunchAgents/ai.brain.server.plist`
 
 Then reload launchd env, not just kickstart:
 
 ```bash
-launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/ai.openclaw.brain-server.plist || true
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.openclaw.brain-server.plist
-launchctl kickstart -k gui/$(id -u)/ai.openclaw.brain-server
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/ai.brain.server.plist || true
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.brain.server.plist
+launchctl kickstart -k gui/$(id -u)/ai.brain.server
 ```
 
 ## Atoms and broad vector stale-truth closure

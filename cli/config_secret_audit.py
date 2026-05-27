@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Audit required Brain/OpenClaw config and secret presence without printing values."""
+"""Audit required Brain/Hermes config and secret presence without printing values."""
 
 from __future__ import annotations
 
@@ -12,16 +12,20 @@ from typing import Any
 
 BRAIN_ROOT = Path(__file__).resolve().parents[1]
 REPORT_FILE = BRAIN_ROOT / "logs" / "config_secret_audit.json"
-OPENCLAW_DIR = Path.home() / ".openclaw"
+BRAIN_CREDENTIALS_DIR = Path.home() / ".brain" / "credentials"
+HERMES_DIR = Path.home() / ".hermes"
 
 REQUIRED_FILES = {
-    "brain_bearer_secret": OPENCLAW_DIR / "credentials" / ".personal_webhook_secret",
-    "openclaw_config": OPENCLAW_DIR / "openclaw.json",
-    "openclaw_cron_jobs": OPENCLAW_DIR / "cron" / "jobs.json",
+    "brain_bearer_secret": BRAIN_CREDENTIALS_DIR / ".personal_webhook_secret",
+    "hermes_config": HERMES_DIR / "config.yaml",
+    "hermes_jenna_cron_jobs": HERMES_DIR / "profiles" / "jenna" / "cron" / "jobs.json",
     "minio_env": Path("/Users/chrischo/server/minio/.env"),
 }
 REQUIRED_ENV_OR_FILE_HINTS = {
-    "telegram_token": ("TELEGRAM_JENNA_TOKEN", OPENCLAW_DIR / ".env"),
+    "telegram_token": (
+        "TELEGRAM_JENNA_TOKEN|TELEGRAM_BOT_TOKEN",
+        (HERMES_DIR / ".env", HERMES_DIR / "profiles" / "jenna" / ".env"),
+    ),
 }
 
 
@@ -45,7 +49,13 @@ def _file_contains_any(path: Path, keys: tuple[str, ...]) -> bool:
     return any(f"{key}=" in text or f"export {key}=" in text for key in keys)
 
 
-def _launchd_env(service: str = "ai.openclaw.brain-server") -> dict[str, bool]:
+def _paths_contains_any(paths: Path | tuple[Path, ...], keys: tuple[str, ...]) -> bool:
+    if isinstance(paths, Path):
+        return _file_contains_any(paths, keys)
+    return any(_file_contains_any(path, keys) for path in paths)
+
+
+def _launchd_env(service: str = "ai.brain.server") -> dict[str, bool]:
     try:
         out = subprocess.check_output(
             ["launchctl", "print", f"gui/{os.getuid()}/{service}"],
@@ -71,8 +81,8 @@ def run() -> dict[str, Any]:
         env_or_file[name] = {
             "env_names": list(keys),
             "present_in_process_env": any(bool(os.getenv(k)) for k in keys),
-            "present_in_file": _file_contains_any(path, keys),
-            "file": str(path),
+            "present_in_file": _paths_contains_any(path, keys),
+            "file": str(path) if isinstance(path, Path) else [str(p) for p in path],
         }
     issues = []
     for name, status in files.items():

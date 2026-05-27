@@ -13,7 +13,7 @@ import urllib.request
 from pathlib import Path
 
 BRAIN_URL = "http://127.0.0.1:8791"
-SECRET_FILE = Path("/Users/chrischo/.openclaw/credentials/.personal_webhook_secret")
+SECRET_FILE = Path("/Users/chrischo/.brain/credentials/.personal_webhook_secret")
 BASELINE_FILE = Path("/Users/chrischo/server/brain/tests/slo_baseline.json")
 
 # Synthetic content templates

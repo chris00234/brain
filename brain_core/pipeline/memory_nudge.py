@@ -25,7 +25,7 @@ BRAIN_URL = "http://127.0.0.1:8791"
 try:
     from config import SECRET_FILE, load_bearer_secret
 except ImportError:
-    SECRET_FILE = Path("/Users/chrischo/.openclaw/credentials/.personal_webhook_secret")
+    SECRET_FILE = Path("/Users/chrischo/.brain/credentials/.personal_webhook_secret")
 
     def load_bearer_secret() -> str:
         return SECRET_FILE.read_text().strip()

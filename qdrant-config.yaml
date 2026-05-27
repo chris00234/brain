@@ -1,7 +1,7 @@
 # qdrant-config.yaml — native Qdrant 1.17 config for Chris's brain.
 #
-# Runs as ai.openclaw.qdrant-native launchd service (see
-# ~/Library/LaunchAgents/ai.openclaw.qdrant-native.plist), binding to
+# Runs as ai.brain.qdrant launchd service (see
+# ~/Library/LaunchAgents/ai.brain.qdrant.plist), binding to
 # localhost only. Data dir is the same path the docker container used,
 # so the move is a drop-in replacement.
 

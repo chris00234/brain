@@ -104,7 +104,7 @@ ScheduledJob(
 
 In `brain_core/indexer.py`, find `collect_experience()` and add your `source_type` to `INBOX_TYPES`:
 ```python
-INBOX_TYPES = {'browser', 'shell', 'git_activity', 'screen_time',
+INBOX_TYPES = {'browser', 'shell', 'git_activity',
                'openclaw_session', 'claude_code_session', 'my_source'}
 ```
 
@@ -123,15 +123,15 @@ cd ~/server/brain && .venv/bin/python ingest/my_source.py
 ls ~/server/knowledge/raw/inbox/raw_mysource_*.json | head -5
 
 # 3. Trigger canonical pipeline
-curl -X POST -H "Authorization: Bearer $(cat ~/.openclaw/credentials/.personal_webhook_secret)" \
+curl -X POST -H "Authorization: Bearer $(cat ~/.brain/credentials/.personal_webhook_secret)" \
   http://127.0.0.1:8791/jobs/canonical_pipeline
 
 # 4. Trigger reindex to pick up in experience collection
-curl -X POST -H "Authorization: Bearer $(cat ~/.openclaw/credentials/.personal_webhook_secret)" \
+curl -X POST -H "Authorization: Bearer $(cat ~/.brain/credentials/.personal_webhook_secret)" \
   http://127.0.0.1:8791/jobs/reindex
 
 # 5. Search for your data
-curl -H "Authorization: Bearer $(cat ~/.openclaw/credentials/.personal_webhook_secret)" \
+curl -H "Authorization: Bearer $(cat ~/.brain/credentials/.personal_webhook_secret)" \
   "http://127.0.0.1:8791/recall?q=my+source+query&n=5"
 ```
 
@@ -148,5 +148,4 @@ curl -H "Authorization: Bearer $(cat ~/.openclaw/credentials/.personal_webhook_s
 | `openclaw_sessions.py` | Agent session JSONL | daily 1am | jenna |
 | `claude_code_sessions.py` | Claude Code sessions | daily 1:15am | jenna |
 | `git_activity.py` | Git commit history | daily 3am | ellie |
-| `screen_time.py` | macOS Screen Time | weekly Sun 3:30am | sage |
 | `active_contacts.py` | iMessage contacts | monthly 1st 4am | jenna |

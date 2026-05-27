@@ -357,11 +357,11 @@ if __name__ == "__main__":
     # Smoke test
     test_results = [
         {
-            "title": "OpenClaw gateway config",
-            "content": "The openclaw gateway runs on port 18789",
+            "title": "Hermes gateway config",
+            "content": "The hermes profile gateways run under ai.hermes.gateway-* launchd labels",
             "score": 50,
         },
         {"title": "Random notes", "content": "Something about docker and nginx setups", "score": 80},
-        {"title": "Gateway docs", "content": "openclaw gateway openclaw openclaw", "score": 30},
+        {"title": "Gateway docs", "content": "hermes gateway hermes hermes", "score": 30},
     ]
-    rerank("openclaw gateway", test_results, debug=True)
+    rerank("hermes gateway", test_results, debug=True)

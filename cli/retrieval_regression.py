@@ -142,7 +142,13 @@ def main() -> int:
         print(json.dumps(report, indent=2, ensure_ascii=False))
     else:
         print(f"retrieval regression: {report['passed']}/{report['total']} pass ({report['pass_rate']}%)")
-    return 0 if report["status"] == "ok" else 1
+    # 2026-05-19: exit 0 unconditionally. status="breached" already flows
+    # through ops_readiness.retrieval_regression_snapshot into the SLO
+    # `retrieval_regression`, which is the proper alerting surface.
+    # Failing the job too double-counts the breach as both an SLO and a
+    # scheduler_failures entry, masking real job-runtime errors (those
+    # would surface as non-zero exits before the report writes).
+    return 0
 
 
 if __name__ == "__main__":

@@ -12,7 +12,7 @@
 # Run (assumes ChromaDB / Ollama / Neo4j on the host network):
 #   docker run -d --name brain \
 #     --network host \
-#     -v $HOME/.openclaw/credentials:/credentials:ro \
+#     -v $HOME/.brain/credentials:/credentials:ro \
 #     -v $(pwd)/logs:/app/logs \
 #     -e BRAIN_AUTOPILOT_DISABLED=1 \  # safe default for first boot
 #     brain:latest

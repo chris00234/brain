@@ -258,7 +258,7 @@ def generate_hypothetical(query: str, allow_dispatch: bool = True) -> str:
 
     # Cache miss + dispatch allowed — call Jenna
     # Tight timeout: HyDE is in the search hot path. A slow Jenna (or a dead
-    # OpenClaw gateway) must not stall the search pipeline — fall back to the
+    # Hermes profile dispatch) must not stall the search pipeline — fall back to the
     # raw query embedding quickly. 10s is enough for a small thinking=low reply.
     reply = _dispatch_to_jenna(HYDE_PROMPT.format(query=query), thinking="low", timeout=10)
     reply = _clean_reply(reply)

@@ -4,13 +4,13 @@ Operational security procedures for the brain's bearer-token auth model. This is
 
 ## Bearer token rotation
 
-The brain uses a single bearer token for all authenticated routes. Token lives at `~/.openclaw/credentials/.personal_webhook_secret` (chmod 600). Rotation is a 5-step procedure that takes ~2 minutes.
+The brain uses a single bearer token for all authenticated routes. Token lives at `~/.brain/credentials/.personal_webhook_secret` (chmod 600). Rotation is a 5-step procedure that takes ~2 minutes.
 
 ### When to rotate
 
 - **Routine**: every 90 days, on the 1st of the quarter
 - **Compromise**: immediately if you suspect the token leaked (clipboard paste, screen share, log dump, lost laptop)
-- **Personnel change**: every time a contractor or non-Chris user gets read access to `~/.openclaw/credentials/`
+- **Personnel change**: every time a contractor or non-Chris user gets read access to `~/.brain/credentials/`
 - **After audit**: every time you run `/cso` or similar security audit
 
 ### Rotation procedure
@@ -20,22 +20,22 @@ The brain uses a single bearer token for all authenticated routes. Token lives a
 NEW_SECRET=$(openssl rand -hex 32)
 
 # 2. Backup the current token (in case rollback is needed mid-rotation)
-cp ~/.openclaw/credentials/.personal_webhook_secret \
-   ~/.openclaw/credentials/.personal_webhook_secret.prev-$(date +%Y%m%d-%H%M%S)
-chmod 600 ~/.openclaw/credentials/.personal_webhook_secret.prev-*
+cp ~/.brain/credentials/.personal_webhook_secret \
+   ~/.brain/credentials/.personal_webhook_secret.prev-$(date +%Y%m%d-%H%M%S)
+chmod 600 ~/.brain/credentials/.personal_webhook_secret.prev-*
 
 # 3. Atomically swap to the new token
-echo "$NEW_SECRET" > ~/.openclaw/credentials/.personal_webhook_secret.new
-chmod 600 ~/.openclaw/credentials/.personal_webhook_secret.new
-mv ~/.openclaw/credentials/.personal_webhook_secret.new \
-   ~/.openclaw/credentials/.personal_webhook_secret
+echo "$NEW_SECRET" > ~/.brain/credentials/.personal_webhook_secret.new
+chmod 600 ~/.brain/credentials/.personal_webhook_secret.new
+mv ~/.brain/credentials/.personal_webhook_secret.new \
+   ~/.brain/credentials/.personal_webhook_secret
 
 # 4. Restart brain-server to pick up the new token from disk
-launchctl kickstart -k gui/$(id -u)/ai.openclaw.brain-server
+launchctl kickstart -k gui/$(id -u)/ai.brain.server
 sleep 5
 
 # 5. Verify the new token works
-NEW=$(cat ~/.openclaw/credentials/.personal_webhook_secret)
+NEW=$(cat ~/.brain/credentials/.personal_webhook_secret)
 curl -sf -H "Authorization: Bearer $NEW" http://127.0.0.1:8791/brain/health | jq -r '.status'
 
 # Expected: "healthy" or "degraded" (with non-empty alerts list)
@@ -45,7 +45,7 @@ curl -sf -H "Authorization: Bearer $NEW" http://127.0.0.1:8791/brain/health | jq
 ### Side effects of rotation
 
 - **Per-bearer rate limit buckets reset** — the bearer-keyed slowapi limiter (M7-WS7) hashes the token to derive the bucket key. After rotation, the new token starts with a fresh quota.
-- **MCP servers continue working** — `brain_mcp_server.py` re-reads the secret file on every request via the global `SECRET` variable initialized at module load. Restart the MCP server to pick up the new token. For Claude Code: restart Claude Code. For OpenClaw agents: `launchctl kickstart -k gui/$UID/ai.openclaw.gateway`.
+- **MCP servers continue working** — `brain_mcp_server.py` re-reads the secret file on every request via the global `SECRET` variable initialized at module load. Restart the MCP server to pick up the new token. For Claude Code: restart Claude Code. For Hermes profiles: `/restart` in gateway or `launchctl kickstart -k gui/$UID/ai.hermes.gateway-<profile>`.
 - **Cron jobs re-read the secret** — every job in `JOB_REGISTRY` that needs the secret reads it from disk via `cat`, so they pick up the new token on next fire.
 - **Action_audit lineage** — the `actor` column doesn't track which token signed the request, only the `x-agent` header. So rotating the token doesn't break per-actor analytics.
 
@@ -71,14 +71,14 @@ If something goes wrong and you need to stop all autonomous brain activity in <5
 
 ```bash
 launchctl setenv BRAIN_AUTOPILOT_DISABLED 1
-launchctl kickstart -k gui/$(id -u)/ai.openclaw.brain-server
+launchctl kickstart -k gui/$(id -u)/ai.brain.server
 ```
 
 Every `autonomy.authorize()` call returns L0 after this. To re-enable:
 
 ```bash
 launchctl unsetenv BRAIN_AUTOPILOT_DISABLED
-launchctl kickstart -k gui/$(id -u)/ai.openclaw.brain-server
+launchctl kickstart -k gui/$(id -u)/ai.brain.server
 ```
 
 ## Incident response checklist

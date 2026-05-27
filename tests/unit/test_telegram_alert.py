@@ -140,11 +140,11 @@ def test_missing_token_queues_backlog():
     assert calls[0][1]["failure_reason"] == "telegram_token_missing"
 
 
-def test_reads_jenna_token_from_openclaw_env_file(tmp_path, monkeypatch):
+def test_reads_jenna_token_from_hermes_env_file(tmp_path, monkeypatch):
     env_file = tmp_path / ".env"
     env_file.write_text('export TELEGRAM_JENNA_TOKEN="123:abc"\n')
     monkeypatch.delenv("TELEGRAM_JENNA_TOKEN", raising=False)
-    monkeypatch.setattr(telegram_alert, "OPENCLAW_ENV_FILE", env_file)
+    monkeypatch.setattr(telegram_alert, "HERMES_ENV_FILE", env_file)
 
     assert telegram_alert._telegram_token() == "123:abc"
 

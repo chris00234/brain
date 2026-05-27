@@ -205,7 +205,7 @@ When a procedure is retrieved for a task (by `_get_relevant_procedures`), tag th
 
 ```
 ┌─────────────────────┐           ┌─────────────────────┐
-│  Claude Code        │           │  OpenClaw agents    │
+│  Claude Code        │           │  Hermes profiles    │
 │                     │           │                     │
 │  mistake-guard      │           │  workflow-memory    │
 │  (PreToolUse hook)  │           │  (methodology)      │
@@ -244,7 +244,7 @@ When a procedure is retrieved for a task (by `_get_relevant_procedures`), tag th
 
 ### Shipped in session B (this update)
 - **T2.9 FTS5 raw_events** — `raw_events_fts.py` new module + live triggers on brain.db. 7402 rows indexed, 0.08s initial build. `search_unified._search_fts` now merges Qdrant-synced FTS + live raw_events FTS. Direct attack on extended eval 64% literal-wording gap.
-- **W3 brain.db backup** — `cli/backup_brain_db.py` + `ai.openclaw.brain-backup.plist` daily 3:10am. SQLite online .backup, 14-day retention. 36MB brain.db backed up in 31ms. autonomy.db (745KB) in 1ms. First-run verified.
+- **W3 brain.db backup** — `cli/backup_brain_db.py` + `ai.brain.backup.plist` daily 3:10am. SQLite online .backup, 14-day retention. 36MB brain.db backed up in 31ms. autonomy.db (745KB) in 1ms. First-run verified.
 - **W5 calibration drift alarm** — new SLO `calibration_brier_drift_7d` target 0.05 warning. `confidence_calibration.run()` now stores abs(new_brier - prev_brier) to `brain_config_store` → SLO reads on each check. Prevents silent self-learning drift.
 - **W7 CLAUDE.md brain-recall guidance** — ACTION BIAS section updated with "Exception — Brain-first lookup BEFORE action" clause listing when brain_recall is the first tool call (preferences/design/infra/corrected-before topics) vs direct action (trivial/self-contained).
 - **Skill staleness + overload handler** — `cleanup_stale_auto_skills()` daily at 4:10am. Safety gate requires `auto_generated: true` frontmatter (human skills protected — auto-updater regression caught and fixed).

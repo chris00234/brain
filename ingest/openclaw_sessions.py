@@ -1,10 +1,20 @@
 #!/opt/homebrew/bin/python3
-"""OpenClaw session ingest — Jenna distills decisions and preferences from agent transcripts.
+"""OpenClaw session ingest — LEGACY (OpenClaw retired 2026-05-23).
 
 Reads JSONL session files from ~/.openclaw/agents/{agent}/sessions/,
 pre-filters to substantive user-assistant text exchanges, dispatches
-batches to Jenna for distillation, writes kept summaries as schema-compliant
-raw records to raw/inbox/.
+batches to Jenna (subscription LLM) for distillation, writes kept summaries
+as schema-compliant raw records to raw/inbox/.
+
+Status (2026-05-23): OpenClaw was retired in favor of Hermes Agent. No new
+JSONL files appear under ~/.openclaw/agents/*/sessions/ — this ingestor now
+only processes historical pre-retirement transcripts. The corresponding cron
+job (`openclaw_sessions_ingest` in job_definitions.py) may be disabled once
+the legacy backlog is fully drained.
+
+Hermes session data does NOT flow through this path. Instead, Hermes pushes
+turns to brain in real time via `BrainMemoryProvider.sync_turn()` and
+`.on_session_end()` (see ~/server/brain/hermes_integration/brain_memory_provider/).
 
 Pipeline: JSONL → pre-filter → Jenna distillation → raw/inbox → canonical pipeline
 

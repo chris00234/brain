@@ -323,7 +323,7 @@ def test_task_queue_defers_timeout_dispatch_errors(monkeypatch, tmp_path):
     class _Result:
         ok = False
         text = ""
-        error = "timeout after 130s: OpenClaw gateway banner"
+        error = "timeout after 130s: Hermes gateway banner"
 
     fake_cli = type(sys)("cli_llm")
     fake_cli.dispatch = lambda **_kwargs: _Result()

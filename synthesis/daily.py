@@ -8,11 +8,11 @@ Pipeline:
   1. Query last 24h from ChromaDB across experience/messages/notes/calendar/context/tasks
      using the new --since temporal filter (Phase 1).
   2. Build a structured prompt with the day's events.
-  3. Dispatch to Jenna agent via `openclaw agent`.
+  3. Dispatch to Jenna via subscription-backed CLI dispatch (Hermes fallback).
   4. Write narrative → distilled/daily/YYYY-MM-DD.md
   5. Write candidate facts → raw/inbox/ as schema-compliant raw records
      (so pipeline_auto.py picks them up Sunday for canonical promotion).
-  6. Write tomorrow's reflection question → ~/.openclaw/workspace-jenna/.tonight_reflection.txt
+  6. Write tomorrow's reflection question → ~/.hermes/profiles/jenna/.tonight_reflection.txt
      (consumed by daily_reflection.py at 22:00).
 
 Usage:
@@ -20,23 +20,22 @@ Usage:
 """
 
 import argparse
+import contextlib
 import hashlib
 import json
-import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "brain_core"))
-from cli_llm import dispatch_with_schema  # migrated 2026-04-17
+from cli_llm import dispatch, dispatch_with_schema  # migrated 2026-04-17
 from safe_state import atomic_write_text
 
 # ── Config ──────────────────────────────────────────────
-OPENCLAW_BIN = "/Users/chrischo/.local/bin/openclaw"
 INBOX_DIR = Path("/Users/chrischo/server/knowledge/raw/inbox")
 DISTILLED_DIR = Path("/Users/chrischo/server/knowledge/distilled/daily")
-TONIGHT_REFLECTION = Path("/Users/chrischo/.openclaw/workspace-jenna/.tonight_reflection.txt")
-FAILURE_LOG = Path("/Users/chrischo/.openclaw/workspace-jenna/logs/daily-synthesis-failures.jsonl")
+TONIGHT_REFLECTION = Path("/Users/chrischo/.hermes/profiles/jenna/.tonight_reflection.txt")
+FAILURE_LOG = Path("/Users/chrischo/.hermes/profiles/jenna/logs/daily-synthesis-failures.jsonl")
 
 DISPATCH_TIMEOUT = 240  # seconds
 AGENT = "jenna"
@@ -69,6 +68,19 @@ def log_failure(reason: str) -> None:
             f.write(json.dumps({"timestamp": datetime.now(UTC).isoformat(), "reason": reason[:500]}) + "\n")
     except Exception:
         pass
+
+
+def notify_failure(reason: str) -> None:
+    """Best-effort Jenna notification without the retired OpenClaw binary."""
+    with contextlib.suppress(Exception):
+        dispatch(
+            agent="jenna",
+            message=f"SYNTHESIS FAILED: {Path(__file__).stem} — {reason}",
+            thinking="off",
+            timeout=30,
+            backlog_kind="synthesis_failure",
+            backlog_payload={"source": Path(__file__).stem, "reason": reason},
+        )
 
 
 def query_day(target_date: str) -> list[dict]:
@@ -364,7 +376,7 @@ def main() -> None:
             print(f"\n... ({len(prompt) - 2000} more chars) ...")
         return
 
-    print("[3/4] Dispatching to Jenna via openclaw gateway...")
+    print("[3/4] Dispatching to Jenna via brain CLI dispatch...")
     parsed = dispatch_with_schema(
         agent=AGENT,
         message=prompt,
@@ -410,47 +422,11 @@ def main() -> None:
 
     if not isinstance(parsed.get("narrative"), str):
         sys.stderr.write("VALIDATION_FAIL: narrative is not a string\n")
-        try:
-            subprocess.run(
-                [
-                    OPENCLAW_BIN,
-                    "agent",
-                    "--agent",
-                    "jenna",
-                    "--message",
-                    f"SYNTHESIS FAILED: {Path(__file__).stem} — narrative field missing or not a string",
-                    "--thinking",
-                    "off",
-                    "--timeout",
-                    "30",
-                ],
-                timeout=35,
-                capture_output=True,
-            )
-        except Exception:
-            pass
+        notify_failure("narrative field missing or not a string")
         sys.exit(1)
     if not isinstance(parsed.get("facts_to_promote"), list):
         sys.stderr.write("VALIDATION_FAIL: facts_to_promote is not a list\n")
-        try:
-            subprocess.run(
-                [
-                    OPENCLAW_BIN,
-                    "agent",
-                    "--agent",
-                    "jenna",
-                    "--message",
-                    f"SYNTHESIS FAILED: {Path(__file__).stem} — facts_to_promote field missing or not a list",
-                    "--thinking",
-                    "off",
-                    "--timeout",
-                    "30",
-                ],
-                timeout=35,
-                capture_output=True,
-            )
-        except Exception:
-            pass
+        notify_failure("facts_to_promote field missing or not a list")
         sys.exit(1)
 
     print("[4/4] Writing outputs...")

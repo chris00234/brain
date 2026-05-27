@@ -27,7 +27,7 @@ pytestmark = pytest.mark.integration
 
 BRAIN_URL = "http://127.0.0.1:8791"
 QDRANT_URL = "http://127.0.0.1:6333"
-SECRET_FILE = Path("/Users/chrischo/.openclaw/credentials/.personal_webhook_secret")
+SECRET_FILE = Path("/Users/chrischo/.brain/credentials/.personal_webhook_secret")
 
 
 def _token() -> str:

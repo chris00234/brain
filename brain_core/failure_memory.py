@@ -154,6 +154,11 @@ _INFRA_REFLECTION = {
         "Reflecting via the same backend while it is unhealthy.",
         "Wait for backend health to recover; adjust queue concurrency before retrying.",
     ),
+    "harness_unregistered": (
+        "Agent harness or agent id is not registered with the dispatch gateway.",
+        "Retrying the same dispatch will fail identically; the LLM-based recorder also cannot reach the missing harness, so reflecting via LLM deadlocks.",
+        "Register the missing harness/agent in OpenClaw config (`openclaw agents list` to inspect), or route the task to an agent whose harness exists. Re-dispatch only after registration is confirmed.",
+    ),
 }
 
 
@@ -165,6 +170,8 @@ def _classify_infra_error(failure_reason: str) -> str:
         return "timeout"
     if "rate" in err and "limit" in err:
         return "rate_limit"
+    if "not registered" in err or "unknown agent" in err:
+        return "harness_unregistered"
     if "gateway" in err or "transporterror" in err:
         return "gateway"
     if err.startswith("breaker_") or "circuit breaker" in err:
@@ -223,6 +230,83 @@ def record_infra_failure_lesson(
         return lesson_id
     except Exception as e:
         log.warning("neo4j infra-lesson write failed: %s", e)
+        return None
+
+
+def record_override_pattern_lesson(
+    *,
+    signature: str,
+    domain: str,
+    overrides: int,
+    sample_brain_recommendation: str,
+    sample_corrections: list[str],
+    agent_id: str = "system",
+) -> str | None:
+    """Mint a deterministic LESSON when Chris keeps overriding the same way.
+
+    Outcome feedback already groups repeat overrides into a stable signature.
+    When a signature carries >=3 overrides at high rate the mistake is a
+    pattern, not an isolated miss, and the pretool nudge hook needs a
+    Lesson node to surface before the next similar action. This recorder
+    has no LLM dependency — the brain_recommendation and corrections are
+    already authoritative text from the outcomes table.
+    """
+    lesson_id = "lesson_override_" + hashlib.md5(
+        f"{signature}:{agent_id}".encode()
+    ).hexdigest()[:12]
+    now_iso = datetime.now(UTC).isoformat()
+
+    correction = (sample_corrections[0] if sample_corrections else "").strip()
+    wrong = (sample_brain_recommendation or "").strip()
+    reflection = (
+        f"Override pattern in {domain}: Chris overrode the same recommendation "
+        f"{overrides} times. The brain's recommendation kept missing in the same "
+        "direction."
+    )[:500]
+    avoid = (
+        f"Do not repeat the recommendation: {wrong[:160]}" if wrong else
+        f"Do not repeat the {domain} recommendation Chris overrode {overrides}x"
+    )[:200]
+    try_next = (
+        f"Chris's preferred path: {correction[:160]}" if correction else
+        "Re-read Chris's last correction for this domain before recommending"
+    )[:200]
+    task_description = f"{domain}: avoid {avoid[:120]} | prefer {try_next[:120]}"
+
+    try:
+        from neo4j_client import run_write
+
+        run_write(
+            "MERGE (l:Lesson {id: $id}) "
+            "ON CREATE SET l.task = $task, l.failure_reason = $reason, "
+            "  l.reflection = $reflection, l.avoid = $avoid, l.try_next = $try_next, "
+            "  l.agent_id = $agent_id, l.kind = 'override_pattern', "
+            "  l.domain = $domain, l.signature = $signature, "
+            "  l.created_at = $created_at, l.last_seen_at = $created_at, "
+            "  l.failure_count = $overrides, l.archived = false "
+            "ON MATCH SET l.last_seen_at = $created_at, "
+            "  l.failure_count = $overrides, "
+            "  l.reflection = $reflection, l.avoid = $avoid, l.try_next = $try_next "
+            "WITH l "
+            "MERGE (a:Agent {name: $agent_id}) "
+            "MERGE (a)-[:HAS_LESSON]->(l)",
+            {
+                "id": lesson_id,
+                "task": task_description[:500],
+                "reason": f"chris_override repeated {overrides}x"[:200],
+                "reflection": reflection,
+                "avoid": avoid,
+                "try_next": try_next,
+                "agent_id": agent_id,
+                "domain": domain,
+                "signature": signature,
+                "overrides": overrides,
+                "created_at": now_iso,
+            },
+        )
+        return lesson_id
+    except Exception as e:
+        log.warning("neo4j override-lesson write failed: %s", e)
         return None
 
 

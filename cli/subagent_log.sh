@@ -18,7 +18,7 @@ EVENT=$(echo "$INPUT" | jq -r '.hookEventName // "unknown"')
 AGENT_NAME=$(echo "$INPUT" | jq -r '.agentName // .name // "unnamed"')
 SESSION_ID=$(echo "$INPUT" | jq -r '.sessionId // .session_id // "unknown"')
 
-SECRET=$(cat ~/.openclaw/credentials/.personal_webhook_secret 2>/dev/null) || exit 0
+SECRET=$(cat ~/.brain/credentials/.personal_webhook_secret 2>/dev/null) || exit 0
 BRAIN_URL="${BRAIN_URL:-http://127.0.0.1:8791}"
 
 # Always log lifecycle (existing behavior). Build JSON via jq so untrusted

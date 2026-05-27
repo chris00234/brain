@@ -15,7 +15,7 @@
 set -uo pipefail
 
 BRAIN_URL="${BRAIN_URL:-http://127.0.0.1:8791}"
-SECRET_FILE="$HOME/.openclaw/credentials/.personal_webhook_secret"
+SECRET_FILE="$HOME/.brain/credentials/.personal_webhook_secret"
 
 PAYLOAD=""
 if [ ! -t 0 ]; then

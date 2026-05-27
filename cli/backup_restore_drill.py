@@ -183,7 +183,16 @@ def _restore_qdrant_snapshots(snapshots: list[Path], tmp_dir: Path) -> dict:
 
     out = qdrant_dir / "qdrant.out.log"
     err = qdrant_dir / "qdrant.err.log"
-    proc = subprocess.Popen(cmd, stdout=out.open("w"), stderr=err.open("w"))
+    # macOS jemalloc rejects `background_thread:true` because it is built without
+    # pthread background-thread support; without this override the restore drill
+    # aborts before any collection is loaded. Setting both keys covers qdrant
+    # builds that read `_RJEM_MALLOC_CONF` (rust jemalloc) and `MALLOC_CONF`.
+    drill_env = {
+        **os.environ,
+        "MALLOC_CONF": "background_thread:false",
+        "_RJEM_MALLOC_CONF": "background_thread:false",
+    }
+    proc = subprocess.Popen(cmd, stdout=out.open("w"), stderr=err.open("w"), env=drill_env)
     try:
         if not _wait_for_qdrant(port):
             return {

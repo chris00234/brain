@@ -1,7 +1,7 @@
 """brain_core/active_recall.py — per-turn attention gating.
 
 Biology: thalamus. Intercepts every user prompt (via UserPromptSubmit hook for
-Claude Code, before_prompt_build for OpenClaw agents) and decides what context
+Claude Code and Hermes profile hooks) and decides what context
 to inject based on the prompt's intent. This is the module that turns brain
 from a passive retrieval store into a per-turn proactive surface.
 
@@ -33,8 +33,8 @@ Pipeline (fast path, <1200 ms hard budget):
 Fail-open: every step wraps in try/except. Returned blocks are best-effort.
 The hook script catches failures and prints a degraded sentinel.
 
-Called from: server.py::recall_active endpoint, OpenClaw brain-active-recall
-plugin via the same endpoint.
+Called from: server.py::recall_active endpoint and Hermes profile Brain MCP/hooks
+via the same endpoint.
 """
 
 from __future__ import annotations

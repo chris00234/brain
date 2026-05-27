@@ -10,7 +10,7 @@ Strategy:
   - Write to ~/server/brain/logs/backups/<db>-YYYYMMDD.db
   - Rotate: keep last N days locally (default 7); MinIO keeps the longer DR
     window so local logs/ stays under the SLO budget.
-  - Invoked daily by launchd (ai.openclaw.brain-backup.plist)
+  - Invoked daily by launchd (ai.brain.backup.plist)
 
 Exit codes:
   0 — all DBs backed up (or no-ops for missing sources)

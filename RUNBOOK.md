@@ -8,7 +8,7 @@ Last updated: 2026-04-13 after Brain v2 phases A–H.
 ## 0. Quick health check
 
 ```bash
-SECRET=$(cat ~/.openclaw/credentials/.personal_webhook_secret)
+SECRET=$(cat ~/.brain/credentials/.personal_webhook_secret)
 curl -sf -H "Authorization: Bearer $SECRET" http://127.0.0.1:8791/brain/health | jq
 ```
 
@@ -34,8 +34,8 @@ tail -50 /Users/chrischo/server/brain/logs/server.err.log
 ### Fix
 1. Force a clean restart:
    ```bash
-   launchctl bootout gui/$(id -u)/ai.openclaw.brain-server
-   launchctl bootstrap gui/$(id -u) /Users/chrischo/Library/LaunchAgents/ai.openclaw.brain-server.plist
+   launchctl bootout gui/$(id -u)/ai.brain.server
+   launchctl bootstrap gui/$(id -u) /Users/chrischo/Library/LaunchAgents/ai.brain.server.plist
    sleep 5
    curl -sf -H "Authorization: Bearer $SECRET" http://127.0.0.1:8791/healthz
    ```
@@ -187,7 +187,7 @@ tail -50 ~/server/brain/logs/qdrant-native.err.log
 ### Fix
 1. Restart native Qdrant:
    ```bash
-   launchctl kickstart -k gui/$(id -u)/ai.openclaw.qdrant-native
+   launchctl kickstart -k gui/$(id -u)/ai.brain.qdrant
    ```
 2. Wait 5s, re-check `/readyz`.
 3. If persistent failure, check disk space on `~/server/brain/qdrant-data/`.
@@ -218,7 +218,7 @@ tail -30 /opt/homebrew/var/log/neo4j/debug.log 2>/dev/null
 ### Fix
 1. Restart:
    ```bash
-   launchctl kickstart -k gui/$(id -u)/ai.openclaw.neo4j-native
+   launchctl kickstart -k gui/$(id -u)/ai.brain.neo4j
    ```
 2. SQLite fallback in `entity_graph.py` keeps the brain functional during outage.
 
@@ -279,7 +279,7 @@ uv sync --dev
 .venv/bin/brain-init secrets       # seed webhook secret
 .venv/bin/brain-init plists        # install launchd plists
 .venv/bin/brain-init migrate       # run schema_versions
-launchctl kickstart -k gui/$(id -u)/ai.openclaw.brain-server
+launchctl kickstart -k gui/$(id -u)/ai.brain.server
 curl -sf http://127.0.0.1:8791/healthz
 ```
 
@@ -304,8 +304,8 @@ Qdrant, Ollama, Neo4j must be installed separately (not packaged with brain).
    ```
 3. Bootout/bootstrap to apply:
    ```bash
-   launchctl bootout gui/$(id -u)/ai.openclaw.brain-server
-   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.openclaw.brain-server.plist
+   launchctl bootout gui/$(id -u)/ai.brain.server
+   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.brain.server.plist
    ```
 4. Brain falls back to Qdrant payload metadata for tier/supersession.
 5. The brain.db is not deleted — re-enabling the flag picks up where it left off.
@@ -322,7 +322,7 @@ Qdrant, Ollama, Neo4j must be installed separately (not packaged with brain).
 ```bash
 # Top-level kill switch (env var, hardest)
 launchctl setenv BRAIN_AUTOPILOT_DISABLED 1
-launchctl kickstart -k gui/$(id -u)/ai.openclaw.brain-server
+launchctl kickstart -k gui/$(id -u)/ai.brain.server
 ```
 
 Or via API (graceful, persists in brain_config):
@@ -516,7 +516,7 @@ is hard-capped at 2 dispatches/day.
 
 **Override loop seems stuck**
 ```bash
-SECRET=$(cat ~/.openclaw/credentials/.personal_webhook_secret)
+SECRET=$(cat ~/.brain/credentials/.personal_webhook_secret)
 curl -s -H "Authorization: Bearer $SECRET" \
   'http://127.0.0.1:8791/brain/outcomes/feedback?hours=168'
 ```

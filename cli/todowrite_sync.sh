@@ -5,7 +5,7 @@
 
 set -euo pipefail
 
-SECRET_FILE="$HOME/.openclaw/credentials/.personal_webhook_secret"
+SECRET_FILE="$HOME/.brain/credentials/.personal_webhook_secret"
 BRAIN_URL="http://127.0.0.1:8791"
 
 if [ ! -f "$SECRET_FILE" ]; then

@@ -35,7 +35,7 @@ BRAIN_ROOT = Path("/Users/chrischo/server/brain")
 KNOWLEDGE_ROOT = Path("/Users/chrischo/server/knowledge")
 FEEDBACK_LOG = BRAIN_ROOT / "logs" / "search-feedback.jsonl"
 EVAL_SET = BRAIN_ROOT / "cli" / "eval_set_stable.json"
-SECRET_FILE = Path("~/.openclaw/credentials/.personal_webhook_secret").expanduser()
+SECRET_FILE = Path("~/.brain/credentials/.personal_webhook_secret").expanduser()
 BRAIN_URL = "http://127.0.0.1:8791"
 
 BOOTSTRAP_MARKER_EVAL = "eval_bootstrap"

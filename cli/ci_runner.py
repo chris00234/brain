@@ -1,7 +1,7 @@
 """brain CI runner — ruff + pytest in sequence.
 
 Triggered by:
-  - launchd plist `ai.openclaw.brain-ci.plist` watching `.git/refs/heads`
+  - launchd plist `ai.brain.ci.plist` watching `.git/refs/heads`
   - pre-commit hook (manual)
   - any caller running `python cli/ci_runner.py`
 
@@ -12,7 +12,7 @@ Exit codes:
   4 — config/setup error
 
 Failures emit a Telegram alert via the direct Bot API path so Chris sees the
-regression on his phone without depending on the OpenClaw gateway.
+regression on his phone without depending on Hermes profile gateways.
 
 Note (2026-04-13): bandit was removed from the gate. Bandit 1.8.0 chokes on
 Python 3.14 AST and silently skips every file ("exception while scanning
@@ -120,11 +120,11 @@ def main() -> int:
         return 1
 
     rc, out = run_step(
-        "openclaw_telegram_target_audit",
-        [str(VENV_BIN / "python"), "cli/audit_openclaw_telegram_targets.py", "--json"],
+        "hermes_telegram_target_audit",
+        [str(VENV_BIN / "python"), "cli/audit_hermes_telegram_targets.py", "--json"],
     )
     if rc != 0:
-        _alert("brain CI: OpenClaw Telegram target audit failed", out[-800:])
+        _alert("brain CI: Hermes Telegram target audit failed", out[-800:])
         return 1
 
     rc, out = run_step(

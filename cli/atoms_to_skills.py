@@ -14,7 +14,7 @@ Flow:
              ─→ emit runtime skill files:
                  ~/.claude/skills/brain-learned-<domain>/SKILL.md
                  ~/.codex/skills/brain-learned-<domain>/SKILL.md
-                 ~/.openclaw/skills/brain-learned-<domain>/SKILL.md
+                 ~/.hermes/skills/brain-learned-<domain>/SKILL.md
              ─→ each SKILL has frontmatter (name/description) + bullet rules
 
 Skills are loaded by the supported runtimes at session start. `description`
@@ -50,11 +50,11 @@ SKILL_PREFIX = "brain-learned-"
 #   ~/.codex/skills/brain-learned-<domain>/SKILL.md
 #
 # OpenClaw (global, all 5 agents can invoke):
-#   ~/.openclaw/skills/brain-learned-<domain>/SKILL.md
+#   ~/.hermes/skills/brain-learned-<domain>/SKILL.md
 SKILL_DESTINATIONS = [
     Path.home() / ".claude" / "skills",
     Path.home() / ".codex" / "skills",
-    Path.home() / ".openclaw" / "skills",
+    Path.home() / ".hermes" / "skills",
 ]
 
 # Domain taxonomy — keywords mapped to domains. Order matters: first match wins.

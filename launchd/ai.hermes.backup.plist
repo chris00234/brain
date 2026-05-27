@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>ai.hermes.backup</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/chrischo/.local/bin/hermes</string>
+        <string>backup</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>4</integer>
+        <key>Minute</key>
+        <integer>15</integer>
+        <key>Weekday</key>
+        <integer>0</integer>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/Users/chrischo/.hermes/logs/backup-weekly.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/chrischo/.hermes/logs/backup-weekly.err</string>
+    <key>WorkingDirectory</key>
+    <string>/Users/chrischo/.hermes</string>
+</dict>
+</plist>

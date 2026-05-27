@@ -109,7 +109,7 @@ def _fetch_docs_for_query(query: str) -> dict[str, str]:
 
         from http_pool import http_json
 
-        secret_path = Path.home() / ".openclaw/credentials/.personal_webhook_secret"
+        secret_path = Path.home() / ".brain/credentials/.personal_webhook_secret"
         token = secret_path.read_text().strip() if secret_path.exists() else ""
         qs = urllib.parse.urlencode({"q": query[:500], "k": TOP_K_FOR_JUDGE, "actor": "recall_judge"})
         payload = http_json(
@@ -177,7 +177,7 @@ def run(sample: int = SAMPLE_SIZE, hours: int = 24, dry_run: bool = False) -> di
         # Both /recall/v2 and /recall/active are eligible — the judge does a
         # live re-recall against the query_text. Filters:
         #   - actor whitelist: only judge Chris's CLI sessions (claude/codex) and
-        #     named OpenClaw agents. Excludes 'eval' (deterministic eval runs,
+        #     named Hermes profiles. Excludes 'eval' (deterministic eval runs,
         #     non-representative), 'unknown' (hook-driven Bash command echos),
         #     and 'recall_judge' (self-feedback loop)
         #   - length >= 5 (skip empty/trivial)

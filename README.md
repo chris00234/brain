@@ -24,15 +24,16 @@ Agents should use Brain through MCP tools first (`brain_recall`, `brain_store`,
 `brain_decide`, `brain_reason`, `brain_tick`, `brain_procedures`,
 `brain_outcome`). HTTP on `127.0.0.1:8791` is the fallback/admin surface for
 endpoints not exposed through MCP, such as readiness, SLOs, job control, and
-OpenClaw task execution evidence.
+Hermes profile dispatch evidence.
 
 Autonomous/background LLM work is CLI-first through `brain_core/cli_llm.py`:
-Codex `gpt-5.5` primary, `gpt-5.3-codex-spark` fallback; OpenClaw is only
-the integration/emergency fallback lane.
+Codex `gpt-5.5` primary, `gpt-5.3-codex-spark` fallback; Hermes
+profiles handle tool/session-heavy agent work.
 `GET /brain/usage` reports this current `cli_llm` surface (`source=cli_llm`,
 `primary_model=gpt-5.5`) rather than the legacy OpenClaw wrapper.
 
-OpenClaw agent handoffs depend on the local gateway at `127.0.0.1:18789`; use
+Hermes profile handoffs depend on the per-profile gateway launchd services
+`ai.hermes.gateway-{jenna,liz,ellie,sage,market}`; use
 `/brain/ops/readiness`, `/brain/slos`, `/brain/autonomous-work`, and
 `/brain/tasks/{task_id}/execution` to prove work actually dispatched before
 claiming automation is running or done. The `autonomous_work_visibility_gap_count`

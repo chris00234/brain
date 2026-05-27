@@ -24,22 +24,24 @@ log = logging.getLogger("brain.memory_lifecycle")
 
 try:
     from config import INBOX_DIR
-    from config import OPENCLAW_DIR as AGENTS_DIR
-
-    EXTRACTION_FAILURE_LOG = AGENTS_DIR / "workspace-liz" / "logs" / "memory-extraction-failures.jsonl"
+    from config import OPENCLAW_DIR as AGENTS_DIR  # legacy alias now points at ~/.brain
 except ImportError:
-    AGENTS_DIR = Path("/Users/chrischo/.openclaw")
+    AGENTS_DIR = Path("/Users/chrischo/.brain")
     INBOX_DIR = Path("/Users/chrischo/server/knowledge/raw/inbox")
-    EXTRACTION_FAILURE_LOG = Path(
-        "/Users/chrischo/.openclaw/workspace-liz/logs/memory-extraction-failures.jsonl"
-    )
+
+# Hermes replaced OpenClaw as the live agent runtime; keep lifecycle extraction
+# failures in the live Liz profile logs, not the removed ~/.openclaw workspace.
+EXTRACTION_FAILURE_LOG = Path("/Users/chrischo/.hermes/profiles/liz/logs/memory-extraction-failures.jsonl")
 LIZ_DISPATCH_TIMEOUT = 180
 EXTRACTION_AGENT = "liz"
 
 
 def get_memory_files():
     files = []
-    for agent_dir in (AGENTS_DIR / "agents").iterdir():
+    agents_root = AGENTS_DIR / "agents"
+    if not agents_root.exists():
+        return files
+    for agent_dir in agents_root.iterdir():
         if not agent_dir.is_dir():
             continue
         agent = agent_dir.name
@@ -59,7 +61,10 @@ def get_memory_files():
 
 def get_archived_files():
     files = []
-    for agent_dir in (AGENTS_DIR / "agents").iterdir():
+    agents_root = AGENTS_DIR / "agents"
+    if not agents_root.exists():
+        return files
+    for agent_dir in agents_root.iterdir():
         if not agent_dir.is_dir():
             continue
         agent = agent_dir.name

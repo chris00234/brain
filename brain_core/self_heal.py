@@ -30,7 +30,7 @@ except ImportError:
     BRAIN_AUTO_HEAL_ENABLED = False
 
     def load_bearer_secret() -> str:
-        return Path("/Users/chrischo/.openclaw/credentials/.personal_webhook_secret").read_text().strip()
+        return Path("/Users/chrischo/.brain/credentials/.personal_webhook_secret").read_text().strip()
 
 
 def _trigger_brain_job(job: str, timeout: int = 10) -> None:

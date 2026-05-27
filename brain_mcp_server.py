@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Brain MCP Server — exposes brain API as MCP tools for OpenClaw agents.
+"""Brain MCP Server — exposes brain API as MCP tools for Hermes profiles.
 
 Thin wrapper: translates MCP tool calls → HTTP requests to brain FastAPI.
 The brain API itself doesn't change — this is an additional access layer.
@@ -19,7 +19,7 @@ import urllib.request
 from pathlib import Path
 
 BRAIN_URL = "http://127.0.0.1:8791"
-SECRET_FILE = Path("~/.openclaw/credentials/.personal_webhook_secret").expanduser()
+SECRET_FILE = Path("~/.brain/credentials/.personal_webhook_secret").expanduser()
 
 # 2026-05-20: BRAIN_MCP_PROFILE selects the exposed tool surface.
 #   "full"    — 21-tool legacy surface (default, used by OpenClaw + Codex)

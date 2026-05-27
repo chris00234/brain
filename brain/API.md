@@ -2,14 +2,14 @@
 
 Auto-generated from FastAPI OpenAPI spec at `/openapi.json`. Version: **2.1.0**.
 
-Base URL: `http://127.0.0.1:8791`. All authenticated routes require `Authorization: Bearer <token>` from `~/.openclaw/credentials/.personal_webhook_secret`. Most read routes also accept `x-agent: <actor>` for action_audit attribution (M7-WS8).
+Base URL: `http://127.0.0.1:8791`. All authenticated routes require `Authorization: Bearer <token>` from `~/.brain/credentials/.personal_webhook_secret`. Most read routes also accept `x-agent: <actor>` for action_audit attribution (M7-WS8).
 
 Total routes: **111**.
 
 ## How to regenerate this file
 
 ```bash
-SECRET=$(cat ~/.openclaw/credentials/.personal_webhook_secret)
+SECRET=$(cat ~/.brain/credentials/.personal_webhook_secret)
 curl -sf -H "Authorization: Bearer $SECRET" http://127.0.0.1:8791/openapi.json > /tmp/brain_openapi.json
 python3 sdk/scripts/api_md_from_openapi.py > brain/API.md   # reuses this generator
 ```

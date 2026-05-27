@@ -172,6 +172,25 @@ def gather_decision_context(
             )
         )
 
+    # Force-include Chris's correction atoms for high-override domains
+    # (closes the synthesis-bypass loop noted 2026-05-15: semantic search
+    # finds atoms by similarity to `situation`, but Chris's corrections often
+    # have different keywords and never rank in top-K. For infra/coding/brain
+    # where historic override rate is ~100%, prepend high-trust corrections).
+    chris_corrections = _fetch_chris_corrections_for_domain(domain)
+    for c in reversed(chris_corrections):  # reverse → highest-trust ends up first
+        hits.insert(
+            0,
+            PreferenceHit(
+                content=str(c.get("text", ""))[:500],
+                category="chris_correction",
+                confidence=float(c.get("trust_score") or 0.9),
+                age_days=_age_days(c.get("created_at"), now),
+                source="atoms.trust_score_forced",
+                collection="chris_corrections",
+            ),
+        )
+
     # Pull Chris's profile
     profile_text = get_chris_profile() or ""
 
@@ -199,6 +218,101 @@ def _search_collection(
         return payload.get("results", []) if isinstance(payload, dict) else []
     except Exception as exc:
         log.warning("search failed (collections=%s): %s", collections, exc)
+        return []
+
+
+_BRAIN_DB_PATH = Path("/Users/chrischo/server/brain/logs/brain.db")
+_AUTONOMY_DB_PATH = Path("/Users/chrischo/server/brain/logs/autonomy.db")
+
+# Fallback used only if autonomy.db is unreachable. 2026-05-15 measured
+# baselines: infra 107/107, coding 13/13, brain 16/16.
+_HIGH_OVERRIDE_FALLBACK: frozenset[str] = frozenset({"infra", "coding", "brain"})
+
+# Cached high-override domains list. Refreshed by autonomy.db query at most
+# once per _OVERRIDE_DOMAINS_TTL_S. Bounded SQL — single GROUP BY, ~5ms.
+_OVERRIDE_DOMAINS_TTL_S = 600.0  # 10 min
+_override_domains_cache: dict[str, Any] = {"ts": 0.0, "domains": _HIGH_OVERRIDE_FALLBACK}
+
+
+def _high_override_domains(min_override_rate: float = 0.5, min_outcomes: int = 5) -> frozenset[str]:
+    """Domains where chris_override outcomes / total outcomes >= threshold over
+    the last 30 days. Cached. Failure-open: falls back to the hardcoded set.
+    """
+    now = time.time()
+    if now - _override_domains_cache["ts"] < _OVERRIDE_DOMAINS_TTL_S:
+        return _override_domains_cache["domains"]
+
+    if not _AUTONOMY_DB_PATH.exists():
+        return _HIGH_OVERRIDE_FALLBACK
+
+    import sqlite3
+
+    try:
+        conn = sqlite3.connect(_AUTONOMY_DB_PATH)
+        try:
+            rows = conn.execute(
+                """
+                SELECT domain,
+                       COUNT(*) AS total,
+                       SUM(chris_override) AS overrides
+                  FROM outcomes
+                 WHERE created_at > datetime('now', '-30 days')
+                 GROUP BY domain
+                HAVING total >= ?
+                """,
+                (min_outcomes,),
+            ).fetchall()
+        finally:
+            conn.close()
+        hot = frozenset(
+            d for d, total, ov in rows
+            if total and (ov or 0) / total >= min_override_rate
+        )
+        # Always include the fallback so hardcoded high-signal domains never
+        # disappear during a transient empty-window.
+        merged = hot | _HIGH_OVERRIDE_FALLBACK
+        _override_domains_cache["ts"] = now
+        _override_domains_cache["domains"] = merged
+        return merged
+    except Exception as exc:
+        log.warning("_high_override_domains query failed: %s", exc)
+        return _HIGH_OVERRIDE_FALLBACK
+
+
+def _fetch_chris_corrections_for_domain(domain: str | None, limit: int = 3) -> list[dict[str, Any]]:
+    """Highest-trust unsuperseded atoms attributable to Chris that mention the
+    given domain. Used to close the synthesis-bypass gap in evaluate_decision.
+
+    Safe to call from request hot path: single short SQL, bounded LIMIT, no
+    network, ~5ms. Failure-open (returns []) on any error.
+    """
+    if not domain or domain not in _high_override_domains() or not _BRAIN_DB_PATH.exists():
+        return []
+    import sqlite3
+
+    try:
+        conn = sqlite3.connect(_BRAIN_DB_PATH)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                """
+                SELECT id, text, trust_score, created_at
+                  FROM atoms
+                 WHERE superseded_by IS NULL
+                   AND tier != 'obsolete'
+                   AND trust_score >= 0.9
+                   AND (text LIKE '%Chris %' OR text LIKE 'CORRECTION:%')
+                   AND text LIKE ?
+                 ORDER BY trust_score DESC, created_at DESC
+                 LIMIT ?
+                """,
+                (f"%{domain}%", limit),
+            ).fetchall()
+        finally:
+            conn.close()
+        return [dict(r) for r in rows]
+    except Exception as exc:
+        log.warning("_fetch_chris_corrections_for_domain failed: %s", exc)
         return []
 
 

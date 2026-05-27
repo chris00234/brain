@@ -23,7 +23,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-SECRET_FILE = Path("/Users/chrischo/.openclaw/credentials/.personal_webhook_secret")
+SECRET_FILE = Path("/Users/chrischo/.brain/credentials/.personal_webhook_secret")
 BASE_URL = "http://127.0.0.1:8791"
 
 DEFAULT_INPUT = Path("/tmp/brain_eval_mine_canonical.jsonl")

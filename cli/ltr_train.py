@@ -32,7 +32,7 @@ BRAIN_ROOT = Path("/Users/chrischo/server/brain")
 sys.path.insert(0, str(BRAIN_ROOT / "brain_core"))
 
 FEEDBACK_LOG = BRAIN_ROOT / "logs" / "search-feedback.jsonl"
-SECRET_FILE = Path("~/.openclaw/credentials/.personal_webhook_secret").expanduser()
+SECRET_FILE = Path("~/.brain/credentials/.personal_webhook_secret").expanduser()
 BRAIN_URL = "http://127.0.0.1:8791"
 
 MIN_SAMPLES = 50

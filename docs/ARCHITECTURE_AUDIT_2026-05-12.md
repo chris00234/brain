@@ -125,7 +125,7 @@ are real on closer reading):
 
 ### Dead code (true 0-importer in production)
 - `reranker_worker.py` — **NOT actually orphaned**, runs as standalone
-  FastAPI service via `ai.openclaw.brain-reranker.plist`. Audit false
+  FastAPI service via `ai.brain.reranker.plist`. Audit false
   positive (process-launched, not Python-imported).
 
 ### Reduced-usage modules (2026-05-12 follow-up correction)

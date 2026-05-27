@@ -10,7 +10,6 @@ Usage:
 """
 
 import re
-import subprocess
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -18,10 +17,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "brain_core"))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "pipeline"))
 try:
-    from config import BRAIN_LOGS_DIR, KNOWLEDGE_DIR, OPENCLAW_BIN
+    from config import BRAIN_LOGS_DIR, KNOWLEDGE_DIR
 except ImportError:
     KNOWLEDGE_DIR = Path("/Users/chrischo/server/knowledge")
-    OPENCLAW_BIN = "/Users/chrischo/.local/bin/openclaw"
     BRAIN_LOGS_DIR = Path("/Users/chrischo/server/brain/logs")
 
 from cli_llm import dispatch  # migrated 2026-04-17
@@ -142,25 +140,14 @@ def main():
     new_body = dispatch_to_sage(prompt)
     if not new_body or len(new_body) < 200:
         print("  ERROR: Sage returned empty/short state, aborting", file=sys.stderr)
-        try:
-            subprocess.run(
-                [
-                    OPENCLAW_BIN,
-                    "agent",
-                    "--agent",
-                    "jenna",
-                    "--message",
-                    f"SYNTHESIS FAILED: {Path(__file__).stem} — Sage returned empty/short state",
-                    "--thinking",
-                    "off",
-                    "--timeout",
-                    "30",
-                ],
-                timeout=35,
-                capture_output=True,
-            )
-        except Exception:
-            pass
+        dispatch(
+            agent="jenna",
+            message=f"SYNTHESIS FAILED: {Path(__file__).stem} — Sage returned empty/short state",
+            thinking="off",
+            timeout=30,
+            backlog_kind="synthesis_failure",
+            backlog_payload={"source": Path(__file__).stem, "reason": "short_state"},
+        )
         sys.exit(1)
 
     now = datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")

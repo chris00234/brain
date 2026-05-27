@@ -349,13 +349,13 @@ def failure_lesson_outcome_readiness_snapshot() -> dict[str, Any]:
         }
 
 
-def openclaw_gateway_snapshot() -> dict[str, Any]:
-    """Read-only OpenClaw gateway readiness derived from the production SLO."""
+def hermes_gateway_snapshot() -> dict[str, Any]:
+    """Read-only Hermes gateway readiness derived from the production SLO."""
 
     try:
         from slos import check_one
 
-        result = check_one("openclaw_gateway_health")
+        result = check_one("hermes_gateway_health")
     except Exception as exc:
         return {"status": "error", "error": str(exc)[:200]}
     if result is None:
@@ -395,7 +395,7 @@ def readiness_snapshot() -> dict[str, Any]:
     ragas_eval = ragas_eval_snapshot()
     release = release_readiness_snapshot()
     ui_parity = ui_parity_audit_snapshot()
-    gateway = openclaw_gateway_snapshot()
+    gateway = hermes_gateway_snapshot()
     source_governance = source_governance_readiness_snapshot()
     skill_promotion = skill_promotion_readiness_snapshot()
     failure_lesson_outcome = failure_lesson_outcome_readiness_snapshot()
@@ -422,7 +422,7 @@ def readiness_snapshot() -> dict[str, Any]:
     if ui_parity.get("status") in {"missing", "error", "blocked"}:
         blockers.append("ui_parity_audit")
     if gateway.get("status") in {"missing", "error", "blocked"}:
-        blockers.append("openclaw_gateway")
+        blockers.append("hermes_gateway")
     if source_governance.get("status") in {"missing", "error", "blocked"}:
         blockers.append("source_governance")
     if skill_promotion.get("status") in {"missing", "error", "blocked"}:
@@ -447,7 +447,7 @@ def readiness_snapshot() -> dict[str, Any]:
         "ragas_eval": ragas_eval,
         "release_readiness": release,
         "ui_parity_audit": ui_parity,
-        "openclaw_gateway": gateway,
+        "hermes_gateway": gateway,
         "source_governance": source_governance,
         "skill_promotion": skill_promotion,
         "failure_lesson_outcome": failure_lesson_outcome,

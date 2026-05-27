@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>ai.openclaw.brain-reranker</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/chrischo/server/brain/.venv/bin/python</string>
+		<string>/Users/chrischo/server/brain/brain_core/reranker_worker.py</string>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>/Users/chrischo/server/brain</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>HOME</key>
+		<string>/Users/chrischo</string>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+		<key>BRAIN_RERANKER_PORT</key>
+		<string>8792</string>
+		<key>BRAIN_CE_MPS_EMPTY_CACHE</key>
+		<string>true</string>
+		<key>BRAIN_CE_MODEL_IDLE_TTL_SEC</key>
+		<string>600</string>
+		<key>BRAIN_RERANKER_MAX_RSS_MB</key>
+		<string>3072</string>
+		<key>BRAIN_RERANKER_MAX_REQUESTS</key>
+		<string>2000</string>
+		<key>BRAIN_RERANKER_MAX_LIFETIME_SEC</key>
+		<string>21600</string>
+		<key>BRAIN_CROSS_ENCODER_LOCAL_FILES_ONLY</key>
+		<string>true</string>
+		<key>TOKENIZERS_PARALLELISM</key>
+		<string>false</string>
+		<key>LOKY_MAX_CPU_COUNT</key>
+		<string>8</string>
+	</dict>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<dict>
+		<key>Crashed</key>
+		<true/>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+	<key>StandardOutPath</key>
+	<string>/Users/chrischo/server/brain/logs/reranker-worker.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/chrischo/server/brain/logs/reranker-worker.err.log</string>
+</dict>
+</plist>

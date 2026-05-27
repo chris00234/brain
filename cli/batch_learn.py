@@ -23,7 +23,7 @@ from pathlib import Path
 
 SESSIONS_DIR = Path("/Users/chrischo/.claude/projects/-Users-chrischo")
 STATE_FILE = Path("/Users/chrischo/server/brain/logs/.batch_learn_state.json")
-SECRET_FILE = Path("/Users/chrischo/.openclaw/credentials/.personal_webhook_secret")
+SECRET_FILE = Path("/Users/chrischo/.brain/credentials/.personal_webhook_secret")
 BRAIN_URL = "http://127.0.0.1:8791/learn"
 CHUNK_SIZE = 4000
 MIN_TRANSCRIPT_LEN = 200

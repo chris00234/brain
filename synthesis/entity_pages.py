@@ -35,7 +35,7 @@ from neo4j_client import run_query
 ENTITY_DIR = ROOT / "canonical" / "entities"
 LOGS_DIR = Path("/Users/chrischo/server/brain/logs")
 BRAIN_URL = "http://127.0.0.1:8791"
-SECRET_PATH = Path("/Users/chrischo/.openclaw/credentials/.personal_webhook_secret")
+SECRET_PATH = Path("/Users/chrischo/.brain/credentials/.personal_webhook_secret")
 
 MIN_MENTIONS = 5
 SKIP_ENTITIES = {"chris cho", "chris", "daehyun cho", "daehyun", "chrischo"}

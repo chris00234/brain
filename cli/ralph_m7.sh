@@ -21,7 +21,7 @@ set -uo pipefail
 BRAIN_ROOT=/Users/chrischo/server/brain
 cd "$BRAIN_ROOT"
 
-SECRET=$(cat /Users/chrischo/.openclaw/credentials/.personal_webhook_secret)
+SECRET=$(cat /Users/chrischo/.brain/credentials/.personal_webhook_secret)
 export SECRET
 
 MAX_ITER="${MAX_ITER:-30}"

@@ -22,7 +22,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 CLI = ROOT / "cli"
 LOG_DIR = ROOT / "logs" / "ontology-gates"
-SECRET_FILE = Path.home() / ".openclaw" / "credentials" / ".personal_webhook_secret"
+SECRET_FILE = Path.home() / ".brain" / "credentials" / ".personal_webhook_secret"
 DEFAULT_BRAIN_URL = "http://127.0.0.1:8791"
 
 
@@ -192,7 +192,12 @@ def _live_smoke(
                 ],
                 "attempt": attempt + 1,
             }
-            attempts.append(row)
+            # Keep attempts as immutable snapshots. `selected` is appended to
+            # final results below; storing the same dict object in attempts and
+            # later attaching `selected["attempts"] = attempts` creates a
+            # self-referential structure when a live-smoke retry happens, which
+            # makes json.dumps fail with "Circular reference detected".
+            attempts.append(dict(row))
             selected = row
             if row["latency_ms"] <= max_live_p95_ms or attempt >= max(0, live_retries):
                 break

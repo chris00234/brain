@@ -544,7 +544,7 @@ Full unit/static verification after privacy reindex and CLI-first route/eval cle
 ```bash
 uv run pytest tests/unit -q
 uv run ruff check . --select F
-launchctl kickstart -k gui/$(id -u)/ai.openclaw.brain-server
+launchctl kickstart -k gui/$(id -u)/ai.brain.server
 curl /brain/ops/readiness
 curl /brain/slos
 ```
@@ -579,7 +579,7 @@ uv run ruff check --select F cli/privacy_negative_audit.py brain_core/source_pol
 uv run python cli/render_cron_map.py --write
 uv run python cli/render_cron_map.py --check
 uv run python cli/privacy_negative_audit.py --limit 300 --repair-redact
-launchctl kickstart -k gui/$(id -u)/ai.openclaw.brain-server
+launchctl kickstart -k gui/$(id -u)/ai.brain.server
 curl /brain/ops/readiness
 curl /brain/slos
 ```
@@ -619,7 +619,7 @@ uv run pytest tests/unit/test_task_dispatch_attempts.py tests/unit/test_task_que
 uv run ruff check --select F brain_core/task_queue.py brain_core/failure_lesson_audit.py brain_core/ops_readiness.py cli/ui_parity_audit.py tests/unit/test_task_dispatch_attempts.py tests/unit/test_task_queue_decision_link.py tests/unit/test_failure_lesson_audit.py tests/unit/test_ops_readiness.py tests/unit/test_ui_parity_audit.py
 uv run python cli/ui_parity_audit.py
 cd /Users/chrischo/server/brain-ui && npm run build && npm run lint
-launchctl kickstart -k gui/$(id -u)/ai.openclaw.brain-server
+launchctl kickstart -k gui/$(id -u)/ai.brain.server
 curl /brain/ops/readiness
 curl /brain/slos
 ```
@@ -642,7 +642,7 @@ Result: py_compile passed; 5 focused tests passed; 51 targeted SLO/task/readines
 Live SLO remediation after loading the new watcher:
 
 ```bash
-launchctl kickstart -k gui/$(id -u)/ai.openclaw.brain-server
+launchctl kickstart -k gui/$(id -u)/ai.brain.server
 uv run python brain_core/db_maintenance.py wal_checkpoint
 uv run python brain_core/maintenance.py all_cleanup
 curl /brain/slos
@@ -663,7 +663,7 @@ Result: both passed. Vite emitted only the existing large-chunk advisory. Re-run
 Live readiness/SLO verification after restart:
 
 ```bash
-launchctl kickstart -k gui/$(id -u)/ai.openclaw.brain-server
+launchctl kickstart -k gui/$(id -u)/ai.brain.server
 curl /brain/ops/readiness
 curl /brain/slos
 ```
@@ -740,7 +740,7 @@ uv run python -m py_compile brain_core/cli_llm.py brain_core/brain_loop.py brain
 uv run pytest tests/unit/test_cli_first_dispatch_contract.py tests/test_brain_loop.py -q
 uv run ruff check brain_core/cli_llm.py brain_core/brain_loop.py brain_core/routes/brain_ops.py tests/unit/test_cli_first_dispatch_contract.py --select F
 uv run pytest tests/unit -q && uv run ruff check . --select F
-launchctl kickstart -k gui/$(id -u)/ai.openclaw.brain-server
+launchctl kickstart -k gui/$(id -u)/ai.brain.server
 curl /brain/usage?days=1
 curl /brain/ops/readiness
 curl /brain/slos
@@ -965,7 +965,7 @@ Fresh verification evidence:
 uv run pytest tests/unit/test_ops_readiness.py tests/unit/test_ragas_eval_set_audit.py -q
 uv run python -m py_compile brain_core/ops_readiness.py tests/unit/test_ops_readiness.py
 uv run ruff check brain_core/ops_readiness.py tests/unit/test_ops_readiness.py --select F
-launchctl kickstart -k gui/$(id -u)/ai.openclaw.brain-server
+launchctl kickstart -k gui/$(id -u)/ai.brain.server
 curl /brain/ops/readiness
 uv run pytest tests/unit -q && uv run ruff check . --select F
 curl /brain/slos
@@ -1014,7 +1014,7 @@ Fresh verification evidence:
 uv run pytest tests/unit/test_failure_lesson_audit.py tests/unit/test_skill_promotion_audit.py tests/unit/test_ops_readiness.py -q
 uv run python -m py_compile brain_core/failure_lesson_audit.py brain_core/skill_promotion_audit.py brain_core/ops_readiness.py
 uv run ruff check brain_core/failure_lesson_audit.py brain_core/skill_promotion_audit.py brain_core/ops_readiness.py tests/unit/test_failure_lesson_audit.py tests/unit/test_skill_promotion_audit.py tests/unit/test_ops_readiness.py --select F
-launchctl kickstart -k gui/$(id -u)/ai.openclaw.brain-server
+launchctl kickstart -k gui/$(id -u)/ai.brain.server
 curl /brain/ops/readiness
 uv run pytest tests/unit -q && uv run ruff check . --select F
 curl /brain/slos
@@ -1054,7 +1054,7 @@ Fresh verification evidence:
 uv run pytest tests/unit/test_metrics_buffer.py tests/unit/test_slos.py -q
 uv run python -m py_compile brain_core/metrics_buffer.py brain_core/slos.py server.py tests/unit/test_metrics_buffer.py tests/unit/test_slos.py
 uv run ruff check brain_core/metrics_buffer.py brain_core/slos.py tests/unit/test_metrics_buffer.py tests/unit/test_slos.py --select F
-launchctl kickstart -k gui/$(id -u)/ai.openclaw.brain-server
+launchctl kickstart -k gui/$(id -u)/ai.brain.server
 curl /metrics
 curl /brain/slos
 uv run pytest tests/unit -q && uv run ruff check . --select F
@@ -1079,7 +1079,7 @@ Fresh verification evidence:
 uv run pytest tests/unit/test_failure_lesson_audit.py tests/unit/test_skill_promotion_audit.py tests/unit/test_ops_readiness.py -q
 uv run python -m py_compile brain_core/failure_lesson_audit.py brain_core/skill_promotion_audit.py brain_core/ops_readiness.py
 uv run ruff check brain_core/failure_lesson_audit.py brain_core/skill_promotion_audit.py brain_core/ops_readiness.py tests/unit/test_failure_lesson_audit.py tests/unit/test_skill_promotion_audit.py tests/unit/test_ops_readiness.py --select F
-launchctl kickstart -k gui/$(id -u)/ai.openclaw.brain-server
+launchctl kickstart -k gui/$(id -u)/ai.brain.server
 curl /brain/ops/readiness
 uv run pytest tests/unit -q && uv run ruff check . --select F
 uv run python cli/world_level_bug_audit.py --json | tee logs/world-level-bug-audit.json

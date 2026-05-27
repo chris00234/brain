@@ -1,6 +1,6 @@
 # Brain — Deployment
 
-**Status (2026-04-21)**: Chris runs the brain + all storage backends natively on his M4 Max Mac Studio via launchd. Qdrant is built from source (v1.17.0 via cargo) and supervised by `ai.openclaw.qdrant-native`. The deployment artifacts in this document (`Dockerfile`, `docker-compose.yml`) are a portable fallback for Linux — they prove the brain can be containerized, run on a fresh Linux box, and recovered from cold-start in under 5 minutes.
+**Status (2026-04-21)**: Chris runs the brain + all storage backends natively on his M4 Max Mac Studio via launchd. Qdrant is built from source (v1.17.0 via cargo) and supervised by `ai.brain.qdrant`. The deployment artifacts in this document (`Dockerfile`, `docker-compose.yml`) are a portable fallback for Linux — they prove the brain can be containerized, run on a fresh Linux box, and recovered from cold-start in under 5 minutes.
 
 ## Deployment modes
 
@@ -10,22 +10,22 @@ Chris's box runs nine launchd services:
 
 | Service | Plist | Purpose |
 |---|---|---|
-| `ai.openclaw.brain-server` | `~/Library/LaunchAgents/` | Brain FastAPI on :8791 (KeepAlive supervisor) |
-| `ai.openclaw.qdrant-native` | same | Qdrant v1.17 on :6333 / :6334 (source-built binary at `~/.local/bin/qdrant`) |
-| `ai.openclaw.ollama-native` | same | Ollama on :11434, Apple Silicon GPU/NE |
-| `ai.openclaw.neo4j-native` | same | Neo4j Bolt :7687 / HTTP :7474, 512MB heap |
-| `ai.openclaw.qdrant-backup` | same | Independent failure domain backup loop (Qdrant snapshots + knowledge tree) |
-| `ai.openclaw.gateway` | same | OpenClaw gateway on :18789 |
-| `ai.openclaw.orbstack-watchdog` | same | Docker auto-recovery |
-| `ai.openclaw.watchdog` | same | Gateway watchdog |
-| `ai.openclaw.log-rotation` | same | Daily log compression |
+| `ai.brain.server` | `~/Library/LaunchAgents/` | Brain FastAPI on :8791 (KeepAlive supervisor) |
+| `ai.brain.qdrant` | same | Qdrant v1.17 on :6333 / :6334 (source-built binary at `~/.local/bin/qdrant`) |
+| `ai.brain.ollama` | same | Ollama on :11434, Apple Silicon GPU/NE |
+| `ai.brain.neo4j` | same | Neo4j Bolt :7687 / HTTP :7474, 512MB heap |
+| `ai.brain.qdrant-backup` | same | Independent failure domain backup loop (Qdrant snapshots + knowledge tree) |
+| `ai.hermes.gateway-{profile}` | same | Hermes per-profile gateways |
+| `ai.brain.orbstack-watchdog` | same | Docker auto-recovery |
+| `ai.brain.watchdog` | same | Gateway watchdog |
+| `ai.brain.log-rotation` | same | Daily log compression |
 
 Recovery from cold:
 ```bash
-launchctl bootout gui/$UID/ai.openclaw.brain-server
-launchctl bootstrap gui/$UID ~/Library/LaunchAgents/ai.openclaw.brain-server.plist
+launchctl bootout gui/$UID/ai.brain.server
+launchctl bootstrap gui/$UID ~/Library/LaunchAgents/ai.brain.server.plist
 sleep 5
-SECRET=$(cat ~/.openclaw/credentials/.personal_webhook_secret)
+SECRET=$(cat ~/.brain/credentials/.personal_webhook_secret)
 curl -sf -H "Authorization: Bearer $SECRET" http://127.0.0.1:8791/brain/health | jq .
 ```
 
@@ -36,15 +36,15 @@ For deployment on a Linux box, in CI, or in a sandbox:
 ```bash
 git clone <brain repo> brain
 cd brain
-mkdir -p ~/.openclaw/credentials
-echo "$(openssl rand -hex 32)" > ~/.openclaw/credentials/.personal_webhook_secret
-chmod 600 ~/.openclaw/credentials/.personal_webhook_secret
+mkdir -p ~/.brain/credentials
+echo "$(openssl rand -hex 32)" > ~/.brain/credentials/.personal_webhook_secret
+chmod 600 ~/.brain/credentials/.personal_webhook_secret
 
 docker compose up -d
 docker compose ps
 docker compose logs -f brain | head -40
 
-SECRET=$(cat ~/.openclaw/credentials/.personal_webhook_secret)
+SECRET=$(cat ~/.brain/credentials/.personal_webhook_secret)
 curl -sf -H "Authorization: Bearer $SECRET" http://127.0.0.1:8791/brain/health | jq .
 ```
 
@@ -79,9 +79,9 @@ python3.14 -m venv .venv
 # - Neo4j:     apt install neo4j  (or download tarball)
 
 # Bearer secret
-mkdir -p $HOME/.openclaw/credentials
-openssl rand -hex 32 > $HOME/.openclaw/credentials/.personal_webhook_secret
-chmod 600 $HOME/.openclaw/credentials/.personal_webhook_secret
+mkdir -p $HOME/.brain/credentials
+openssl rand -hex 32 > $HOME/.brain/credentials/.personal_webhook_secret
+chmod 600 $HOME/.brain/credentials/.personal_webhook_secret
 
 # Run brain
 .venv/bin/python server.py
@@ -113,7 +113,7 @@ WantedBy=multi-user.target
 
 ## Backups
 
-- **Qdrant**: `cli/backup_qdrant.py` — runs nightly via `ai.openclaw.qdrant-backup` launchd plist (3am). Uses Qdrant's snapshot API per collection, tars all snapshots, uploads to MinIO `rag-backups/`. Independent failure domain from brain-server so a brain crash doesn't take backups with it. Also dumps knowledge tree (`raw/inbox` + `canonical` + `distilled`) and a raw JSON of `semantic_memory` as extra safety nets.
+- **Qdrant**: `cli/backup_qdrant.py` — runs nightly via `ai.brain.qdrant-backup` launchd plist (3am). Uses Qdrant's snapshot API per collection, tars all snapshots, uploads to MinIO `rag-backups/`. Independent failure domain from brain-server so a brain crash doesn't take backups with it. Also dumps knowledge tree (`raw/inbox` + `canonical` + `distilled`) and a raw JSON of `semantic_memory` as extra safety nets.
 - **Neo4j**: `cli/backup_neo4j.py` — daily `neo4j-admin database dump`.
 - **Brain DBs** (`brain.db`, `autonomy.db`): SQLite WAL files. Backup script copies via `sqlite3 .backup` (atomic snapshot, no downtime).
 - **Restore**: stop brain → `qdrant-client` snapshot restore API (`PUT /collections/{name}/snapshots/upload`) → restart brain.
@@ -124,7 +124,7 @@ Backup verification is automated: `cli/backup_verify.py` runs monthly (1st of mo
 
 - **Self-monitoring**: `/brain/health` returns `{status: "healthy"|"degraded"|"down", services: {qdrant, ollama, neo4j}, alerts: [...]}`. SLOs check every 5 min.
 - **External**: Add `https://brain.chrischodev.com/healthz` to Uptime Kuma. The `/healthz` route is unauth and returns `{status: "ok"}` if the FastAPI server is up; it doesn't probe storage backends — use `/brain/health` for full status.
-- **Telegram alerts**: SLO breaches use `brain_core/telegram_alert.py` direct Telegram Bot API delivery with backlog replay. Deterministic remediation runs first for safe mechanical fixes; OpenClaw is not required for Chris-facing alert delivery.
+- **Telegram alerts**: SLO breaches use `brain_core/telegram_alert.py` direct Telegram Bot API delivery with backlog replay. Deterministic remediation runs first for safe mechanical fixes; Hermes profile gateways are not required for Chris-facing alert delivery.
 
 ## Upgrade path
 
@@ -133,7 +133,7 @@ cd /opt/brain
 git pull
 .venv/bin/pip install -e .          # picks up new deps
 .venv/bin/python cli/brain_init.py migrate  # runs schema migrations
-launchctl kickstart -k gui/$UID/ai.openclaw.brain-server  # restart
+launchctl kickstart -k gui/$UID/ai.brain.server  # restart
 sleep 5
 curl -sf -H "Authorization: Bearer $SECRET" http://127.0.0.1:8791/brain/health
 ```
@@ -154,7 +154,7 @@ None of this is implemented. Treat the brain as a personal device, not a SaaS.
 
 1. ✅ Python 3.14 installed
 2. ✅ Qdrant + Ollama + Neo4j running and reachable on localhost
-3. ✅ Bearer secret at `~/.openclaw/credentials/.personal_webhook_secret` (chmod 600)
+3. ✅ Bearer secret at `~/.brain/credentials/.personal_webhook_secret` (chmod 600)
 4. ✅ Embed model pulled in Ollama: `ollama pull blaifa/multilingual-e5-large-instruct`
 5. ✅ Brain venv installed: `pip install -e .` from project root
 6. ✅ `cli/brain_init.py check` reports all components healthy

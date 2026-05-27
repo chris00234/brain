@@ -38,7 +38,7 @@ RATE_LIMIT_SLEEP_S = 2.2
 
 MEMORY_DIR = Path.home() / ".claude" / "projects" / "-Users-chrischo" / "memory"
 BRAIN_URL = "http://127.0.0.1:8791"
-SECRET_FILE = Path.home() / ".openclaw" / "credentials" / ".personal_webhook_secret"
+SECRET_FILE = Path.home() / ".brain" / "credentials" / ".personal_webhook_secret"
 MIGRATION_LOG = Path("/Users/chrischo/server/brain/logs/claude_memory_migration.json")
 
 # Frontmatter `type` → brain category (MemoryCreateRequest enum)

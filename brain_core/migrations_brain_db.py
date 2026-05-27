@@ -40,7 +40,7 @@ except ImportError as e:
 # would hit downgrade-refused on subsequent restarts (db v3 vs code v0).
 # 2026-05-01: v13 fixes entry_chunks primary key to (collection, vector_id)
 # so identical vector ids in different collections do not overwrite.
-CURRENT_VERSIONS["brain_db"] = 13
+CURRENT_VERSIONS["brain_db"] = 15
 
 
 def _safe_int(v: object, default: int = 0) -> int:
@@ -729,6 +729,139 @@ def _fix_entry_manifest_chunk_key() -> dict:
         return {"recreated": "entry_chunks", "columns": cols}
     finally:
         conn.close()
+
+
+def _normalize_z_in_place(
+    conn: sqlite3.Connection, table: str, candidate_cols: tuple[str, ...]
+) -> tuple[list[str], dict[str, int], dict[str, int]]:
+    """Helper: REPLACE `+00:00` with `Z` for the subset of `candidate_cols`
+    that exist on `table` in `conn`. Returns (normalised_cols, before, after).
+    """
+    existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    target = [col for col in candidate_cols if col in existing]
+    before: dict[str, int] = {}
+    after: dict[str, int] = {}
+    if not target:
+        return target, before, after
+    for col in target:
+        row = conn.execute(f"SELECT COUNT(*) FROM {table} WHERE {col} LIKE '%+00:00'").fetchone()
+        before[col] = int(row[0] or 0)
+    for col in target:
+        conn.execute(
+            f"UPDATE {table} SET {col} = REPLACE({col}, '+00:00', 'Z') " f"WHERE {col} LIKE '%+00:00'"
+        )
+    conn.commit()
+    for col in target:
+        row = conn.execute(f"SELECT COUNT(*) FROM {table} WHERE {col} LIKE '%+00:00'").fetchone()
+        after[col] = int(row[0] or 0)
+    return target, before, after
+
+
+@migration("brain_db", 13, 14)
+def _normalize_entities_timestamps_to_z() -> dict:
+    """P4-12: rewrite entities timestamp columns so any `...+00:00` suffix
+    becomes `...Z`.
+
+    Covers BOTH stores entity_graph writes to:
+      * brain.db.entities (atoms_store schema — 5k+ rows, hot path)
+      * autonomy.db.entities (entity_graph fallback when Neo4j is down)
+      * autonomy.db.memory_access (entity-access counters)
+
+    entity_graph._now() now returns Z; without normalising every store, old
+    +00:00 rows mix with new Z rows and the dormant lex-sort bug
+    (architecture audit 2026-05-12 §Timestamp format inconsistency) stays
+    live for one table even though the version says it's resolved.
+
+    Schema-drift safe: tables may omit some columns (autonomy.db.entities
+    has no neo4j_synced_at, etc.). `_normalize_z_in_place` filters via
+    PRAGMA table_info, so missing columns are silently skipped.
+
+    Idempotent: REPLACE only matches the literal `+00:00` suffix.
+    """
+    summary: dict[str, dict] = {}
+    conn = _connect_brain_db()
+    try:
+        cols, before, after = _normalize_z_in_place(
+            conn, "entities", ("first_seen_at", "last_seen_at", "neo4j_synced_at")
+        )
+        summary["brain_db.entities"] = {
+            "columns": cols,
+            "before_plus_offset": before,
+            "after_plus_offset": after,
+        }
+    finally:
+        conn.close()
+
+    # autonomy.db lives next to brain.db in the same logs dir; reuse the
+    # config path so test environments can redirect it.
+    autonomy_path = BRAIN_DB.parent / "autonomy.db"
+    if autonomy_path.exists():
+        conn = sqlite3.connect(str(autonomy_path))
+        try:
+            entities_cols, e_before, e_after = _normalize_z_in_place(
+                conn,
+                "entities",
+                ("first_seen_at", "last_seen_at", "neo4j_synced_at"),
+            )
+            summary["autonomy_db.entities"] = {
+                "columns": entities_cols,
+                "before_plus_offset": e_before,
+                "after_plus_offset": e_after,
+            }
+            ma_cols, ma_before, ma_after = _normalize_z_in_place(
+                conn,
+                "memory_access",
+                ("first_accessed_at", "last_accessed_at"),
+            )
+            summary["autonomy_db.memory_access"] = {
+                "columns": ma_cols,
+                "before_plus_offset": ma_before,
+                "after_plus_offset": ma_after,
+            }
+        finally:
+            conn.close()
+    return summary
+
+
+@migration("brain_db", 14, 15)
+def _normalize_autonomy_db_timestamps_to_z() -> dict:
+    """P4-12 follow-up: v14 originally only normalised brain.db; entity_graph
+    also writes to autonomy.db.entities and autonomy.db.memory_access, which
+    were missed. This v15 step backfills those tables for installs that
+    already crossed v14 before the broader scope landed.
+
+    Idempotent. Safe on fresh installs because v14 (broadened) handles the
+    same tables — this pass simply finds zero +00:00 rows in that case.
+    """
+    summary: dict[str, dict] = {}
+    autonomy_path = BRAIN_DB.parent / "autonomy.db"
+    if not autonomy_path.exists():
+        return {"autonomy_db_missing": True}
+    conn = sqlite3.connect(str(autonomy_path))
+    try:
+        entities_cols, e_before, e_after = _normalize_z_in_place(
+            conn,
+            "entities",
+            ("first_seen_at", "last_seen_at", "neo4j_synced_at"),
+        )
+        summary["autonomy_db.entities"] = {
+            "columns": entities_cols,
+            "before_plus_offset": e_before,
+            "after_plus_offset": e_after,
+        }
+        ma_cols, ma_before, ma_after = _normalize_z_in_place(
+            conn,
+            "memory_access",
+            ("first_accessed_at", "last_accessed_at"),
+        )
+        summary["autonomy_db.memory_access"] = {
+            "columns": ma_cols,
+            "before_plus_offset": ma_before,
+            "after_plus_offset": ma_after,
+        }
+    finally:
+        conn.close()
+    return summary
 
 
 @migration("brain_db", 4, 5)

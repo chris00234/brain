@@ -40,7 +40,7 @@ def client(monkeypatch):
 
 
 def _bearer_headers():
-    secret_path = Path("/Users/chrischo/.openclaw/credentials/.personal_webhook_secret")
+    secret_path = Path("/Users/chrischo/.brain/credentials/.personal_webhook_secret")
     if not secret_path.exists():
         pytest.skip("bearer secret missing")
     return {"Authorization": f"Bearer {secret_path.read_text().strip()}"}

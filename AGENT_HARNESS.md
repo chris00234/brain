@@ -1,9 +1,12 @@
 # Agent Harness — Brain Integration Guide
 
-**Audience**: Claude Code, OpenClaw agents (Jenna / Liz / Ellie / Sage / Market), any
-other AI agent that needs to read from, write to, or trigger the brain.
+**Audience**: Claude Code, Hermes profiles (Jenna / Liz / Ellie / Sage / Market),
+Codex CLI, and any other AI agent that needs to read from, write to, or trigger
+the brain.
 
-**Last updated**: 2026-05-05 after CLI-first task dispatch, execution-truth ledger, ops readiness gates, and UI parity audit.
+**Last updated**: 2026-05-23 (OpenClaw → Hermes migration: gateway retired,
+launchd namespace migrated to `ai.brain.*` / `ai.hermes.*`, BrainMemoryProvider
+plugin added for profile-aware Hermes ↔ brain integration).
 
 ---
 
@@ -13,20 +16,29 @@ Default to MCP tools for interactive agent work. Use HTTP for batch jobs, schedu
 readiness checks, and endpoints that are not exposed as MCP tools yet. Both paths
 call the same FastAPI backend.
 
+Bearer token canonical path: `~/.brain/credentials/.personal_webhook_secret`
+
+Legacy `~/.openclaw/credentials/...` no longer exists after the 2026-05-23 OpenClaw → Brain migration. Use the `.brain` path only.
+
 | Path | Best for | Auth | Examples |
 |---|---|---|---|
-| **MCP stdio** (`brain_mcp_server.py`) | interactive tool use — Claude Code, OpenClaw sessions | Bearer read from `~/.openclaw/credentials/.personal_webhook_secret` | `brain_recall`, `brain_store`, `brain_doubt` |
-| **HTTP API** (`http://127.0.0.1:8791`) | batch jobs, schedulers, non-MCP agents, readiness and execution truth | `Authorization: Bearer $(cat ~/.openclaw/credentials/.personal_webhook_secret)` | `GET /recall/v2`, `POST /memory`, `GET /brain/ops/readiness`, `GET /brain/tasks/{id}/execution` |
+| **MCP stdio** (`brain_mcp_server.py`) | interactive tool use — Claude Code, Hermes profiles | Bearer read from `~/.brain/credentials/.personal_webhook_secret` | `brain_recall`, `brain_store`, `brain_doubt` |
+| **HTTP API** (`http://127.0.0.1:8791`) | batch jobs, schedulers, non-MCP agents, readiness and execution truth | `Authorization: Bearer $(cat ~/.brain/credentials/.personal_webhook_secret)` | `GET /recall/v2`, `POST /memory`, `GET /brain/ops/readiness`, `GET /brain/tasks/{id}/execution` |
+| **MemoryProvider plugin** (Hermes only) | session-time prefetch + sync_turn for Hermes profiles | inherits Hermes process auth | Auto: prefetch into system prompt; sync_turn → `/memory` (tag=`agent:<profile>`); on_session_end → session_summary atom |
 
 Autonomous Brain task execution and stateless task-helper endpoints are
 CLI-first through `brain_core/cli_llm.py` (Codex `gpt-5.5` primary, then
-Spark fallback). OpenClaw remains an agent integration / emergency
-fallback lane and depends on the local gateway at `127.0.0.1:18789`.
-`GET /brain/usage` is the usage/accounting proof surface for this path and must
-report `llm.source=cli_llm` plus `llm.primary_model=gpt-5.5`. Task-evaluation
-notifications use `task_queue:evaluation_action_summary` with
-`TASK EVALUATION ACTION` wording so Chris sees what Brain already did, not a
-request to approve routine evaluation handling.
+`gpt-5.3-codex-spark` fallback — same chain Hermes profiles use via the
+`fallback_providers` config). `GET /brain/usage` is the usage/accounting proof
+surface for this path and must report `llm.source=cli_llm` plus
+`llm.primary_model=gpt-5.5`. Task-evaluation notifications use
+`task_queue:evaluation_action_summary` with `TASK EVALUATION ACTION` wording so
+Chris sees what Brain already did, not a request to approve routine evaluation
+handling.
+
+OpenClaw is retired as of 2026-05-23. The local gateway (`127.0.0.1:18789`) is
+archived; the multi-channel surface lives in Hermes as 5 per-profile gateway
+daemons (`ai.hermes.gateway-{jenna,liz,ellie,sage,market}`).
 
 ---
 
@@ -35,12 +47,21 @@ request to approve routine evaluation handling.
 ### Claude Code
 MCP already registered in `~/.claude.json` → `mcpServers.brain`. Nothing to do. Tools appear as `brain_recall`, `brain_store`, etc.
 
-### OpenClaw agents
-MCP already registered in `~/.openclaw/openclaw.json` → `mcp.servers.brain`. Nothing to do. Each agent's prompt should reference the `brain_*` tools.
+### Hermes profiles (jenna / liz / ellie / sage / market)
+MCP registered in `~/.hermes/profiles/<profile>/config.yaml` → `mcp_servers.brain`
+(inherited from the default profile via `hermes profile create --clone`). Tools
+appear as `mcp_brain_brain_*` in Hermes namespace but call the same brain HTTP
+underneath. Each profile additionally activates `BrainMemoryProvider` via
+`memory.provider: brain` (see `~/server/brain/hermes_integration/brain_memory_provider/`).
+
+### Codex (CLI / app-server)
+Codex talks to brain through the same MCP server when invoked from a session
+that has `brain_mcp_server.py` registered (Claude Code subagents, Hermes
+`mcp_servers.brain`). For direct HTTP, use the bearer auth pattern below.
 
 ### Any HTTP client
 ```bash
-SECRET=$(cat ~/.openclaw/credentials/.personal_webhook_secret)
+SECRET=$(cat ~/.brain/credentials/.personal_webhook_secret)
 curl -H "Authorization: Bearer $SECRET" \
      -H "x-agent: my-agent-name" \
      http://127.0.0.1:8791/agent/heartbeat
@@ -69,7 +90,7 @@ curl -H "Authorization: Bearer $SECRET" \
 | Web search | `brain_search_web` | `POST /web/search` | SearXNG + per-domain trust scoring. |
 | Focus/working mem | `brain_focus`, `brain_wm_*` | `POST /brain/focus`, `POST /brain/wm` | Session-scoped. |
 | Feedback | — | `POST /recall/feedback` | Report useful/wrong to train LtR + calibration. |
-| Ops readiness | — | `GET /brain/ops/readiness` | Aggregated readiness blockers: backup, retrieval/eval gates, source governance, skill promotion, autonomous work visibility, OpenClaw gateway, UI parity. |
+| Ops readiness | — | `GET /brain/ops/readiness` | Aggregated readiness blockers: backup, retrieval/eval gates, source governance, skill promotion, autonomous work visibility, Hermes profile gateways, UI parity. |
 | SLO roster | — | `GET /brain/slos` | Current SLO measurements and breaches. |
 | Task execution truth | — | `GET /brain/tasks/{task_id}/execution`, `GET /brain/task-dispatch-attempts` | Handoff → dispatch attempt → outcome evidence, including backend/model/error metadata. |
 | Autonomous work | — | `GET /brain/autonomous-work` | Recent no-prior-ack/background work from task dispatch, SLO remediation, and autonomy decisions with status, consent mode, trace IDs, and evidence. |
@@ -229,7 +250,7 @@ If you're going to exceed these, use the batch endpoints.
 curl http://127.0.0.1:8791/agent/heartbeat
 
 # 2. Auth sanity
-SECRET=$(cat ~/.openclaw/credentials/.personal_webhook_secret)
+SECRET=$(cat ~/.brain/credentials/.personal_webhook_secret)
 curl -H "Authorization: Bearer $SECRET" http://127.0.0.1:8791/brain/health
 
 # 3. Recall
@@ -253,10 +274,10 @@ sqlite3 ~/server/brain/logs/brain.db \
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| 401 on every call | secret file not readable | `chmod 600 ~/.openclaw/credentials/.personal_webhook_secret` |
+| 401 on every call | secret file not readable | `chmod 600 ~/.brain/credentials/.personal_webhook_secret` |
 | Empty results on known facts | brain-server pointing at wrong Qdrant | check `/brain/health` → `services.qdrant` |
 | MCP tool not found | stale MCP server process | kill `brain_mcp_server.py` PID; Claude Code respawns it |
-| Results missing confidence field | older-than-2026-04-16 brain-server | restart: `launchctl kickstart -k gui/$(id -u)/ai.openclaw.brain-server` |
+| Results missing confidence field | older-than-2026-04-16 brain-server | restart: `launchctl kickstart -k gui/$(id -u)/ai.brain.server` |
 | High p95 latency | RAPTOR firing on short query | fine — it skips queries with fewer than 5 tokens |
 | `action_audit.actor=unknown` | agent didn't pass `x-agent` header | always pass it |
 
@@ -281,4 +302,4 @@ grep "request_id=abc123" ~/server/brain/logs/server.log
 
 ---
 
-**If the harness is failing**: start with `/agent/heartbeat` (unauthenticated). If that works, auth is the issue. If that fails, brain-server isn't running — `launchctl kickstart -k gui/$(id -u)/ai.openclaw.brain-server`.
+**If the harness is failing**: start with `/agent/heartbeat` (unauthenticated). If that works, auth is the issue. If that fails, brain-server isn't running — `launchctl kickstart -k gui/$(id -u)/ai.brain.server`.

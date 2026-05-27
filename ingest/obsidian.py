@@ -18,7 +18,7 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
-ENV_FILE = Path(os.getenv("OBSIDIAN_SYNC_ENV_FILE", "/Users/chrischo/.openclaw/workspace/.obsidian_sync.env"))
+ENV_FILE = Path(os.getenv("OBSIDIAN_SYNC_ENV_FILE", "/Users/chrischo/.brain/credentials/obsidian_sync.env"))
 FAILURE_LOG = Path("/Users/chrischo/server/brain/logs/obsidian-sync-failures.jsonl")
 STATE_FILE = Path("/Users/chrischo/server/brain/logs/obsidian-sync-state.json")
 
@@ -92,14 +92,14 @@ COUCH_URL = os.getenv("OBSIDIAN_COUCH_URL", "http://localhost:5984")
 COUCH_USER = os.getenv("OBSIDIAN_COUCH_USER")
 COUCH_PASS = os.getenv("OBSIDIAN_COUCH_PASS")
 DB_NAME = os.getenv("OBSIDIAN_COUCH_DB", "obsidian")
-VAULT_DIR = os.getenv("OBSIDIAN_VAULT_DIR", "/Users/chrischo/.openclaw/workspace/obsidian-vault")
+VAULT_DIR = os.getenv("OBSIDIAN_VAULT_DIR", "/Users/chrischo/server/brain/state/obsidian-vault")
 
 
 def _check_creds():
     if not COUCH_USER or not COUCH_PASS:
         raise RuntimeError(
             "Missing Obsidian CouchDB credentials. Set OBSIDIAN_COUCH_USER/OBSIDIAN_COUCH_PASS "
-            "(or create /Users/chrischo/.openclaw/workspace/.obsidian_sync.env)."
+            "(or create /Users/chrischo/.brain/credentials/obsidian_sync.env)."
         )
 
 

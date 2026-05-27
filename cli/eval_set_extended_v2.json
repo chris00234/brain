@@ -6588,12 +6588,12 @@
   {
     "query": "현재 Brain native vector service는 launchd에서 뭐로 떠 있어?",
     "expected_source": "canonical/live_state/launchd_services.md",
-    "expected_content": "ai.openclaw.qdrant-native",
+    "expected_content": "ai.brain.qdrant",
     "collection": "all",
     "expected_alternates": [
       "qdrant-native launchd service",
       "Qdrant native service",
-      "ai.openclaw.qdrant-native"
+      "ai.brain.qdrant"
     ],
     "_relabel_origin": "stale pre-Qdrant eval replaced after Qdrant cutover"
   },
@@ -6646,7 +6646,7 @@
   {
     "query": "What does the current launchd live state use for Brain's vector backend?",
     "expected_source": "canonical/live_state/launchd_services.md",
-    "expected_content": "ai.openclaw.qdrant-native",
+    "expected_content": "ai.brain.qdrant",
     "collection": "all",
     "expected_alternates": [
       "qdrant-native",

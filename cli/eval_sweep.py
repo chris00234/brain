@@ -56,8 +56,8 @@ STATE_FILE = Path("/tmp/brain_eval_sweep_state.json")
 ITERATIONS_LOG = BRAIN_ROOT / "logs" / "eval_sweep_iterations.jsonl"
 EVAL_COMPARE = BRAIN_ROOT / "cli" / "eval_compare.py"
 VENV_PY = BRAIN_ROOT / ".venv" / "bin" / "python"
-SECRET_FILE = Path("/Users/chrischo/.openclaw/credentials/.personal_webhook_secret")
-LAUNCHD_LABEL = f"gui/{os.getuid()}/ai.openclaw.brain-server"
+SECRET_FILE = Path("/Users/chrischo/.brain/credentials/.personal_webhook_secret")
+LAUNCHD_LABEL = f"gui/{os.getuid()}/ai.brain.server"
 BRAIN_URL = "http://127.0.0.1:8791"
 
 # Prefer the train split if it exists so we don't tune on the holdout.

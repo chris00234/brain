@@ -127,7 +127,7 @@ except ImportError:
     BRAIN_ONTOLOGY_SIDECAR_LIMIT = 5
     BRAIN_ONTOLOGY_CONDITIONAL_EXPANSION_ENABLED = False
     _PIPELINE_DIR = Path("/Users/chrischo/server/brain/pipeline")
-    OBSIDIAN_VAULT = Path("/Users/chrischo/.openclaw/workspace/obsidian-vault")
+    OBSIDIAN_VAULT = Path("/Users/chrischo/server/brain/state/obsidian-vault")
     KNOWLEDGE_SEARCH = Path("/Users/chrischo/server/brain/pipeline/search_memory.py")
     RAG_SEARCH = Path("/Users/chrischo/server/brain/brain_core/search.py")
     ONTOLOGY_GRAPH = Path("/Users/chrischo/.openclaw/memory/ontology/graph.jsonl")
@@ -1239,11 +1239,13 @@ def _should_suppress_chris_identity_for_query(query: str) -> bool:
 
 
 _AGENT_PRIMARY_DOCS = {
-    "jenna": "/Users/chrischo/.openclaw/workspace-jenna/AGENTS.md",
-    "liz": "/Users/chrischo/.openclaw/workspace-liz/AGENTS.md",
-    "ellie": "/Users/chrischo/.openclaw/workspace-ellie/AGENTS.md",
-    "sage": "/Users/chrischo/.openclaw/workspace-sage/AGENTS.md",
-    "market": "/Users/chrischo/.openclaw/workspace-market/AGENTS.md",
+    # 2026-05-24: Hermes profiles replaced retired OpenClaw workspaces.
+    # Hermes keeps each profile's durable persona contract in SOUL.md.
+    "jenna": "/Users/chrischo/.hermes/profiles/jenna/SOUL.md",
+    "liz": "/Users/chrischo/.hermes/profiles/liz/SOUL.md",
+    "ellie": "/Users/chrischo/.hermes/profiles/ellie/SOUL.md",
+    "sage": "/Users/chrischo/.hermes/profiles/sage/SOUL.md",
+    "market": "/Users/chrischo/.hermes/profiles/market/SOUL.md",
 }
 
 _SERVICE_PRIMARY_DOCS = {
@@ -1276,7 +1278,7 @@ _QUERY_PRIMARY_DOCS = [
 
 _OBSIDIAN_ROOTS = [
     Path("/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault"),
-    Path("/Users/chrischo/.openclaw/workspace/obsidian-vault"),
+    Path("/Users/chrischo/server/brain/state/obsidian-vault"),
 ]
 
 _PREFERENCE_PRIMARY_DOCS = {

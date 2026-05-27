@@ -2,7 +2,7 @@
   {
     "query": "automation success proof before claiming",
     "collection": "all",
-    "expected_source": "automation",
+    "expected_source": "distilled/infra/dist_chris_assigns_infra_and_automation_ownership_to_ellie_for_homelab_serve.md",
     "expected_content": "proof",
     "expected_alternates": [
       "actual submit",
@@ -12,7 +12,8 @@
     "category": "anti_false_success",
     "ragas_answer_eval": true,
     "purpose": "generated-answer faithfulness/relevance gate; answer must directly address the query from retrieved Brain context",
-    "answer_rubric": "Answer must say automation success claims require actual dispatch/verification proof before reporting success."
+    "answer_rubric": "Answer must say automation success claims require actual dispatch/verification proof before reporting success.",
+    "expected_source_legacy": "automation"
   },
   {
     "query": "stale fact correction superseded memory canonical layer",
@@ -132,7 +133,7 @@
   {
     "query": "CLI-first autonomous background work default model task evaluation action summary",
     "collection": "all",
-    "expected_source": "cli_llm",
+    "expected_source": "distilled/decisions/dist_a_broader_architecture_gap_was_identified_cli_llm_breakers_and_llm.md",
     "expected_content": "gpt-5.5",
     "expected_alternates": [
       "task_queue:evaluation_action_summary",
@@ -142,7 +143,8 @@
     "category": "cli_first_task_eval",
     "ragas_answer_eval": true,
     "purpose": "generated-answer faithfulness/relevance gate for CLI-first background work and task-eval action summaries",
-    "answer_rubric": "Answer must state that autonomous/background LLM work is CLI-first with Codex gpt-5.5 primary, and task evaluation sends action summaries rather than approval alerts."
+    "answer_rubric": "Answer must state that autonomous/background LLM work is CLI-first with Codex gpt-5.5 primary, and task evaluation sends action summaries rather than approval alerts.",
+    "expected_source_legacy": "cli_llm"
   },
   {
     "query": "source governance privacy negative audit personal vectors content suppressed",

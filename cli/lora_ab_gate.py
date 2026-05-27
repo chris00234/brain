@@ -57,7 +57,7 @@ def _switch_brain_adapter(path: str | None) -> dict:
     import urllib.error
     import urllib.request
 
-    secret_file = Path.home() / ".openclaw" / "credentials" / ".personal_webhook_secret"
+    secret_file = Path.home() / ".brain" / "credentials" / ".personal_webhook_secret"
     secret = secret_file.read_text().strip() if secret_file.exists() else ""
     body = json.dumps({"path": path}).encode()
     req = urllib.request.Request(

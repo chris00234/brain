@@ -1,12 +1,12 @@
 #!/bin/bash
 # Checks if brain-server is responding and alerts directly via Telegram if not.
-# Designed to be called by the existing ai.openclaw.watchdog launchd plist.
+# Designed to be called by the existing ai.brain.watchdog launchd plist.
 
 set -u
 
 BRAIN_ROOT="/Users/chrischo/server/brain"
 BRAIN_URL="http://127.0.0.1:8791/healthz"
-SECRET_FILE="$HOME/.openclaw/credentials/.personal_webhook_secret"
+SECRET_FILE="$HOME/.brain/credentials/.personal_webhook_secret"
 STATE_FILE="/tmp/.brain-watchdog-state"
 PYTHON_BIN="$BRAIN_ROOT/.venv/bin/python"
 
@@ -51,7 +51,7 @@ touch "$STATE_FILE"
 # crash, but useless when the process is HUNG (alive but not serving).
 # KeepAlive only catches exit codes, not stalls. kickstart -k forces a
 # restart whether the process has crashed or hung.
-LAUNCHD_LABEL="ai.openclaw.brain-server"
+LAUNCHD_LABEL="ai.brain.server"
 GUI_TARGET="gui/$(id -u)/${LAUNCHD_LABEL}"
 launchctl kickstart -k "$GUI_TARGET" >/dev/null 2>&1 || true
 

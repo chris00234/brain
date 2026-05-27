@@ -47,15 +47,18 @@ _cli_semaphore = threading.BoundedSemaphore(CLI_CONCURRENCY)
 
 
 def _load_api_key() -> str:
-    """Load GEMINI_API_KEY from process env or ~/.openclaw/.env."""
+    """Load GEMINI_API_KEY from process env or Hermes/legacy env files."""
     key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
     if key:
         return key
-    env_file = Path.home() / ".openclaw" / ".env"
-    if not env_file.exists():
-        return ""
-    try:
-        for line in env_file.read_text().splitlines():
+    for env_file in (Path.home() / ".hermes" / ".env", Path.home() / ".openclaw" / ".env"):
+        if not env_file.exists():
+            continue
+        try:
+            lines = env_file.read_text().splitlines()
+        except Exception:
+            continue
+        for line in lines:
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
@@ -67,8 +70,6 @@ def _load_api_key() -> str:
             k = k.strip()
             if k in ("GEMINI_API_KEY", "GOOGLE_API_KEY") and v:
                 return v.strip().strip('"').strip("'")
-    except OSError as _exc:
-        log.debug("silenced exception in vision_llm.py: %s", _exc)
     return ""
 
 

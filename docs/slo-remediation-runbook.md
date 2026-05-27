@@ -28,7 +28,7 @@ Disable the deterministic playbook with `BRAIN_SLO_AUTOREMEDIATE=off`.
 
 ## Alert delivery rule
 
-Brain critical alerts use `brain_core/telegram_alert.py` direct Telegram Bot API. OpenClaw cron jobs that deliver to Telegram must use Chris's numeric chat id `8484060831`, not `Chris`/`@chris`. The daily `openclaw_telegram_target_audit` job and CI step enforce this.
+Brain critical alerts use `brain_core/telegram_alert.py` direct Telegram Bot API. Hermes cron/scheduled jobs that deliver to Telegram must use Chris's numeric chat id `8484060831`, not `Chris`/`@chris`. The legacy `openclaw_telegram_target_audit` job remains only as a retired-backlog guard.
 
 ## Backup restore assurance
 

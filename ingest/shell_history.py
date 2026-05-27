@@ -24,9 +24,9 @@ from pathlib import Path
 
 # ── Config ──────────────────────────────────────────────
 HISTORY_FILE = Path.home() / ".zsh_history"
-STATE_FILE = Path("/Users/chrischo/.openclaw/workspace-ellie/.brain_state/shell_history_offset.json")
+STATE_FILE = Path("/Users/chrischo/server/brain/state/ingest/ellie/shell_history_offset.json")
 INBOX_DIR = Path("/Users/chrischo/server/knowledge/raw/inbox")
-FAILURE_LOG = Path("/Users/chrischo/.openclaw/workspace-ellie/logs/shell-ingest-failures.jsonl")
+FAILURE_LOG = Path("/Users/chrischo/server/brain/logs/shell-ingest-failures.jsonl")
 BUCKET_SECONDS = 5 * 60  # 5-minute work buckets
 
 # Drop entire line on these patterns — secret-bearing

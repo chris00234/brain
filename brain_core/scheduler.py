@@ -365,7 +365,7 @@ class BrainScheduler:
 
         Two phases:
         1. process_pending — auto-approve tasks above confidence threshold
-        2. process_ready — dispatch approved tasks to OpenClaw agents
+        2. process_ready — dispatch approved tasks to Hermes profiles
         """
         import sys as _sys
 

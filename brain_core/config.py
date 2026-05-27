@@ -12,7 +12,9 @@ HOME = Path(os.getenv("BRAIN_HOME", str(Path.home())))
 BRAIN_DIR = Path(os.getenv("BRAIN_DIR", str(HOME / "server" / "brain")))
 KNOWLEDGE_DIR = Path(os.getenv("KNOWLEDGE_DIR", str(HOME / "server" / "knowledge")))
 RAG_DIR = Path(os.getenv("RAG_DIR", str(HOME / "server" / "rag")))
-OPENCLAW_DIR = Path(os.getenv("OPENCLAW_DIR", str(HOME / ".openclaw")))
+OPENCLAW_DIR = Path(
+    os.getenv("OPENCLAW_DIR", str(HOME / ".brain"))
+)  # legacy name, redirected post-2026-05-23
 
 # ── Service URLs ──────────────────────────────────────────
 QDRANT_URL = os.getenv("QDRANT_URL", "http://127.0.0.1:6333")
@@ -53,8 +55,8 @@ AUDIT_DB = BRAIN_LOGS_DIR / "audit.db"
 # with temporal validity, separate from the atoms graph.
 FACTS_DB = BRAIN_LOGS_DIR / "facts.db"
 
-# ── Derived paths: openclaw ───────────────────────────────
-OPENCLAW_BIN = str(HOME / ".local" / "bin" / "openclaw")
+# ── Derived paths: Hermes / legacy brain home ─────────────
+HERMES_BIN = os.getenv("HERMES_BIN", "/Users/chrischo/.local/bin/hermes")
 OPENCLAW_CREDENTIALS = OPENCLAW_DIR / "credentials"
 SECRET_FILE = OPENCLAW_CREDENTIALS / ".personal_webhook_secret"
 OPENCLAW_ONTOLOGY_GRAPH = OPENCLAW_DIR / "memory" / "ontology" / "graph.jsonl"
@@ -97,10 +99,11 @@ BRAIN_DISPATCH_CACHE_ENABLED = os.getenv("BRAIN_DISPATCH_CACHE_ENABLED", "false"
 BRAIN_AUTO_HEAL_ENABLED = os.getenv("BRAIN_AUTO_HEAL_ENABLED", "false").lower() in ("true", "1", "yes")
 BRAIN_FINETUNE_ENABLED = os.getenv("BRAIN_FINETUNE_ENABLED", "false").lower() in ("true", "1", "yes")
 # Outcome-aware atom deboost — multiplies post-rerank scores by per-atom
-# weights from atom_deboost. Default off until the daily update job has
-# accumulated enough evidence; flip to "true" after a week of background
-# data collection.
-BRAIN_ATOM_DEBOOST_ENABLED = os.getenv("BRAIN_ATOM_DEBOOST_ENABLED", "false").lower() in (
+# weights from atom_deboost. Default on as of 2026-05-19: nightly job has
+# 323 weighted atoms (229 below 0.5) and recall feedback shows wrong>useful
+# 2:1 over 7d, so this is the consumer that closes the feedback loop.
+# Set "false" to bypass if a regression appears.
+BRAIN_ATOM_DEBOOST_ENABLED = os.getenv("BRAIN_ATOM_DEBOOST_ENABLED", "true").lower() in (
     "true",
     "1",
     "yes",

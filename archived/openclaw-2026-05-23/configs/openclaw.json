@@ -1,0 +1,1347 @@
+{
+  "meta": {
+    "lastTouchedVersion": "2026.5.18",
+    "lastTouchedAt": "2026-05-19T01:52:15.270Z"
+  },
+  "wizard": {
+    "lastRunAt": "2026-05-19T01:52:15.187Z",
+    "lastRunVersion": "2026.5.18",
+    "lastRunCommand": "doctor",
+    "lastRunMode": "local"
+  },
+  "logging": {
+    "level": "info",
+    "redactSensitive": "tools",
+    "redactPatterns": [
+      "sk-ant-[a-zA-Z0-9_-]+",
+      "Bearer [a-zA-Z0-9_-]+",
+      "botToken.*?:[a-zA-Z0-9_-]+"
+    ]
+  },
+  "update": {
+    "channel": "stable",
+    "checkOnStart": true,
+    "auto": {
+      "enabled": false
+    }
+  },
+  "auth": {
+    "profiles": {
+      "openai-codex:codexirvine@gmail.com": {
+        "provider": "openai-codex",
+        "mode": "oauth"
+      }
+    }
+  },
+  "acp": {
+    "enabled": true,
+    "dispatch": {
+      "enabled": true
+    },
+    "backend": "builtin",
+    "defaultAgent": "claude",
+    "allowedAgents": [
+      "claude",
+      "codex"
+    ],
+    "maxConcurrentSessions": 4,
+    "stream": {
+      "coalesceIdleMs": 300,
+      "maxChunkChars": 1200
+    },
+    "runtime": {
+      "ttlMinutes": 120
+    }
+  },
+  "models": {
+    "mode": "replace",
+    "providers": {
+      "openai-codex": {
+        "baseUrl": "https://chatgpt.com/backend-api/codex",
+        "apiKey": "openai-codex:codexirvine@gmail.com",
+        "api": "openai-codex-responses",
+        "models": [
+          {
+            "id": "gpt-5.5-pro",
+            "name": "GPT-5.5 Pro",
+            "reasoning": true,
+            "input": [
+              "text",
+              "image"
+            ],
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            },
+            "contextWindow": 1050000,
+            "maxTokens": 128000
+          },
+          {
+            "id": "gpt-5.5",
+            "name": "GPT-5.5",
+            "reasoning": true,
+            "input": [
+              "text",
+              "image"
+            ],
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            },
+            "contextWindow": 1050000,
+            "maxTokens": 128000
+          },
+          {
+            "id": "gpt-5.3-codex-spark",
+            "name": "GPT-5.3 Codex Spark",
+            "reasoning": true,
+            "input": [
+              "text",
+              "image"
+            ],
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            },
+            "contextWindow": 1050000,
+            "maxTokens": 128000,
+            "api": "openai-codex-responses"
+          }
+        ]
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "openai/gpt-5.5",
+        "fallbacks": [
+          "claude-cli/claude-opus-4-7",
+          "openai/gpt-5.5-pro"
+        ]
+      },
+      "models": {
+        "claude1-cli/claude-opus-4-7": {
+          "alias": "opus-claude1"
+        },
+        "claude2-cli/claude-opus-4-7": {
+          "alias": "opus-claude2"
+        },
+        "claude1-cli/claude-sonnet-4-6": {
+          "alias": "sonnet-claude1"
+        },
+        "claude2-cli/claude-sonnet-4-6": {
+          "alias": "sonnet-claude2"
+        },
+        "openai/gpt-5.5": {
+          "agentRuntime": {
+            "id": "codex"
+          }
+        },
+        "openai/gpt-5.5-pro": {
+          "alias": "pro",
+          "agentRuntime": {
+            "id": "codex"
+          }
+        }
+      },
+      "workspace": "/Users/chrischo/.openclaw/workspace",
+      "userTimezone": "America/Los_Angeles",
+      "timeFormat": "12",
+      "memorySearch": {
+        "enabled": false,
+        "provider": "local",
+        "query": {
+          "hybrid": {
+            "enabled": true,
+            "vectorWeight": 0.7,
+            "textWeight": 0.3,
+            "mmr": {
+              "enabled": true,
+              "lambda": 0.7
+            },
+            "temporalDecay": {
+              "enabled": true,
+              "halfLifeDays": 30
+            }
+          }
+        }
+      },
+      "contextPruning": {
+        "mode": "cache-ttl",
+        "ttl": "6h",
+        "keepLastAssistants": 5,
+        "softTrimRatio": 0.3,
+        "hardClearRatio": 0.5,
+        "tools": {
+          "deny": [
+            "message"
+          ]
+        }
+      },
+      "compaction": {
+        "mode": "safeguard",
+        "reserveTokens": 40000,
+        "keepRecentTokens": 35000,
+        "memoryFlush": {
+          "enabled": true,
+          "softThresholdTokens": 6000
+        }
+      },
+      "thinkingDefault": "adaptive",
+      "elevatedDefault": "on",
+      "timeoutSeconds": 1800,
+      "heartbeat": {
+        "every": "55m",
+        "activeHours": {
+          "start": "07:00",
+          "end": "23:00"
+        }
+      },
+      "maxConcurrent": 4,
+      "subagents": {
+        "maxConcurrent": 6,
+        "maxSpawnDepth": 3,
+        "maxChildrenPerAgent": 5,
+        "model": {
+          "primary": "openai/gpt-5.5",
+          "fallbacks": [
+            "claude-cli/claude-opus-4-7",
+            "openai/gpt-5.5-pro"
+          ]
+        },
+        "thinking": "high",
+        "runTimeoutSeconds": 1800
+      },
+      "contextInjection": "always",
+      "bootstrapMaxChars": 20000,
+      "bootstrapTotalMaxChars": 150000,
+      "imageGenerationModel": {
+        "primary": "openai/gpt-image-2"
+      }
+    },
+    "list": [
+      {
+        "id": "jenna",
+        "default": true,
+        "name": "Jenna",
+        "workspace": "/Users/chrischo/.openclaw/workspace-jenna",
+        "model": {
+          "primary": "openai/gpt-5.5",
+          "fallbacks": [
+            "claude-cli/claude-opus-4-7",
+            "openai/gpt-5.5-pro"
+          ]
+        },
+        "skills": [
+          "apple-reminders",
+          "things-mac",
+          "google-workspace-mcp",
+          "macos-calendar",
+          "notion-skill",
+          "weather",
+          "weather-pollen",
+          "imsg",
+          "obsidian",
+          "summarize",
+          "agent-team-orchestration",
+          "adaptive-reasoning",
+          "session-wrap-up",
+          "Self-Improving Agent (Proactive Self-Reflection)",
+          "brain-learned-agent-orchestration",
+          "brain-learned-brain-system",
+          "brain-learned-claude-code-ops",
+          "brain-learned-communication",
+          "brain-learned-general",
+          "brain-learned-infra-ops",
+          "brain-learned-llm-budget",
+          "auto-post-migration-audit",
+          "auto-brain-log-slo-cleanup",
+          "auto-brain-architecture-export",
+          "auto-brain-slo-cleanup",
+          "auto-brain-storage-cleanup",
+          "auto-brain-speak-urgent-no-active-session-limited-triage",
+          "auto-brain-speak-urgent-no-active-session-fast-triage",
+          "auto-brain-slo-infra-lesson-fix",
+          "auto-brain-slo-hardening",
+          "auto-brain-slo-fix",
+          "auto-claude-alias-setup"
+        ],
+        "heartbeat": {
+          "every": "55m",
+          "model": "openai/gpt-5.5",
+          "lightContext": true,
+          "isolatedSession": true
+        },
+        "groupChat": {
+          "mentionPatterns": [
+            "@jenna",
+            "jenna"
+          ]
+        },
+        "tools": {
+          "profile": "full",
+          "alsoAllow": [
+            "read",
+            "web_search",
+            "web_fetch"
+          ]
+        },
+        "models": {
+          "openai/gpt-5.5": {
+            "agentRuntime": {
+              "id": "codex"
+            }
+          },
+          "openai/gpt-5.5-pro": {
+            "agentRuntime": {
+              "id": "codex"
+            }
+          }
+        }
+      },
+      {
+        "id": "liz",
+        "default": false,
+        "name": "Liz",
+        "workspace": "/Users/chrischo/.openclaw/workspace-liz",
+        "model": {
+          "primary": "openai/gpt-5.5",
+          "fallbacks": [
+            "claude-cli/claude-opus-4-7",
+            "openai/gpt-5.5-pro"
+          ]
+        },
+        "skills": [
+          "github",
+          "mcporter",
+          "nextjs-expert",
+          "fastapi-patterns",
+          "shadcn-ui",
+          "conventional-commits",
+          "debug-pro",
+          "code-review",
+          "security-auditor",
+          "Agentic Coding",
+          "test-runner",
+          "sql-toolkit",
+          "adaptive-reasoning",
+          "performance-profiler",
+          "react-expert",
+          "react-performance",
+          "ui-ux-pro-max",
+          "mermaid-architect",
+          "session-wrap-up",
+          "Self-Improving Agent (Proactive Self-Reflection)",
+          "brain-learned-agent-orchestration",
+          "brain-learned-brain-system",
+          "brain-learned-claude-code-ops",
+          "brain-learned-communication",
+          "brain-learned-general",
+          "brain-learned-infra-ops",
+          "brain-learned-llm-budget",
+          "auto-post-migration-audit",
+          "auto-brain-log-slo-cleanup",
+          "auto-brain-architecture-export",
+          "auto-brain-slo-cleanup",
+          "auto-brain-storage-cleanup",
+          "auto-brain-speak-urgent-no-active-session-limited-triage",
+          "auto-brain-speak-urgent-no-active-session-fast-triage",
+          "auto-brain-slo-infra-lesson-fix",
+          "auto-brain-slo-hardening",
+          "auto-brain-slo-fix",
+          "auto-claude-alias-setup"
+        ],
+        "groupChat": {
+          "mentionPatterns": [
+            "@liz",
+            "liz"
+          ]
+        },
+        "tools": {
+          "profile": "full",
+          "alsoAllow": [
+            "web_search",
+            "web_fetch",
+            "browser",
+            "canvas",
+            "agents_list"
+          ],
+          "deny": [
+            "tts"
+          ]
+        },
+        "models": {
+          "openai/gpt-5.5": {
+            "agentRuntime": {
+              "id": "codex"
+            }
+          },
+          "openai/gpt-5.5-pro": {
+            "agentRuntime": {
+              "id": "codex"
+            }
+          }
+        }
+      },
+      {
+        "id": "ellie",
+        "default": false,
+        "name": "Ellie",
+        "workspace": "/Users/chrischo/.openclaw/workspace-ellie",
+        "model": {
+          "primary": "openai/gpt-5.5",
+          "fallbacks": [
+            "claude-cli/claude-opus-4-7",
+            "openai/gpt-5.5-pro"
+          ]
+        },
+        "skills": [
+          "cloudflare",
+          "docker-essentials",
+          "docker",
+          "docker-diag",
+          "container-debug",
+          "docker-compose",
+          "github",
+          "mcporter",
+          "server-health",
+          "security-auditor",
+          "debug-pro",
+          "performance-profiler",
+          "nginx",
+          "uptime-kuma",
+          "portainer-skill-openclaw",
+          "openclaw-backup",
+          "log-analyzer",
+          "devops-automation-pack",
+          "openclaw-update-checker",
+          "adaptive-reasoning",
+          "session-wrap-up",
+          "Self-Improving Agent (Proactive Self-Reflection)",
+          "brain-learned-agent-orchestration",
+          "brain-learned-brain-system",
+          "brain-learned-claude-code-ops",
+          "brain-learned-communication",
+          "brain-learned-general",
+          "brain-learned-infra-ops",
+          "brain-learned-llm-budget",
+          "auto-post-migration-audit",
+          "auto-brain-log-slo-cleanup",
+          "auto-brain-architecture-export",
+          "auto-brain-slo-cleanup",
+          "auto-brain-storage-cleanup",
+          "auto-brain-speak-urgent-no-active-session-limited-triage",
+          "auto-brain-speak-urgent-no-active-session-fast-triage",
+          "auto-brain-slo-infra-lesson-fix",
+          "auto-brain-slo-hardening",
+          "auto-brain-slo-fix",
+          "auto-claude-alias-setup"
+        ],
+        "heartbeat": {
+          "every": "6h",
+          "activeHours": {
+            "start": "00:00",
+            "end": "23:59"
+          },
+          "lightContext": true,
+          "isolatedSession": true
+        },
+        "groupChat": {
+          "mentionPatterns": [
+            "@ellie",
+            "ellie"
+          ]
+        },
+        "tools": {
+          "profile": "full",
+          "alsoAllow": [
+            "web_search",
+            "web_fetch",
+            "browser"
+          ],
+          "deny": [
+            "tts"
+          ]
+        },
+        "models": {
+          "openai/gpt-5.5": {
+            "agentRuntime": {
+              "id": "codex"
+            }
+          },
+          "openai/gpt-5.5-pro": {
+            "agentRuntime": {
+              "id": "codex"
+            }
+          }
+        }
+      },
+      {
+        "id": "sage",
+        "default": false,
+        "name": "Sage",
+        "workspace": "/Users/chrischo/.openclaw/workspace-sage",
+        "agentDir": "/Users/chrischo/.openclaw/agents/sage/agent",
+        "model": {
+          "primary": "openai/gpt-5.5",
+          "fallbacks": [
+            "claude-cli/claude-opus-4-7",
+            "openai/gpt-5.5-pro"
+          ]
+        },
+        "skills": [
+          "adaptive-reasoning",
+          "reasoning-personas",
+          "deep-research-pro",
+          "academic-deep-research",
+          "firecrawl-search",
+          "data-analyst",
+          "data-analyst-pro",
+          "senior-architect",
+          "markdown-converter",
+          "memory-tiering",
+          "architecture-patterns",
+          "session-wrap-up",
+          "Self-Improving Agent (Proactive Self-Reflection)",
+          "brain-learned-agent-orchestration",
+          "brain-learned-brain-system",
+          "brain-learned-claude-code-ops",
+          "brain-learned-communication",
+          "brain-learned-general",
+          "brain-learned-infra-ops",
+          "brain-learned-llm-budget",
+          "auto-post-migration-audit",
+          "auto-brain-log-slo-cleanup",
+          "auto-brain-architecture-export",
+          "auto-brain-slo-cleanup",
+          "auto-brain-storage-cleanup",
+          "auto-brain-speak-urgent-no-active-session-limited-triage",
+          "auto-brain-speak-urgent-no-active-session-fast-triage",
+          "auto-brain-slo-infra-lesson-fix",
+          "auto-brain-slo-hardening",
+          "auto-brain-slo-fix",
+          "auto-claude-alias-setup"
+        ],
+        "identity": {
+          "name": "Sage",
+          "emoji": "\ud83e\udde0"
+        },
+        "groupChat": {
+          "mentionPatterns": [
+            "@sage",
+            "sage"
+          ]
+        },
+        "tools": {
+          "profile": "full",
+          "alsoAllow": [
+            "web_fetch",
+            "web_search",
+            "cron",
+            "browser",
+            "canvas"
+          ],
+          "deny": [
+            "apply_patch"
+          ],
+          "fs": {
+            "workspaceOnly": true
+          }
+        },
+        "models": {
+          "openai/gpt-5.5": {
+            "agentRuntime": {
+              "id": "codex"
+            }
+          },
+          "openai/gpt-5.5-pro": {
+            "agentRuntime": {
+              "id": "codex"
+            }
+          }
+        }
+      },
+      {
+        "id": "market",
+        "default": false,
+        "name": "Market",
+        "workspace": "/Users/chrischo/.openclaw/workspace-market",
+        "model": {
+          "primary": "openai/gpt-5.5",
+          "fallbacks": [
+            "claude-cli/claude-opus-4-7",
+            "openai/gpt-5.5-pro"
+          ]
+        },
+        "skills": [
+          "seo",
+          "seo-optimizer",
+          "copywriting-pro",
+          "newsletter-digest",
+          "reddit-readonly",
+          "social-media-agent",
+          "landing-page-generator",
+          "growth-hacker",
+          "content-marketing",
+          "linkedin",
+          "product-hunt-launch",
+          "competitor-analysis",
+          "ghost-publishing-pro",
+          "ghost-cms-agent",
+          "adaptive-reasoning",
+          "session-wrap-up",
+          "Self-Improving Agent (Proactive Self-Reflection)",
+          "brain-learned-agent-orchestration",
+          "brain-learned-brain-system",
+          "brain-learned-claude-code-ops",
+          "brain-learned-communication",
+          "brain-learned-general",
+          "brain-learned-infra-ops",
+          "brain-learned-llm-budget",
+          "auto-post-migration-audit",
+          "auto-brain-log-slo-cleanup",
+          "auto-brain-architecture-export",
+          "auto-brain-slo-cleanup",
+          "auto-brain-storage-cleanup",
+          "auto-brain-speak-urgent-no-active-session-limited-triage",
+          "auto-brain-speak-urgent-no-active-session-fast-triage",
+          "auto-brain-slo-infra-lesson-fix",
+          "auto-brain-slo-hardening",
+          "auto-brain-slo-fix",
+          "auto-claude-alias-setup"
+        ],
+        "heartbeat": {
+          "every": "6h",
+          "activeHours": {
+            "start": "07:00",
+            "end": "23:00"
+          },
+          "lightContext": true,
+          "isolatedSession": true
+        },
+        "identity": {
+          "name": "Market",
+          "emoji": "\ud83d\udcc8"
+        },
+        "groupChat": {
+          "mentionPatterns": [
+            "@market",
+            "market"
+          ]
+        },
+        "tools": {
+          "profile": "full",
+          "alsoAllow": [
+            "web_search",
+            "web_fetch",
+            "browser",
+            "canvas"
+          ],
+          "deny": [
+            "tts"
+          ]
+        },
+        "models": {
+          "openai/gpt-5.5": {
+            "agentRuntime": {
+              "id": "codex"
+            }
+          },
+          "openai/gpt-5.5-pro": {
+            "agentRuntime": {
+              "id": "codex"
+            }
+          }
+        }
+      }
+    ]
+  },
+  "tools": {
+    "profile": "messaging",
+    "sessions": {
+      "visibility": "all"
+    },
+    "loopDetection": {
+      "enabled": true,
+      "historySize": 30,
+      "warningThreshold": 10,
+      "criticalThreshold": 20,
+      "globalCircuitBreakerThreshold": 30
+    },
+    "agentToAgent": {
+      "enabled": true,
+      "allow": [
+        "jenna",
+        "liz",
+        "ellie",
+        "sage",
+        "market"
+      ]
+    },
+    "elevated": {
+      "enabled": true,
+      "allowFrom": {
+        "telegram": [
+          8484060831
+        ]
+      }
+    },
+    "exec": {
+      "security": "full",
+      "ask": "on-miss",
+      "notifyOnExit": false
+    },
+    "web": {
+      "search": {
+        "openaiCodex": {
+          "enabled": true,
+          "mode": "cached"
+        }
+      },
+      "fetch": {
+        "enabled": true
+      }
+    }
+  },
+  "bindings": [
+    {
+      "agentId": "jenna",
+      "match": {
+        "channel": "telegram",
+        "accountId": "jenna-bot"
+      }
+    },
+    {
+      "agentId": "liz",
+      "match": {
+        "channel": "telegram",
+        "accountId": "liz-bot"
+      }
+    },
+    {
+      "agentId": "ellie",
+      "match": {
+        "channel": "telegram",
+        "accountId": "ellie-bot"
+      }
+    },
+    {
+      "agentId": "jenna",
+      "match": {
+        "channel": "telegram",
+        "accountId": "jenna-bot",
+        "peer": {
+          "kind": "group",
+          "id": "-5200401184"
+        }
+      }
+    },
+    {
+      "agentId": "liz",
+      "match": {
+        "channel": "telegram",
+        "accountId": "liz-bot",
+        "peer": {
+          "kind": "group",
+          "id": "-5200401184"
+        }
+      }
+    },
+    {
+      "agentId": "ellie",
+      "match": {
+        "channel": "telegram",
+        "accountId": "ellie-bot",
+        "peer": {
+          "kind": "group",
+          "id": "-5200401184"
+        }
+      }
+    },
+    {
+      "agentId": "sage",
+      "match": {
+        "channel": "telegram",
+        "accountId": "sage-bot"
+      }
+    },
+    {
+      "agentId": "market",
+      "match": {
+        "channel": "telegram",
+        "accountId": "market-bot"
+      }
+    },
+    {
+      "agentId": "market",
+      "match": {
+        "channel": "telegram",
+        "accountId": "market-bot",
+        "peer": {
+          "kind": "group",
+          "id": "-5200401184"
+        }
+      }
+    }
+  ],
+  "messages": {
+    "queue": {
+      "mode": "collect",
+      "byChannel": {
+        "telegram": "collect"
+      },
+      "debounceMs": 1000,
+      "cap": 20,
+      "drop": "summarize"
+    },
+    "ackReactionScope": "group-mentions",
+    "groupChat": {
+      "visibleReplies": "message_tool"
+    }
+  },
+  "commands": {
+    "native": "auto",
+    "nativeSkills": "auto",
+    "bash": true,
+    "restart": true,
+    "ownerDisplay": "raw",
+    "ownerAllowFrom": [
+      "telegram:8484060831"
+    ]
+  },
+  "approvals": {
+    "exec": {
+      "enabled": false
+    }
+  },
+  "session": {
+    "dmScope": "per-account-channel-peer",
+    "reset": {
+      "idleMinutes": 120
+    },
+    "agentToAgent": {
+      "maxPingPongTurns": 5
+    },
+    "maintenance": {
+      "mode": "enforce",
+      "pruneAfter": "3d",
+      "maxEntries": 8,
+      "resetArchiveRetention": "3d",
+      "maxDiskBytes": "500mb",
+      "highWaterBytes": "400mb"
+    }
+  },
+  "cron": {
+    "enabled": true,
+    "maxConcurrentRuns": 2,
+    "sessionRetention": "24h",
+    "runLog": {
+      "maxBytes": "5mb",
+      "keepLines": 3000
+    }
+  },
+  "hooks": {
+    "enabled": true,
+    "path": "/hooks",
+    "token": "${OPENCLAW_HOOKS_TOKEN}",
+    "defaultSessionKey": "hook:ingress",
+    "allowedAgentIds": [
+      "liz",
+      "ellie",
+      "jenna",
+      "market",
+      "sage"
+    ],
+    "presets": [
+      "gmail"
+    ],
+    "mappings": [
+      {
+        "name": "github",
+        "agentId": "liz"
+      },
+      {
+        "name": "server-alert",
+        "agentId": "ellie"
+      },
+      {
+        "name": "generic",
+        "agentId": "jenna"
+      },
+      {
+        "name": "marketing",
+        "agentId": "market"
+      }
+    ],
+    "internal": {
+      "enabled": true,
+      "entries": {
+        "boot-md": {
+          "enabled": true
+        },
+        "startup-doctor": {
+          "enabled": false
+        },
+        "self-improvement": {
+          "enabled": true
+        },
+        "brain-coordination-boot": {
+          "enabled": true
+        },
+        "brain-active-recall": {
+          "enabled": true
+        },
+        "brain-session-end": {
+          "enabled": true
+        }
+      },
+      "load": {
+        "extraDirs": [
+          "/Users/chrischo/.openclaw/workspace/hooks"
+        ]
+      }
+    }
+  },
+  "channels": {
+    "telegram": {
+      "enabled": true,
+      "dmPolicy": "pairing",
+      "groups": {
+        "-5200401184": {
+          "requireMention": true,
+          "groupPolicy": "allowlist"
+        }
+      },
+      "groupAllowFrom": [
+        8484060831,
+        8070618093
+      ],
+      "groupPolicy": "allowlist",
+      "textChunkLimit": 3000,
+      "streaming": {
+        "mode": "partial",
+        "chunkMode": "newline"
+      },
+      "retry": {
+        "attempts": 5,
+        "minDelayMs": 500,
+        "maxDelayMs": 30000,
+        "jitter": 0.2
+      },
+      "accounts": {
+        "jenna-bot": {
+          "dmPolicy": "pairing",
+          "botToken": "${TELEGRAM_JENNA_TOKEN}",
+          "groupPolicy": "allowlist",
+          "streaming": {
+            "mode": "partial"
+          }
+        },
+        "liz-bot": {
+          "dmPolicy": "pairing",
+          "botToken": "${TELEGRAM_LIZ_TOKEN}",
+          "groupPolicy": "allowlist",
+          "streaming": {
+            "mode": "partial"
+          }
+        },
+        "ellie-bot": {
+          "dmPolicy": "pairing",
+          "botToken": "${TELEGRAM_ELLIE_TOKEN}",
+          "groupPolicy": "allowlist",
+          "streaming": {
+            "mode": "partial"
+          }
+        },
+        "sage-bot": {
+          "enabled": true,
+          "dmPolicy": "pairing",
+          "botToken": "${TELEGRAM_SAGE_TOKEN}",
+          "groupPolicy": "allowlist",
+          "streaming": {
+            "mode": "partial"
+          }
+        },
+        "market-bot": {
+          "dmPolicy": "pairing",
+          "botToken": "${TELEGRAM_MARKET_TOKEN}",
+          "groupPolicy": "allowlist",
+          "streaming": {
+            "mode": "partial"
+          }
+        }
+      },
+      "defaultAccount": "ellie-bot"
+    },
+    "discord": {
+      "enabled": false
+    },
+    "nostr": {
+      "enabled": false
+    },
+    "slack": {
+      "enabled": false
+    }
+  },
+  "discovery": {
+    "mdns": {
+      "mode": "minimal"
+    }
+  },
+  "gateway": {
+    "port": 18789,
+    "mode": "local",
+    "bind": "loopback",
+    "controlUi": {
+      "allowedOrigins": [
+        "https://openclaw.chrischodev.com",
+        "http://127.0.0.1:18789",
+        "http://localhost:18789",
+        "http://127.0.0.1:3030",
+        "http://localhost:3030",
+        "http://host.docker.internal:18789"
+      ],
+      "dangerouslyDisableDeviceAuth": false
+    },
+    "auth": {
+      "mode": "token",
+      "token": "${OPENCLAW_GATEWAY_TOKEN}"
+    },
+    "trustedProxies": [
+      "127.0.0.1",
+      "::1"
+    ],
+    "tailscale": {
+      "mode": "off",
+      "resetOnExit": false
+    },
+    "remote": {
+      "url": "ws://127.0.0.1:18789",
+      "token": "${OPENCLAW_GATEWAY_TOKEN}"
+    },
+    "http": {
+      "endpoints": {
+        "chatCompletions": {
+          "enabled": true
+        }
+      }
+    }
+  },
+  "skills": {
+    "install": {
+      "nodeManager": "npm"
+    },
+    "entries": {
+      "weather": {
+        "enabled": true
+      },
+      "markdown-converter": {
+        "enabled": true
+      },
+      "adaptive-reasoning": {
+        "enabled": true
+      },
+      "nextjs-expert": {
+        "enabled": true
+      },
+      "shadcn-ui": {
+        "enabled": true
+      },
+      "conventional-commits": {
+        "enabled": true
+      },
+      "security-auditor": {
+        "enabled": true
+      },
+      "reasoning-personas": {
+        "enabled": true
+      },
+      "debug-pro": {
+        "enabled": true
+      },
+      "architecture-patterns": {
+        "enabled": true
+      },
+      "performance-profiler": {
+        "enabled": true
+      },
+      "openclaw-update-checker": {
+        "enabled": true
+      },
+      "code-review": {
+        "enabled": true
+      },
+      "agent-team-orchestration": {
+        "enabled": true
+      },
+      "Self-Improving Agent (Proactive Self-Reflection)": {
+        "enabled": true
+      },
+      "Agentic Coding": {
+        "enabled": true
+      },
+      "senior-architect": {
+        "enabled": true
+      },
+      "test-runner": {
+        "enabled": true
+      },
+      "deep-research-pro": {
+        "enabled": true
+      },
+      "auto-updater": {
+        "enabled": true
+      },
+      "data-analyst": {
+        "enabled": true
+      },
+      "auto-post-migration-audit": {
+        "enabled": true
+      },
+      "brain-learned-agent-orchestration": {
+        "enabled": true
+      },
+      "brain-learned-brain-system": {
+        "enabled": true
+      },
+      "brain-learned-claude-code-ops": {
+        "enabled": true
+      },
+      "brain-learned-communication": {
+        "enabled": true
+      },
+      "brain-learned-general": {
+        "enabled": true
+      },
+      "brain-learned-infra-ops": {
+        "enabled": true
+      },
+      "brain-learned-llm-budget": {
+        "enabled": true
+      },
+      "fastapi-patterns": {
+        "enabled": true
+      },
+      "macos-calendar": {
+        "enabled": false
+      },
+      "newsletter-digest": {
+        "enabled": true
+      },
+      "openclaw-session-cleanup": {
+        "enabled": true
+      },
+      "openclaw-session-guard": {
+        "enabled": true
+      },
+      "rag-search": {
+        "enabled": true
+      },
+      "session-wrap-up": {
+        "enabled": true
+      },
+      "ui-ux-pro-max": {
+        "enabled": true
+      },
+      "Workflow Memory (procedures + lessons)": {
+        "enabled": true
+      },
+      "auto-brain-log-slo-cleanup": {
+        "enabled": true
+      },
+      "imap-smtp-email": {
+        "enabled": true
+      },
+      "skill-vetter": {
+        "enabled": true
+      },
+      "auto-brain-architecture-export": {
+        "enabled": true
+      },
+      "summarize": {
+        "enabled": false
+      },
+      "auto-brain-slo-cleanup": {
+        "enabled": true
+      },
+      "auto-brain-storage-cleanup": {
+        "enabled": true
+      },
+      "auto-brain-speak-urgent-no-active-session-limited-triage": {
+        "enabled": true
+      },
+      "auto-brain-speak-urgent-no-active-session-fast-triage": {
+        "enabled": true
+      },
+      "auto-brain-slo-infra-lesson-fix": {
+        "enabled": true
+      },
+      "auto-brain-slo-hardening": {
+        "enabled": true
+      },
+      "auto-brain-slo-fix": {
+        "enabled": true
+      },
+      "auto-claude-alias-setup": {
+        "enabled": true
+      },
+      "obsidian": {
+        "enabled": false
+      }
+    }
+  },
+  "mcp": {
+    "servers": {
+      "brain": {
+        "command": "/Users/chrischo/server/brain/.venv/bin/python3",
+        "args": [
+          "/Users/chrischo/server/brain/brain_mcp_server.py"
+        ]
+      },
+      "crawl4ai": {
+        "command": "python3",
+        "args": [
+          "/Users/chrischo/.local/bin/crawl4ai-mcp-filtered.py"
+        ]
+      }
+    }
+  },
+  "browser": {
+    "profiles": {
+      "openclaw": {
+        "cdpPort": 18800,
+        "color": "#FF4500"
+      },
+      "automation": {
+        "cdpUrl": "http://127.0.0.1:18802",
+        "color": "#00B7FF"
+      }
+    },
+    "defaultProfile": "openclaw",
+    "headless": false,
+    "attachOnly": false
+  },
+  "plugins": {
+    "allow": [
+      "telegram",
+      "browser",
+      "openai",
+      "anthropic",
+      "llm-task",
+      "memory-core",
+      "active-memory",
+      "memory-wiki",
+      "canvas",
+      "codex"
+    ],
+    "entries": {
+      "telegram": {
+        "enabled": true
+      },
+      "llm-task": {
+        "enabled": true
+      },
+      "browser": {
+        "enabled": true
+      },
+      "openai": {
+        "enabled": true
+      },
+      "anthropic": {
+        "enabled": true
+      },
+      "memory-core": {
+        "config": {
+          "dreaming": {
+            "enabled": true,
+            "phases": {
+              "light": {
+                "enabled": true
+              },
+              "rem": {
+                "enabled": true
+              },
+              "deep": {
+                "enabled": false
+              }
+            }
+          }
+        },
+        "enabled": true
+      },
+      "active-memory": {
+        "enabled": false
+      },
+      "memory-wiki": {
+        "enabled": false
+      },
+      "alibaba": {
+        "enabled": false
+      },
+      "byteplus": {
+        "enabled": false
+      },
+      "kimi": {
+        "enabled": false
+      },
+      "minimax": {
+        "enabled": false
+      },
+      "moonshot": {
+        "enabled": false
+      },
+      "qianfan": {
+        "enabled": false
+      },
+      "qwen": {
+        "enabled": false
+      },
+      "stepfun": {
+        "enabled": false
+      },
+      "tencent": {
+        "enabled": false
+      },
+      "volcengine": {
+        "enabled": false
+      },
+      "xiaomi": {
+        "enabled": false
+      },
+      "zai": {
+        "enabled": false
+      },
+      "discord": {
+        "enabled": false
+      },
+      "nostr": {
+        "enabled": false
+      },
+      "slack": {
+        "enabled": false
+      },
+      "canvas": {
+        "config": {
+          "host": {
+            "enabled": true
+          }
+        },
+        "enabled": true
+      },
+      "codex": {
+        "enabled": true
+      }
+    },
+    "slots": {
+      "memory": "memory-core"
+    },
+    "bundledDiscovery": "compat"
+  }
+}

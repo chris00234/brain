@@ -29,7 +29,6 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -46,7 +45,15 @@ WINDOW_HOURS = 24 * 7
 
 
 def _now_iso() -> str:
-    return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+    # 2026-05-15 P2-8: delegate to shared helper; Z-suffix lex-sorts with
+    # atoms_store / entry_manifest writers.
+    import sys as _sys
+    from pathlib import Path as _Path
+
+    _sys.path.insert(0, str(_Path(__file__).resolve().parent))
+    from db import now_iso
+
+    return now_iso(z_suffix=True)
 
 
 def _ensure_table(conn: sqlite3.Connection) -> None:
@@ -220,17 +227,32 @@ def load_weight_map(
     brain_db_path: Path | str,
     floor: float = DEBOOST_FLOOR,
 ) -> dict[str, float]:
-    """Return atom_id → weight for atoms whose weight is below `floor`.
+    """Return ID-keyed weights for atoms whose weight is below `floor`.
 
-    Recall integration call site reads this small map (typically ≤200
-    entries) and multiplies the post-rerank score. Atoms at default
-    weight (1.0) are omitted so consumers can use `.get(atom_id, 1.0)`.
+    Returns a dict whose keys cover EVERY equivalent ID form for each
+    deboosted atom:
+      * atom_deboost.atom_id (the raw stored form — could be atoms.id /
+        chroma_id / audit-UUID, depending on writer)
+      * atoms.id (when join succeeds)
+      * atoms.chroma_id (when join succeeds)
+      * The chroma_id-as-suffix (so `semantic_memory:hex` results match the
+        bare `hex`-form chroma_id)
+      * UUID-dashed form of any 32-char-hex variant (matches
+        _to_dashed_uuid output written into audit/deboost)
+
+    Each weight is duplicated under all equivalent keys so the recall
+    consumer can lookup by result.id regardless of which ID schema the
+    upstream writer used. Closes the ID-mismatch hole between deboost
+    writers (audit-UUID, atoms.id from wrong_atom_demoter, chroma_id from
+    judges) and the recall reader (result.id format depends on
+    collection).
     """
     db_path = Path(brain_db_path)
     if not db_path.exists():
         return {}
+    raw_weights: dict[str, float] = {}
     try:
-        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
+        conn = sqlite3.connect(str(db_path), timeout=5)
         try:
             if not _table_exists(conn, "atom_deboost"):
                 return {}
@@ -238,11 +260,59 @@ def load_weight_map(
                 "SELECT atom_id, weight FROM atom_deboost WHERE weight < ?",
                 (floor,),
             ).fetchall()
+            raw_weights = {row[0]: float(row[1]) for row in rows}
+            if not raw_weights:
+                return {}
+            # Cross-key into atoms via id OR chroma_id. Both directions:
+            # some writers store atoms.id, others store chroma_id.
+            atoms_meta: list[tuple[str, str | None, str | None]] = []
+            if _table_exists(conn, "atoms"):
+                chunk = list(raw_weights.keys())
+                for i in range(0, len(chunk), 800):
+                    batch = chunk[i : i + 800]
+                    placeholders = ",".join("?" * len(batch))
+                    rows = conn.execute(
+                        f"SELECT atom_id_or_chroma, id, chroma_id FROM ("  # noqa: S608 — fixed placeholder count
+                        f"  SELECT id AS atom_id_or_chroma, id, chroma_id FROM atoms "
+                        f"   WHERE id IN ({placeholders}) "
+                        f"  UNION "
+                        f"  SELECT chroma_id AS atom_id_or_chroma, id, chroma_id FROM atoms "
+                        f"   WHERE chroma_id IN ({placeholders}) "
+                        f")",
+                        batch + batch,
+                    ).fetchall()
+                    atoms_meta.extend((r[0], r[1], r[2]) for r in rows)
         finally:
             conn.close()
     except sqlite3.Error:
         return {}
-    return {row[0]: float(row[1]) for row in rows}
+
+    expanded: dict[str, float] = {}
+    for key, weight in raw_weights.items():
+        for variant in _id_variants(key):
+            expanded[variant] = min(expanded.get(variant, 1.0), weight)
+    for ad_key, atoms_id, chroma_id in atoms_meta:
+        if not ad_key:
+            continue
+        weight = raw_weights.get(ad_key)
+        if weight is None:
+            continue
+        for variant in _id_variants(atoms_id) + _id_variants(chroma_id):
+            expanded[variant] = min(expanded.get(variant, 1.0), weight)
+    return expanded
+
+
+def _id_variants(raw: str | None) -> list[str]:
+    """Return every equivalent textual form for a single atom identifier."""
+    if not raw:
+        return []
+    out = {raw}
+    if ":" in raw:
+        out.add(raw.split(":", 1)[1])
+    bare = raw.split(":", 1)[1] if ":" in raw else raw
+    if len(bare) == 32 and "-" not in bare and all(c in "0123456789abcdef" for c in bare.lower()):
+        out.add(f"{bare[:8]}-{bare[8:12]}-{bare[12:16]}-{bare[16:20]}-{bare[20:]}")
+    return [v for v in out if v]
 
 
 def run_default(brain_db_path: Path | str | None = None) -> dict:

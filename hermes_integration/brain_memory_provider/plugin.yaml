@@ -1,0 +1,5 @@
+name: brain
+version: 0.1.0
+description: "Brain memory provider — Hermes ↔ brain HTTP (127.0.0.1:8791) bridge. Profile-aware via agent_identity → tag=agent:<profile>. Prefetch via /recall/v2; sync_turn via /memory POST."
+hooks:
+  - on_session_end

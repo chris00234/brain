@@ -4137,7 +4137,7 @@
     "query": "현재 Brain native vector service는 launchd에서 뭐로 떠 있어?",
     "collection": "all",
     "expected_source": "canonical/live_state/launchd_services.md",
-    "expected_content": "ai.openclaw.qdrant-native"
+    "expected_content": "ai.brain.qdrant"
   },
   {
     "query": "What service is expected to stay inside Docker in Chris's brain stack?",
@@ -4167,7 +4167,7 @@
     "query": "What does the current launchd live state use for Brain's vector backend?",
     "collection": "all",
     "expected_source": "canonical/live_state/launchd_services.md",
-    "expected_content": "ai.openclaw.qdrant-native"
+    "expected_content": "ai.brain.qdrant"
   },
   {
     "query": "What exact Docker command does Chris want for gradual redeploys?",

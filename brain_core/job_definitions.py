@@ -854,17 +854,8 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         resource_tags=("qdrant", "privacy"),
     ),
     ScheduledJob(
-        name="openclaw_telegram_target_audit",
-        description="Daily audit that OpenClaw Telegram cron delivery uses Chris's numeric chat id (06:42 PT)",
-        trigger=CronTrigger(hour=6, minute=42),
-        agent="system",
-        misfire_grace=900,
-        resource_class="light",
-        resource_tags=("openclaw", "telegram"),
-    ),
-    ScheduledJob(
         name="config_secret_audit",
-        description="Daily safe audit of required Brain/OpenClaw config and secret sources without printing values (06:47 PT)",
+        description="Daily safe audit of required Brain/Hermes config and secret sources without printing values (06:47 PT)",
         trigger=CronTrigger(hour=6, minute=47),
         agent="system",
         misfire_grace=900,
@@ -1149,12 +1140,6 @@ JOB_SCHEDULE: list[ScheduledJob] = [
     ),
     # ── New data source ingest (agent-distilled) ──────────
     ScheduledJob(
-        name="openclaw_sessions_ingest",
-        description="OpenClaw agent session distillation via Jenna -> raw/inbox (6x/day off-peak, respects 9am-6pm no-local-embedder rule)",
-        trigger=CronTrigger(hour="0,3,6,19,21,23", minute=35),
-        agent="jenna",
-    ),
-    ScheduledJob(
         name="claude_code_sessions_ingest",
         description="Claude Code session distillation via Jenna -> raw/inbox",
         trigger=CronTrigger(hour=1, minute=15),
@@ -1200,10 +1185,10 @@ JOB_SCHEDULE: list[ScheduledJob] = [
     ),
     # Registry reconciliation + auto-attach — runs 5min after skill_extract
     # so any new brain-learned-* skills get registered in skills.entries and
-    # attached to every agent without a manual `openclaw skills install`.
+    # attached to Hermes profiles without a manual `hermes skills install`.
     ScheduledJob(
         name="skill_sync",
-        description="Reconcile ~/.openclaw/skills disk ↔ openclaw.json entries + agent attach (Sunday 7:50am, after skill_extract)",
+        description="Reconcile Hermes profile skill dirs + usage sidecars (Sunday 7:50am, after skill_extract)",
         trigger=CronTrigger(day_of_week="sun", hour=7, minute=50),
         agent="system",
         misfire_grace=900,
@@ -1539,7 +1524,6 @@ RESOURCE_BUDGET_OVERRIDES: dict[str, tuple[str, tuple[str, ...]]] = {
     "entity_pages": ("heavy", ("llm", "neo4j")),
     "answer_canonicalize": ("heavy", ("llm", "qdrant")),
     "canonical_merge_draft": ("heavy", ("llm", "qdrant")),
-    "openclaw_sessions_ingest": ("heavy", ("llm", "qdrant")),
     "claude_code_sessions_ingest": ("heavy", ("llm", "qdrant")),
     "skill_extract": ("heavy", ("llm", "sqlite")),
     "atoms_to_skills": ("heavy", ("llm", "sqlite")),
@@ -1568,7 +1552,6 @@ RESOURCE_BUDGET_OVERRIDES: dict[str, tuple[str, tuple[str, ...]]] = {
     "code_index_refresh": ("heavy", ("embedder", "qdrant", "index")),
     "entry_contract_audit": ("standard", ("qdrant",)),
     "privacy_negative_audit": ("standard", ("qdrant", "privacy")),
-    "openclaw_telegram_target_audit": ("light", ("openclaw", "telegram")),
     "config_secret_audit": ("light", ("config", "secrets")),
     "release_readiness": ("light", ("git", "release")),
     "ui_parity_audit": ("light", ("ui", "readiness")),

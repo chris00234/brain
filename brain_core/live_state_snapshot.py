@@ -9,7 +9,7 @@ these files surface for "now/current/running" queries.
 
 Topics captured:
   docker_services    — docker ps (image, status, name, uptime)
-  launchd_services   — launchctl list for ai.openclaw.* jobs
+  launchd_services   — launchctl list for ai.brain.* jobs
   active_goals       — autonomy.db::goals WHERE status='active' + focus_items
   recent_commits     — git log last 24h across ~/server/* repos
   active_sessions    — action_audit distinct actors in last 1h
@@ -122,7 +122,7 @@ def _snapshot_docker() -> str:
 
 
 def _snapshot_launchd() -> str:
-    """List ai.openclaw.* launchd services and their running state."""
+    """List ai.brain.* launchd services and their running state."""
     try:
         result = subprocess.run(
             ["launchctl", "list"],
@@ -138,7 +138,7 @@ def _snapshot_launchd() -> str:
     md += "|---|---|---|\n"
     rows = 0
     for line in (result.stdout or "").splitlines():
-        if "ai.openclaw" not in line and "ai.brain" not in line:
+        if "ai.brain" not in line and "ai.hermes" not in line:
             continue
         parts = line.split()
         if len(parts) < 3:
@@ -150,7 +150,7 @@ def _snapshot_launchd() -> str:
         md += f"| `{label}` | {pid_display} | {status} |\n"
         rows += 1
     if rows == 0:
-        md += "| _(no ai.openclaw.* services found)_ | | |\n"
+        md += "| _(no ai.brain.* services found)_ | | |\n"
     return md
 
 
@@ -242,7 +242,7 @@ def _snapshot_commits() -> str:
     return md
 
 
-# ── Active sessions (Claude + OpenClaw agents) ──────────────────
+# ── Active sessions (Claude + Hermes profiles) ──────────────────
 
 
 def _snapshot_sessions() -> str:

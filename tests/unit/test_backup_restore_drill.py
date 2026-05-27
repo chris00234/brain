@@ -170,3 +170,41 @@ def test_qdrant_restore_prefers_production_snapshot_over_healthcheck(tmp_path, m
     assert out["status"] == "ok"
     assert "distilled.snapshot" in " ".join(selected_cmds)
     assert "healthcheck_probe.snapshot" not in " ".join(selected_cmds)
+
+
+def test_qdrant_restore_sets_jemalloc_env_for_macos(tmp_path, monkeypatch):
+    """Qdrant on macOS aborts with jemalloc background_thread:true unless
+    overridden; the drill must launch it with the override or the SLO breaches."""
+    captured_env: dict[str, str] = {}
+    qbin = tmp_path / "qdrant"
+    qbin.write_text("#!/bin/sh\nsleep 30\n")
+    qbin.chmod(0o755)
+    snap = tmp_path / "distilled.snapshot"
+    snap.write_bytes(b"p" * (backup_restore_drill.MIN_SNAPSHOT_BYTES + 1))
+    monkeypatch.setattr(backup_restore_drill, "QDRANT_BIN", str(qbin))
+    monkeypatch.setattr(backup_restore_drill, "_wait_for_qdrant", lambda port: True)
+    monkeypatch.setattr(backup_restore_drill, "_qdrant_collection_count", lambda port, collection: 1)
+
+    class FakeProc:
+        def __init__(self, cmd, **kwargs):
+            captured_env.update(kwargs.get("env") or {})
+            self.returncode = None
+
+        def terminate(self):
+            self.returncode = -15
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+        def poll(self):
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
+
+    monkeypatch.setattr(backup_restore_drill.subprocess, "Popen", FakeProc)
+
+    backup_restore_drill._restore_qdrant_snapshots([snap], tmp_path)
+
+    assert captured_env.get("MALLOC_CONF") == "background_thread:false"
+    assert captured_env.get("_RJEM_MALLOC_CONF") == "background_thread:false"

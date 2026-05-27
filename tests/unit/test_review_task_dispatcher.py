@@ -165,3 +165,128 @@ def test_dispatcher_queries_brain_cli_agent_beyond_default_limit(tmp_path):
     result = dispatch_pending_review_tasks(max_dispatches=2, task_queue_obj=tq, dispatch_fn=fake_dispatch)
 
     assert [d["task_id"] for d in result["dispatched"]] == [target["id"]]
+
+
+# ---------------------------------------------------------------------------
+# Failure-lesson recording regression coverage (task_failure_lesson_missing_count SLO).
+# Each failure path must invoke `_record_failure_lesson_async` with the attempt id
+# so dispatch_attempt metadata gets `failure_lesson_status` populated; otherwise
+# the SLO breaches every time a review task fails.
+# ---------------------------------------------------------------------------
+
+
+def _patch_lesson_recorder(tq: TaskQueue) -> list[dict]:
+    """Replace `_record_failure_lesson_async` with a capture spy."""
+    calls: list[dict] = []
+
+    def spy(task, failure_reason, agent_id, *, context="", attempt_id=""):
+        calls.append(
+            {
+                "task_id": task.get("id"),
+                "failure_reason": failure_reason,
+                "agent_id": agent_id,
+                "context": context,
+                "attempt_id": attempt_id,
+            }
+        )
+
+    tq._record_failure_lesson_async = spy  # type: ignore[method-assign]
+    return calls
+
+
+def test_dispatcher_records_lesson_on_transient_cli_failure(tmp_path):
+    tq = TaskQueue(tmp_path / "autonomy.db")
+    task = _seed_task(tq, created_by="outcome_feedback")
+    lesson_calls = _patch_lesson_recorder(tq)
+
+    def fake_dispatch(**_kwargs):
+        return _StubCliResult(ok=False, error="rate-limited")
+
+    dispatch_pending_review_tasks(max_dispatches=2, task_queue_obj=tq, dispatch_fn=fake_dispatch)
+
+    assert len(lesson_calls) == 1, "transient failure must invoke failure-lesson recorder"
+    call = lesson_calls[0]
+    assert call["task_id"] == task["id"]
+    assert call["agent_id"] == "brain_cli"
+    assert "transient_dispatch" in call["context"]
+    assert call["failure_reason"] == "rate-limited"
+    attempts = tq.list_dispatch_attempts(task_id=task["id"])
+    assert call["attempt_id"] == attempts[0]["id"]
+
+
+def test_dispatcher_records_lesson_on_terminal_cli_failure(tmp_path):
+    tq = TaskQueue(tmp_path / "autonomy.db")
+    task = _seed_task(tq, created_by="outcome_feedback")
+    lesson_calls = _patch_lesson_recorder(tq)
+
+    def fake_dispatch(**_kwargs):
+        return _StubCliResult(ok=False, error="invalid task prompt")
+
+    dispatch_pending_review_tasks(max_dispatches=2, task_queue_obj=tq, dispatch_fn=fake_dispatch)
+
+    assert len(lesson_calls) == 1, "terminal failure must invoke failure-lesson recorder"
+    call = lesson_calls[0]
+    assert call["task_id"] == task["id"]
+    assert call["agent_id"] == "brain_cli"
+    assert "terminal_dispatch" in call["context"]
+    assert call["failure_reason"] == "invalid task prompt"
+    attempts = tq.list_dispatch_attempts(task_id=task["id"])
+    assert call["attempt_id"] == attempts[0]["id"]
+
+
+def test_dispatcher_records_lesson_on_dispatch_exception(tmp_path):
+    tq = TaskQueue(tmp_path / "autonomy.db")
+    task = _seed_task(tq, created_by="outcome_feedback")
+    lesson_calls = _patch_lesson_recorder(tq)
+
+    def fake_dispatch(**_kwargs):
+        raise RuntimeError("boom")
+
+    dispatch_pending_review_tasks(max_dispatches=2, task_queue_obj=tq, dispatch_fn=fake_dispatch)
+
+    assert len(lesson_calls) == 1, "dispatch exception must invoke failure-lesson recorder"
+    call = lesson_calls[0]
+    assert call["task_id"] == task["id"]
+    assert call["agent_id"] == "brain_cli"
+    assert "dispatch_exception" in call["context"]
+    assert "boom" in call["failure_reason"]
+    attempts = tq.list_dispatch_attempts(task_id=task["id"])
+    assert call["attempt_id"] == attempts[0]["id"]
+
+
+def test_dispatcher_records_lesson_on_complete_task_failure(tmp_path):
+    tq = TaskQueue(tmp_path / "autonomy.db")
+    task = _seed_task(tq, created_by="outcome_feedback")
+    lesson_calls = _patch_lesson_recorder(tq)
+
+    def explode(*_a, **_kw):
+        raise RuntimeError("complete kaboom")
+
+    tq.complete_task = explode  # type: ignore[method-assign]
+
+    def fake_dispatch(**_kwargs):
+        return _StubCliResult(ok=True, text="OK from cli")
+
+    dispatch_pending_review_tasks(max_dispatches=2, task_queue_obj=tq, dispatch_fn=fake_dispatch)
+
+    assert len(lesson_calls) == 1, "complete_failed branch must invoke failure-lesson recorder"
+    call = lesson_calls[0]
+    assert call["task_id"] == task["id"]
+    assert call["agent_id"] == "brain_cli"
+    assert "complete_failed" in call["context"]
+    assert "complete kaboom" in call["failure_reason"]
+    attempts = tq.list_dispatch_attempts(task_id=task["id"])
+    assert call["attempt_id"] == attempts[0]["id"]
+
+
+def test_dispatcher_does_not_record_lesson_on_success(tmp_path):
+    tq = TaskQueue(tmp_path / "autonomy.db")
+    _seed_task(tq, created_by="outcome_feedback")
+    lesson_calls = _patch_lesson_recorder(tq)
+
+    def fake_dispatch(**_kwargs):
+        return _StubCliResult(ok=True, text="OK from cli")
+
+    dispatch_pending_review_tasks(max_dispatches=2, task_queue_obj=tq, dispatch_fn=fake_dispatch)
+
+    assert lesson_calls == [], "successful dispatch must not invoke the failure-lesson recorder"

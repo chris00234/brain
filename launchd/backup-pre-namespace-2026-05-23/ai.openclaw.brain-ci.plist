@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>ai.openclaw.brain-ci</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/chrischo/server/brain/.venv/bin/python</string>
+		<string>/Users/chrischo/server/brain/cli/ci_runner.py</string>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>/Users/chrischo/server/brain</string>
+	<key>WatchPaths</key>
+	<array>
+		<string>/Users/chrischo/server/brain/.git/HEAD</string>
+		<string>/Users/chrischo/server/brain/.git/refs/heads</string>
+	</array>
+	<key>ThrottleInterval</key>
+	<integer>30</integer>
+	<key>StandardOutPath</key>
+	<string>/Users/chrischo/server/brain/logs/ci.out.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/chrischo/server/brain/logs/ci.err.log</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>HOME</key>
+		<string>/Users/chrischo</string>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+		<key>PYTHONUNBUFFERED</key>
+		<string>1</string>
+	</dict>
+</dict>
+</plist>

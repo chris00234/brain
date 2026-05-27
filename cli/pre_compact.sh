@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-SECRET=$(cat ~/.openclaw/credentials/.personal_webhook_secret)
+SECRET=$(cat ~/.brain/credentials/.personal_webhook_secret)
 SESSION_ID=$(cat | jq -r '.sessionId // "unknown"')
 
 curl -s -X POST \

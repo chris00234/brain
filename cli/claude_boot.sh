@@ -71,7 +71,7 @@ echo $((TURN_IDX + 1)) > "$TURN_FILE"
 # both recall blocks below. Previous code called mktemp twice with separate
 # traps — the second `trap` overwrote the first, orphaning the initial
 # tempfile in /tmp/ on exit. Over time, bearer-secret tempfiles accumulated.
-SECRET_FILE_CB="$HOME/.openclaw/credentials/.personal_webhook_secret"
+SECRET_FILE_CB="$HOME/.brain/credentials/.personal_webhook_secret"
 HEADER_FILE_CB=""
 if [ -r "$SECRET_FILE_CB" ]; then
   HEADER_FILE_CB=$(mktemp -t claude_boot_hdr_XXXXXX)

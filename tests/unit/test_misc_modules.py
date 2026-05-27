@@ -261,8 +261,37 @@ def test_brain_loop_run_reports_process_timeout(tmp_path, monkeypatch):
 def test_job_registry_caps_brain_loop_tick_timeout():
     import job_registry
 
-    assert job_registry._JOB_TIMEOUT_SECONDS["brain_loop_tick"] == 45
+    # 2026-05-15: raised from 45→90s to survive wal_checkpoint_intraday's
+    # ~20s exclusive lock window. Cap stays well under the 1h generic limit.
+    assert job_registry._JOB_TIMEOUT_SECONDS["brain_loop_tick"] == 90
     assert job_registry._JOB_TIMEOUT_SECONDS["proactive_check"] == 900
+
+
+def test_job_registry_summarize_stderr_tail_skips_cost_governor_noise():
+    import job_registry
+
+    tail = (
+        "cost_governor engaged: cli concurrency capped to 2 for 1800s\n"
+        "sqlite3.OperationalError: database is locked\n"
+        "cost_governor engaged: cli concurrency capped to 2 for 1800s\n"
+        "cost_governor engaged: cli concurrency capped to 2 for 1800s\n"
+    )
+    summary = job_registry._summarize_stderr_tail(tail)
+    assert "database is locked" in summary
+    assert "cost_governor" not in summary
+
+
+def test_job_registry_summarize_stderr_tail_falls_back_to_noise_when_only_noise():
+    import job_registry
+
+    tail = "cost_governor engaged: cli concurrency capped to 2 for 1800s\n"
+    assert job_registry._summarize_stderr_tail(tail).startswith("cost_governor engaged")
+
+
+def test_job_registry_summarize_stderr_tail_empty():
+    import job_registry
+
+    assert job_registry._summarize_stderr_tail("") == ""
 
 
 # ── retrieval_inhibition ────────────────────────────────────────

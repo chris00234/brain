@@ -27,7 +27,7 @@ from common import (  # noqa: E402
 
 ROOT = Path("/Users/chrischo/server/knowledge")  # data tree
 REVIEW_QUEUE_DIR = ROOT / "review_queue"
-AGENTS_DIR = Path("/Users/chrischo/.openclaw")
+AGENTS_DIR = Path("/Users/chrischo/.brain")
 STATE_FILE = ROOT / ".pipeline_state.json"  # state tracks data, so lives with data
 DIGEST_FILE = ROOT / "reports" / "weekly-digest.md"
 try:
@@ -394,7 +394,7 @@ def main():
     # Chain reindex if anything changed so new canonical notes become searchable
     # immediately (without waiting for the next scheduled reindex).
     if not args.dry_run and (distill_created or promoted):
-        secret_file = Path.home() / ".openclaw/credentials/.personal_webhook_secret"
+        secret_file = Path.home() / ".brain/credentials/.personal_webhook_secret"
         if secret_file.exists():
             try:
                 import urllib.request

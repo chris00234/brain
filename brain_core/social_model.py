@@ -203,8 +203,8 @@ def list_subjects() -> list[dict]:
         conn.close()
 
 
-# Known-good seed: the OpenClaw agents and Chris himself. Sources from
-# CLAUDE.md + ~/.openclaw/. Confidence high (0.9) because these are
+# Known-good seed: Hermes profiles and Chris himself. Sources from
+# CLAUDE.md + ~/.hermes/profiles/. Confidence high (0.9) because these are
 # canonical role definitions, not inferred behavior.
 SEEDS: list[dict] = [
     {

@@ -73,18 +73,39 @@ _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?。！？])\s+|\n+")  # noqa: RUF001 �
 
 
 def _connect_brain_db(db_path: Path) -> sqlite3.Connection:
-    """Open brain.db with a write-friendly busy timeout.
+    """Open brain.db with a write-friendly busy timeout and connect retry.
 
     The staleness job runs alongside ingest / scheduler writers. A plain
     sqlite3.connect() can fail immediately with ``database is locked`` during
-    a harmless WAL writer overlap; waiting up to 30s keeps the maintenance job
-    reliable without adding load.
-    """
+    a harmless WAL writer overlap. Two layers of resilience:
 
-    conn = sqlite3.connect(str(db_path), timeout=30.0)
-    conn.execute("PRAGMA busy_timeout=30000")
-    conn.row_factory = sqlite3.Row
-    return conn
+      1. ``timeout=60.0`` + ``PRAGMA busy_timeout=60000`` — the connection
+         itself polls for up to 60s. Raised from 30s 2026-05-19 because
+         canonical_staleness_check kept tripping the scheduler failure SLO
+         under 04:30-cluster contention with ingest writers.
+      2. Connect-level retry — if SQLite raises ``database is locked`` while
+         opening the file (different code path than statement-level
+         busy_timeout) retry the connect itself with exponential backoff.
+    """
+    import time as _time
+
+    last_exc: sqlite3.OperationalError | None = None
+    delay = 1.0
+    for _ in range(4):
+        try:
+            conn = sqlite3.connect(str(db_path), timeout=60.0)
+            conn.execute("PRAGMA busy_timeout=60000")
+            conn.row_factory = sqlite3.Row
+            return conn
+        except sqlite3.OperationalError as exc:
+            msg = str(exc).lower()
+            if "locked" not in msg and "busy" not in msg:
+                raise
+            last_exc = exc
+            _time.sleep(delay)
+            delay = min(delay * 2.0, 8.0)
+    assert last_exc is not None
+    raise last_exc
 
 
 @lru_cache(maxsize=8)
@@ -573,43 +594,48 @@ def build_atoms_report(
                     "trust_score": row["trust_score"],
                 }
             )
+    # wal_checkpoint_intraday (cron :35) holds an EXCLUSIVE lock ~20s on
+    # brain.db. Use retrying_transaction so the maintenance pass waits the
+    # checkpoint out instead of failing the daily run.
+    from db import retrying_transaction
+
     marked_atoms = 0
     marked_vectors: dict[str, int] = {}
     if apply and ids_to_mark and db_path.exists():
         conn = _connect_brain_db(db_path)
         try:
-            conn.executemany(
-                """
-                UPDATE atoms
-                   SET tier = 'obsolete',
-                       superseded_by = ?,
-                       valid_until = ?,
-                       updated_at = ?
-                 WHERE id = ?
-                """,
-                [(f"stale_current_truth:{now}", now, now, atom_id) for atom_id in ids_to_mark],
-            )
-            conn.commit()
-            marked_atoms = conn.total_changes
+            with retrying_transaction(conn):
+                conn.executemany(
+                    """
+                    UPDATE atoms
+                       SET tier = 'obsolete',
+                           superseded_by = ?,
+                           valid_until = ?,
+                           updated_at = ?
+                     WHERE id = ?
+                    """,
+                    [(f"stale_current_truth:{now}", now, now, atom_id) for atom_id in ids_to_mark],
+                )
+                marked_atoms = conn.total_changes
         finally:
             conn.close()
     repaired_superseded_valid_until = 0
     if apply and superseded_lifecycle_gaps and db_path.exists():
         conn = _connect_brain_db(db_path)
         try:
-            conn.executemany(
-                """
-                UPDATE atoms
-                   SET valid_until = COALESCE(NULLIF(updated_at, ''), ?),
-                       updated_at = ?
-                 WHERE id = ?
-                   AND COALESCE(superseded_by, '') != ''
-                   AND (valid_until IS NULL OR valid_until = '')
-                """,
-                [(now, now, str(row["id"])) for row in superseded_lifecycle_gaps],
-            )
-            conn.commit()
-            repaired_superseded_valid_until = conn.total_changes
+            with retrying_transaction(conn):
+                conn.executemany(
+                    """
+                    UPDATE atoms
+                       SET valid_until = COALESCE(NULLIF(updated_at, ''), ?),
+                           updated_at = ?
+                     WHERE id = ?
+                       AND COALESCE(superseded_by, '') != ''
+                       AND (valid_until IS NULL OR valid_until = '')
+                    """,
+                    [(now, now, str(row["id"])) for row in superseded_lifecycle_gaps],
+                )
+                repaired_superseded_valid_until = conn.total_changes
         finally:
             conn.close()
     if apply and mirror_vector and chroma_ids_to_mark:

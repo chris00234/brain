@@ -75,7 +75,7 @@ Daily backup runs at 3:10am (just shipped). Restore procedure:
 
 ```bash
 # 1. Stop brain-server
-launchctl bootout gui/$(id -u)/ai.openclaw.brain-server
+launchctl bootout gui/$(id -u)/ai.brain.server
 
 # 2. Find latest backup
 ls -la ~/server/brain/logs/backups/ | tail -5
@@ -90,7 +90,7 @@ cp ~/server/brain/logs/brain.db ~/server/brain/logs/brain.db.pre-restore
 cp /tmp/brain-restore-test.db ~/server/brain/logs/brain.db
 
 # 5. Restart brain-server
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.openclaw.brain-server.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.brain.server.plist
 sleep 5
 curl -sf http://127.0.0.1:8791/healthz | jq -c
 ```
@@ -111,7 +111,7 @@ Chris's atoms from 2026-04 may not reflect Chris in 2031. Current handling:
 ### §API Versioning (3-5 year horizon)
 
 ~90+ endpoints, no `/v1/` prefix. Breaking changes would ripple to:
-- OpenClaw agents (rag-search skill, brain_* MCP tools)
+- Hermes profiles (brain_* MCP tools and BrainMemoryProvider)
 - Telegram bots
 - Chris's interactive tools
 - Claude Code hooks (boot_context, SessionEnd)

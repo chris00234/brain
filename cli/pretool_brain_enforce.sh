@@ -6,8 +6,8 @@
 # has been told is dangerous without explicit Chris approval.
 #
 # Scope (phase 1, narrow):
-#   - ~/.openclaw/credentials/**     — secrets dir
-#   - ~/.openclaw/openclaw.json      — main OpenClaw config
+#   - ~/.brain/credentials/**       — secrets dir
+#   - ~/.hermes/profiles/*/.env       — Hermes per-profile secrets
 #   - ~/server/brain/models/adapters/lora_active/**  — live LoRA adapter
 #
 # Escape hatch: set BRAIN_OVERRIDE=1 in the agent's env before the tool call.
@@ -19,7 +19,7 @@
 set -uo pipefail
 
 BRAIN_URL="${BRAIN_URL:-http://127.0.0.1:8791}"
-SECRET_FILE="$HOME/.openclaw/credentials/.personal_webhook_secret"
+SECRET_FILE="$HOME/.brain/credentials/.personal_webhook_secret"
 AGENT_NAME="${BRAIN_AGENT:-claude}"
 
 PAYLOAD=""
@@ -47,11 +47,11 @@ esac
 # Dangerous-path matcher. Keep narrow: each pattern is a literal prefix.
 DENY_REASON=""
 case "$FILE_PATH" in
-  "$HOME/.openclaw/credentials"/*|"$HOME/.openclaw/credentials")
+  "$HOME/.brain/credentials"/*|"$HOME/.brain/credentials")
     DENY_REASON="Modifies OpenClaw credentials dir. Rotate via the documented credential workflow, not by direct Edit/Write."
     ;;
-  "$HOME/.openclaw/openclaw.json")
-    DENY_REASON="OpenClaw config schema is strict; direct edits have corrupted the file before. Update via openclaw CLI or the brain sidecar pattern."
+  "$HOME/.hermes/profiles"/*/config.yaml)
+    DENY_REASON="Hermes profile configs are managed by \`hermes config set\` / \`hermes -p <name> config set\`. Direct YAML edits bypass validation."
     ;;
   "$HOME/server/brain/models/adapters/lora_active"/*|"$HOME/server/brain/models/adapters/lora_active")
     DENY_REASON="Live LoRA adapter must not be modified in place — that's the serving adapter. Write to lora_v_candidate/ and let lora_ab_gate promote it."

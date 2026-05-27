@@ -240,13 +240,21 @@ def get_scratch_context(agent_name):
     cached = _cache_get(key, DYNAMIC_TTL)
     if cached is not None:
         return cached
-    scratch = OPENCLAW_DIR / f"workspace-{agent_name}" / "SCRATCH.md"
-    if scratch.exists():
-        content = scratch.read_text().strip()
-        if content and len(content) > 50:
-            result = content[:500]
-            _cache_set(key, result)
-            return result
+    # Hermes profiles replaced retired OpenClaw workspaces on 2026-05-23.
+    # Prefer Hermes scratch/profile notes; retain the legacy path only as a
+    # historical compatibility fallback for old imports.
+    candidates = [
+        Path.home() / ".hermes" / "profiles" / agent_name / "SCRATCH.md",
+        Path.home() / ".hermes" / "profiles" / agent_name / "SOUL.md",
+        OPENCLAW_DIR / f"workspace-{agent_name}" / "SCRATCH.md",
+    ]
+    for scratch in candidates:
+        if scratch.exists():
+            content = scratch.read_text().strip()
+            if content and len(content) > 50:
+                result = content[:500]
+                _cache_set(key, result)
+                return result
     return None
 
 

@@ -26,8 +26,8 @@ from llm_dispatch import dispatch_json
 
 # ── Config ──────────────────────────────────────────────
 INBOX_DIR = Path("/Users/chrischo/server/knowledge/raw/inbox")
-STATE_FILE = Path("/Users/chrischo/.openclaw/workspace-sage/.brain_state/browser_ingest_state.json")
-FAILURE_LOG = Path("/Users/chrischo/.openclaw/workspace-sage/logs/browser-ingest-failures.jsonl")
+STATE_FILE = Path("/Users/chrischo/server/brain/state/ingest/sage/browser_ingest_state.json")
+FAILURE_LOG = Path("/Users/chrischo/server/brain/logs/browser-ingest-failures.jsonl")
 
 AGENT = "sage"
 DISPATCH_TIMEOUT = 240

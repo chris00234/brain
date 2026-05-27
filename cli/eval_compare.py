@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any
 
 DEFAULT_EVAL_SET = Path("/Users/chrischo/server/brain/cli/eval_set.json")
-SECRET_FILE = Path("/Users/chrischo/.openclaw/credentials/.personal_webhook_secret")
+SECRET_FILE = Path("/Users/chrischo/.brain/credentials/.personal_webhook_secret")
 BASE = "http://127.0.0.1:8791"
 BRAIN_CORE = Path("/Users/chrischo/server/brain/brain_core")
 DIVERSITY_HIGH_COSINE_THRESHOLD = 0.92

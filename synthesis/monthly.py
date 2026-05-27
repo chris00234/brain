@@ -12,6 +12,7 @@ Usage:
 """
 
 import argparse
+import contextlib
 import json
 import subprocess
 import sys
@@ -19,17 +20,16 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "brain_core"))
-from cli_llm import dispatch_with_schema  # migrated 2026-04-17
+from cli_llm import dispatch, dispatch_with_schema  # migrated 2026-04-17
 from safe_state import atomic_write_text
 
-OPENCLAW_BIN = "/Users/chrischo/.local/bin/openclaw"
+HERMES_BIN = "/Users/chrischo/.local/bin/hermes"
 WEEKLY_DIR = Path("/Users/chrischo/server/knowledge/canonical/chris/weekly")
 MONTHLY_DIR = Path("/Users/chrischo/server/knowledge/canonical/chris/monthly")
 IDENTITY = Path("/Users/chrischo/server/knowledge/canonical/chris/_identity.md")
 STATE = Path("/Users/chrischo/server/knowledge/canonical/chris/_state.md")
-FAILURE_LOG = Path("/Users/chrischo/.openclaw/workspace-sage/logs/monthly-synthesis-failures.jsonl")
+FAILURE_LOG = Path("/Users/chrischo/.hermes/profiles/sage/logs/monthly-synthesis-failures.jsonl")
 TELEGRAM_CHAT_ID = "8484060831"
-TELEGRAM_ACCOUNT = "jenna-bot"
 
 DISPATCH_TIMEOUT = 480
 AGENT = "sage"
@@ -56,6 +56,19 @@ def log_failure(reason: str) -> None:
             f.write(json.dumps({"timestamp": datetime.now(UTC).isoformat(), "reason": reason[:500]}) + "\n")
     except Exception:
         pass
+
+
+def notify_failure(reason: str) -> None:
+    """Best-effort Jenna notification without the retired OpenClaw binary."""
+    with contextlib.suppress(Exception):
+        dispatch(
+            agent="jenna",
+            message=f"SYNTHESIS FAILED: {Path(__file__).stem} — {reason}",
+            thinking="off",
+            timeout=30,
+            backlog_kind="synthesis_failure",
+            backlog_payload={"source": Path(__file__).stem, "reason": reason},
+        )
 
 
 def collect_month(target_month: str) -> dict:
@@ -141,16 +154,10 @@ def telegram_alert(month: str, out_path: Path) -> None:
     try:
         subprocess.run(
             [
-                OPENCLAW_BIN,
-                "message",
+                HERMES_BIN,
                 "send",
-                "--channel",
-                "telegram",
-                "--target",
-                TELEGRAM_CHAT_ID,
-                "--account",
-                TELEGRAM_ACCOUNT,
-                "--message",
+                "--to",
+                f"telegram:{TELEGRAM_CHAT_ID}",
                 msg,
             ],
             capture_output=True,
@@ -272,70 +279,16 @@ def main() -> None:
     if parsed is None:
         sys.stderr.write("DISPATCH_FAIL agent=sage reason=dispatch_with_schema returned None\n")
         log_failure("dispatch_with_schema returned None")
-        try:
-            subprocess.run(
-                [
-                    OPENCLAW_BIN,
-                    "agent",
-                    "--agent",
-                    "jenna",
-                    "--message",
-                    f"SYNTHESIS FAILED: {Path(__file__).stem} — dispatch_with_schema returned None",
-                    "--thinking",
-                    "off",
-                    "--timeout",
-                    "30",
-                ],
-                timeout=35,
-                capture_output=True,
-            )
-        except Exception:
-            pass
+        notify_failure("dispatch_with_schema returned None")
         sys.exit(1)
 
     if not isinstance(parsed.get("narrative"), str):
         sys.stderr.write("VALIDATION_FAIL: narrative is not a string\n")
-        try:
-            subprocess.run(
-                [
-                    OPENCLAW_BIN,
-                    "agent",
-                    "--agent",
-                    "jenna",
-                    "--message",
-                    f"SYNTHESIS FAILED: {Path(__file__).stem} — narrative field missing or not a string",
-                    "--thinking",
-                    "off",
-                    "--timeout",
-                    "30",
-                ],
-                timeout=35,
-                capture_output=True,
-            )
-        except Exception:
-            pass
+        notify_failure("narrative field missing or not a string")
         sys.exit(1)
     if not isinstance(parsed.get("longitudinal_patterns"), list):
         sys.stderr.write("VALIDATION_FAIL: longitudinal_patterns is not a list\n")
-        try:
-            subprocess.run(
-                [
-                    OPENCLAW_BIN,
-                    "agent",
-                    "--agent",
-                    "jenna",
-                    "--message",
-                    f"SYNTHESIS FAILED: {Path(__file__).stem} — longitudinal_patterns field missing or not a list",
-                    "--thinking",
-                    "off",
-                    "--timeout",
-                    "30",
-                ],
-                timeout=35,
-                capture_output=True,
-            )
-        except Exception:
-            pass
+        notify_failure("longitudinal_patterns field missing or not a list")
         sys.exit(1)
 
     print("[4/4] Writing monthly arc...")

@@ -126,8 +126,12 @@ def run(days: int = 30) -> dict:
                     slot["last_recalled_at"] = ts
 
         now = _now_iso()
-        conn.execute("BEGIN IMMEDIATE")
-        try:
+        # Retry BEGIN IMMEDIATE: wal_checkpoint_intraday at :35 holds an
+        # exclusive lock ~20s. retrying_transaction backs off until the
+        # checkpoint releases.
+        from db import retrying_transaction
+
+        with retrying_transaction(conn):
             # Wipe + repopulate. Cheaper + simpler than UPSERT for ~hundreds of atoms.
             conn.execute("DELETE FROM atom_recall_quality")
             for atom_id, c in tally.items():
@@ -149,28 +153,80 @@ def run(days: int = 30) -> dict:
                         now,
                     ),
                 )
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
 
         # Summary metrics
         labeled_atoms = sum(1 for c in tally.values() if (c["n_good"] + c["n_wrong"] + c["n_restated"]) > 0)
-        low_quality = sum(
-            1
-            for c in tally.values()
-            if (c["n_good"] + c["n_wrong"] + c["n_restated"]) >= 3
-            and c["n_good"] / (c["n_good"] + c["n_wrong"] + c["n_restated"]) < 0.3
-        )
-        return {
-            "status": "ok",
+        low_quality_ids: list[dict] = []
+        for atom_id, c in tally.items():
+            labeled = c["n_good"] + c["n_wrong"] + c["n_restated"]
+            if labeled < 3:
+                continue
+            acc = c["n_good"] / labeled
+            if acc < 0.3:
+                low_quality_ids.append(
+                    {
+                        "atom_id": atom_id,
+                        "accuracy": round(acc, 4),
+                        "n_recalls": c["n_recalls"],
+                        "labeled": labeled,
+                    }
+                )
+        low_quality = len(low_quality_ids)
+        # P3-10: persist the low-quality list so re-embed / human-review can
+        # pick it up. Previously the count was reported but the IDs were
+        # ephemeral — every job had to recompute the tally to find them. The
+        # JSONL is append-only and date-stamped so trends are visible.
+        if low_quality_ids:
+            persist_ok = _persist_low_quality_queue(low_quality_ids, now)
+            persist_status = "ok" if persist_ok else "error"
+        else:
+            persist_status = "skipped_empty"
+        result = {
+            "status": "ok" if persist_status != "error" else "degraded",
             "atoms_seen": len(tally),
             "labeled_atoms": labeled_atoms,
             "low_quality_atoms": low_quality,
+            "low_quality_persisted": persist_status,
             "window_days": days,
         }
+        return result
     finally:
         conn.close()
+
+
+def _persist_low_quality_queue(rows: list[dict], computed_at: str) -> bool:
+    """Append today's low-quality atom snapshot to the review queue.
+
+    Returns True on a successful append, False if the JSONL write failed.
+    The caller propagates the failure into the run status so a wedged
+    disk / permissions issue surfaces as a scheduler-visible error
+    instead of a silent success.
+    """
+    if not rows:
+        return True
+    try:
+        from config import BRAIN_LOGS_DIR
+    except ImportError:
+        BRAIN_LOGS_DIR = Path("/Users/chrischo/server/brain/logs")
+    out_path = BRAIN_LOGS_DIR / "atom_recall_quality_low_quality.jsonl"
+    try:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        with out_path.open("a", encoding="utf-8") as fh:
+            fh.write(
+                json.dumps(
+                    {
+                        "computed_at": computed_at,
+                        "count": len(rows),
+                        "atoms": rows,
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+    except OSError as exc:
+        log.warning("low-quality queue persist failed: %s", exc)
+        return False
+    return True
 
 
 def get_atom_quality(atom_id: str) -> dict | None:
@@ -236,8 +292,12 @@ def list_low_quality(limit: int = 50, min_labeled: int = 3, max_accuracy: float 
 
 if __name__ == "__main__":
     import argparse
+    import sys
 
     p = argparse.ArgumentParser()
     p.add_argument("--days", type=int, default=30)
     args = p.parse_args()
-    print(json.dumps(run(days=args.days), indent=2, ensure_ascii=False))  # noqa: T201
+    out = run(days=args.days)
+    print(json.dumps(out, indent=2, ensure_ascii=False))  # noqa: T201
+    if out.get("status") == "degraded":
+        sys.exit(1)

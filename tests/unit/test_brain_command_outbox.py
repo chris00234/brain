@@ -85,7 +85,7 @@ def test_command_codex_target_writes_outbox(monkeypatch, tmp_path):
 
 
 def test_command_jenna_target_no_outbox(monkeypatch, tmp_path):
-    """OpenClaw agents (jenna et al) consume via agent_messenger; no outbox."""
+    """Hermes profiles (jenna et al) consume via agent_messenger; no outbox."""
     cmd = _import_command_module(monkeypatch, tmp_path)
     req = _make_request(cmd, to_agent="jenna", content="jenna test")
     result = cmd.brain_command(req)

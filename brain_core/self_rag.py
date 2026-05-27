@@ -75,7 +75,7 @@ def critique(query: str, results: list[dict]) -> CritiqueReport:
     # Rationale: Claude is already providing recall quality judgement in its
     # own reasoning — spending 2-5s + Jenna tokens on a duplicate critique
     # adds latency without adding signal. When the session ends, later
-    # /recall/v2 calls (from Telegram / OpenClaw agents) resume Jenna path.
+    # /recall/v2 calls (from Telegram / Hermes profiles) resume Jenna path.
     try:
         from claude_session import is_session_active
 

@@ -23,7 +23,7 @@ from __future__ import annotations
 import json
 import logging
 import sys
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -224,7 +224,10 @@ def _to_float(value: object) -> float | None:
 
 
 def _now_iso() -> str:
-    return datetime.now(UTC).isoformat(timespec="seconds")
+    # 2026-05-15 P2-8: delegate to shared helper.
+    from db import now_iso
+
+    return now_iso()
 
 
 if __name__ == "__main__":

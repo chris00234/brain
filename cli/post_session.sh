@@ -1,18 +1,19 @@
 #!/bin/bash
-# Claude Code SessionEnd hook (v2) — thin outbox spooler.
+# Claude Code / Hermes SessionEnd hook (v2) — thin outbox spooler.
 #
-# Differences from v1 (post_session.sh):
-#   - Writes a JSONL envelope to ~/.openclaw/outbox/brain-learn/pending/<sid>.jsonl
-#   - Returns in ~50 ms (no blocking HTTP, no transcript parse)
-#   - Drainer (cli/outbox_drain.py) handles upload + retries asynchronously
-#   - Failures persist across brain outages (no transcript loss)
+# Writes a JSONL envelope to ~/server/brain/outbox/brain-learn/pending/<sid>.jsonl
+# Returns in ~50 ms (no blocking HTTP, no transcript parse).
+# Drainer (cli/outbox_drain.py) handles upload + retries asynchronously.
+# Failures persist across brain outages (no transcript loss).
 #
-# Cutover: `mv post_session_v2.sh post_session.sh` once verified.
+# Path migrated 2026-05-23 from ~/.openclaw/outbox/ to brain-owned location
+# as part of OpenClaw → Hermes namespace cleanup. Old path still readable
+# for any legacy spool files via the drainer's dual-path scan.
 
 set -uo pipefail
 
-LOG=/Users/chrischo/.openclaw/logs/post-session.log
-OUTBOX=/Users/chrischo/.openclaw/outbox/brain-learn/pending
+LOG=/Users/chrischo/server/brain/logs/post-session.log
+OUTBOX=/Users/chrischo/server/brain/outbox/brain-learn/pending
 DRAIN_SCRIPT=/Users/chrischo/server/brain/cli/outbox_drain.py
 BRAIN_PY="${BRAIN_PYTHON:-/Users/chrischo/server/brain/.venv/bin/python}"
 
@@ -28,7 +29,7 @@ import time
 import uuid
 from pathlib import Path
 
-OUTBOX = Path("/Users/chrischo/.openclaw/outbox/brain-learn/pending")
+OUTBOX = Path("/Users/chrischo/server/brain/outbox/brain-learn/pending")
 OUTBOX.mkdir(parents=True, exist_ok=True)
 
 raw = os.environ.get("PAYLOAD_VAR", "")

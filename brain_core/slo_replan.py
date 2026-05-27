@@ -70,13 +70,43 @@ def _load_triggers(
     return out
 
 
+def _currently_breached_set() -> set[str] | None:
+    """Return names of SLOs that are breaching RIGHT NOW.
+
+    Returns None when slos.evaluate_slos is unavailable so the caller can
+    fall back to the legacy (count-only) behavior; returns the live-breach
+    name set otherwise. Used to prevent slo_replan from queueing a
+    structural-fix task for an SLO whose breach has already cleared.
+    """
+    try:
+        from slos import evaluate_slos
+    except ImportError:
+        return None
+    try:
+        result = evaluate_slos(send_alerts=False)
+    except Exception:
+        return None
+    return {
+        item.get("name") for item in result.get("items") or [] if item.get("breached") and item.get("name")
+    }
+
+
 def find_repeat_breaches(
     *,
     log_path: Path | str = DEFAULT_LOG,
     window_days: int = DEFAULT_WINDOW_DAYS,
     min_triggers: int = DEFAULT_MIN_TRIGGERS,
+    require_currently_breached: bool = True,
 ) -> list[dict]:
-    """Return SLOs with ≥ min_triggers remediation triggers in the window."""
+    """Return SLOs with ≥ min_triggers remediation triggers in the window.
+
+    2026-05-19: ``require_currently_breached`` (default True) filters out
+    SLOs whose breach has already cleared. Historical trigger count alone
+    was queueing tasks for healthy metrics (e.g. logs_dir_growth_24h_mb
+    fired 267× during a one-time WAL leak but has been quiet since the
+    fix landed), stalling the top brain-quality goal on already-resolved
+    work. Pass False only when you specifically want historical replay.
+    """
     triggers = _load_triggers(log_path, window_days)
     counts: Counter[str] = Counter()
     last_seen: dict[str, dict] = {}
@@ -86,9 +116,12 @@ def find_repeat_breaches(
             continue
         counts[slo] += 1
         last_seen[slo] = rec
+    live_breaches = _currently_breached_set() if require_currently_breached else None
     out: list[dict] = []
     for slo, n in counts.most_common():
         if n < min_triggers:
+            continue
+        if live_breaches is not None and slo not in live_breaches:
             continue
         rec = last_seen[slo]
         out.append(

@@ -103,7 +103,7 @@ def test_playbook_triggers_calibration_refit_on_drift(monkeypatch, tmp_path):
     assert out["actions"][0]["action"] == "trigger:confidence_calibration"
 
 
-def test_playbook_starts_openclaw_gateway(monkeypatch, tmp_path):
+def test_playbook_starts_hermes_gateways(monkeypatch, tmp_path):
     import slo_remediation
 
     monkeypatch.setenv("BRAIN_SLO_AUTOREMEDIATE", "on")
@@ -120,11 +120,11 @@ def test_playbook_starts_openclaw_gateway(monkeypatch, tmp_path):
     fake_jr.dispatch_job = dispatch_job
     monkeypatch.setitem(sys.modules, "job_registry", fake_jr)
 
-    out = slo_remediation.apply_direct_remediations([{"slo": "openclaw_gateway_health", "current": 1}])
+    out = slo_remediation.apply_direct_remediations([{"slo": "hermes_gateway_health", "current": 1}])
 
-    assert calls == ["openclaw_gateway_start"]
-    assert out["actions"][0]["action"] == "trigger:openclaw_gateway_start"
-    assert "openclaw_gateway_health" in (tmp_path / "slo_remediation.jsonl").read_text()
+    assert calls == ["hermes_gateway_start"]
+    assert out["actions"][0]["action"] == "trigger:hermes_gateway_start"
+    assert "hermes_gateway_health" in (tmp_path / "slo_remediation.jsonl").read_text()
 
 
 def test_playbook_escalates_stale_dispatch_attempts(monkeypatch, tmp_path):
@@ -161,3 +161,96 @@ def test_playbook_escalates_autonomous_work_visibility_gap(monkeypatch, tmp_path
     assert out["actions"][0]["status"] == "manual_required"
     assert "/brain/autonomous-work" in (tmp_path / "slo_remediation.jsonl").read_text()
     assert "autonomous_work_visibility_gap_count" in (tmp_path / "slo_escalations.jsonl").read_text()
+
+
+def test_playbook_escalates_consecutive_rate_limited(monkeypatch, tmp_path):
+    """Stuck remediation guard: after N rate_limited cycles in a row, emit a
+    human-routed escalation so a wedged SLO (e.g. logs_dir_growth_24h_mb that
+    fired 267× without resolving) cannot loop silently forever.
+    """
+    import slo_remediation
+
+    monkeypatch.setenv("BRAIN_SLO_AUTOREMEDIATE", "on")
+    monkeypatch.setattr(slo_remediation, "LOG_FILE", tmp_path / "slo_remediation.jsonl")
+    monkeypatch.setattr(slo_remediation, "ESCALATION_LOG_FILE", tmp_path / "slo_escalations.jsonl")
+    monkeypatch.setattr(slo_remediation, "_should_fire", lambda _rule: False)
+    counter = {"v": 0}
+
+    def fake_bump(_rule):
+        counter["v"] += 1
+        return counter["v"]
+
+    monkeypatch.setattr(slo_remediation, "_bump_rate_limited", fake_bump)
+
+    last_out = None
+    for _ in range(slo_remediation.RATE_LIMITED_ESCALATION_THRESHOLD):
+        last_out = slo_remediation.apply_direct_remediations(
+            [{"slo": "logs_dir_growth_24h_mb", "current": 643.7}]
+        )
+
+    assert last_out is not None
+    assert last_out["actions"][0]["status"] == "rate_limited"
+    assert (
+        last_out["actions"][0]["consecutive_rate_limited"]
+        >= slo_remediation.RATE_LIMITED_ESCALATION_THRESHOLD
+    )
+    escalation_text = (tmp_path / "slo_escalations.jsonl").read_text()
+    assert "stuck_rate_limited" in escalation_text
+    assert "logs_dir_growth_24h_mb" in escalation_text
+
+
+def test_stuck_rate_limited_escalation_is_idempotent(monkeypatch, tmp_path):
+    """Once the streak crosses RATE_LIMITED_ESCALATION_THRESHOLD, follow-on
+    cycles must not append new escalation rows. Otherwise a wedged SLO
+    spams hundreds of identical escalations and buries new incidents.
+    """
+    import slo_remediation
+
+    monkeypatch.setenv("BRAIN_SLO_AUTOREMEDIATE", "on")
+    monkeypatch.setattr(slo_remediation, "LOG_FILE", tmp_path / "slo_remediation.jsonl")
+    monkeypatch.setattr(slo_remediation, "ESCALATION_LOG_FILE", tmp_path / "slo_escalations.jsonl")
+    monkeypatch.setattr(slo_remediation, "_should_fire", lambda _rule: False)
+    counter = {"v": 0}
+
+    def fake_bump(_rule):
+        counter["v"] += 1
+        return counter["v"]
+
+    monkeypatch.setattr(slo_remediation, "_bump_rate_limited", fake_bump)
+
+    # Fire enough cycles to cross the threshold AND keep going.
+    cycles = slo_remediation.RATE_LIMITED_ESCALATION_THRESHOLD + 4
+    for _ in range(cycles):
+        slo_remediation.apply_direct_remediations([{"slo": "logs_dir_growth_24h_mb", "current": 643.7}])
+
+    escalation_text = (tmp_path / "slo_escalations.jsonl").read_text().splitlines()
+    stuck_lines = [line for line in escalation_text if "stuck_rate_limited" in line]
+    assert (
+        len(stuck_lines) == 1
+    ), f"expected exactly one stuck_rate_limited escalation, saw {len(stuck_lines)}"
+
+
+def test_playbook_resets_rate_limited_counter_on_success(monkeypatch, tmp_path):
+    import slo_remediation
+
+    monkeypatch.setenv("BRAIN_SLO_AUTOREMEDIATE", "on")
+    monkeypatch.setattr(slo_remediation, "LOG_FILE", tmp_path / "slo_remediation.jsonl")
+
+    set_keys: dict[str, str] = {}
+
+    fake_store = type(sys)("brain_config_store")
+
+    def store_set(key, value, **_kwargs):
+        set_keys[key] = value
+
+    def store_get(_key):
+        return None
+
+    fake_store.set = store_set
+    fake_store.get = store_get
+    monkeypatch.setitem(sys.modules, "brain_config_store", fake_store)
+
+    rule = slo_remediation.PLAYBOOK["telegram_backlog_pending_count"]
+    slo_remediation._record_fire(rule)
+    counter_key = slo_remediation._consecutive_rate_limited_key(rule)
+    assert set_keys.get(counter_key) == "0"

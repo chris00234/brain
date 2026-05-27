@@ -27,20 +27,19 @@ VENV_PY = BRAIN_ROOT / ".venv/bin/python"
 LAUNCH_SRC = BRAIN_ROOT / "launchd"
 LAUNCH_DST = Path("~/Library/LaunchAgents").expanduser()
 
-SECRET_F = Path("~/.openclaw/credentials/.personal_webhook_secret").expanduser()
-OUTBOX_ROOT = Path("~/.openclaw/outbox/brain-learn").expanduser()
+SECRET_F = Path("~/.brain/credentials/.personal_webhook_secret").expanduser()
+OUTBOX_ROOT = Path("~/server/brain/outbox/brain-learn").expanduser()
 
 PLISTS = [
-    "ai.openclaw.brain-server.plist",
-    "ai.openclaw.ollama-native.plist",
-    "ai.openclaw.neo4j-native.plist",
-    "ai.openclaw.qdrant-native.plist",
-    "ai.openclaw.qdrant-backup.plist",
-    "ai.openclaw.brain-ci.plist",
-    "ai.openclaw.log-rotation.plist",
-    "ai.openclaw.gateway.plist",
-    "ai.openclaw.watchdog.plist",
-    "ai.openclaw.orbstack-watchdog.plist",
+    "ai.brain.server.plist",
+    "ai.brain.ollama.plist",
+    "ai.brain.neo4j.plist",
+    "ai.brain.qdrant.plist",
+    "ai.brain.qdrant-backup.plist",
+    "ai.brain.ci.plist",
+    "ai.brain.log-rotation.plist",
+    "ai.brain.watchdog.plist",
+    "ai.brain.orbstack-watchdog.plist",
 ]
 
 REQ_DIRS = [
@@ -48,8 +47,7 @@ REQ_DIRS = [
     BRAIN_ROOT / "logs/training",
     BRAIN_ROOT / "logs/backups",
     BRAIN_ROOT / "qdrant-backups",
-    Path("~/.openclaw/logs").expanduser(),
-    Path("~/.openclaw/credentials").expanduser(),
+    Path("~/.brain/credentials").expanduser(),
     OUTBOX_ROOT / "pending",
     OUTBOX_ROOT / "inflight",
     OUTBOX_ROOT / "done",
@@ -233,7 +231,7 @@ def cmd_full(yes: bool = False) -> int:
 
     print("\n=== Bootstrap complete ===")
     print("Next steps:")
-    print(f"  launchctl kickstart -k gui/{os.getuid()}/ai.openclaw.brain-server")
+    print(f"  launchctl kickstart -k gui/{os.getuid()}/ai.brain.server")
     print("  curl -fs http://127.0.0.1:8791/healthz")
     return 0
 

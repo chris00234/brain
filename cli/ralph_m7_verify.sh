@@ -20,7 +20,7 @@ set -uo pipefail
 BRAIN_ROOT=/Users/chrischo/server/brain
 cd "$BRAIN_ROOT"
 
-SECRET_FILE=/Users/chrischo/.openclaw/credentials/.personal_webhook_secret
+SECRET_FILE=/Users/chrischo/.brain/credentials/.personal_webhook_secret
 SECRET=$(cat "$SECRET_FILE")
 export SECRET
 

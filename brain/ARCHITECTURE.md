@@ -62,8 +62,8 @@ A single-user, local-first second brain that combines RAG, episodic + semantic m
        ┌───────────────┴──────────────────┐
        │ cli_llm fallback chain (CB+retry)│
        │ Codex gpt-5.5 → Spark   │
-       │ OpenClaw gateway as integration  │
-       │ / emergency fallback lane        │
+       │ Hermes profiles for agent work  │
+       │ via profile gateway services    │
        └──────────────────────────────────┘
 
                        ▲
@@ -81,22 +81,22 @@ A single-user, local-first second brain that combines RAG, episodic + semantic m
 
 ### 1. Operator surfaces
 - **Claude Code** — primary operator. Uses 20 brain_* MCP tools (`~/.claude.json`).
-- **OpenClaw agents** (jenna/liz/ellie/sage/market) — same 20 tools via `~/.openclaw/openclaw.json`.
+- **Hermes profiles** (jenna/liz/ellie/sage/market) — same Brain MCP surface via profile configs under `~/.hermes/profiles/<name>/`.
 - **Brain UI** — React/Vite SPA at `brain.chrischodev.com`, served via nginx, talks to `/api/*`.
 - **Telegram** — final human-only blocker surface. Proactive insights, alerts, and digests are first routed through the Brain escalation policy and subscription-backed LLM/agent handling; Chris is notified only for missing private/current knowledge, credentials/account access, physical access, irreversible authority, or human-only judgment.
 
 ### 2. API gateway (`server.py`, ~5,000 LOC)
-FastAPI on `127.0.0.1:8791`. Bearer-token auth (`~/.openclaw/credentials/.personal_webhook_secret`), per-route slowapi rate limits (M5), per-actor adoption tracking via `action_audit` (M7-WS8), ~130 routes covering recall/memory/jobs/SLOs/triggers/holdout/atoms/breakers/quiet hours/denylist.
+FastAPI on `127.0.0.1:8791`. Bearer-token auth (`~/.brain/credentials/.personal_webhook_secret`), per-route slowapi rate limits (M5), per-actor adoption tracking via `action_audit` (M7-WS8), ~130 routes covering recall/memory/jobs/SLOs/triggers/holdout/atoms/breakers/quiet hours/denylist.
 
 ### 3. Search pipeline (`brain_core/search_unified.py`)
 Parallel fan-out across 6 sources → RRF fuse with trust weights → cross-encoder rerank (BGE-reranker-base) → token-overlap rerank → time decay (category-aware) → preference recency boost → graph entity boost → spreading activation (HippoRAG PPR) → triple_link boost (HippoRAG2, M7-WS3) → MMR diversity → source diversity cap. Optional `?iterative=true` activates CRAG (M9) for low-confidence retry.
 
-Cross-encoder scoring runs in an isolated local worker (`brain_core/reranker_worker.py`, launchd label `ai.openclaw.brain-reranker`, `127.0.0.1:8792`) when `BRAIN_RERANKER_MODE=worker`. The main API calls it via `brain_core/reranker_client.py` and keeps stage-1 retrieval results unchanged if the worker is unavailable. This prevents Torch/MPS allocator growth from accumulating in the long-running `server.py` process; the worker self-recycles on RSS/request/lifetime limits and launchd restarts it.
+Cross-encoder scoring runs in an isolated local worker (`brain_core/reranker_worker.py`, launchd label `ai.brain.reranker`, `127.0.0.1:8792`) when `BRAIN_RERANKER_MODE=worker`. The main API calls it via `brain_core/reranker_client.py` and keeps stage-1 retrieval results unchanged if the worker is unavailable. This prevents Torch/MPS allocator growth from accumulating in the long-running `server.py` process; the worker self-recycles on RSS/request/lifetime limits and launchd restarts it.
 
 `/recall/active` adds a lightweight judgment layer before per-turn hook injection. `brain_core/judgment_layer.py` classifies prompt shape, suppresses proceed-only/generic hook noise, sets semantic score and token budgets, and arbitrates canonical/doorbell/semantic/proactive blocks so the hook injects only evidence that is useful for the current turn. `brain_core/judgment_feedback.py` records those decisions beside `action_audit` and exposes `/brain/judgment-report` plus `/brain/judgment-tuning` for evidence-based policy tuning without adding a new daemon or LLM call.
 
 ### 4. Storage layer (3 native services + SQLite)
-- **Qdrant** 1.17 native at `127.0.0.1:6333` — 7 collections (13→7 collapse via payload discriminators), ~34K points, 1024-dim e5-large-instruct. int8 scalar quantization, HNSW m=16/ef_construct=128, named vectors `dense`+`contextual`+`raptor` on canonical, `sparse` (BM25 via IDF modifier) on every collection. Built from source; supervised by `ai.openclaw.qdrant-native`.
+- **Qdrant** 1.17 native at `127.0.0.1:6333` — 7 collections (13→7 collapse via payload discriminators), ~34K points, 1024-dim e5-large-instruct. int8 scalar quantization, HNSW m=16/ef_construct=128, named vectors `dense`+`contextual`+`raptor` on canonical, `sparse` (BM25 via IDF modifier) on every collection. Built from source; supervised by `ai.brain.qdrant`.
 - **Ollama** native at `127.0.0.1:11434` — embedder only. `multilingual-e5-large-instruct`. Asymmetric `passage:`/`query:` prefixes. Apple Silicon GPU/NE. Zero LLM duty.
 - **Neo4j** native at `127.0.0.1:7687` — entity knowledge graph (atoms ↔ entities ↔ relationships). 512MB heap.
 - **SQLite WAL** — `brain.db` (atoms truth layer + action_audit + web_search), `autonomy.db` (eval_proposals, autopilot, breakers, accuracy_tracker), `metrics_history.db`, `audit.db`.
@@ -105,7 +105,7 @@ Cross-encoder scoring runs in an isolated local worker (`brain_core/reranker_wor
 523+ canonical atoms with SM-2 spaced repetition (`easiness_factor`, `interval_days`, `next_review_at`, `reinforcement_count`), tier promotion (`episodic → semantic → core → obsolete`), supersession chains (`supersedes` / `superseded_by` / `valid_from` / `valid_until`), per-atom provenance + raw_event lineage. Gated by `BRAIN_ATOMS_ENABLED` for write-side, `BRAIN_ATOMS_READ` for read-side filtering.
 
 ### 6. LLM dispatch (`brain_core/cli_llm.py`, `brain_core/openclaw_dispatch.py`)
-Mechanical text LLM calls and autonomous Brain background work route through the subscription Codex CLI via `brain_core/cli_llm.py`: Codex `gpt-5.5` first, then `gpt-5.3-codex-spark`. Tool/session-heavy agent work can still use OpenClaw through `brain_core/openclaw_dispatch.py`, but OpenClaw is the integration / emergency fallback lane rather than the default executor. Both paths use breakers/backlog so quota degradation queues catch-up work instead of paging Chris. Hard rule: no direct OpenAI/Anthropic SDK billing and no local generation model duty.
+Mechanical text LLM calls and autonomous Brain background work route through the subscription Codex CLI via `brain_core/cli_llm.py`: Codex `gpt-5.5` first, then `gpt-5.3-codex-spark`. Tool/session-heavy agent work routes through Hermes profiles via the legacy-named `brain_core/openclaw_dispatch.py` compatibility wrapper. Both paths use breakers/backlog so quota degradation queues catch-up work instead of paging Chris. Hard rule: no direct OpenAI/Anthropic SDK billing and no local generation model duty.
 Usage/accounting is exposed through `/brain/usage`, backed by `cli_llm.get_usage_stats`, and should report `source=cli_llm` with `primary_model=gpt-5.5` for mechanical dispatch.
 
 `brain_core/escalation_policy.py` gates all Chris-facing notification paths. The default target is LLM/agent self-handling; Telegram is reserved for blockers the LLM cannot resolve itself: missing private/current knowledge, credentials/account access, physical access, irreversible authority, or human-only judgment. If a subscription LLM review returns `HUMAN_NEEDED: ...`, the original path may notify Chris with that specific blocker; `HANDLEABLE: ...` stays inside Brain.
@@ -125,7 +125,7 @@ Vision captioning defaults to the subscription CLI path: `brain_core/vision_llm.
 L0–L3 levels per action_kind. Per-kind override via `POST /brain/autonomy/{kind}`. Quiet hours 23:00–07:00 PT. Soft denylist + DENY_PREFIXES. Persistent breakers (5m / 15m / 1h / 4h backoff). Top kill: `BRAIN_AUTOPILOT_DISABLED=1`.
 
 ### 9. SLO + alert loop (`brain_core/slos.py`)
-27 SLOs in code cover recall latency/quality, breakers, queue backlogs, atom writes, eval drift, backups, logs size, entry-contract drift, Telegram delivery, OpenClaw gateway health, task-dispatch truth, Reflexion lesson coverage, and Brain process RSS. Checked every 5 min. Chris-facing alerts use `brain_core/telegram_alert.py` direct Telegram delivery with backlog replay; deterministic remediation runs first for safe mechanical fixes.
+27 SLOs in code cover recall latency/quality, breakers, queue backlogs, atom writes, eval drift, backups, logs size, entry-contract drift, Telegram delivery, Hermes profile gateway health, task-dispatch truth, Reflexion lesson coverage, and Brain process RSS. Checked every 5 min. Chris-facing alerts use `brain_core/telegram_alert.py` direct Telegram delivery with backlog replay; deterministic remediation runs first for safe mechanical fixes.
 
 ### 10. Cron infrastructure (`brain_core/scheduler.py` + APScheduler)
 139 jobs total from `brain_core/job_definitions.py` / generated `CRON_MAP.md`. Off-hours pipeline includes canonicalization, reflection, SM-2 review, eval gates, profile regeneration, autonomy proposals, ingestion, backup/restore checks, CRAG/RAGAS/adversarial/holdout gates, privacy-negative/source-governance audits, UI parity audit, and maintenance. Sunday cluster covers heavier tuning/training/backup/eval work.
@@ -166,8 +166,8 @@ operator → MCP brain_recall(q="how do we deploy ghost?")
 | `brain_core/reranker_worker.py` | Isolated Torch/MPS cross-encoder worker with RSS/request/lifetime recycling |
 | `brain_core/reranker_client.py` | Main-server HTTP client for the local reranker worker |
 | `brain_core/atoms_store.py` | SQLite truth layer + action_audit |
-| `brain_core/cli_llm.py` | CLI-first LLM fallback chain: Codex gpt-5.5 → Spark → OpenClaw fallback |
-| `brain_core/openclaw_dispatch.py` | OpenClaw gateway integration / emergency fallback for agent-session-heavy work |
+| `brain_core/cli_llm.py` | CLI-first LLM fallback chain: Codex gpt-5.5 → Spark |
+| `brain_core/openclaw_dispatch.py` | Legacy-named Hermes profile dispatch compatibility wrapper for agent-session-heavy work |
 | `brain_core/scheduler.py` | 138 APScheduler cron jobs |
 | `brain_core/slos.py` | 27 SLOs + measurement + alert dispatch |
 | `brain_core/breakers.py` | Persistent circuit breakers |
@@ -192,7 +192,7 @@ operator → MCP brain_recall(q="how do we deploy ghost?")
 
 ## Out-of-band assumptions
 
-- The brain runs on Chris's M4 Max Mac Studio. Single user, single tenant, single token. `~/.openclaw/credentials/.personal_webhook_secret` is the auth root.
-- All storage backends native via launchd: `ai.openclaw.qdrant-native` (source-built v1.17 binary at `~/.local/bin/qdrant`), `ai.openclaw.ollama-native`, `ai.openclaw.neo4j-native`. Brain server itself native via `ai.openclaw.brain-server.plist`. OrbStack is used only for ancillary services (not brain-critical).
+- The brain runs on Chris's M4 Max Mac Studio. Single user, single tenant, single token. `~/.brain/credentials/.personal_webhook_secret` is the auth root.
+- All storage backends native via launchd: `ai.brain.qdrant` (source-built v1.17 binary at `~/.local/bin/qdrant`), `ai.brain.ollama`, `ai.brain.neo4j`. Brain server itself native via `ai.brain.server.plist`. OrbStack is used only for ancillary services (not brain-critical).
 - Cloudflare tunnel exposes `brain.chrischodev.com` for remote access. Bearer auth required.
-- Text LLM dispatch uses Chris's existing subscription through CLI-first routing (`codex exec` gpt-5.5 primary, Spark fallback); OpenClaw remains available as an integration / emergency fallback. Vision captioning defaults to Codex subscription CLI; Gemini REST is explicit opt-in only.
+- Text LLM dispatch uses Chris's existing subscription through CLI-first routing (`codex exec` gpt-5.5 primary, Spark fallback); Hermes profiles handle tool/session-heavy agent dispatch. Vision captioning defaults to Codex subscription CLI; Gemini REST is explicit opt-in only.

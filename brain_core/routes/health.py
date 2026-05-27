@@ -243,6 +243,26 @@ def get_schema_versions() -> dict:
     }
 
 
+# ── Scheduler introspection ───────────────────────────────
+@router.get("/brain/jobs", tags=["brain"])
+def list_scheduler_jobs(name: str | None = None) -> dict:
+    """Return the loaded scheduler job list with next-run and recent history.
+
+    2026-05-19: added so callers can verify a newly-registered job is live
+    without waiting for its cron window. Optional ?name= filters to one
+    job. Read-only — calls brain_scheduler.list_jobs() which is already
+    used internally by /brain/health.
+    """
+    jobs = brain_scheduler.list_jobs()
+    if name:
+        jobs = [j for j in jobs if j.get("name") == name]
+    return {
+        "total": len(jobs),
+        "jobs": jobs,
+        "resources": brain_scheduler.resource_status(),
+    }
+
+
 # ── Phase A1: self-heal ───────────────────────────────
 @router.get("/brain/self-heal/status", tags=["brain"])
 def self_heal_status(limit: int = 20) -> dict:

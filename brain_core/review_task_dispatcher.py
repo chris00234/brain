@@ -80,14 +80,26 @@ def dispatch_pending_review_tasks(
         except Exception as exc:
             log.warning("cli_llm dispatch raised for %s: %s", task["id"], exc)
             err = f"dispatch_exception:{str(exc)[:200]}"
+            transient = _is_transient_dispatch_error(tq, err)
             _finish_attempt(
                 tq,
                 attempt,
-                status="deferred" if _is_transient_dispatch_error(tq, err) else "failed",
+                status="deferred" if transient else "failed",
                 error_class="dispatch_exception",
                 error=err,
             )
-            if _is_transient_dispatch_error(tq, err):
+            _record_failure_lesson(
+                tq,
+                attempt,
+                task,
+                err,
+                context=(
+                    "status=deferred; error_class=dispatch_exception"
+                    if transient
+                    else "status=failed; error_class=dispatch_exception"
+                ),
+            )
+            if transient:
                 _safe_defer(tq, task["id"], err)
                 skipped.append({"task_id": task["id"], "reason": "dispatch_deferred"})
             else:
@@ -131,6 +143,7 @@ def dispatch_pending_review_tasks(
                 )
             except Exception as exc:
                 log.warning("complete_task failed for %s: %s", task["id"], exc)
+                err_msg = f"complete_failed:{str(exc)[:200]}"
                 _finish_attempt(
                     tq,
                     attempt,
@@ -138,7 +151,14 @@ def dispatch_pending_review_tasks(
                     error_class="complete_failed",
                     error=str(exc)[:500],
                 )
-                _safe_fail(tq, task["id"], f"complete_failed:{str(exc)[:200]}")
+                _record_failure_lesson(
+                    tq,
+                    attempt,
+                    task,
+                    err_msg,
+                    context="status=failed; error_class=complete_failed",
+                )
+                _safe_fail(tq, task["id"], err_msg)
                 skipped.append({"task_id": task["id"], "reason": f"complete_failed:{str(exc)[:80]}"})
         else:
             err = getattr(result, "error", "") or "degraded"
@@ -157,6 +177,17 @@ def dispatch_pending_review_tasks(
                     "rate_limited": getattr(result, "rate_limited", False),
                     "openclaw_fallback_allowed": False,
                 },
+            )
+            _record_failure_lesson(
+                tq,
+                attempt,
+                task,
+                err,
+                context=(
+                    "status=deferred; error_class=transient_dispatch"
+                    if transient
+                    else "status=failed; error_class=terminal_dispatch"
+                ),
             )
             if transient:
                 _safe_defer(tq, task["id"], f"cli_dispatch_failed:{err[:200]}")
@@ -289,6 +320,37 @@ def _finish_attempt(task_queue_obj: Any, attempt: dict | None, **kwargs: Any) ->
         task_queue_obj.finish_dispatch_attempt(attempt["id"], **kwargs)
     except Exception as exc:
         log.debug("finish_dispatch_attempt failed for %s: %s", attempt.get("id"), exc)
+
+
+def _record_failure_lesson(
+    task_queue_obj: Any,
+    attempt: dict | None,
+    task: dict,
+    error: str,
+    *,
+    context: str,
+) -> None:
+    """Mirror process_ready's failure-lesson recording so review-dispatcher attempts
+    leave a Reflexion lesson and `failure_lesson_status=recorded` in attempt metadata.
+
+    Without this, the `task_failure_lesson_missing_count` SLO breaches on every
+    review-task dispatch failure.
+    """
+    if not attempt:
+        return
+    fn = getattr(task_queue_obj, "_record_failure_lesson_async", None)
+    if not callable(fn):
+        return
+    try:
+        fn(
+            task,
+            error,
+            BRAIN_CLI_AGENT_LABEL,
+            context=context,
+            attempt_id=attempt["id"],
+        )
+    except Exception as exc:
+        log.debug("review-dispatcher failure-lesson record failed: %s", exc)
 
 
 def _is_transient_dispatch_error(task_queue_obj: Any, error: str) -> bool:

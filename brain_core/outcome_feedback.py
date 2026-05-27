@@ -48,7 +48,10 @@ except ImportError:  # pragma: no cover - direct execution fallback
 
 
 def _now_iso() -> str:
-    return datetime.now(UTC).isoformat(timespec="seconds")
+    # 2026-05-15 P2-8: delegate to shared helper; single +00:00 format owner.
+    from db import now_iso
+
+    return now_iso()
 
 
 def _cutoff_iso(hours: int) -> str:
@@ -218,12 +221,20 @@ def create_override_review_tasks(
         return {"created": [], "skipped": [], "error": "task_queue_unavailable", "report": report}
 
     open_signatures = _open_review_task_signatures(tq)
+    closed_signatures = _closed_review_task_signatures(tq)
     created: list[dict] = []
     skipped: list[dict] = []
     for candidate in report.get("learning_candidates", [])[: max(1, int(max_tasks or 5))]:
         signature = candidate["signature"]
         if signature in open_signatures:
             skipped.append({"signature": signature, "reason": "open_task_exists"})
+            continue
+        if _pattern_resolved(candidate, closed_signatures):
+            # Investigation closed and no fresh overrides for >=24h. Don't
+            # re-queue a task — the previous fix has held. New overrides
+            # matching this signature will reset `last_seen` and naturally
+            # re-surface the pattern.
+            skipped.append({"signature": signature, "reason": "resolved"})
             continue
         task = tq.create_task(
             title=_review_task_title(candidate),
@@ -402,6 +413,86 @@ def _open_review_task_signatures(task_queue_obj: Any) -> set[str]:
             if sig:
                 signatures.add(str(sig))
     return signatures
+
+
+def _closed_review_task_signatures(task_queue_obj: Any) -> set[str]:
+    """Signatures of review tasks **verified** as remediated.
+
+    Critical distinction (2026-05-15): `review_task_dispatcher` auto-calls
+    `complete_task()` as soon as the Codex CLI returns a proposal — that
+    only proves an investigation TEXT was recorded, not that a fix shipped.
+    Treating every completed task as resolution would let a single auto-
+    generated proposal permanently suppress an unresolved autonomy
+    pattern.
+
+    So we require an explicit verification marker: only tasks whose
+    metadata sets `resolution_status` to one of the values in
+    `_VERIFIED_RESOLUTION_VALUES` count toward resolution. Chris (or a
+    verification job) flips this after confirming the fix landed. Tasks
+    completed by the dispatcher without that marker are merely
+    "investigation_recorded" and don't suppress future cron sweeps.
+    """
+    signatures: set[str] = set()
+    try:
+        tasks = task_queue_obj.list_tasks(status="completed") or []
+    except Exception:
+        tasks = []
+    for task in tasks:
+        meta = task.get("metadata") if isinstance(task, dict) else None
+        if isinstance(meta, str):
+            try:
+                meta = json.loads(meta)
+            except (TypeError, ValueError):
+                meta = None
+        if not isinstance(meta, dict):
+            continue
+        resolution = str(meta.get("resolution_status") or "").lower()
+        if resolution not in _VERIFIED_RESOLUTION_VALUES:
+            continue
+        sig = meta.get("override_signature")
+        if sig:
+            signatures.add(str(sig))
+    return signatures
+
+
+# Values that explicitly attest a fix has landed. The dispatcher's auto-
+# completion path never writes these — only a human (or a verification
+# pipeline) does. Listed as a set so the gate is greppable.
+_VERIFIED_RESOLUTION_VALUES: frozenset[str] = frozenset(
+    {"verified_fixed", "verified", "fix_shipped", "remediation_verified"}
+)
+
+
+# Override pattern is considered resolved when (a) the most recent override
+# matching the signature is older than this many hours AND (b) a review task
+# for that signature has been completed/failed. Tuned to 24h so a same-day
+# fix landing inline with a still-open task doesn't auto-resolve before the
+# scheduler has even seen it.
+RESOLVED_RECENCY_HOURS = 24
+
+
+def _pattern_resolved(candidate: dict, closed_signatures: set[str]) -> bool:
+    """Decide whether an override candidate has effectively been fixed.
+
+    Resolution requires both signals: no recent reoccurrence (>= RESOLVED_RECENCY_HOURS)
+    AND a closed review task for the same signature. Either alone is insufficient —
+    a long-quiet pattern with no investigation could just be dormant, and a
+    closed task with fresh overrides means the fix didn't take.
+    """
+    sig = str(candidate.get("signature") or "")
+    if sig not in closed_signatures:
+        return False
+    last_seen = candidate.get("last_seen") or ""
+    if not last_seen:
+        return False
+    try:
+        seen_dt = datetime.fromisoformat(str(last_seen).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return False
+    if seen_dt.tzinfo is None:
+        seen_dt = seen_dt.replace(tzinfo=UTC)
+    age_hours = (datetime.now(UTC) - seen_dt).total_seconds() / 3600.0
+    return age_hours >= RESOLVED_RECENCY_HOURS
 
 
 def _default_task_queue() -> Any | None:

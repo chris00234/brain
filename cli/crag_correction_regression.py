@@ -353,7 +353,11 @@ def main() -> int:
             f"status={report['status']} recovery={report['recovery_rate']}% "
             f"cases={report['recovered']}/{report['recovery_needed']}"
         )
-    return 0 if report["status"] == "ok" else 1
+    # 2026-05-19: exit 0 unconditionally. status flows through
+    # ops_readiness.crag_correction_regression_snapshot into the SLO
+    # of the same name; double-counting as scheduler_failures masks real
+    # job-runtime errors.
+    return 0
 
 
 if __name__ == "__main__":

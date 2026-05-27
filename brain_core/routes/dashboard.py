@@ -57,7 +57,7 @@ def code_find(
 # ── Phase E4: skill discovery ──────────────────────────
 @router.get("/brain/skills", tags=["brain"])
 def discover_skills(q: str = "", agent: str | None = None, limit: int = 20) -> dict:
-    """Search OpenClaw + Claude Code skills via Neo4j skill graph."""
+    """Search Hermes + Claude Code skills via Neo4j skill graph."""
     try:
         from neo4j_client import run_query
 

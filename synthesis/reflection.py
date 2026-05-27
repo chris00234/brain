@@ -22,8 +22,8 @@ QUESTIONS = {
 }
 
 CHAT_ID = "8484060831"
-OPENCLAW_BIN = "/Users/chrischo/.local/bin/openclaw"
-TONIGHT_REFLECTION = Path("/Users/chrischo/.openclaw/workspace-jenna/.tonight_reflection.txt")
+HERMES_BIN = "/Users/chrischo/.local/bin/hermes"
+TONIGHT_REFLECTION = Path("/Users/chrischo/.hermes/profiles/jenna/.tonight_reflection.txt")
 
 
 def get_question():
@@ -42,16 +42,10 @@ def get_question():
 
 def send_telegram(text):
     cmd = [
-        OPENCLAW_BIN,
-        "message",
+        HERMES_BIN,
         "send",
-        "--channel",
-        "telegram",
-        "--target",
-        CHAT_ID,
-        "--account",
-        "jenna-bot",
-        "--message",
+        "--to",
+        f"telegram:{CHAT_ID}",
         text,
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)

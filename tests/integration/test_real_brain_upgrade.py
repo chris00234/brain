@@ -37,7 +37,7 @@ pytestmark = pytest.mark.skipif(
 os.environ["BRAIN_ATOMS_ENABLED"] = "true"
 
 BRAIN_URL = "http://127.0.0.1:8791"
-SECRET_FILE = Path("/Users/chrischo/.openclaw/credentials/.personal_webhook_secret")
+SECRET_FILE = Path("/Users/chrischo/.brain/credentials/.personal_webhook_secret")
 BRAIN_DB = Path("/Users/chrischo/server/brain/logs/brain.db")
 
 
@@ -119,7 +119,7 @@ def test_r1_contradictions_land_in_response_and_audit():
             import urllib.request as _ur
             from pathlib import Path as _P
 
-            _secret = _P("~/.openclaw/credentials/.personal_webhook_secret").expanduser().read_text().strip()
+            _secret = _P("~/.brain/credentials/.personal_webhook_secret").expanduser().read_text().strip()
             # Pull open contradictions containing the test tag and delete them.
             _req_get = _ur.Request(
                 "http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections",

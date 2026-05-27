@@ -22,10 +22,10 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
-REPO_PLIST = ROOT / "launchd" / "ai.openclaw.brain-server.plist"
-INSTALLED_PLIST = Path.home() / "Library" / "LaunchAgents" / "ai.openclaw.brain-server.plist"
+REPO_PLIST = ROOT / "launchd" / "ai.brain.server.plist"
+INSTALLED_PLIST = Path.home() / "Library" / "LaunchAgents" / "ai.brain.server.plist"
 BACKUP_DIR = ROOT / ".omx" / "plans"
-LABEL = "ai.openclaw.brain-server"
+LABEL = "ai.brain.server"
 
 
 def _timestamp() -> str:

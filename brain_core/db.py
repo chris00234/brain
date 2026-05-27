@@ -155,6 +155,55 @@ def transaction(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
         raise
 
 
+@contextlib.contextmanager
+def retrying_transaction(
+    conn: sqlite3.Connection,
+    *,
+    attempts: int = 5,
+    base_delay_s: float = 1.0,
+    max_delay_s: float = 10.0,
+) -> Iterator[sqlite3.Connection]:
+    """BEGIN IMMEDIATE with exponential backoff on `database is locked`.
+
+    sqlite3.connect(timeout=...) covers a single internal poll loop, but
+    real contention windows (wal_checkpoint TRUNCATE holds an EXCLUSIVE
+    lock ~20s on hot DBs) can exceed it. This wrapper retries the
+    BEGIN IMMEDIATE itself with backoff, so a job that races a checkpoint
+    waits it out instead of failing.
+
+    Retries only on `OperationalError` whose message contains
+    `database is locked` / `database is busy`. Other errors propagate
+    immediately. After `attempts` failed attempts the final exception
+    bubbles up.
+    """
+    import time
+
+    last_exc: Exception | None = None
+    delay = base_delay_s
+    for attempt in range(attempts):
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            break
+        except sqlite3.OperationalError as exc:
+            msg = str(exc).lower()
+            if "locked" not in msg and "busy" not in msg:
+                raise
+            last_exc = exc
+            if attempt + 1 >= attempts:
+                raise
+            time.sleep(min(delay, max_delay_s))
+            delay = min(delay * 2.0, max_delay_s)
+    else:
+        if last_exc is not None:
+            raise last_exc
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
 def parse_iso_utc(ts: str | None) -> datetime | None:
     """Parse ISO timestamp, forcing UTC when timezone is absent.
 

@@ -1118,8 +1118,14 @@ def cluster_size_for(
         return 1
 
 
-def count_atoms(*, db_path: Path | None = None) -> dict[str, int]:
-    """Aggregate counts for /brain/health introspection."""
+def count_atoms(*, db_path: Path | None = None) -> dict[str, int | dict]:
+    """Aggregate counts for /brain/atoms/stats and /brain/health.
+
+    Extended 2026-05-15 (P4-11) with by_kind, confidence_buckets, and a
+    low_quality_recall_atoms counter pulled from atom_recall_quality so the
+    parity endpoint is useful for dashboards. All new fields are additive;
+    existing keys keep their shape so legacy consumers remain stable.
+    """
     if not BRAIN_ATOMS_ENABLED:
         return {"enabled": 0}
     try:
@@ -1131,6 +1137,29 @@ def count_atoms(*, db_path: Path | None = None) -> dict[str, int]:
             core = conn.execute("SELECT COUNT(*) FROM atoms WHERE tier='core'").fetchone()[0]
             obsolete = conn.execute("SELECT COUNT(*) FROM atoms WHERE tier='obsolete'").fetchone()[0]
             raw_events = conn.execute("SELECT COUNT(*) FROM raw_events").fetchone()[0]
+            by_kind = {
+                str(r[0]): int(r[1])
+                for r in conn.execute("SELECT kind, COUNT(*) FROM atoms GROUP BY kind").fetchall()
+            }
+            confidence_buckets = {
+                "high_0.7_plus": conn.execute(
+                    "SELECT COUNT(*) FROM atoms WHERE confidence >= 0.7"
+                ).fetchone()[0],
+                "mid_0.4_to_0.7": conn.execute(
+                    "SELECT COUNT(*) FROM atoms WHERE confidence >= 0.4 AND confidence < 0.7"
+                ).fetchone()[0],
+                "low_below_0.4": conn.execute("SELECT COUNT(*) FROM atoms WHERE confidence < 0.4").fetchone()[
+                    0
+                ],
+            }
+            try:
+                low_quality_recall = conn.execute(
+                    "SELECT COUNT(*) FROM atom_recall_quality "
+                    "WHERE accuracy IS NOT NULL AND accuracy < 0.3 "
+                    "  AND (n_good + n_wrong + n_restated) >= 3"
+                ).fetchone()[0]
+            except sqlite3.OperationalError:
+                low_quality_recall = None
             return {
                 "enabled": 1,
                 "atoms_total": atoms_total,
@@ -1140,6 +1169,9 @@ def count_atoms(*, db_path: Path | None = None) -> dict[str, int]:
                 "core": core,
                 "obsolete": obsolete,
                 "raw_events": raw_events,
+                "by_kind": by_kind,
+                "confidence_buckets": confidence_buckets,
+                "low_quality_recall_atoms": low_quality_recall,
             }
     except sqlite3.Error:
         return {"enabled": 1, "error": "sqlite_error"}

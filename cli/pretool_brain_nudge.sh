@@ -13,7 +13,7 @@
 set -uo pipefail
 
 BRAIN_URL="${BRAIN_URL:-http://127.0.0.1:8791}"
-SECRET_FILE="$HOME/.openclaw/credentials/.personal_webhook_secret"
+SECRET_FILE="$HOME/.brain/credentials/.personal_webhook_secret"
 AGENT_NAME="${BRAIN_AGENT:-claude}"
 
 CURL_TIMEOUT="0.3"
@@ -46,26 +46,35 @@ case "$TOOL_NAME" in
   Bash)
     QUERY=$(printf '%s' "$PAYLOAD" | jq -r '.tool_input.command // empty' 2>/dev/null || echo "")
     FIRST_TOK=$(printf '%s' "$QUERY" | awk '{print $1}')
-    # Skip commands that are obviously observability / plumbing, not knowledge-lookup.
-    case "$FIRST_TOK" in
-      ls|pwd|cd|echo|printf|cat|head|tail|sed|awk|grep|rg|wc|find|xargs|rm|mv|cp|mkdir|touch|chmod|chown|sleep|date|whoami|which|env|true|false|:|test|[)
-        exit 0 ;;
-      curl|wget|nc|ping|dig|host|nslookup|ssh|scp|rsync)
-        exit 0 ;;
-      ps|top|htop|kill|pkill|lsof|launchctl|systemctl|docker|brew|port|netstat|ifconfig|ip)
-        exit 0 ;;
-      sqlite3|psql|mysql|redis-cli|mongo|jq|yq|python|python3|node|npm|pip|uv|cargo|go|make|bash|sh|zsh|perl|ruby)
-        exit 0 ;;
-      git)
-        case "$QUERY" in
-          git\ status*|git\ diff*|git\ log*|git\ add*|git\ commit*|git\ push*|git\ pull*|git\ checkout*|git\ branch*|git\ stash*|git\ show*|git\ blame*|git\ tag*|git\ fetch*|git\ rebase*|git\ merge*|git\ reset*|git\ clean*|git\ rm*|git\ mv*|git\ remote*|git\ config*|git\ worktree*)
-            exit 0 ;;
-        esac ;;
-    esac
+    # Bypass skip filter when the command touches brain/openclaw infra. These
+    # introspection commands ARE decision moments — recall context should fire.
+    BYPASS_SKIP=""
     case "$QUERY" in
-      ps*|lsof*|launchctl*|docker*|curl*|sqlite3*)
-        exit 0 ;;
+      *brain*|*openclaw*|*"127.0.0.1:8791"*|*".openclaw"*|*"server/brain"*|*"/recall/v2"*|*brain.db*|*autonomy.db*)
+        BYPASS_SKIP=1 ;;
     esac
+    if [ -z "$BYPASS_SKIP" ]; then
+      # Skip commands that are obviously observability / plumbing, not knowledge-lookup.
+      case "$FIRST_TOK" in
+        ls|pwd|cd|echo|printf|cat|head|tail|sed|awk|grep|rg|wc|find|xargs|rm|mv|cp|mkdir|touch|chmod|chown|sleep|date|whoami|which|env|true|false|:|test|[)
+          exit 0 ;;
+        curl|wget|nc|ping|dig|host|nslookup|ssh|scp|rsync)
+          exit 0 ;;
+        ps|top|htop|kill|pkill|lsof|launchctl|systemctl|docker|brew|port|netstat|ifconfig|ip)
+          exit 0 ;;
+        sqlite3|psql|mysql|redis-cli|mongo|jq|yq|python|python3|node|npm|pip|uv|cargo|go|make|bash|sh|zsh|perl|ruby)
+          exit 0 ;;
+        git)
+          case "$QUERY" in
+            git\ status*|git\ diff*|git\ log*|git\ add*|git\ commit*|git\ push*|git\ pull*|git\ checkout*|git\ branch*|git\ stash*|git\ show*|git\ blame*|git\ tag*|git\ fetch*|git\ rebase*|git\ merge*|git\ reset*|git\ clean*|git\ rm*|git\ mv*|git\ remote*|git\ config*|git\ worktree*)
+              exit 0 ;;
+          esac ;;
+      esac
+      case "$QUERY" in
+        ps*|lsof*|launchctl*|docker*|curl*|sqlite3*)
+          exit 0 ;;
+      esac
+    fi
     ;;
   Grep)
     PATTERN=$(printf '%s' "$PAYLOAD" | jq -r '.tool_input.pattern // empty' 2>/dev/null || echo "")

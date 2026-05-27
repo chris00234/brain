@@ -64,10 +64,10 @@ READINESS_SURFACES: tuple[ReadinessSurface, ...] = (
         rationale="Reflexion lessons need post-use outcome evidence, not write-only storage.",
     ),
     ReadinessSurface(
-        id="openclaw_gateway",
-        label="OpenClaw gateway health",
-        readiness_fields=("openclaw_gateway",),
-        rationale="Autonomous agent work depends on gateway health being explicit.",
+        id="hermes_gateway",
+        label="Hermes profile gateway health",
+        readiness_fields=("hermes_gateway",),
+        rationale="Autonomous agent work depends on Hermes profile gateway health being explicit.",
     ),
     ReadinessSurface(
         id="autonomous_work",

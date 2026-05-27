@@ -84,6 +84,33 @@ def graph_stats_endpoint() -> dict:
         raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e)) from e
 
 
+# ── Qdrant parity stats ────────────────────────────────
+@router.get("/brain/qdrant/stats", tags=["qdrant"])
+def qdrant_stats_endpoint() -> dict:
+    """Per-collection point counts. Parity with /brain/graph/stats."""
+    try:
+        from vector_store import get_vector_store
+
+        store = get_vector_store()
+        if not store.heartbeat():
+            return {"backend": "unavailable", "collections": {}}
+        collections: dict[str, int] = {}
+        for name in store.list_collections():
+            try:
+                collections[name] = int(store.count(name))
+            except Exception:
+                collections[name] = -1
+        total = sum(c for c in collections.values() if c >= 0)
+        return {
+            "backend": "qdrant",
+            "collection_count": len(collections),
+            "total_points": total,
+            "collections": collections,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=_safe_http_detail("internal", e)) from e
+
+
 @router.get("/brain/graph/nodes", tags=["graph"])
 def graph_nodes_endpoint(limit: int = 200, connected_only: bool = False) -> dict:
     """Entities + relations for 3D graph visualization.

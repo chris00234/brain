@@ -19,7 +19,6 @@ import json
 import logging
 import os
 import shlex
-import socket
 import sqlite3
 import subprocess
 import sys
@@ -199,20 +198,20 @@ SLOS: dict[str, SLO] = {
     # that degradation 24-48h earlier than breaker_open_count does.
     "dispatch_failure_rate_1h": SLO(
         name="dispatch_failure_rate_1h",
-        description="openclaw_dispatch empty-envelope / error rate over the last hour (per all agents)",
+        description="agent_dispatch empty-envelope / error rate over the last hour (per all agents)",
         target=20.0,  # breach when >20% of dispatches fail
         severity="warning",
         metric_unit="%",
         consecutive_breaches_required=2,
     ),
-    # 2026-04-17: agent session file-size watcher. OpenClaw agent
+    # 2026-04-17: agent session file-size watcher. Agent gateway
     # sessions accumulate indefinitely as conversational context grows;
-    # past 100MB the codex backend starts returning empty responses.
+    # past 100MB the Codex/Hermes backend can start returning empty responses.
     # Alerts when any single session .jsonl exceeds the threshold so
-    # operator can rotate sessions.json → fresh sessionKey.
+    # operators can rotate oversized sessions.
     "agent_session_max_mb": SLO(
         name="agent_session_max_mb",
-        description="Size of the largest live OpenClaw agent session .jsonl file (MB)",
+        description="Size of the largest live Hermes/Codex agent session .jsonl file (MB)",
         target=100.0,
         severity="warning",
         metric_unit="MB",
@@ -294,9 +293,9 @@ SLOS: dict[str, SLO] = {
         metric_unit="failed",
         consecutive_breaches_required=1,
     ),
-    "openclaw_gateway_health": SLO(
-        name="openclaw_gateway_health",
-        description="OpenClaw local gateway TCP health on 127.0.0.1:18789. 0=connectable, 1=unreachable. Agent handoff tasks depend on this gateway; a breach means automated OpenClaw agent work may be only queued/deferred rather than actually running.",
+    "hermes_gateway_health": SLO(
+        name="hermes_gateway_health",
+        description="Hermes per-profile launchd gateway health. 0=all expected profile gateway services are loaded, 1=one or more are missing/unhealthy. Agent handoff tasks depend on Hermes profile gateways; a breach means automated agent work may be queued/deferred rather than delivered.",
         target=0.0,
         severity="critical",
         metric_unit="failed",
@@ -330,7 +329,7 @@ SLOS: dict[str, SLO] = {
         consecutive_breaches_required=1,
     ),
     # 2026-04-21: qdrant-backup silent-failure watcher. The nightly
-    # ai.openclaw.qdrant-backup launchd plist runs at 03:00 local time and
+    # ai.brain.qdrant-backup launchd plist runs at 03:00 local time and
     # uploads to MinIO. If it silently fails (S3 creds rot, Qdrant snapshot
     # API flakes, or the Python CLI itself crashes pre-upload), there is
     # no natural alarm — the next cron fire just produces a fresh attempt
@@ -405,7 +404,7 @@ _RECALL_AGENT_ACTORS = {
     "claude",
     "claude-code",
     "gemini",
-    "openclaw",
+    "hermes",
     "jenna",
     "liz",
     "ellie",
@@ -586,7 +585,7 @@ def _measure_breaker_open_count() -> float:
 
 
 def _measure_outbox_pending() -> float:
-    pending_dir = Path("~/.openclaw/outbox/brain-learn/pending").expanduser()
+    pending_dir = Path("~/.brain_outbox/brain-learn/pending").expanduser()
     if not pending_dir.exists():
         return 0.0
     try:
@@ -1063,33 +1062,77 @@ def _measure_telegram_backlog_pending_count() -> float:
 
 
 def _measure_telegram_direct_health() -> float:
+    """Probe Telegram direct API with bounded retry/backoff.
+
+    2026-05-19: single-shot probe flipped the SLO to 1 on transient network
+    blips (two manual_required entries today at 07:02 and 07:42 UTC for
+    chat reachability that recovered within minutes). Retry 3 times with
+    exponential backoff so the SLO only fires when the path is truly
+    sustained-broken — not on a single packet drop. Total worst-case
+    spend ~3.5s, well within the SLO measurement window.
+    """
+    import time as _time
+
     try:
         from telegram_alert import direct_api_healthcheck
-
-        ok, reason = direct_api_healthcheck()
-        if not ok:
-            log.warning("telegram direct healthcheck failed: %s", reason)
-        return 0.0 if ok else 1.0
     except Exception as exc:
-        log.debug("telegram_direct_health measurement failed: %s", exc)
+        log.debug("telegram_direct_health import failed: %s", exc)
         return 1.0
 
+    delay = 0.5
+    last_reason = ""
+    for attempt in range(3):
+        try:
+            ok, reason = direct_api_healthcheck()
+        except Exception as exc:
+            last_reason = f"probe-exception: {exc}"
+            ok = False
+        else:
+            last_reason = reason or ""
+        if ok:
+            return 0.0
+        if attempt < 2:
+            _time.sleep(delay)
+            delay = min(delay * 2.0, 2.0)
+    log.warning("telegram direct healthcheck failed after retries: %s", last_reason)
+    return 1.0
 
-def _measure_openclaw_gateway_health() -> float:
-    """Return 0 when the local OpenClaw gateway port accepts TCP, else 1.
 
-    Keep this probe deliberately cheap and side-effect-free. The deeper CLI
-    ``openclaw gateway status`` command is useful for operators, but the SLO
-    path runs every few minutes and should not spawn Node/Codex subprocesses or
-    compete with the agent-dispatch path it is protecting.
+HERMES_GATEWAY_PROFILES: tuple[str, ...] = ("jenna", "liz", "ellie", "sage", "market")
+
+
+def _measure_hermes_gateway_health() -> float:
+    """Return 0 when every expected Hermes profile gateway launchd service is loaded.
+
+    Keep this probe cheap and side-effect-free: launchctl metadata only, no
+    gateway restart and no agent subprocesses.
     """
 
-    try:
-        with socket.create_connection(("127.0.0.1", 18789), timeout=1.0):
-            return 0.0
-    except OSError as exc:
-        log.warning("openclaw gateway healthcheck failed: %s", exc)
-        return 1.0
+    uid = os.getuid()
+    failed: list[str] = []
+    for profile in HERMES_GATEWAY_PROFILES:
+        service = f"ai.hermes.gateway-{profile}"
+        try:
+            proc = subprocess.run(
+                ["launchctl", "print", f"gui/{uid}/{service}"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            log.warning("Hermes gateway healthcheck failed service=%s: %s", service, exc)
+            failed.append(service)
+            continue
+        if proc.returncode != 0:
+            log.warning(
+                "Hermes gateway healthcheck failed service=%s returncode=%s stderr=%s",
+                service,
+                proc.returncode,
+                (proc.stderr or "")[:200],
+            )
+            failed.append(service)
+    return 0.0 if not failed else 1.0
 
 
 def _measure_task_dispatch_stale_started_count() -> float:
@@ -1204,24 +1247,26 @@ def _measure_boot_context_degraded_1h() -> float:
 
 
 def _measure_agent_session_max_mb() -> float:
-    """Largest live OpenClaw agent session .jsonl file size in MB."""
+    """Largest live Hermes/Codex session .jsonl file size in MB."""
     try:
-        agents_root = Path.home() / ".openclaw" / "agents"
-        if not agents_root.exists():
-            return 0.0
+        session_roots = (
+            Path("/Users/chrischo/.hermes/profiles"),
+            Path.home() / ".codex",
+        )
         max_bytes = 0
-        for agent_dir in agents_root.iterdir():
-            sessions = agent_dir / "sessions"
-            if not sessions.is_dir():
+        patterns = ("*/sessions/*.jsonl", "sessions/*.jsonl")
+        for root in session_roots:
+            if not root.exists():
                 continue
-            for jsonl in sessions.glob("*.jsonl"):
-                if ".checkpoint." in jsonl.name:
-                    continue
-                try:
-                    max_bytes = max(max_bytes, jsonl.stat().st_size)
-                except OSError as _exc:
-                    log.debug("silenced exception in slos.py: %s", _exc)
-                    continue
+            for pattern in patterns:
+                for session_path in root.glob(pattern):
+                    if ".checkpoint." in session_path.name:
+                        continue
+                    try:
+                        max_bytes = max(max_bytes, session_path.stat().st_size)
+                    except OSError as _exc:
+                        log.debug("silenced exception in slos.py: %s", _exc)
+                        continue
         return round(max_bytes / (1024 * 1024), 1)
     except Exception as exc:
         log.debug("agent_session_max_mb measurement failed: %s", exc)
@@ -1428,7 +1473,7 @@ _MEASUREMENTS: dict[str, Callable[[], float]] = {
     "entry_contract_missing_pct": _measure_entry_contract_missing_pct,
     "telegram_backlog_pending_count": _measure_telegram_backlog_pending_count,
     "telegram_direct_health": _measure_telegram_direct_health,
-    "openclaw_gateway_health": _measure_openclaw_gateway_health,
+    "hermes_gateway_health": _measure_hermes_gateway_health,
     "task_dispatch_stale_started_count": _measure_task_dispatch_stale_started_count,
     "task_failure_lesson_missing_count": _measure_task_failure_lesson_missing_count,
     "autonomous_work_visibility_gap_count": _measure_autonomous_work_visibility_gap_count,

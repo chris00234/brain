@@ -2,7 +2,7 @@
 
 All Chris-facing alerts — SLO breaches, job failures, brain_loop URGENT
 messages, healthcheck alerts, LoRA regressions — go through this single
-entry point. Bypasses any LLM session and bypasses the OpenClaw gateway:
+entry point. Bypasses any LLM session and bypasses Hermes profile gateways:
 uses Telegram Bot API ``sendMessage`` directly.
 
 Why this exists:
@@ -37,8 +37,14 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 CHRIS_TELEGRAM_CHAT_ID = "8484060831"
-TELEGRAM_TOKEN_ENV = "TELEGRAM_JENNA_TOKEN"  # noqa: S105 - env var name, not a secret
-OPENCLAW_ENV_FILE = Path("/Users/chrischo/.openclaw/.env")
+TELEGRAM_TOKEN_ENVS = ("TELEGRAM_JENNA_TOKEN", "TELEGRAM_BOT_TOKEN")
+HERMES_ENV_FILES = (
+    Path("/Users/chrischo/.hermes/.env"),
+    Path("/Users/chrischo/.hermes/profiles/jenna/.env"),
+)
+# Backward-compatible test/config hooks.
+TELEGRAM_TOKEN_ENV = TELEGRAM_TOKEN_ENVS[0]
+HERMES_ENV_FILE = HERMES_ENV_FILES[0]
 SEND_TIMEOUT_S = 20
 
 # ── Rate limiter ────────────────────────────────────────────
@@ -117,7 +123,18 @@ def _read_shell_export(path: Path, name: str) -> str | None:
 
 
 def _telegram_token() -> str | None:
-    return os.getenv(TELEGRAM_TOKEN_ENV) or _read_shell_export(OPENCLAW_ENV_FILE, TELEGRAM_TOKEN_ENV)
+    for name in TELEGRAM_TOKEN_ENVS:
+        token = os.getenv(name)
+        if token:
+            return token
+
+    files = tuple(dict.fromkeys((HERMES_ENV_FILE, *HERMES_ENV_FILES)))
+    for path in files:
+        for name in TELEGRAM_TOKEN_ENVS:
+            token = _read_shell_export(path, name)
+            if token:
+                return token
+    return None
 
 
 def _send_direct_bot_api(body: str) -> tuple[bool, str]:

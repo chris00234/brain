@@ -1,14 +1,14 @@
 #!/opt/homebrew/bin/python3
 """brain_reflect — nightly Sage-driven reflection on recent self-learning captures.
 
-Runs at 02:45 daily via ai.openclaw.brain-reflect.plist. Pulls semantic_memory
-entries from the last 7 days, dispatches to Sage (research agent) via OpenClaw
-for pattern + contradiction detection, writes findings to raw/inbox/ as
+Runs at 02:45 daily via ai.brain.brain-reflect.plist. Pulls semantic_memory
+entries from the last 7 days, dispatches to Sage via brain CLI dispatch
+(Hermes fallback) for pattern + contradiction detection, writes findings to raw/inbox/ as
 schema-compliant raw records. The existing canonical pipeline (pipeline_auto.py)
 picks them up on its next run and promotes durable insights to canonical.
 
 Constraints honored:
-- Only LLM call is via `openclaw agent --agent sage` (existing OpenAI subscription).
+- Only LLM call is via subscription-backed brain CLI dispatch.
 - Ollama untouched (embedder-only).
 - No new daemons; this is a one-shot launchd job.
 """
@@ -28,7 +28,7 @@ from safe_state import atomic_write_text
 
 SEMANTIC_COLLECTION = "semantic_memory"
 INBOX_DIR = Path("/Users/chrischo/server/knowledge/raw/inbox")
-LOG_FILE = Path("/Users/chrischo/.openclaw/logs/brain-reflect.log")
+LOG_FILE = Path("/Users/chrischo/server/brain/logs/brain-reflect.log")
 LOOKBACK_DAYS = 7
 DISPATCH_TIMEOUT = 240
 

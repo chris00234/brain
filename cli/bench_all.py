@@ -13,7 +13,7 @@ Usage:
   bench_all.py snap before
 
   # Apply your change, restart brain-server, trigger eval
-  launchctl kickstart -k gui/$UID/ai.openclaw.brain-server
+  launchctl kickstart -k gui/$UID/ai.brain.server
   curl -s -X POST -H "Authorization: Bearer $SECRET" /jobs/eval_run
   # ... wait for eval to finish ...
 

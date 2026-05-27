@@ -2320,6 +2320,26 @@ _wake_spawn_lock = threading.Lock()
 _wake_child_proc: Any | None = None
 
 
+def _reap_wake_child(proc: Any) -> None:
+    """Daemon-thread reaper for a detached wake-tick subprocess.
+
+    Without this, the only place a previous child is reaped is the next
+    wake event's `poll()` call. If no further wake fires (or no fire passes
+    the 3s debounce), the previous child remains <defunct> in the brain
+    server's process table indefinitely — observed as a zombie under PPID
+    1422 with no SIGCHLD handler installed. The daemon blocks on wait()
+    inside the brain server process so each spawn is reaped immediately
+    when its tick completes.
+    """
+
+    try:
+        proc.wait()
+    except Exception:
+        # Already reaped by a concurrent poll() on a subsequent wake, or
+        # the proc handle is otherwise invalid. Either way, nothing left.
+        pass
+
+
 def _wake_debounced_tick(loop: BrainLoop) -> None:
     """Wake-triggered tick with a 3s debounce. Spawns the tick as a
     subprocess so it matches the isolation pattern of the scheduler's
@@ -2354,6 +2374,12 @@ def _wake_debounced_tick(loop: BrainLoop) -> None:
                 stderr=subprocess.DEVNULL,
                 env=child_env,
             )
+            threading.Thread(
+                target=_reap_wake_child,
+                args=(_wake_child_proc,),
+                daemon=True,
+                name="brain_wake_child_reaper",
+            ).start()
     except Exception as exc:
         log.warning("wake-triggered tick spawn failed: %s", exc)
 

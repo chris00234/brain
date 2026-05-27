@@ -158,16 +158,18 @@ def _conn():
 
 
 def _now() -> str:
-    """+00:00-form UTC timestamp. Delegates to db.now_iso() — single source
-    of truth. (See ARCHITECTURE_AUDIT_2026-05-12.md for the Z vs +00:00
-    format inconsistency dormant-bug note.)"""
+    """Z-suffix UTC timestamp. 2026-05-15 (P4-12): switched from +00:00 →
+    Z so entities first_seen_at / last_seen_at lex-sort consistently with
+    atoms_store / entry_manifest / memory_lifecycle. A one-shot migration
+    normalises pre-2026-05-15 rows; see migrations_brain_db for the
+    normalisation step."""
     import sys as _sys
     from pathlib import Path as _Path
 
     _sys.path.insert(0, str(_Path(__file__).resolve().parent))
     from db import now_iso as _db_now_iso
 
-    return _db_now_iso()
+    return _db_now_iso(z_suffix=True)
 
 
 # ---------------------------------------------------------------------------

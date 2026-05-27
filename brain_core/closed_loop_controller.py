@@ -190,7 +190,7 @@ def _fetch_slos_via_http() -> list[dict]:
     try:
         import urllib.request as _u
 
-        secret_path = Path("~/.openclaw/credentials/.personal_webhook_secret").expanduser()
+        secret_path = Path("~/.brain/credentials/.personal_webhook_secret").expanduser()
         secret = secret_path.read_text().strip() if secret_path.exists() else ""
         req = _u.Request("http://127.0.0.1:8791/brain/slos")
         if secret:

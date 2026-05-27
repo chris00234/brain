@@ -35,10 +35,10 @@ log = logging.getLogger("brain.gmail")
 
 
 # ── Config ──────────────────────────────────────────────
-ENV_FILE = Path.home() / ".openclaw/credentials/gmail-imap.env"
-STATE_FILE = Path("/Users/chrischo/.openclaw/workspace-jenna/.gmail_ingest_state.json")
+ENV_FILE = Path.home() / ".brain/credentials/gmail-imap.env"
+STATE_FILE = Path("/Users/chrischo/server/brain/state/ingest/jenna/gmail_ingest_state.json")
 INBOX_DIR = Path("/Users/chrischo/server/knowledge/raw/inbox")
-FAILURE_LOG = Path("/Users/chrischo/.openclaw/workspace-jenna/logs/gmail-ingest-failures.jsonl")
+FAILURE_LOG = Path("/Users/chrischo/server/brain/logs/gmail-ingest-failures.jsonl")
 
 AGENT = "jenna"
 

@@ -14,7 +14,7 @@
 # container restarts.
 
 # Qdrant is no longer run via Docker. It's a native macOS binary built
-# from source (v1.17.0), launched via ai.openclaw.qdrant-native launchd
+# from source (v1.17.0), launched via ai.brain.qdrant launchd
 # plist. Kept out of docker-compose to match the ChromaDB-era decision:
 # OrbStack virtiofs adds write amplification that a vector store's
 # mmap+WAL pattern doesn't like. This file is the portable Linux fallback
@@ -72,7 +72,7 @@ services:
       BRAIN_ATOMS_READ: "true"
       VECTOR_BACKEND: qdrant
       # On native (Chris's Mac) Qdrant runs on the host via the
-      # ai.openclaw.qdrant-native plist; on Linux/portable deploys,
+      # ai.brain.qdrant plist; on Linux/portable deploys,
       # reintroduce a qdrant service block above and point this at
       # http://qdrant:6333.
       QDRANT_URL: http://host.docker.internal:6333
@@ -81,7 +81,7 @@ services:
     volumes:
       - ./logs:/app/logs
       - ./brain.db:/app/brain.db
-      - ${HOME}/.openclaw/credentials:/credentials:ro
+      - ${HOME}/.brain/credentials:/credentials:ro
     depends_on:
       ollama:
         condition: service_started

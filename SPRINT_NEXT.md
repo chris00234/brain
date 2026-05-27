@@ -46,8 +46,8 @@ Current: PreToolUse hook injects hints; agent can ignore.
 Target: deny + reason message when agent is about to touch canonical-marked-dangerous paths.
 
 Scope (phase 1, narrow):
-- `~/.openclaw/**/credentials/`
-- `~/.openclaw/openclaw.json`
+- `~/.brain/credentials/`
+- `~/.hermes/profiles/*/config.yaml`
 - `~/server/brain/models/adapters/lora_active/**`
 - `~/.claude/settings.json` — only deny edits that REMOVE brain hooks (allow additions)
 
@@ -78,5 +78,5 @@ Target: `self_eval_drive` that runs nightly:
 - No "search.py argparse" canonical surfacing within 24h of staleness_check running.
 - `speak.py` doesn't exist as a single file anymore.
 - `brain_loop` uptime log shows signal-triggered fires outnumbering tick fires.
-- Any attempt to edit `~/.openclaw/openclaw.json` without `BRAIN_OVERRIDE=1` returns `permissionDecision=deny`.
+Any attempt to edit protected Hermes profile config or Brain credentials without `BRAIN_OVERRIDE=1` returns `permissionDecision=deny`.
 - `self_eval_drift_7d` SLO registered and reporting.

@@ -23,6 +23,26 @@ def test_relation_alias_preserves_direction():
     assert resolved.canonical == "owned_by"
 
 
+def test_creates_aliases_to_created():
+    # 2026-05-26: was producing `unknown` blockers in the Neo4j ontology gate
+    # ("brain/agent creates deterministic infra lesson" × 2). Verb-tense alias
+    # — `creates` (present) maps to canonical `created` (past), matching the
+    # existing `created_by → created` convention.
+    resolved = resolve_relation_type("creates")
+    assert resolved.status == "alias"
+    assert resolved.canonical == "created"
+
+
+def test_managed_aliases_to_managed_by():
+    # 2026-05-26: was producing an `unknown` blocker in the Neo4j ontology gate
+    # ("brain managed chris cho", concept → person). Passive-voice missing
+    # "by"; data shape (target=person) matches `managed_by`, not `manages`
+    # (which constrains target to project/repo/service/tool/workflow).
+    resolved = resolve_relation_type("managed")
+    assert resolved.status == "alias"
+    assert resolved.canonical == "managed_by"
+
+
 def test_deprecated_ontology_related_warns_to_related_to():
     resolved = resolve_relation_type("ontology_related")
     assert resolved.status == "deprecated"
@@ -440,6 +460,11 @@ def test_rollout_live_smoke_retries_transient_latency(monkeypatch, tmp_path: Pat
     assert result["p95_latency_ms"] == 50
     assert result["results"][0]["attempt"] == 2
     assert [attempt["latency_ms"] for attempt in result["results"][0]["attempts"]] == [5000, 50]
+    # Regression: attempts must not contain the same dict object as the
+    # selected result, otherwise adding selected["attempts"] creates a circular
+    # reference and the launchd artifact write fails at json.dumps().
+    json.dumps(result, indent=2)
+    assert result["results"][0]["attempts"][1] is not result["results"][0]
 
 
 def test_search_unified_conditional_relations_are_query_intent_gated(monkeypatch):

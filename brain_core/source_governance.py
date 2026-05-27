@@ -51,28 +51,26 @@ GOVERNED_SOURCES: tuple[GovernedSource, ...] = (
         rationale="Obsidian is a high-value authored-memory source and should not silently stall.",
     ),
     GovernedSource(
-        id="openclaw_sessions",
-        label="OpenClaw agent sessions",
-        jobs=("openclaw_sessions_ingest",),
-        state_files=("openclaw-sessions-state.json",),
-        log_files=("jobs/openclaw_sessions_ingest.log",),
-        # The scheduler intentionally leaves a long daytime gap to avoid
-        # competing with local embedder/Qdrant resources. Keep the freshness
-        # gate wider than the 06:35→19:35 local schedule gap plus normal
-        # distillation runtime, otherwise readiness falsely blocks every day.
-        max_age_hours=16,
-        rationale=(
-            "OpenClaw agents must use the Brain effectively, " "so their sessions need timely distillation."
-        ),
-    ),
-    GovernedSource(
-        id="claude_code_sessions",
-        label="Claude/Codex coding sessions",
+        id="hermes_sessions",
+        label="Hermes, Claude Code, and Codex coding sessions",
         jobs=("claude_code_sessions_ingest",),
         state_files=("claude-code-sessions-state.json",),
         log_files=("jobs/claude_code_sessions_ingest.log",),
         max_age_hours=30,
-        rationale="Coding-session memory feeds reusable procedures and bug-prevention context.",
+        rationale=(
+            "Current agent-session memory flows through Hermes profiles plus Claude/Codex "
+            "coding-session distillation; OpenClaw session ingest is legacy-only."
+        ),
+    ),
+    GovernedSource(
+        id="legacy_openclaw_sessions",
+        label="Legacy OpenClaw session backlog",
+        jobs=("openclaw_sessions_ingest",),
+        state_files=("openclaw-sessions-state.json",),
+        log_files=("jobs/openclaw_sessions_ingest.log",),
+        max_age_hours=168,
+        critical=False,
+        rationale="Historical pre-2026-05-23 OpenClaw transcripts only; not a current runtime source.",
     ),
     GovernedSource(
         id="gmail",

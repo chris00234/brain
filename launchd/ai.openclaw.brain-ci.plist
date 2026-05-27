@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>Label</key>
-	<string>ai.openclaw.brain-ci</string>
+	<string>ai.brain.ci</string>
 	<key>ProgramArguments</key>
 	<array>
 		<string>/Users/chrischo/server/brain/.venv/bin/python</string>

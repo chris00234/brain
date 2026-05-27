@@ -34,7 +34,7 @@ def test_slo_count(slos_module):
     # + 2 brain_server_rss_* (FastAPI absolute + growth memory watchers)
     # + 3 source-aware entry / alert reliability watchers
     # + 1 backup_restore_drill_age_hours (restore-readiness watcher)
-    # + 1 openclaw_gateway_health (agent-dispatch gateway watcher)
+    # + 1 hermes_gateway_health (profile gateway watcher)
     # + 1 task_dispatch_stale_started_count (unclosed dispatch attempt watcher)
     # + 1 task_failure_lesson_missing_count (Reflexion lesson coverage watcher)
     # + 1 autonomous_work_visibility_gap_count (background work traceability)
@@ -55,7 +55,7 @@ def test_slo_count(slos_module):
     assert "entry_contract_missing_pct" in slos_module.SLOS
     assert "telegram_backlog_pending_count" in slos_module.SLOS
     assert "telegram_direct_health" in slos_module.SLOS
-    assert "openclaw_gateway_health" in slos_module.SLOS
+    assert "hermes_gateway_health" in slos_module.SLOS
     assert "task_dispatch_stale_started_count" in slos_module.SLOS
     assert "task_failure_lesson_missing_count" in slos_module.SLOS
     assert "autonomous_work_visibility_gap_count" in slos_module.SLOS
@@ -96,41 +96,46 @@ def test_entry_contract_missing_pct_zero_target(slos_module):
     assert slos_module._is_breach(slo, 0.0) is False
 
 
-def test_openclaw_gateway_health_zero_target(slos_module):
-    slo = slos_module.SLOS["openclaw_gateway_health"]
+def test_hermes_gateway_health_zero_target(slos_module):
+    slo = slos_module.SLOS["hermes_gateway_health"]
     assert slo.target == 0.0
     assert slo.severity == "critical"
     assert slos_module._is_breach(slo, 1.0) is True
     assert slos_module._is_breach(slo, 0.0) is False
 
 
-def test_measure_openclaw_gateway_health_success(slos_module, monkeypatch):
-    class FakeSocket:
-        def __enter__(self):
-            return self
+def test_measure_hermes_gateway_health_success(slos_module, monkeypatch):
+    calls: list[list[str]] = []
 
-        def __exit__(self, *_args):
-            return False
+    def fake_run(cmd, **_kwargs):
+        calls.append(cmd)
 
-    calls: list[tuple[tuple[str, int], float]] = []
+        class Result:
+            returncode = 0
+            stderr = ""
 
-    def fake_create_connection(addr, timeout):
-        calls.append((addr, timeout))
-        return FakeSocket()
+        return Result()
 
-    monkeypatch.setattr(slos_module.socket, "create_connection", fake_create_connection)
+    monkeypatch.setattr(slos_module.subprocess, "run", fake_run)
 
-    assert slos_module._measure_openclaw_gateway_health() == 0.0
-    assert calls == [(("127.0.0.1", 18789), 1.0)]
+    assert slos_module._measure_hermes_gateway_health() == 0.0
+    assert calls == [
+        ["launchctl", "print", f"gui/{slos_module.os.getuid()}/ai.hermes.gateway-{profile}"]
+        for profile in slos_module.HERMES_GATEWAY_PROFILES
+    ]
 
 
-def test_measure_openclaw_gateway_health_failure(slos_module, monkeypatch):
-    def fake_create_connection(_addr, timeout):
-        raise OSError("connection refused")
+def test_measure_hermes_gateway_health_failure(slos_module, monkeypatch):
+    def fake_run(cmd, **_kwargs):
+        class Result:
+            returncode = 1 if cmd[-1].endswith("-liz") else 0
+            stderr = "not found"
 
-    monkeypatch.setattr(slos_module.socket, "create_connection", fake_create_connection)
+        return Result()
 
-    assert slos_module._measure_openclaw_gateway_health() == 1.0
+    monkeypatch.setattr(slos_module.subprocess, "run", fake_run)
+
+    assert slos_module._measure_hermes_gateway_health() == 1.0
 
 
 def test_measure_task_dispatch_stale_started_count(slos_module, monkeypatch, tmp_path):
@@ -304,7 +309,12 @@ def test_no_slo_cold_start_false_positive(slos_module, monkeypatch, tmp_path):
     fake_bcs.set = lambda _k, _v, updated_by=None: None
     monkeypatch.setitem(sys.modules, "brain_config_store", fake_bcs)
 
-    monkeypatch.setattr(slos_module.socket, "create_connection", lambda *_a, **_k: _FakeSocket())
+    def _fake_run(cmd, *args, **kwargs):
+        if isinstance(cmd, list) and cmd[:2] == ["launchctl", "print"]:
+            return type("Proc", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+        return type("Proc", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    monkeypatch.setattr(slos_module.subprocess, "run", _fake_run)
 
     # Backup-age SLOs intentionally return 999.0 on missing files (operator-
     # visible "no backup ever" signal). They are excluded from the no-false-
@@ -329,14 +339,6 @@ def test_no_slo_cold_start_false_positive(slos_module, monkeypatch, tmp_path):
             f"severity={slo.severity}. Measurements must return a non-breaching value when "
             f"their upstream data is absent."
         )
-
-
-class _FakeSocket:
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_args):
-        return False
 
 
 def test_logs_dir_growth_24h_returns_delta(slos_module, monkeypatch):

@@ -18,7 +18,7 @@ import pytest
 pytestmark = pytest.mark.integration
 
 BRAIN_URL = "http://127.0.0.1:8791"
-SECRET_FILE = Path("/Users/chrischo/.openclaw/credentials/.personal_webhook_secret")
+SECRET_FILE = Path("/Users/chrischo/.brain/credentials/.personal_webhook_secret")
 BRAIN_DB = Path("/Users/chrischo/server/brain/logs/brain.db")
 
 

@@ -1,16 +1,20 @@
 """brain outbox drain — replays SessionEnd transcripts that didn't reach /learn.
 
 Triggered by:
-  - SessionEnd hook (post_session_v2.sh) right after enqueue
+  - SessionEnd hook (post_session.sh) right after enqueue
   - SessionStart hook (manually via brain-outbox-drain.sh)
-  - APScheduler `outbox_drain` job every 5 minutes (Phase 2D)
+  - APScheduler `outbox_drain` job every 5 minutes
 
-Layout:
-    ~/.openclaw/outbox/brain-learn/
+Layout (2026-05-23 migration: ~/.openclaw/ → ~/server/brain/):
+    ~/server/brain/outbox/brain-learn/    (canonical, post-2026-05-23)
         pending/    <sid>.jsonl     (waiting for retry)
         inflight/   <sid>.jsonl     (during drain — crash-safe via atomic rename)
         done/       <sid>.jsonl     (7-day retention for audit)
         quarantine/ <sid>.jsonl     (after MAX_RETRIES)
+
+    ~/.openclaw/outbox/brain-learn/       (legacy, drained until empty)
+        Same layout. Drainer reads pending from BOTH roots so any in-flight
+        legacy spool files still get processed.
 
 Each envelope is a single JSON line:
     {"session_id":"...","transcript_path":"...","enqueued_ts":...,
@@ -30,16 +34,22 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-OUTBOX_ROOT = Path("/Users/chrischo/.openclaw/outbox/brain-learn")
+# Canonical (brain-owned) outbox root.
+OUTBOX_ROOT = Path("/Users/chrischo/server/brain/outbox/brain-learn")
 PENDING = OUTBOX_ROOT / "pending"
 INFLIGHT = OUTBOX_ROOT / "inflight"
 DONE = OUTBOX_ROOT / "done"
 QUARANTINE = OUTBOX_ROOT / "quarantine"
 
-SECRET_FILE = Path("/Users/chrischo/.openclaw/credentials/.personal_webhook_secret")
+# Legacy outbox — pending files written before the 2026-05-23 migration land
+# here. Drainer reads both `PENDING` and `LEGACY_PENDING`; everything moves
+# through `INFLIGHT`/`DONE`/`QUARANTINE` under the new canonical root.
+LEGACY_PENDING = Path("/Users/chrischo/.openclaw/outbox/brain-learn/pending")
+
+SECRET_FILE = Path("/Users/chrischo/.brain/credentials/.personal_webhook_secret")
 LEARN_URL = "http://127.0.0.1:8791/learn"
 TASKS_URL = "http://127.0.0.1:8791/brain/tasks"
-LOG = Path("/Users/chrischo/.openclaw/logs/brain-outbox-drain.log")
+LOG = Path("/Users/chrischo/server/brain/logs/brain-outbox-drain.log")
 
 MAX_RETRIES = 8
 BACKOFF_S = [30, 60, 120, 300, 600, 1200, 2400, 3600]
@@ -274,7 +284,10 @@ def main() -> int:
     _recover_orphan_inflight()
 
     counts: dict[str, int] = {}
+    # Canonical (brain-owned) + legacy (~/.openclaw) pending — drain both.
     pending_files = sorted(PENDING.glob("*.jsonl"))
+    if LEGACY_PENDING.exists():
+        pending_files.extend(sorted(LEGACY_PENDING.glob("*.jsonl")))
     for envelope_path in pending_files:
         status = _drain_one(envelope_path, secret)
         counts[status] = counts.get(status, 0) + 1

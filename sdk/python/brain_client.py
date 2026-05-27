@@ -6,7 +6,7 @@ through MCP. Designed so a developer can `pip install brain-client` (once
 published) and start using it without reading the FastAPI source.
 
 Auth:
-  - Reads bearer token from `~/.openclaw/credentials/.personal_webhook_secret`
+  - Reads bearer token from `~/.brain/credentials/.personal_webhook_secret`
     (default), or pass `token=` explicitly to the constructor.
   - All requests get `Authorization: Bearer <token>` and `x-agent: <actor>`
     so the brain's `action_audit` table sees who's calling.
@@ -42,7 +42,7 @@ from pathlib import Path
 from typing import Any
 
 DEFAULT_BASE = "http://127.0.0.1:8791"
-DEFAULT_SECRET = Path("~/.openclaw/credentials/.personal_webhook_secret").expanduser()
+DEFAULT_SECRET = Path("~/.brain/credentials/.personal_webhook_secret").expanduser()
 
 
 class BrainError(Exception):
@@ -62,7 +62,7 @@ class BrainClient:
     base_url : str
         Brain endpoint (default http://127.0.0.1:8791).
     token : str | None
-        Bearer token. Falls back to ~/.openclaw/credentials/.personal_webhook_secret.
+        Bearer token. Falls back to ~/.brain/credentials/.personal_webhook_secret.
     actor : str
         The agent name to record in `action_audit`. Use one of:
         jenna | liz | ellie | sage | market | claude-code | <your_script>.

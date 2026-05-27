@@ -208,3 +208,154 @@ def test_barren_conjecture_expires_after_21d(tmp_path, monkeypatch):
         assert tier == "obsolete"
     finally:
         conn.close()
+
+
+def test_soft_cap_archives_oldest_unsupported_excess(tmp_path, monkeypatch):
+    """P3-9: when unsupported episodic conjectures exceed SOFT_CAP_UNSUPPORTED,
+    the oldest excess must be moved to tier=obsolete with
+    expire_reason='soft_cap_exceeded'. Conjectures with at least one
+    supporter row never count toward the cap and are not touched.
+    """
+    db = tmp_path / "brain.db"
+    _seed_schema(db)
+
+    cv = _reload_module(tmp_path, monkeypatch)
+    # Tighten cap for the test so we don't have to seed dozens of rows.
+    monkeypatch.setattr(cv, "SOFT_CAP_UNSUPPORTED", 3)
+
+    # Five recent unsupported conjectures (so none expire via the 21d TTL),
+    # plus one supported one that must NOT be archived.
+    now = datetime.now(UTC)
+    for i in range(5):
+        _insert_atom(
+            db,
+            atom_id=f"atm_conj_unsupported_{i}",
+            text=f"Dream conjecture (alpha_{i} x beta_{i}):\nUnsupported guess #{i}.",
+            kind="conjecture",
+            tier="episodic",
+            confidence=0.3,
+            valid_from=(now - timedelta(days=10 - i)).isoformat(timespec="seconds"),
+            provenance={"origin": "dream_replay", "entity_a": f"alpha_{i}", "entity_b": f"beta_{i}"},
+        )
+
+    _insert_atom(
+        db,
+        atom_id="atm_conj_supported",
+        text="Dream conjecture (gamma_x x delta_y):\nThis one will have evidence.",
+        kind="conjecture",
+        tier="episodic",
+        confidence=0.3,
+        valid_from=(now - timedelta(days=15)).isoformat(timespec="seconds"),
+        provenance={"origin": "dream_replay", "entity_a": "gamma_x", "entity_b": "delta_y"},
+    )
+    # Manually insert a supporter row so this conjecture is "supported".
+    conn = sqlite3.connect(str(db))
+    try:
+        conn.execute(
+            "INSERT INTO atom_evidence (atom_id, event_type, weight, evidence_ref, created_at) "
+            "VALUES (?, 'conjecture_support', 1.0, 'atm_evidence', ?)",
+            ("atm_conj_supported", now.isoformat(timespec="seconds")),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = cv.run()
+
+    # 5 unsupported - 3 cap = 2 archived. Supported one untouched.
+    assert result["cap_expired_count"] == 2
+    archived_ids = {e["id"] for e in result["expired"] if e.get("expire_reason") == "soft_cap_exceeded"}
+    # Oldest two (i=0 → 10d ago, i=1 → 9d ago) should be the targets.
+    assert archived_ids == {"atm_conj_unsupported_0", "atm_conj_unsupported_1"}
+
+    conn = sqlite3.connect(str(db))
+    try:
+        # Newer unsupported survive; supported one untouched.
+        for keeper in (
+            "atm_conj_unsupported_2",
+            "atm_conj_unsupported_3",
+            "atm_conj_unsupported_4",
+            "atm_conj_supported",
+        ):
+            tier = conn.execute("SELECT tier FROM atoms WHERE id = ?", (keeper,)).fetchone()[0]
+            assert tier == "episodic", f"{keeper} should remain episodic"
+        for archived in archived_ids:
+            tier = conn.execute("SELECT tier FROM atoms WHERE id = ?", (archived,)).fetchone()[0]
+            assert tier == "obsolete"
+    finally:
+        conn.close()
+
+
+def test_soft_cap_does_not_archive_non_dream_replay_conjectures(tmp_path, monkeypatch):
+    """Codex review: the soft-cap query previously scanned ALL unsupported
+    episodic conjectures, which would archive manually-authored or
+    other-origin conjectures as collateral damage. Scope it to
+    `provenance_json.origin == 'dream_replay'` only.
+    """
+    db = tmp_path / "brain.db"
+    _seed_schema(db)
+
+    cv = _reload_module(tmp_path, monkeypatch)
+    monkeypatch.setattr(cv, "SOFT_CAP_UNSUPPORTED", 2)
+
+    now = datetime.now(UTC)
+
+    # 4 dream-replay conjectures (over the cap of 2).
+    for i in range(4):
+        _insert_atom(
+            db,
+            atom_id=f"dream_{i}",
+            text=f"Dream conjecture (alpha_{i} x beta_{i}):\n#{i}",
+            kind="conjecture",
+            tier="episodic",
+            confidence=0.3,
+            valid_from=(now - timedelta(days=10 - i)).isoformat(timespec="seconds"),
+            provenance={"origin": "dream_replay", "entity_a": f"alpha_{i}", "entity_b": f"beta_{i}"},
+        )
+
+    # 1 manually authored conjecture — older than any dream one, no
+    # supporters. MUST NOT be archived even though it's the oldest unsupported.
+    _insert_atom(
+        db,
+        atom_id="manual_old",
+        text="Manually authored hypothesis we want to keep.",
+        kind="conjecture",
+        tier="episodic",
+        confidence=0.3,
+        valid_from=(now - timedelta(days=30)).isoformat(timespec="seconds"),
+        provenance={"origin": "manual", "entity_a": "manual_alpha", "entity_b": "manual_beta"},
+    )
+
+    cv.run()
+
+    conn = sqlite3.connect(str(db))
+    try:
+        manual_tier = conn.execute("SELECT tier FROM atoms WHERE id = 'manual_old'").fetchone()[0]
+        assert manual_tier == "episodic", "non-dream conjecture must not be archived by soft-cap"
+        # And dream-replay conjectures over the cap ARE archived.
+        archived = conn.execute("SELECT id FROM atoms WHERE id LIKE 'dream_%' AND tier='obsolete'").fetchall()
+        assert len(archived) == 2, "dream-replay excess should still be archived"
+    finally:
+        conn.close()
+
+
+def test_soft_cap_noop_below_threshold(tmp_path, monkeypatch):
+    db = tmp_path / "brain.db"
+    _seed_schema(db)
+
+    cv = _reload_module(tmp_path, monkeypatch)
+    monkeypatch.setattr(cv, "SOFT_CAP_UNSUPPORTED", 100)
+    now = datetime.now(UTC)
+    for i in range(3):
+        _insert_atom(
+            db,
+            atom_id=f"atm_below_cap_{i}",
+            text=f"Dream conjecture (a_{i} x b_{i}):\nBelow cap.",
+            kind="conjecture",
+            tier="episodic",
+            confidence=0.3,
+            valid_from=(now - timedelta(days=2)).isoformat(timespec="seconds"),
+            provenance={"origin": "dream_replay", "entity_a": f"a_{i}", "entity_b": f"b_{i}"},
+        )
+    result = cv.run()
+    assert result["cap_expired_count"] == 0

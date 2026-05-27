@@ -55,28 +55,44 @@ def _record_failure_lesson_bg(
     except Exception as exc:
         error = str(exc)[:200]
         log.debug("failure lesson bg failed: %s", exc)
-    finally:
-        if db_path and attempt_id:
-            _merge_dispatch_attempt_metadata_db(
-                db_path,
-                attempt_id,
-                {
-                    "failure_lesson_status": status,
-                    "failure_lesson_id": lesson_id,
-                    "failure_lesson_completed_at": datetime.now(UTC).isoformat(timespec="seconds"),
-                    "failure_lesson_error": error,
-                },
-            )
-        if db_path and task_id:
-            _merge_task_metadata_db(
-                db_path,
-                task_id,
-                {
-                    "last_failure_lesson_status": status,
-                    "last_failure_lesson_id": lesson_id,
-                    "last_failure_lesson_completed_at": datetime.now(UTC).isoformat(timespec="seconds"),
-                },
-            )
+    if status != "recorded":
+        # LLM-based recorder failed (e.g. harness unreachable, gateway down,
+        # codex unregistered). Fall back to the deterministic infra path so
+        # the SLO never breaches on a failure that produced no lesson.
+        try:
+            import failure_memory
+
+            lesson_id = failure_memory.record_infra_failure_lesson(
+                task_description=task_description,
+                failure_reason=failure_reason,
+                agent_id=agent_id or "system",
+            ) or ""
+            if lesson_id:
+                status = "recorded"
+                error = ""
+        except Exception as exc:
+            log.debug("infra-lesson fallback failed: %s", exc)
+    if db_path and attempt_id:
+        _merge_dispatch_attempt_metadata_db(
+            db_path,
+            attempt_id,
+            {
+                "failure_lesson_status": status,
+                "failure_lesson_id": lesson_id,
+                "failure_lesson_completed_at": datetime.now(UTC).isoformat(timespec="seconds"),
+                "failure_lesson_error": error,
+            },
+        )
+    if db_path and task_id:
+        _merge_task_metadata_db(
+            db_path,
+            task_id,
+            {
+                "last_failure_lesson_status": status,
+                "last_failure_lesson_id": lesson_id,
+                "last_failure_lesson_completed_at": datetime.now(UTC).isoformat(timespec="seconds"),
+            },
+        )
 
 
 def _merge_json_metadata(raw: str | None, patch: dict) -> str:
@@ -1391,12 +1407,15 @@ class TaskQueue:
             or ("slot" in err and "busy" in err)
             or "all cli backends exhausted" in err
             or "gatewaytransporterror" in err
+            or "gatewayclientrequest" in err
             or "gateway closed" in err
             or "timeout" in err
             or "process timeout" in err
             or "rate limit" in err
             or "rate_limit" in err
             or "rate-limited" in err
+            or "not registered" in err
+            or "unknown agent" in err
         )
 
     @staticmethod
@@ -1417,7 +1436,7 @@ class TaskQueue:
         return 600
 
     def process_ready(self) -> list[dict]:
-        """Dispatch ready tasks (approved, deps met) to their assigned OpenClaw agents.
+        """Dispatch ready tasks (approved, deps met) to their assigned Hermes profiles.
 
         Transitions each task: approved → running, dispatches to agent,
         then running → completed/failed based on result.

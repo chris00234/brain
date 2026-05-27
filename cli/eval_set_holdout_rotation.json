@@ -26,18 +26,20 @@
   {
     "query": "Ellie role and responsibilities",
     "collection": "all",
-    "expected_source": "ellie",
+    "expected_source": "distilled/infra/dist_openclaw_ellie_session_2.md",
     "expected_content": "Ellie",
     "category": "stable_holdout_preference_agent",
-    "holdout_group": "rotation_a"
+    "holdout_group": "rotation_a",
+    "expected_source_legacy": "ellie"
   },
   {
     "query": "Jenna responsibilities",
     "collection": "all",
-    "expected_source": "jenna",
+    "expected_source": "distilled/infra/dist_openclaw_jenna_session_2026_04_01_21.md",
     "expected_content": "Jenna",
     "category": "stable_holdout_preference_agent",
-    "holdout_group": "rotation_a"
+    "holdout_group": "rotation_a",
+    "expected_source_legacy": "jenna"
   },
   {
     "query": "nginx rate limiting configuration",

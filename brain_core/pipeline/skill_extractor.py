@@ -2,12 +2,12 @@
 """Weekly skill graph indexer + proposed skill extractor + review digest.
 
 Pipeline (runs via `skill_extract` scheduled job, Sundays):
- 1. Index existing OpenClaw skills from ~/.openclaw/skills/ into Neo4j as SKILL nodes.
+ 1. Index existing Hermes profile skills from ~/.hermes/profiles/liz/skills/ into Neo4j as SKILL nodes.
  2. Read recent raw/inbox records (last 7 days of agent learnings + corrections).
  3. Cluster by embedding cosine similarity.
  4. For each cluster with ≥3 members, decide via embedding similarity to existing
     skills whether to propose a NEW skill or an UPDATE to an existing one.
- 5. Use CLI-first LLM dispatch to draft proposals, write to ~/.openclaw/skills/_proposed/.
+ 5. Use CLI-first LLM dispatch to draft proposals, write to ~/.hermes/profiles/liz/skills/_proposed/.
  6. Build a weekly digest of everything in _proposed/ and deliver via direct Telegram.
 
 This closes the self-improvement loop that was stuck at placeholder before:
@@ -25,7 +25,7 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-SKILLS_DIR = Path("/Users/chrischo/.openclaw/skills")
+SKILLS_DIR = Path("/Users/chrischo/.hermes/profiles/liz/skills")
 PROPOSED_DIR = SKILLS_DIR / "_proposed"
 RAW_INBOX = Path("/Users/chrischo/server/knowledge/raw/inbox")
 
@@ -63,7 +63,7 @@ def parse_skill_frontmatter(skill_file: Path) -> dict | None:
 
 
 def index_existing_skills():
-    """Walk ~/.openclaw/skills/ and index SKILL.md files into Neo4j."""
+    """Walk Hermes profile skills and index SKILL.md files into Neo4j."""
     if not SKILLS_DIR.exists():
         print(f"skills dir not found: {SKILLS_DIR}")
         return 0
@@ -429,7 +429,7 @@ proposed_at: {datetime.now(UTC).isoformat()}
 
 
 def build_weekly_proposal_digest() -> str:
-    """Walk ~/.openclaw/skills/_proposed/ and return a markdown digest (empty string if nothing)."""
+    """Walk Hermes profile _proposed skills and return a markdown digest (empty string if nothing)."""
     if not PROPOSED_DIR.exists():
         return ""
 

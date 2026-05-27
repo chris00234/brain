@@ -654,7 +654,7 @@ JOB_REGISTRY: dict[str, list[str]] = {
     "canonical_index": [
         "/bin/bash",
         "-c",
-        'SECRET=$(cat ~/.openclaw/credentials/.personal_webhook_secret) && curl -sf -X POST -H "Authorization: Bearer $SECRET" http://127.0.0.1:8791/brain/index/rebuild',
+        'SECRET=$(cat ~/.brain/credentials/.personal_webhook_secret) && curl -sf -X POST -H "Authorization: Bearer $SECRET" http://127.0.0.1:8791/brain/index/rebuild',
     ],
     "graph_consolidation": [_py, f"{_bd}/brain_core/graph_consolidation.py"],
     "stale_cleanup": [_py, f"{_bd}/brain_core/maintenance.py", "stale_cleanup"],
@@ -701,12 +701,12 @@ JOB_REGISTRY: dict[str, list[str]] = {
     "qdrant_backup": [_py, f"{_bd}/cli/backup_qdrant.py"],
     "backup_restore_drill": [_py, f"{_bd}/cli/backup_restore_drill.py"],
     "backup_verify": [_py, f"{_bd}/cli/backup_verify.py"],
-    "openclaw_telegram_target_audit": [
+    "hermes_telegram_target_audit": [
         _py,
-        f"{_bd}/cli/audit_openclaw_telegram_targets.py",
+        f"{_bd}/cli/audit_hermes_telegram_targets.py",
         "--json",
     ],
-    "openclaw_gateway_start": ["/bin/bash", f"{_bd}/cli/ensure_openclaw_gateway.sh"],
+    "hermes_gateway_start": ["/bin/bash", f"{_bd}/cli/ensure_hermes_gateways.sh"],
     # reembed_migrator is manual-only (requires positional <collection> arg).
     # Invoke directly: python brain_core/pipeline/reembed_migrator.py <collection_name>
     "proactive_insights": [_py, f"{_bd}/brain_core/pipeline/proactive_linker.py"],

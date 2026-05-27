@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>ai.openclaw.gateway</string>
+    
+    <key>Comment</key>
+    <string>OpenClaw Gateway (v2026.4.11)</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>1</integer>
+    <key>Umask</key>
+    <integer>63</integer>
+    <key>ProgramArguments</key>
+    <array>
+      <string>/opt/homebrew/opt/node@22/bin/node</string>
+      <string>/opt/homebrew/lib/node_modules/openclaw/dist/index.js</string>
+      <string>gateway</string>
+      <string>--port</string>
+      <string>18789</string>
+    </array>
+    
+    <key>StandardOutPath</key>
+    <string>/Users/chrischo/.openclaw/logs/gateway.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/chrischo/.openclaw/logs/gateway.err.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+    <key>OPENCLAW_GATEWAY_TOKEN</key>
+    <string>4f1994e8a8fba485c896e31fbed6aa2b5d332eff674c0965</string>
+    <key>OPENCLAW_HOOKS_TOKEN</key>
+    <string>960cf689770f361d6aab37efae5d3219da66f5f72637d508</string>
+    <key>TELEGRAM_JENNA_TOKEN</key>
+    <string>8102904360:AAFzQMSzaIMJug78F25nZM__K31npDHSkmA</string>
+    <key>TELEGRAM_LIZ_TOKEN</key>
+    <string>8685578584:AAEW2liz2YrU1YUljd8iWxRg1HDjYQy_E9Y</string>
+    <key>TELEGRAM_ELLIE_TOKEN</key>
+    <string>8751034788:AAGqajzl06vcO32LJcC9jr-EtW8scCFHS9w</string>
+    <key>DISCORD_TOKEN</key>
+    <string>MTQ2NjgyOTI4NTQ2ODkzNDM0OA.GHgEO7.bVZVRuc4nULDfizANkogn3YMKELKDt4QPpc_k4</string>
+    <key>TODOIST_API_TOKEN</key>
+    <string>5c14eb80d7bbeed3713ccb7cfe05e915b637c840</string>
+    <key>TAVILY_API_KEY</key>
+    <string>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</string>
+    <key>GOOGLE_API_KEY</key>
+    <string>AIzaSyBP5gAW8zd9_1ukuPq9Rx0k00LJZ3Pe9HM</string>
+    <key>GEMINI_API_KEY</key>
+    <string>AIzaSyBP5gAW8zd9_1ukuPq9Rx0k00LJZ3Pe9HM</string>
+    <key>LEONARDO_API_KEY</key>
+    <string>7ae3b4e4-136c-4180-a003-04db06c9e5c5</string>
+    <key>CLOUDFLARE_API_TOKEN</key>
+    <string>519b99eb8eea0cab5f698aa7491f9b4286411</string>
+    <key>TELEGRAM_SAGE_TOKEN</key>
+    <string>8411459352:AAErA55lGxLgIymJ3ZGMUY9j3HavNOvkPo0</string>
+    <key>TELEGRAM_MARKET_TOKEN</key>
+    <string>7680975839:AAHPHxRMQEGsdV782agXNiapY1rxuzyeRFk</string>
+    <key>HOME</key>
+    <string>/Users/chrischo</string>
+    <key>TMPDIR</key>
+    <string>/var/folders/md/lz6xf6_905j5bs3lw4wqs1r40000gn/T/</string>
+    <key>NODE_EXTRA_CA_CERTS</key>
+    <string>/etc/ssl/cert.pem</string>
+    <key>NODE_USE_SYSTEM_CA</key>
+    <string>1</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/opt/node@22/bin:/Users/chrischo/.local/bin:/Users/chrischo/.npm-global/bin:/Users/chrischo/bin:/Users/chrischo/.volta/bin:/Users/chrischo/.asdf/shims:/Users/chrischo/.bun/bin:/Users/chrischo/Library/Application Support/fnm/aliases/default/bin:/Users/chrischo/.fnm/aliases/default/bin:/Users/chrischo/Library/pnpm:/Users/chrischo/.local/share/pnpm:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>OPENCLAW_GATEWAY_PORT</key>
+    <string>18789</string>
+    <key>OPENCLAW_LAUNCHD_LABEL</key>
+    <string>ai.openclaw.gateway</string>
+    <key>OPENCLAW_SYSTEMD_UNIT</key>
+    <string>openclaw-gateway.service</string>
+    <key>OPENCLAW_WINDOWS_TASK_NAME</key>
+    <string>OpenClaw Gateway</string>
+    <key>OPENCLAW_SERVICE_MARKER</key>
+    <string>openclaw</string>
+    <key>OPENCLAW_SERVICE_KIND</key>
+    <string>gateway</string>
+    <key>OPENCLAW_SERVICE_VERSION</key>
+    <string>2026.4.11</string>
+    <key>OPENCLAW_SERVICE_MANAGED_ENV_KEYS</key>
+    <string>CLOUDFLARE_API_TOKEN,DISCORD_TOKEN,GEMINI_API_KEY,GOOGLE_API_KEY,LEONARDO_API_KEY,OPENCLAW_GATEWAY_TOKEN,OPENCLAW_HOOKS_TOKEN,TAVILY_API_KEY,TELEGRAM_ELLIE_TOKEN,TELEGRAM_JENNA_TOKEN,TELEGRAM_LIZ_TOKEN,TELEGRAM_MARKET_TOKEN,TELEGRAM_SAGE_TOKEN,TODOIST_API_TOKEN</string>
+    </dict>
+  </dict>
+</plist>

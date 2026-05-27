@@ -178,12 +178,12 @@ PLAYBOOK: dict[str, RemediationRule] = {
         action="check TELEGRAM_JENNA_TOKEN/chat reachability",
         reason="Direct Telegram healthcheck failed; token/network/chat auth require external repair.",
     ),
-    "openclaw_gateway_health": RemediationRule(
-        slo="openclaw_gateway_health",
+    "hermes_gateway_health": RemediationRule(
+        slo="hermes_gateway_health",
         kind="trigger",
         threshold=0,
-        action="openclaw_gateway_start",
-        reason="OpenClaw gateway is unreachable; start the local gateway so approved agent handoff tasks can actually execute.",
+        action="hermes_gateway_start",
+        reason="Hermes profile gateway is unreachable; restart local profile gateways so approved agent handoff tasks can execute.",
     ),
     "task_dispatch_stale_started_count": RemediationRule(
         slo="task_dispatch_stale_started_count",

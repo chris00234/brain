@@ -1,6 +1,6 @@
-"""brain_core/openclaw_dispatch.py — resilient wrapper around `openclaw agent`.
+"""brain_core/openclaw_dispatch.py — legacy-named resilient wrapper around Hermes profiles.
 
-Every LLM call in the brain goes through this module. Features:
+Tool/session-heavy Brain agent dispatch goes through this compatibility module. Features:
 
   1. Exponential backoff retry (3 attempts: 30s, 60s, 120s)
   2. Rate-limit detection from stderr/stdout patterns
@@ -8,7 +8,7 @@ Every LLM call in the brain goes through this module. Features:
      reply so scheduled jobs never "lose a day" because of a single
      rate-limit cascade
   4. Structured failure log to brain/logs/dispatch-failures.jsonl
-  5. Consistent OpenClaw JSON envelope parsing
+  5. Consistent Hermes JSON envelope parsing with legacy OpenClaw compatibility
 
 Usage:
     from openclaw_dispatch import dispatch, DispatchResult
@@ -46,7 +46,7 @@ from typing import Any
 log = logging.getLogger("brain.dispatch")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PROMPT CACHING CONVENTION (for OpenAI prompt caching via OpenClaw gateway)
+# PROMPT CACHING CONVENTION (for OpenAI prompt caching via Hermes gateway)
 # ─────────────────────────────────────────────────────────────────────────────
 # OpenAI offers 50% discount on cached prompt prefixes (>=1024 tokens).
 # To maximize cache hits, structure dispatch messages so stable content comes
@@ -59,7 +59,7 @@ log = logging.getLogger("brain.dispatch")
 #   3. Working context (task-specific) — variable, NOT cached
 #   4. The user query — variable, NOT cached
 #
-# The actual prompt caching happens in the OpenClaw gateway (not brain).
+# The actual prompt caching happens in the Hermes gateway/model provider (not brain).
 # This convention ensures the brain's messages are compatible with gateway-side
 # caching. See: https://platform.openai.com/docs/guides/prompt-caching
 #
@@ -70,11 +70,11 @@ log = logging.getLogger("brain.dispatch")
 # ─────────────────────────────────────────────────────────────────────────────
 
 try:
-    from config import BRAIN_DISPATCH_CACHE_ENABLED, BRAIN_LOGS_DIR, OPENCLAW_BIN
+    from config import BRAIN_DISPATCH_CACHE_ENABLED, BRAIN_LOGS_DIR, HERMES_BIN
 
     FAILURE_LOG = BRAIN_LOGS_DIR / "dispatch-failures.jsonl"
 except ImportError:
-    OPENCLAW_BIN = "/Users/chrischo/.local/bin/openclaw"
+    HERMES_BIN = "/Users/chrischo/.local/bin/hermes"
     FAILURE_LOG = Path("/Users/chrischo/server/brain/logs/dispatch-failures.jsonl")
     BRAIN_DISPATCH_CACHE_ENABLED = False
 
@@ -377,7 +377,7 @@ def _check_struggle(agent: str, message: str, duration_ms: int, ok: bool, attemp
 
 @dataclass
 class DispatchResult:
-    """Outcome of an openclaw dispatch call."""
+    """Outcome of a Hermes profile dispatch call."""
 
     ok: bool
     text: str = ""
@@ -411,8 +411,11 @@ def _classify_error(stderr: str, stdout: str) -> tuple[bool, bool]:
 
 
 def _parse_envelope(raw: str) -> tuple[str, dict[str, Any]]:
-    """Return (extracted_text, full_envelope). Handles OpenClaw 2026.4+ shape
-    {result: {payloads: [{text: ...}]}} and legacy {response|message|text}."""
+    """Return (extracted_text, full_envelope).
+
+    Handles current Hermes/plain text envelopes plus legacy OpenClaw
+    {result: {payloads: [{text: ...}]}} and {response|message|text} shapes.
+    """
     if not raw:
         return "", {}
     try:
@@ -425,7 +428,7 @@ def _parse_envelope(raw: str) -> tuple[str, dict[str, Any]]:
     if not isinstance(envelope, dict):
         return "", {}
 
-    # Primary path: OpenClaw 2026.4+
+    # Structured gateway path: Hermes envelopes plus legacy OpenClaw shapes
     result = envelope.get("result") or {}
     if isinstance(result, dict):
         payloads = result.get("payloads")
@@ -457,7 +460,7 @@ def _extract_meta(envelope: dict[str, Any]) -> tuple[str, str]:
 def _extract_usage(envelope: dict[str, Any]) -> dict[str, int]:
     """Extract token usage from envelope.result.meta.agentMeta.usage.
 
-    OpenClaw 2026.4+ exposes {input, output, cacheRead, cacheWrite, total}.
+    Hermes envelopes expose {input, output, cacheRead, cacheWrite, total}; legacy OpenClaw used the same usage shape.
     Returns dict with zero fallbacks so callers don't need to null-check.
     """
     try:
@@ -518,7 +521,7 @@ def _estimate_cost_usd(provider: str, model: str, usage: dict[str, int]) -> floa
 
 
 # Skill-usage telemetry dispatcher — fires off a thread (best-effort) to
-# bump openclaw.json skill entries on successful dispatch so attach-level
+# bump Hermes profile skill telemetry on successful dispatch so generated-skill
 # adoption numbers show up in future /metrics reporting. Silent on error.
 _skill_bg_pool = None
 
@@ -574,11 +577,11 @@ def dispatch(
     backlog_kind: str | None = None,
     backlog_payload: dict | None = None,
 ) -> DispatchResult:
-    """Dispatch to an OpenClaw agent with retry + degraded fallback.
+    """Dispatch to a Hermes profile with retry + degraded fallback.
 
     Parameters
     ----------
-    agent               : OpenClaw agent id (jenna | liz | ellie | sage | market)
+    agent               : Hermes profile id (jenna | liz | ellie | sage | market)
     message             : prompt body
     thinking            : off | minimal | low | medium | high | xhigh
     timeout             : per-attempt subprocess timeout (seconds)
@@ -749,7 +752,7 @@ def _dispatch_inner(
         # D fix (2026-04-14): replaced Popen PIPE + communicate() with tempfile
         # redirection + wait(). The old M9.1 approach used start_new_session
         # + killpg on timeout, but that still left a class of deadlocks where
-        # openclaw grandchildren (ACP gateway HTTP client) held the stdout
+        # gateway grandchildren (ACP/Hermes HTTP client) held the stdout
         # pipe open AND somehow escaped the process group via their own
         # setsid() — so killpg couldn't reach them, and Python's
         # communicate() blocked forever waiting for pipe EOF. Reproduced
@@ -767,28 +770,21 @@ def _dispatch_inner(
         stderr_f = None
         try:
             _cmd = [
-                OPENCLAW_BIN,
-                "agent",
-                "--agent",
+                HERMES_BIN,
+                "--profile",
                 agent,
-                "--message",
+                "chat",
+                "-q",
                 message,
-                "--json",
-                "--thinking",
-                thinking,
-                "--timeout",
-                str(timeout),
+                "--quiet",
+                "--source",
+                "brain-dispatch",
             ]
-            # 2026-04-17 cost fix: brain dispatches MUST NOT land in the
-            # agent's interactive session (Chris's Telegram chat with
-            # Jenna accumulates 30k+ events / 95MB over 2 weeks, and every
-            # call replays the full history — ~140k tokens avg per call,
-            # $150+/day). Use a stable brain-owned session that rotates
-            # daily to cap prompt size. Telegram interactive session is
-            # untouched.
-            if session_id is None:
-                session_id = f"brain-auto-{agent}-{datetime.now().strftime('%Y-%m-%d')}"
-            _cmd.extend(["--session-id", session_id])
+            # 2026-05-23 Hermes migration: one-shot `hermes chat -q` runs under
+            # the target profile without reusing Chris's interactive Telegram
+            # session. The compatibility `session_id` parameter is intentionally
+            # ignored because current Hermes CLI does not accept an arbitrary
+            # session-id flag for one-shot chat.
             import tempfile as _tempfile
 
             stdout_f = _tempfile.TemporaryFile(mode="w+", encoding="utf-8")
@@ -911,8 +907,8 @@ def _dispatch_inner(
                     # Attach-level telemetry: stamp last_used_at + use_count on
                     # every brain-learned-* skill available to this agent.
                     # Fire-and-forget in the scheduler thread pool so the
-                    # ~10-40ms of openclaw.json rewrite doesn't block the
-                    # dispatch return path.
+                    # ~10-40ms telemetry write does not block the dispatch
+                    # return path.
                     _stamp_skill_usage_bg(agent)
                     return result
                 # Empty text despite rc=0 — treat as transient error.
@@ -1063,14 +1059,14 @@ def _build_degraded_placeholder(agent: str, message: str, result: DispatchResult
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="openclaw dispatch smoke test")
-    parser.add_argument("--agent", default="jenna")
+    parser = argparse.ArgumentParser(description="Hermes profile dispatch smoke test")
+    parser.add_argument("--profile", default="jenna")
     parser.add_argument("--message", required=True)
     parser.add_argument("--thinking", default="low")
     parser.add_argument("--timeout", type=int, default=30)
     args = parser.parse_args()
 
-    r = dispatch(args.agent, args.message, thinking=args.thinking, timeout=args.timeout)
+    r = dispatch(args.profile, args.message, thinking=args.thinking, timeout=args.timeout)
     print(f"ok={r.ok} attempts={r.attempts} duration_ms={r.duration_ms}")
     print(f"provider={r.provider} model={r.model}")
     if r.ok:

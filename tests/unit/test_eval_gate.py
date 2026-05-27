@@ -152,6 +152,77 @@ def test_persist_loose_metric_keeps_strict_and_selected_content(fake_eval_gate, 
     assert report["failure_analysis"]["buckets"]["stale_expected_content"]["count"] == 1
 
 
+def test_persist_history_records_failed_ids_from_query(fake_eval_gate, tmp_path):
+    """P1-4 regression coverage: eval_compare per_test rows lack `id`/`test_id`
+    fields. The history row must still capture failing rows by deriving an ID
+    from `query`, otherwise the nightly regression-diff sees an empty
+    failed_ids list and reports zero regressions even when accuracy drops.
+    """
+    import hashlib
+
+    report_in = _stub_report(60.0, loose=70.0)
+    report_in["v2"]["per_test"] = [
+        {
+            "query": "a failing case",
+            "expected_source": "s",
+            "expected_content": "c",
+            "hit_content_loose": False,
+            "hit_content": False,
+            "hit_source": True,
+            "top_sources": ["s"],
+            "rank": 1,
+        },
+        {
+            "query": "a passing case",
+            "expected_source": "s",
+            "expected_content": "c",
+            "hit_content_loose": True,
+            "hit_content": True,
+            "hit_source": True,
+            "top_sources": ["s"],
+            "rank": 1,
+        },
+    ]
+    fake_eval_gate._persist_eval_report(report_in, track="extended", content_metric="loose")
+
+    row = json.loads((tmp_path / "logs" / "eval-history-extended.jsonl").read_text().splitlines()[-1])
+    assert row["failed_ids"], "failing rows must produce a non-empty failed_ids list"
+    expected_id = "q_" + hashlib.sha1(b"a failing case", usedforsecurity=False).hexdigest()[:12]
+    assert expected_id in row["failed_ids"]
+    # Passing row must not appear.
+    passing_id = "q_" + hashlib.sha1(b"a passing case", usedforsecurity=False).hexdigest()[:12]
+    assert passing_id not in row["failed_ids"]
+
+
+def test_persist_history_uses_metric_appropriate_hit_field(fake_eval_gate, tmp_path):
+    """For content_metric='strict' the gate looks at `hit_content`, for 'loose'
+    it looks at `hit_content_loose`. A row that loose-passes but strict-fails
+    is captured only when the track's metric says it failed.
+    """
+    import hashlib
+
+    report_in = _stub_report(85.0, loose=92.0)
+    report_in["v2"]["per_test"] = [
+        {
+            "query": "strict-fail-loose-pass",
+            "hit_content": False,
+            "hit_content_loose": True,
+            "hit_source": True,
+        }
+    ]
+
+    # Loose track: the row counts as PASS (loose hit=True). failed_ids empty.
+    fake_eval_gate._persist_eval_report(report_in, track="extended", content_metric="loose")
+    loose_row = json.loads((tmp_path / "logs" / "eval-history-extended.jsonl").read_text().splitlines()[-1])
+    assert loose_row["failed_ids"] == []
+
+    # Strict track: same row counts as FAIL (strict hit=False).
+    fake_eval_gate._persist_eval_report(report_in, track="stable", content_metric="strict")
+    strict_row = json.loads((tmp_path / "logs" / "eval-history-stable.jsonl").read_text().splitlines()[-1])
+    expected_id = "q_" + hashlib.sha1(b"strict-fail-loose-pass", usedforsecurity=False).hexdigest()[:12]
+    assert strict_row["failed_ids"] == [expected_id]
+
+
 def test_baseline_roundtrip(fake_eval_gate, tmp_path):
     baseline = tmp_path / "baseline.json"
     fake_eval_gate.write_baseline(_stub_report(95.7), baseline)

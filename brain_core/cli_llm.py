@@ -1,23 +1,23 @@
 """Subscription-backed LLM dispatch via Codex CLI with
 comprehensive fallback chain and llm_backlog integration.
 
-Replaces openclaw_dispatch.dispatch for ALL brain mechanical calls. The
-OpenClaw path drags a 95MB session history into every call (414K tokens
-per simple query). CLI is stateless: ~5K tokens/call, 3-5x faster, cleaner
-output (no agent persona pollution).
+Replaces legacy profile dispatch for ALL brain mechanical calls. The
+stateful agent path can drag large session history into every call. CLI is
+stateless: ~5K tokens/call, 3-5x faster, cleaner output (no persona
+pollution).
 
 ## Fallback chain (worst-case guaranteed catch-up)
 
     1. codex exec (gpt-5.5, ChatGPT Pro sub) — primary, 2-6s
     2. codex exec -m gpt-5.3-codex-spark — lighter fallback if primary hit quota
-    3. openclaw agent — authenticated, heavier context, emergency fallback
+    3. hermes --profile <name> chat -q — authenticated profile fallback
     4. llm_backlog.enqueue — if every provider is exhausted, queue the work
        so it catches up automatically when quota resets
 
-Rate-limit detection patterns match openclaw_dispatch.RATE_LIMIT_PATTERNS
-so the behavior is consistent with the existing breaker.
+Rate-limit detection patterns match the legacy dispatch wrapper so behavior
+stays consistent with the existing breaker.
 
-## API compatibility with openclaw_dispatch
+## API compatibility with legacy dispatch wrappers
 
 `CliResult` mirrors `DispatchResult` (ok, text, error, duration_ms,
 provider, model) so call-sites can swap with minimal churn. Plus token
@@ -27,12 +27,12 @@ accounting for the new llm_daily_spend_usd SLO.
 
 - Use `cli_dispatch` for: HyDE, classify, atom compression, entity
   extraction, reflection, synthesis, SLO notifications — anything that
-  doesn't need OpenClaw's agent persona, session continuity, or skills.
+  does not need a Hermes profile persona, session continuity, or skills.
   Claude CLI prompt mode is intentionally not used; stale `backend="claude"`
   hints are treated as Codex gpt-5.5 compatibility aliases.
 - Use `cli_dispatch_with_schema` for structured JSON output with retry.
-- Keep `openclaw_dispatch` for: Chris↔Jenna Telegram interactive chat,
-  skill-heavy agent turns (imsg/things/obsidian), multi-agent messages.
+- Keep profile dispatch for: skill-heavy profile turns (imsg/things/obsidian)
+  and multi-agent messages.
 """
 
 from __future__ import annotations
@@ -96,11 +96,11 @@ CLI_LLM_LOCK = Path(os.getenv("BRAIN_CLI_LLM_LOCK_PATH", "/Users/chrischo/server
 CODEX_BIN = os.getenv("BRAIN_CODEX_BIN", "/opt/homebrew/bin/codex")
 CODEX_PRIMARY_MODEL = os.getenv("BRAIN_CODEX_PRIMARY_MODEL", "gpt-5.5")
 CODEX_FALLBACK_MODEL = os.getenv("BRAIN_CODEX_FALLBACK_MODEL", "gpt-5.3-codex-spark")
-OPENCLAW_BIN = os.getenv("BRAIN_OPENCLAW_BIN", "/Users/chrischo/.local/bin/openclaw")
-OPENCLAW_FALLBACK_AGENT = os.getenv("BRAIN_OPENCLAW_FALLBACK_AGENT", "jenna")
-OPENCLAW_TIMEOUT_FLOOR_S = max(5, int(os.getenv("BRAIN_OPENCLAW_TIMEOUT_FLOOR_S", "45")))
-OPENCLAW_TIMEOUT_CAP_S = max(OPENCLAW_TIMEOUT_FLOOR_S, int(os.getenv("BRAIN_OPENCLAW_TIMEOUT_CAP_S", "90")))
-OPENCLAW_FALLBACK_ENABLED = os.getenv("BRAIN_OPENCLAW_FALLBACK_ENABLED", "1").lower() not in {
+HERMES_BIN = os.getenv("BRAIN_HERMES_BIN", os.getenv("HERMES_BIN", "/Users/chrischo/.local/bin/hermes"))
+HERMES_FALLBACK_PROFILE = os.getenv("BRAIN_HERMES_FALLBACK_PROFILE", "jenna")
+HERMES_TIMEOUT_FLOOR_S = max(5, int(os.getenv("BRAIN_HERMES_TIMEOUT_FLOOR_S", "45")))
+HERMES_TIMEOUT_CAP_S = max(HERMES_TIMEOUT_FLOOR_S, int(os.getenv("BRAIN_HERMES_TIMEOUT_CAP_S", "90")))
+HERMES_FALLBACK_ENABLED = os.getenv("BRAIN_HERMES_FALLBACK_ENABLED", "1").lower() not in {
     "0",
     "false",
     "no",
@@ -112,7 +112,7 @@ OPENCLAW_FALLBACK_ENABLED = os.getenv("BRAIN_OPENCLAW_FALLBACK_ENABLED", "1").lo
 # other brain dispatch behind a global flock; the per-call timeout was eating
 # into the subprocess budget while waiting for that lock, producing 80-94%
 # spurious-timeout failures across thousands of calls. Bounded concurrency
-# preserves the original memory contract (cap on simultaneous Codex/OpenClaw
+# preserves the original memory contract (cap on simultaneous Codex/Hermes
 # helper processes) without single-caller starvation. Lock-wait is tracked
 # separately from the subprocess timeout so a slow CLI never bleeds into the
 # next dispatch's budget.
@@ -166,7 +166,7 @@ def _effective_concurrency() -> int:
 FALLBACK_CHAIN: list[tuple[str, str, str]] = [
     ("codex", CODEX_PRIMARY_MODEL, "ChatGPT Pro primary — frontier quality"),
     ("codex", CODEX_FALLBACK_MODEL, "ChatGPT Pro lightweight — quota fallback"),
-    ("openclaw", OPENCLAW_FALLBACK_AGENT, "OpenClaw authenticated emergency fallback"),
+    ("hermes", HERMES_FALLBACK_PROFILE, "Hermes authenticated profile fallback"),
 ]
 
 _BACKEND_COOLDOWN_UNTIL: dict[tuple[str, str], float] = {}
@@ -233,7 +233,7 @@ def _run_cli_process(
 ) -> tuple[subprocess.CompletedProcess[str], int]:
     """Run a subscription CLI with a process-group timeout.
 
-    `subprocess.run(..., timeout=...)` kills only the direct child. Codex/OpenClaw
+    `subprocess.run(..., timeout=...)` kills only the direct child. Codex/Hermes
     CLIs can leave helper descendants behind when the parent wedges, which is
     how stale "brain synthesis drive" processes survived for hours. A new
     session lets us terminate the whole group deterministically.
@@ -371,7 +371,7 @@ FAILOVER_REASONS = (
 )
 
 FAILURE_TAXONOMY_VERSION = "cli-failure-taxonomy-v1"
-_PROVIDER_FAILURE_CLASSES = ("codex", "openclaw")
+_PROVIDER_FAILURE_CLASSES = ("codex", "hermes")
 _FAILURE_CLASS_PROBES = {
     "auth": "not logged in",
     "billing": "payment required",
@@ -498,15 +498,15 @@ class CliResult:
     tried: list[tuple[str, str]] = field(default_factory=list)  # [(backend, model)...]
     lock_wait_ms: int = 0  # time spent waiting for a free CLI slot (separate from duration_ms)
 
-    # Compat shim with openclaw_dispatch.DispatchResult
+    # Compat shim with legacy DispatchResult
     @property
     def provider(self) -> str:
         if self.backend == "codex":
             return "openai-codex"
         if self.backend == "claude":
             return "anthropic"
-        if self.backend == "openclaw":
-            return "openclaw"
+        if self.backend == "hermes":
+            return "hermes"
         return self.backend
 
 
@@ -519,13 +519,14 @@ def _record_usage(
     rate_limited: bool = False,
 ) -> None:
     """Append to llm_usage.db so the llm_daily_spend_usd SLO and /metrics see
-    the CLI dispatches alongside openclaw_dispatch calls. Cost is 0 because
+    the CLI dispatches alongside profile-dispatch calls. Cost is 0 because
     these are subscription-backed — token count is the real signal.
     """
     conn = None
     try:
         conn = sqlite3.connect(str(LLM_USAGE_DB))
-        # 2026-04-17 fix: audit showed that if openclaw_dispatch had never been
+        # 2026-04-17 fix: audit showed that if the legacy profile-dispatch
+        # module had never been
         # loaded in this process, the llm_usage table doesn't exist and every
         # CLI dispatch silently lost its telemetry. Create-if-missing covers
         # the standalone case (CLI scripts, cold worker, etc).
@@ -569,7 +570,7 @@ def get_usage_stats(days: int = 30) -> dict:
     """Return rolling CLI-first LLM usage stats for the last N days.
 
     This intentionally lives in ``cli_llm`` so `/brain/usage` reports the
-    current mechanical-dispatch surface instead of the legacy OpenClaw wrapper.
+    current mechanical-dispatch surface instead of the legacy profile wrapper.
     """
     try:
         conn = sqlite3.connect(str(LLM_USAGE_DB))
@@ -670,7 +671,7 @@ def _is_transient_throttle_error(error: str | None) -> bool:
     """Errors that already have a local/provider retry path.
 
     These should not trip the coarse global ``llm.dispatch`` breaker. Backend
-    cooldowns, task deferral, and OpenClaw gateway recovery handle them more
+    cooldowns, task deferral, and Hermes profile recovery handle them more
     precisely. Counting them globally was reopening the breaker from local
     gateway/timeouts and making Chris see "automation under the hood" that was
     only waiting on a broad cooldown.
@@ -761,7 +762,7 @@ def _single_codex(prompt: str, model: str, timeout: int) -> CliResult:
     codex refuses to run outside trusted repos by default. Without this
     flag the subprocess fails in ~10ms with 'Not inside a trusted
     directory', which was causing every dispatch from brain-server to
-    fall through to the next Codex/OpenClaw fallback.
+    fall through to the next Codex/Hermes fallback.
     """
     t0 = time.time()
     # Feed the prompt through stdin (`-`) instead of argv. Codex v0.128 can
@@ -827,12 +828,12 @@ def _legacy_claude_backend_via_codex(prompt: str, model: str, timeout: int) -> C
     return _single_codex(prompt, CODEX_PRIMARY_MODEL, timeout)
 
 
-def _parse_openclaw_payload(stdout: str) -> tuple[str, int]:
+def _parse_hermes_payload(stdout: str) -> tuple[str, int]:
     raw = (stdout or "").strip()
     try:
         envelope = json.loads(raw)
     except json.JSONDecodeError:
-        # OpenClaw may print a gateway fallback banner before the JSON envelope.
+        # Hermes may print a fallback banner before the JSON envelope.
         # Parse the first plausible envelope instead of treating the banner as
         # the model answer.
         start = raw.find('{\n  "payloads"')
@@ -853,88 +854,87 @@ def _parse_openclaw_payload(stdout: str) -> tuple[str, int]:
     return text, tokens
 
 
-def _single_openclaw(prompt: str, model: str, timeout: int, *, session_id: str | None = None) -> CliResult:
-    """Emergency fallback through OpenClaw's authenticated agent path.
+def _single_hermes(prompt: str, model: str, timeout: int, *, session_id: str | None = None) -> CliResult:
+    """Emergency fallback through a Hermes authenticated profile path.
 
-    This is intentionally last in the chain because OpenClaw carries large
-    agent context, but it is better than opening the global breaker when the
-    stateless CLIs are logged out or quota-exhausted.
+    Last in the chain: Codex stays the stateless primary; Hermes profile chat is
+    available when subscription CLIs are logged out or quota-exhausted.
     """
 
-    if not OPENCLAW_FALLBACK_ENABLED:
-        return CliResult(ok=False, error="openclaw fallback disabled", backend="openclaw", model=model)
+    if not HERMES_FALLBACK_ENABLED:
+        return CliResult(ok=False, error="hermes fallback disabled", backend="hermes", model=model)
     t0 = time.time()
-    openclaw_timeout = max(OPENCLAW_TIMEOUT_FLOOR_S, min(timeout, OPENCLAW_TIMEOUT_CAP_S))
+    hermes_timeout = max(HERMES_TIMEOUT_FLOOR_S, min(timeout, HERMES_TIMEOUT_CAP_S))
     cmd = [
-        OPENCLAW_BIN,
-        "agent",
-        "--agent",
-        model or OPENCLAW_FALLBACK_AGENT,
-        "--message",
+        HERMES_BIN,
+        "--profile",
+        model or HERMES_FALLBACK_PROFILE,
+        "chat",
+        "-q",
         prompt,
-        "--json",
-        "--thinking",
-        "off",
-        "--timeout",
-        str(openclaw_timeout),
+        "--quiet",
+        "--source",
+        "brain-cli-llm",
     ]
     if session_id:
-        cmd.extend(["--session-id", session_id])
+        # Current Hermes one-shot chat is stateless; keep the compatibility
+        # argument accepted but intentionally unused.
+        pass
     try:
-        # Foreground agent tasks must not lose to background learning jobs that
-        # briefly hold the shared CLI slot. OpenClaw has its own timeout
+        # Foreground profile tasks must not lose to background learning jobs
+        # that briefly hold the shared CLI slot. Hermes has its own timeout
         # budget; allow a longer lock wait so queued Liz/Ellie/Sage work waits
-        # for the slot instead of becoming a false task failure/defer.
-        openclaw_lock_wait_s = max(DEFAULT_LOCK_WAIT_S, min(float(timeout), 180.0))
+        # instead of becoming a false task failure/defer.
+        hermes_lock_wait_s = max(DEFAULT_LOCK_WAIT_S, min(float(timeout), 180.0))
         proc, lock_wait_ms = _run_cli_process(
             cmd,
-            timeout=max(openclaw_timeout + 10, 20),
-            lock_wait_s=openclaw_lock_wait_s,
+            timeout=max(hermes_timeout + 10, 20),
+            lock_wait_s=hermes_lock_wait_s,
             use_slot=False,
         )
     except subprocess.TimeoutExpired as exc:
         dur = int((time.time() - t0) * 1000)
-        _record_usage("openclaw", model, 0, dur, False)
-        err = _timeout_error(exc, max(openclaw_timeout + 10, 20))[:500]
+        _record_usage("hermes", model, 0, dur, False)
+        err = _timeout_error(exc, max(hermes_timeout + 10, 20))[:500]
         return CliResult(
             ok=False,
             error=err,
             duration_ms=dur,
-            backend="openclaw",
+            backend="hermes",
             model=model,
             lock_wait_ms=getattr(exc, "lock_wait_ms", 0),
         )
     dur = int((time.time() - t0) * 1000)
     rate_limited = _is_quota_error(proc.stderr, proc.stdout)
     if proc.returncode != 0:
-        _record_usage("openclaw", model, 0, dur, False, rate_limited)
+        _record_usage("hermes", model, 0, dur, False, rate_limited)
         return CliResult(
             ok=False,
             error=(proc.stderr or proc.stdout)[:500],
             duration_ms=dur,
-            backend="openclaw",
+            backend="hermes",
             model=model,
             rate_limited=rate_limited,
             lock_wait_ms=lock_wait_ms,
         )
-    text, tokens = _parse_openclaw_payload(proc.stdout)
+    text, tokens = _parse_hermes_payload(proc.stdout)
     if text:
-        # OpenClaw can print a gateway-fallback warning while still returning a
+        # Hermes can print a fallback warning while still returning a
         # valid embedded-agent answer. A successful answer must not poison the
         # backend cooldown state as a rate limit.
         rate_limited = False
-    _record_usage("openclaw", model, tokens, dur, bool(text), rate_limited)
+    _record_usage("hermes", model, tokens, dur, bool(text), rate_limited)
     return CliResult(
         ok=bool(text),
         text=text,
         error=(
             ""
             if text
-            else _empty_response_error("openclaw", proc.stderr, proc.stdout, rate_limited=rate_limited)
+            else _empty_response_error("hermes", proc.stderr, proc.stdout, rate_limited=rate_limited)
         ),
         tokens=tokens,
         duration_ms=dur,
-        backend="openclaw",
+        backend="hermes",
         model=model,
         rate_limited=rate_limited,
         lock_wait_ms=lock_wait_ms,
@@ -947,14 +947,14 @@ def _try_backend(
     prompt: str,
     timeout: int,
     *,
-    openclaw_session_id: str | None = None,
+    hermes_session_id: str | None = None,
 ) -> CliResult:
     if backend == "codex":
         return _single_codex(prompt, model, timeout)
     if backend == "claude":
         return _legacy_claude_backend_via_codex(prompt, model, timeout)
-    if backend == "openclaw":
-        return _single_openclaw(prompt, model, timeout, session_id=openclaw_session_id)
+    if backend == "hermes":
+        return _single_hermes(prompt, model, timeout, session_id=hermes_session_id)
     return CliResult(ok=False, error=f"unknown backend {backend}", backend=backend, model=model)
 
 
@@ -963,7 +963,10 @@ def cli_dispatch(
     *,
     timeout: int = 30,
     backend: str | None = None,
-    allow_openclaw_fallback: bool = True,
+    allow_hermes_fallback: bool = True,
+    hermes_profile: str | None = None,
+    hermes_session_id: str | None = None,
+    allow_openclaw_fallback: bool | None = None,
     openclaw_agent: str | None = None,
     openclaw_session_id: str | None = None,
     backlog_kind: str | None = None,
@@ -981,14 +984,14 @@ def cli_dispatch(
     ----------
     prompt          : raw user message (system prompt + task)
     timeout         : per-attempt seconds
-    backend         : hint to PREFER a specific backend ('codex' | 'openclaw').
+    backend         : hint to PREFER a specific backend ('codex' | 'hermes').
                       Legacy 'claude' hints are normalized to Codex gpt-5.5.
                       Fallback chain still fires on
                       failure. None = use FALLBACK_CHAIN default order.
-    allow_openclaw_fallback
+    allow_hermes_fallback
                     : when False, constrain the fallback chain to stateless
                       subscription CLI path (Codex) and never invoke the
-                      persona/session-heavy OpenClaw emergency lane.
+                      persona/session-heavy Hermes emergency lane.
     backlog_kind    : optional llm_backlog kind. When provided, a total
                       failure enqueues the work with this kind for later
                       catch-up. One of: classify | entities | distill |
@@ -1057,9 +1060,16 @@ def cli_dispatch(
     # through Codex instead of spawning Claude prompt-mode CLI.
     if backend == "claude":
         backend = "codex"
-    chain = [(b, (openclaw_agent or m) if b == "openclaw" else m, d) for (b, m, d) in FALLBACK_CHAIN]
-    if not allow_openclaw_fallback:
-        chain = [(b, m, d) for (b, m, d) in chain if b != "openclaw"]
+    if allow_openclaw_fallback is not None:
+        allow_hermes_fallback = allow_openclaw_fallback
+    if openclaw_agent and not hermes_profile:
+        hermes_profile = openclaw_agent
+    if openclaw_session_id and not hermes_session_id:
+        hermes_session_id = openclaw_session_id
+
+    chain = [(b, (hermes_profile or m) if b == "hermes" else m, d) for (b, m, d) in FALLBACK_CHAIN]
+    if not allow_hermes_fallback:
+        chain = [(b, m, d) for (b, m, d) in chain if b != "hermes"]
     if backend:
         preferred = [(b, m, d) for (b, m, d) in chain if b == backend]
         rest = [(b, m, d) for (b, m, d) in chain if b != backend]
@@ -1085,13 +1095,13 @@ def cli_dispatch(
             )
         else:
             real_attempts += 1
-            if openclaw_session_id:
+            if hermes_session_id:
                 r = _try_backend(
                     backend,
                     model,
                     prompt,
                     timeout,
-                    openclaw_session_id=openclaw_session_id,
+                    hermes_session_id=hermes_session_id,
                 )
             else:
                 r = _try_backend(backend, model, prompt, timeout)
@@ -1184,7 +1194,7 @@ def cli_dispatch_with_schema(
 ) -> dict | None:
     """Dispatch with strict-JSON retry logic. Returns parsed dict or None.
 
-    Mirrors openclaw_dispatch.dispatch_with_schema API so call-sites in
+    Mirrors the legacy dispatch_with_schema API so call-sites in
     synthesis/*.py, pipeline/skill_extractor.py, etc. can swap in place.
     """
     schema_instruction = (
@@ -1215,7 +1225,7 @@ def cli_dispatch_with_schema(
     return None
 
 
-# ── Back-compat shim for call-sites using openclaw DispatchResult API ──
+# ── Back-compat shim for call-sites using legacy DispatchResult API ──
 def dispatch_compat(
     agent: str,
     message: str,
@@ -1229,21 +1239,20 @@ def dispatch_compat(
     openclaw_session_id: str | None = None,
     **_: Any,
 ) -> CliResult:
-    """Drop-in replacement for openclaw_dispatch.dispatch. Ignores `agent`
-    and `thinking` (CLI path doesn't need persona injection). Returns a
+    """Drop-in replacement for legacy profile dispatch. Ignores `thinking`.
+    Uses `agent` as a Hermes profile hint when profile fallback is reached. Returns a
     CliResult which exposes the same .ok/.text/.error/.duration_ms/
     .provider/.model fields as DispatchResult.
 
-    Migration pattern: legacy callers that used the OpenClaw dispatch wrapper
-    should import this shim as ``dispatch`` instead, or more cleanly use
-    ``cli_dispatch`` and drop the persona-only arguments.
+    Migration pattern: legacy callers should import this shim as ``dispatch``
+    instead, or more cleanly use ``cli_dispatch`` and drop persona-only args.
     """
     return cli_dispatch(
         message,
         timeout=timeout,
         backend=backend,
-        openclaw_agent=agent,
-        openclaw_session_id=openclaw_session_id,
+        hermes_profile=agent,
+        hermes_session_id=openclaw_session_id,
         backlog_kind=backlog_kind,
         backlog_payload=backlog_payload,
         max_backends=max_backends,
@@ -1251,7 +1260,7 @@ def dispatch_compat(
 
 
 # ── Drop-in aliases for minimal-churn migration ────────────
-# Legacy OpenClaw-wrapper call sites can swap to this module with zero other
+# Legacy profile-dispatch call sites can swap to this module with zero other
 # changes. `agent=` and `thinking=` are accepted but ignored (CLI does not
 # need persona).
 dispatch = dispatch_compat
@@ -1262,9 +1271,9 @@ def dispatch_with_schema_compat(
     *args: Any,
     **kwargs: Any,
 ) -> dict | None:
-    """Back-compat shim for callers using the openclaw signature.
+    """Back-compat shim for callers using the legacy profile-dispatch signature.
 
-    The original openclaw API was
+    The original profile-dispatch API was
     ``dispatch_with_schema(agent, message, schema_description, thinking,
     timeout, max_retries, backlog_kind, backlog_payload)``.
     The CLI path doesn't need ``agent`` or ``thinking`` (no persona
@@ -1286,7 +1295,7 @@ def dispatch_with_schema_compat(
     if prompt is None or schema_description is None:
         raise TypeError("dispatch_with_schema requires prompt/message and schema_description")
 
-    # Silently drop openclaw-only kwargs.
+    # Silently drop profile-dispatch-only kwargs.
     kwargs.pop("agent", None)
     kwargs.pop("thinking", None)
     # Translate legacy retry name.

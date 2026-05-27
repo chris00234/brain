@@ -20,3 +20,14 @@ brain.db
 .ruff_cache/
 # .omx is Codex workspace state — operational artifacts, not source
 .omx/
+
+# Secrets / private credential notes — never commit
+*.env
+*.env.*
+.env
+.env.*
+**/.env
+**/.env.*
+**/*Credential*.md
+**/*credential*.md
+**/*setup-token*.md

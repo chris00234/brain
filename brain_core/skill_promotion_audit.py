@@ -16,9 +16,9 @@ except Exception:  # pragma: no cover - standalone fallback
 from skill_materializer import (
     CLAUDE_SKILLS_DIR,
     CODEX_SKILLS_DIR,
+    HERMES_SKILLS_DIR,
     MIN_STEPS,
     MIN_SUCCESS_COUNT,
-    OPENCLAW_SKILLS_DIR,
     PROMOTION_CONTRACT_VERSION,
     _load_usage,
     _parse_frontmatter,
@@ -28,7 +28,7 @@ MIN_OUTCOME_LINKED_OUTCOMES = 5
 MIN_OUTCOME_PROCEDURES_WITH_OUTCOMES = 1
 MIN_OUTCOME_SUCCESS_RATE = 60.0
 
-REQUIRED_ROOTS = (CLAUDE_SKILLS_DIR, CODEX_SKILLS_DIR, OPENCLAW_SKILLS_DIR)
+REQUIRED_ROOTS = (CLAUDE_SKILLS_DIR, CODEX_SKILLS_DIR, HERMES_SKILLS_DIR)
 
 
 def _procedure_map(db_path: Path | None = None) -> dict[str, dict[str, Any]]:

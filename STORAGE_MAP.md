@@ -14,7 +14,7 @@ Authoritative list of every on-disk store brain owns. Anything not listed here i
 | `audit.db` | ~456 KB | Unified audit log for merges, conflicts, dedup events. Separate from `action_audit` (which lives in brain.db for atom lineage). | `audit_events` | none yet (low write rate) | `brain_core/audit_log.py` |
 | `embedding_cache.db` | ~397 MB | Shared query/document embedding cache. The size reflects the multilingual-e5-large-instruct 1024-dim vectors accumulated since model swap. | `prune_old(max_age_days=30, max_rows=15_000)` in `embed_cache.py`, scheduled daily at 04:08. Argparse defaults aligned 2026-04-26 — prior CLI defaults of 60d/25K were overriding the tighter function signature. | `brain_core/embed_cache.py` |
 | `hyde_cache.db` | ~12 KB | HyDE hypothetical document expansion cache. Two-tier (in-memory TTLCache + persistent SQLite). | `hyde_expansions` | TTLCache 5min, persistent rows TTL via `clear_cache()` on prefix bump | `brain_core/hyde.py` |
-| `llm_usage.db` | ~2.2 MB | LLM token/cost accounting per agent and per call. | `llm_calls`, `llm_usage_monthly` | 90d detail (`run_llm_usage_retention`, monthly 1st 04:30) → archived to `llm_usage_monthly` rollup forever. | `brain_core/openclaw_dispatch.py` (writer), `brain_core/db_maintenance.py` (retention) |
+| `llm_usage.db` | ~2.2 MB | LLM token/cost accounting per profile and per call. | `llm_calls`, `llm_usage_monthly` | 90d detail (`run_llm_usage_retention`, monthly 1st 04:30) → archived to `llm_usage_monthly` rollup forever. | `brain_core/cli_llm.py`, `brain_core/openclaw_dispatch.py` compatibility wrapper, `brain_core/db_maintenance.py` (retention) |
 | `metrics_history.db` | ~81 MB | Persistence for `metrics_buffer.py`. Recent metrics snapshots for observability. SLOs only read the last 20 rows; everything older is trend-history. | `metrics_snapshots` | 14d via `run_metrics_history_retention` (daily 04:40) plus 90d safety net inside `metrics_buffer.persist`. Weekly VACUUM Sun 05:30. | `brain_core/metrics_buffer.py`, `brain_core/db_maintenance.py` (retention + VACUUM) |
 | `reasoning_checkpoints.db` | ~16 KB | LangGraph-style checkpoints for multi-hop reasoning threads that can be resumed. | `checkpoints` | none (per-thread lifecycle) | `brain_core/reasoning_loop.py` |
 | `scheduler_history.db` | ~2.3 MB | APScheduler job run history. Backs `GET /jobs/{name}/history`. | `job_runs` | 30d via `maintenance.prune_scheduler_history` | `brain_core/scheduler.py`, `brain_core/maintenance.py` |
@@ -46,7 +46,7 @@ The field is set by `ingest_mirror.py` when a NEW atom on the same `topic_key + 
 | `focus-aggregate.jsonl` | Day-of-week/hour activity rollup consumed by `_predictive_queries`. | Weekly overwrite |
 | `collection_size_history.jsonl` | Qdrant collection size snapshots over time. | Daily append |
 | `eval-history.jsonl` / `eval-history-extended.jsonl` | Regression eval run history. | Persistent |
-| `ghost-ingest-failures.jsonl`, `pdf-ingest-failures.jsonl`, `personal-ingest-failures.jsonl`, `openclaw-sessions-failures.jsonl`, `screen-time-failures.jsonl` | Per-source ingest failure logs. | Daily |
+| `ghost-ingest-failures.jsonl`, `pdf-ingest-failures.jsonl`, `personal-ingest-failures.jsonl`, `openclaw-sessions-failures.jsonl` | Per-source ingest failure logs. | Daily |
 | `hooks.jsonl` | Hook firing log (brain_core/hooks.py). | Daily |
 | `jobs/<name>.log` | Per-scheduler-job stdout/stderr. | Per `log_rotation` job (>512 KB or >3 d → truncate) |
 | `server.log` | Main FastAPI server log. | Per `log_rotation` |

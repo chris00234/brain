@@ -15,7 +15,7 @@ isn't enough data.
 
 Gated by BRAIN_INTEGRATION_TESTS=1; required for the M7 WS4 done-criterion.
 Brain server must be running on 127.0.0.1:8791 with the bearer token at
-~/.openclaw/credentials/.personal_webhook_secret.
+~/.brain/credentials/.personal_webhook_secret.
 """
 
 from __future__ import annotations
@@ -40,7 +40,7 @@ pytestmark = pytest.mark.skipif(
 
 
 BRAIN_URL = "http://127.0.0.1:8791"
-SECRET_PATH = Path("~/.openclaw/credentials/.personal_webhook_secret").expanduser()
+SECRET_PATH = Path("~/.brain/credentials/.personal_webhook_secret").expanduser()
 AUTONOMY_DB = Path("/Users/chrischo/server/brain/logs/autonomy.db")
 
 

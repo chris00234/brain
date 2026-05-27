@@ -183,6 +183,192 @@ def test_create_review_tasks_is_idempotent_via_signature(tmp_path: Path) -> None
     assert meta["llm_dispatch"] == "cli_llm"
 
 
+def test_resolved_pattern_is_skipped_when_old_and_review_task_completed(tmp_path: Path) -> None:
+    """P1-5: once a review task closes AND no fresh overrides for >=24h, the
+    pattern should not keep generating new review tasks every day. Prior
+    behaviour spawned a fresh task every cron tick on the same signature
+    long after the underlying fix landed.
+    """
+    db = tmp_path / "autonomy.db"
+    _seed_outcomes(
+        db,
+        [
+            {
+                "id": f"o{i}",
+                "task_id": f"t{i}",
+                "domain": "infra",
+                "chris_override": 1,
+                "override_reason": "old infra fix theme",
+                # All overrides 26h+ ago — past the 24h resolution threshold.
+                "created_at": _iso(26 + i),
+            }
+            for i in range(3)
+        ],
+    )
+    tq = TaskQueue(db)
+
+    # First run creates the review task.
+    first = create_override_review_tasks(
+        hours=168, min_overrides=2, max_tasks=5, db_path=db, task_queue_obj=tq
+    )
+    assert len(first["created"]) == 1
+    task_id = first["created"][0]["task_id"]
+
+    # Simulate the agent / human closing it AND explicitly verifying the
+    # fix. Auto-completion alone (review_task_dispatcher path) is now NOT
+    # enough — a verification marker is required.
+    tq.approve_task(task_id, by="test")
+    tq.start_task(task_id, by="test")
+    tq.complete_task(task_id, result="fix shipped", by="test")
+    tq._merge_task_metadata(task_id, {"resolution_status": "verified_fixed"})
+
+    # Second run must skip the now-resolved pattern.
+    second = create_override_review_tasks(
+        hours=168, min_overrides=2, max_tasks=5, db_path=db, task_queue_obj=tq
+    )
+    assert second["created"] == []
+    reasons = {s["reason"] for s in second["skipped"]}
+    assert "resolved" in reasons
+
+
+def test_completed_review_task_without_verification_marker_does_not_resolve(tmp_path: Path) -> None:
+    """review_task_dispatcher auto-completes tasks as soon as the CLI returns
+    a proposal, which doesn't prove a fix shipped. Without an explicit
+    `resolution_status` marker, the next sweep must still surface the pattern.
+    """
+    db = tmp_path / "autonomy.db"
+    _seed_outcomes(
+        db,
+        [
+            {
+                "id": f"o{i}",
+                "task_id": f"t{i}",
+                "domain": "infra",
+                "chris_override": 1,
+                "override_reason": "auto-completed but unverified theme",
+                "created_at": _iso(26 + i),
+            }
+            for i in range(3)
+        ],
+    )
+    tq = TaskQueue(db)
+    first = create_override_review_tasks(
+        hours=168, min_overrides=2, max_tasks=5, db_path=db, task_queue_obj=tq
+    )
+    task_id = first["created"][0]["task_id"]
+
+    # Dispatcher's auto-complete path — no verification marker.
+    tq.approve_task(task_id, by="test")
+    tq.start_task(task_id, by="test")
+    tq.complete_task(task_id, result="proposal text", by="review_task_dispatcher")
+
+    second = create_override_review_tasks(
+        hours=168, min_overrides=2, max_tasks=5, db_path=db, task_queue_obj=tq
+    )
+    # Pattern must re-surface because nobody verified the fix.
+    assert len(second["created"]) == 1
+
+
+def test_failed_review_task_does_not_resolve_pattern(tmp_path: Path) -> None:
+    """A `failed` review task means the dispatch broke (rate limit, cli crash),
+    not that the underlying pattern was investigated. The next override-pattern
+    sweep must NOT treat that signature as resolved — otherwise a transient
+    dispatch hiccup silently suppresses real autonomy feedback.
+    """
+    db = tmp_path / "autonomy.db"
+    _seed_outcomes(
+        db,
+        [
+            {
+                "id": f"o{i}",
+                "task_id": f"t{i}",
+                "domain": "infra",
+                "chris_override": 1,
+                "override_reason": "still-unresolved infra theme",
+                "created_at": _iso(48 + i),
+            }
+            for i in range(3)
+        ],
+    )
+    tq = TaskQueue(db)
+
+    first = create_override_review_tasks(
+        hours=168, min_overrides=2, max_tasks=5, db_path=db, task_queue_obj=tq
+    )
+    assert len(first["created"]) == 1
+    task_id = first["created"][0]["task_id"]
+
+    # Simulate the dispatcher pipeline crashing (status='failed') — NOT
+    # an investigation closing the pattern.
+    tq.approve_task(task_id, by="test")
+    tq.start_task(task_id, by="test")
+    tq.fail_task(task_id, error="dispatch crashed", by="test")
+
+    # The next sweep should retry, not treat the failed task as resolution.
+    second = create_override_review_tasks(
+        hours=168, min_overrides=2, max_tasks=5, db_path=db, task_queue_obj=tq
+    )
+    assert len(second["created"]) == 1, "failed-task signature must not be auto-resolved"
+
+
+def test_resolved_pattern_re_surfaces_on_fresh_override(tmp_path: Path) -> None:
+    """If the same signature gets a NEW override after resolution, the
+    pattern must come back — the fix didn't hold."""
+    db = tmp_path / "autonomy.db"
+    _seed_outcomes(
+        db,
+        [
+            # Old overrides (>24h)
+            {
+                "id": "o_old1",
+                "task_id": "t_old1",
+                "domain": "infra",
+                "chris_override": 1,
+                "override_reason": "recurring infra theme",
+                "created_at": _iso(48),
+            },
+            {
+                "id": "o_old2",
+                "task_id": "t_old2",
+                "domain": "infra",
+                "chris_override": 1,
+                "override_reason": "recurring infra theme",
+                "created_at": _iso(40),
+            },
+        ],
+    )
+    tq = TaskQueue(db)
+    first = create_override_review_tasks(
+        hours=168, min_overrides=2, max_tasks=5, db_path=db, task_queue_obj=tq
+    )
+    task_id = first["created"][0]["task_id"]
+    tq.approve_task(task_id, by="test")
+    tq.start_task(task_id, by="test")
+    tq.complete_task(task_id, result="fix shipped", by="test")
+    tq._merge_task_metadata(task_id, {"resolution_status": "verified_fixed"})
+
+    # Now a NEW override of the same signature shows up.
+    _seed_outcomes(
+        db,
+        [
+            {
+                "id": "o_new",
+                "task_id": "t_new",
+                "domain": "infra",
+                "chris_override": 1,
+                "override_reason": "recurring infra theme",
+                "created_at": _iso(0.5),  # 30 min ago, recent
+            }
+        ],
+    )
+
+    second = create_override_review_tasks(
+        hours=168, min_overrides=2, max_tasks=5, db_path=db, task_queue_obj=tq
+    )
+    # last_seen is now fresh, so resolved=False → a new task is created.
+    assert len(second["created"]) == 1
+
+
 def test_severity_prefers_recent_high_volume_patterns(tmp_path: Path) -> None:
     db = tmp_path / "autonomy.db"
     rows: list[dict] = []

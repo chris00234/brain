@@ -40,7 +40,7 @@ EVAL_COMPARE = BRAIN_ROOT / "cli" / "eval_compare.py"
 DEFAULT_EVAL_SET = BRAIN_ROOT / "cli" / "eval_set.json"
 DEFAULT_BASELINE = BRAIN_ROOT / "cli" / "eval_baseline.json"
 PENDING_HOLDOUT = BRAIN_ROOT / "cli" / "eval_holdout_pending.json"
-SECRET_FILE = Path("/Users/chrischo/.openclaw/credentials/.personal_webhook_secret")
+SECRET_FILE = Path("/Users/chrischo/.brain/credentials/.personal_webhook_secret")
 BRAIN_URL = "http://127.0.0.1:8791"
 
 def _content_metric_value(v2: dict, metric: str) -> float:
@@ -262,6 +262,38 @@ def _persist_eval_report(report: dict, track: str = "default", content_metric: s
             ensure_ascii=False,
         )
     )
+    # Per-test pass/fail snapshot for nightly regression-diff (P1-4). Stored
+    # as a sorted list of IDs so eval-history rows stay small but the diff
+    # job can compute newly-regressed vs newly-passing across consecutive
+    # runs without re-running the eval. Readers that ignore unknown fields
+    # are unaffected.
+    #
+    # eval_compare per_test rows expose `hit_content` (strict) and
+    # `hit_content_loose`; pick the one that matches `content_metric` so
+    # pass/fail tracks the track's actual gate. Rows lack a stable id —
+    # derive one from the query so the diff identifies regressions even
+    # when upstream eval cases get reordered.
+    import hashlib as _hashlib
+
+    pass_key = "hit_content_loose" if content_metric == "loose" else "hit_content"
+    failed_ids: list[str] = []
+    for t in per_test:
+        if not isinstance(t, dict):
+            continue
+        # 2026-05-19: use falsy check, not strict `is not False`. The old
+        # form silently skipped rows whose pass_key was None/missing — those
+        # are real failures (eval_compare didn't compute the field), not
+        # passes. Skip only when pass_key is truthy.
+        if t.get(pass_key):
+            continue
+        case_id = str(t.get("id") or t.get("test_id") or "")
+        if not case_id:
+            query = str(t.get("query") or "").strip()
+            if not query:
+                continue
+            case_id = "q_" + _hashlib.sha1(query.encode("utf-8"), usedforsecurity=False).hexdigest()[:12]
+        failed_ids.append(case_id)
+    failed_ids = sorted(failed_ids)
     with history_path.open("a") as hf:
         hf.write(
             json.dumps(
@@ -280,6 +312,7 @@ def _persist_eval_report(report: dict, track: str = "default", content_metric: s
                     "hit_source_pct": round(source_pct, 1),
                     "source_accuracy": round(source_pct, 1),
                     "slow_count": 0,
+                    "failed_ids": failed_ids,
                 },
                 ensure_ascii=False,
             )
@@ -400,7 +433,7 @@ def main() -> int:
         "--max-baseline-age-days",
         type=int,
         default=30,
-        help="auto-refresh baseline if older than N days AND current is ≥ baseline (default 30)",
+        help="auto-refresh baseline if older than N days AND current is within --threshold of baseline (default 30)",
     )
     parser.add_argument(
         "--no-heal",
@@ -449,6 +482,16 @@ def main() -> int:
         return 0
 
     baseline_current = baseline.get("v2", {})
+    baseline_total = int(baseline_current.get("total", 0))
+    current_total = int(current.get("total", 0))
+    if baseline_total != current_total:
+        write_baseline(report, args.baseline)
+        print(
+            f"[eval_gate] baseline auto-refreshed due to eval-set cardinality change "
+            f"(was {baseline_total}, now {current_total})"
+        )
+        return 0
+
     baseline_content = _content_metric_value(baseline_current, args.content_metric)
     baseline_source = float(baseline_current.get("hit_source_pct", 0))
     print(
@@ -520,14 +563,33 @@ def main() -> int:
         return 1
 
     # Auto-refresh baseline on passing runs if stale.
+    # 2026-05-19: previously refresh required `current >= baseline`, which
+    # ratcheted up only. When eval legitimately settled below the previous
+    # peak (e.g., source-path migrations, canonical reorgs) the baseline
+    # locked in forever and every future run reported a permanent
+    # "regression". Now: refresh on any age-passing run within the same
+    # threshold the gate already enforced — that's the pass criterion, so
+    # honoring it for baseline writes can't unblock anything the gate
+    # wouldn't have unblocked.
     try:
         baseline_ts = baseline.get("baseline_written_at", "")
         if baseline_ts:
             dt_baseline = datetime.fromisoformat(baseline_ts)
             age_days = (datetime.now() - dt_baseline).days
-            if age_days > args.max_baseline_age_days and current_content >= baseline_content:
-                write_baseline(report, args.baseline)
-                print(f"[eval_gate] baseline auto-refreshed (was {age_days}d old, current ≥ baseline)")
+            if age_days > args.max_baseline_age_days:
+                drop = baseline_content - current_content
+                if drop <= args.threshold:
+                    write_baseline(report, args.baseline)
+                    direction = "up" if current_content >= baseline_content else "down"
+                    print(
+                        f"[eval_gate] baseline auto-refreshed ({direction}, "
+                        f"{age_days}d old, drop={drop:.1f}pts ≤ threshold={args.threshold})"
+                    )
+                else:
+                    print(
+                        f"[eval_gate] baseline NOT refreshed: {age_days}d old but "
+                        f"drop={drop:.1f}pts > threshold={args.threshold}"
+                    )
     except Exception as e:
         print(f"[eval_gate] baseline age check failed: {e}", file=sys.stderr)
 

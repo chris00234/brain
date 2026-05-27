@@ -41,7 +41,7 @@ VENV_PY = BRAIN_ROOT / ".venv" / "bin" / "python"
 EVAL_COMPARE = BRAIN_ROOT / "cli" / "eval_compare.py"
 TRAIN = BRAIN_ROOT / "cli" / "eval_set_train.json"
 LOG = BRAIN_ROOT / "logs" / "eval_paired_test.jsonl"
-LAUNCHD_LABEL = "gui/501/ai.openclaw.brain-server"
+LAUNCHD_LABEL = "gui/501/ai.brain.server"
 BRAIN_URL = "http://127.0.0.1:8791"
 
 SEARCH_UNIFIED = BRAIN_ROOT / "brain_core" / "search_unified.py"
@@ -66,7 +66,7 @@ GRID = [
 
 
 def _bearer() -> str:
-    return Path("/Users/chrischo/.openclaw/credentials/.personal_webhook_secret").read_text().strip()
+    return Path("/Users/chrischo/.brain/credentials/.personal_webhook_secret").read_text().strip()
 
 
 def _healthy() -> bool:

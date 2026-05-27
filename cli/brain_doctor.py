@@ -33,7 +33,7 @@ METRICS_DB = BRAIN_LOGS_DIR / "metrics_history.db"
 LLM_USAGE_DB = BRAIN_LOGS_DIR / "llm_usage.db"
 SLO_REMEDIATION_LOG = BRAIN_LOGS_DIR / "slo_remediation.jsonl"
 BRAIN_ENDPOINT = os.environ.get("BRAIN_ENDPOINT", "http://127.0.0.1:8791")
-CREDENTIALS_FILE = Path.home() / ".openclaw/credentials/.personal_webhook_secret"
+CREDENTIALS_FILE = Path.home() / ".brain/credentials/.personal_webhook_secret"
 
 
 def _bearer() -> str:

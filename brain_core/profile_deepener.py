@@ -40,7 +40,7 @@ log = logging.getLogger("brain.profile_deepener")
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 BRAIN_URL = "http://127.0.0.1:8791"
-SECRET_FILE = Path("~/.openclaw/credentials/.personal_webhook_secret").expanduser()
+SECRET_FILE = Path("~/.brain/credentials/.personal_webhook_secret").expanduser()
 
 JOURNAL_PATH = Path("/Users/chrischo/server/brain/logs/profile_deepener_journal.jsonl")
 MAX_CANDIDATES_PER_RUN = 5

@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# LEGACY 2026-05-23: OpenClaw retired; no live agent sessions to rotate.
+# Module kept for historical session file cleanup. New agent runtime (Hermes)
+# manages its own session SQLite at ~/.hermes/profiles/<name>/state.db.
 """Archive old OpenClaw agent session checkpoints.
 
 Context: On 2026-04-17 the jenna agent session accumulated 499MB — a

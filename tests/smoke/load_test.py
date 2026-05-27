@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any
 
 BASE = "http://127.0.0.1:8791"
-SECRET = Path("/Users/chrischo/.openclaw/credentials/.personal_webhook_secret").read_text().strip()
+SECRET = Path("/Users/chrischo/.brain/credentials/.personal_webhook_secret").read_text().strip()
 
 QUERIES = [
     "openclaw gateway",

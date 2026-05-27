@@ -18,7 +18,7 @@ set -u
 
 ITERATIONS="${1:-5}"
 THRESHOLD=96.0
-SECRET=$(cat ~/.openclaw/credentials/.personal_webhook_secret 2>/dev/null)
+SECRET=$(cat ~/.brain/credentials/.personal_webhook_secret 2>/dev/null)
 BRAIN_PY=/Users/chrischo/server/brain/.venv/bin/python
 BRAIN_DIR=/Users/chrischo/server/brain
 EVAL_SCRIPT="$BRAIN_DIR/cli/eval_compare.py"
@@ -36,11 +36,11 @@ LAST_CONTENT="0"
 for i in $(seq 1 "$ITERATIONS"); do
     echo "=== iteration $i / $ITERATIONS ==="
 
-    if ! launchctl bootout "gui/$(id -u)/ai.openclaw.brain-server" 2>&1; then
+    if ! launchctl bootout "gui/$(id -u)/ai.brain.server" 2>&1; then
         echo "  bootout returned non-zero (may be expected if not loaded)"
     fi
     sleep 1
-    if ! launchctl bootstrap "gui/$(id -u)" /Users/chrischo/Library/LaunchAgents/ai.openclaw.brain-server.plist; then
+    if ! launchctl bootstrap "gui/$(id -u)" /Users/chrischo/Library/LaunchAgents/ai.brain.server.plist; then
         echo "[FAIL #$i] bootstrap failed"
         FAIL=$((FAIL + 1))
         continue

@@ -1097,6 +1097,7 @@ def _build_recall_v2_cache_key(
     iterative: bool,
     collection: str | None,
     domain: str | None,
+    agent: str | None,
     since: str | None,
     until: str | None,
     entity: str | None,
@@ -1124,7 +1125,7 @@ def _build_recall_v2_cache_key(
         adapter_marker = "base"
     return (
         f"{q}:{n}:{hyde}:{expand}:{rerank}:{decay}:{iterative}:{collection}:"
-        f"{domain}:{since}:{until}:{entity}:{source_type}:"
+        f"{domain}:filter_agent={agent}:{since}:{until}:{entity}:{source_type}:"
         f"{include_history}:{include_obsolete}:{as_of}:{canonical_first}:"
         f"excl={exclude_already_used}:"
         f"sess={sess_hdr}:agent={agent_hdr}:emb={adapter_marker}"
@@ -1143,6 +1144,7 @@ def recall(
     entity: str | None = None,
     collection: str | None = None,
     domain: str | None = None,
+    agent: str | None = Query(default=None, max_length=32),
     source_type: str | None = Query(default=None, max_length=32),
     include_history: bool = Query(default=False),
     include_obsolete: bool = Query(default=False),
@@ -1497,6 +1499,7 @@ def recall_v2(
     entity: str | None = None,
     collection: str | None = None,
     domain: str | None = None,
+    agent: str | None = Query(default=None, max_length=32),
     source_type: str | None = Query(default=None, max_length=32),
     include_history: bool = Query(default=False),
     include_obsolete: bool = Query(default=False),
@@ -1514,6 +1517,7 @@ def recall_v2(
       decay   = apply exponential time decay per collection (default ON)
       since/until = temporal range (same as /recall)
       entity/collection/domain = filter passthrough
+      agent = filter Qdrant-backed memory results by metadata.agent
       source_type = filter personal collection results by type (note|message|event|reminder)
       canonical_first = Karpathy llm-wiki mode — query the canonical truth
           layer only (skips experience/obsidian/semantic_memory). Use when
@@ -1537,6 +1541,7 @@ def recall_v2(
         iterative=iterative,
         collection=collection,
         domain=domain,
+        agent=agent,
         since=since,
         until=until,
         entity=entity,
@@ -1556,7 +1561,7 @@ def recall_v2(
 
     start_dt, end_dt = temporal.parse_range(since, until)
     # ChromaDB 1.4.1 rejects string operands in $gte/$lt; filter Python-side instead.
-    where = None
+    where = {"agent": agent} if agent else None
     collections_arg = [collection] if collection else None
     # Widen inner-search n when a temporal filter will post-drop rows.
     search_n_mult = 3 if (start_dt or end_dt) else 2
@@ -1872,7 +1877,7 @@ def recall_stream(
 
 
 # 2026-04-17 H-3: agent-ergonomic batch endpoints. AI agents (Claude
-# Code, OpenClaw agents) often fan out N recalls per task. Serial
+# Code, Hermes profiles) often fan out N recalls per task. Serial
 # round-trips add up fast — a single batch endpoint lets the agent
 # submit a list of queries and get a list of results back in one
 # HTTP call. 20-query cap per batch to keep per-call latency bounded.
@@ -2006,7 +2011,7 @@ def brain_ops_compound(request: Request, req: CompoundRequest) -> dict:
 
     secret = ""
     try:
-        secret = _Path("~/.openclaw/credentials/.personal_webhook_secret").expanduser().read_text().strip()
+        secret = _Path("~/.brain/credentials/.personal_webhook_secret").expanduser().read_text().strip()
     except Exception:
         secret = ""
 

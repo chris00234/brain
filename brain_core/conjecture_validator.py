@@ -53,6 +53,13 @@ EXPIRY_DAYS = 21
 SUPPORT_SEARCH_LIMIT = 50
 MIN_ENTITY_LEN = 4
 
+# 2026-05-15 P3-9: soft cap on unsupported episodic conjectures. dream_replay
+# generates ~5-10 new conjectures per night; without an upper bound, the
+# 0.3-confidence pile grows monotonically until the 21d TTL clears the
+# oldest. The cap archives the oldest *unsupported* conjectures over the
+# cap each run so brain_doubt isn't dominated by dream-tier noise.
+SOFT_CAP_UNSUPPORTED = 30
+
 
 def _now_iso() -> str:
     """Backwards-compat shim — delegates to shared now_iso()."""
@@ -226,15 +233,17 @@ def run() -> dict:
         conn.execute("PRAGMA journal_mode=WAL")
         conjectures = _fetch_conjectures(conn)
         if not conjectures:
+            cap_expired = _enforce_soft_cap(conn, _now_iso())
             return {
                 "status": "ok",
                 "scanned": 0,
                 "new_supports": 0,
                 "promoted_count": 0,
-                "expired_count": 0,
+                "expired_count": len(cap_expired),
                 "progressed_count": 0,
+                "cap_expired_count": len(cap_expired),
                 "promoted": [],
-                "expired": [],
+                "expired": cap_expired,
             }
 
         scanned = 0
@@ -312,6 +321,10 @@ def run() -> dict:
                 conn.rollback()
                 raise
 
+        cap_expired = _enforce_soft_cap(conn, now_iso)
+        if cap_expired:
+            expired.extend(cap_expired)
+
         summary = {
             "status": "ok",
             "scanned": scanned,
@@ -319,6 +332,7 @@ def run() -> dict:
             "promoted_count": len(promoted),
             "expired_count": len(expired),
             "progressed_count": len(progressed),
+            "cap_expired_count": len(cap_expired),
             "promoted": promoted,
             "expired": expired,
         }
@@ -333,6 +347,7 @@ def run() -> dict:
                         "promoted_count",
                         "expired_count",
                         "progressed_count",
+                        "cap_expired_count",
                     )
                 },
             }
@@ -340,6 +355,68 @@ def run() -> dict:
         return summary
     finally:
         conn.close()
+
+
+def _enforce_soft_cap(conn: sqlite3.Connection, now_iso_str: str) -> list[dict]:
+    """Archive the oldest unsupported dream-replay conjectures over SOFT_CAP_UNSUPPORTED.
+
+    Scoped narrowly to `kind='conjecture' AND tier='episodic'` rows whose
+    `provenance_json.origin == 'dream_replay'` — the same population
+    `_fetch_conjectures()` validates. Manually-authored conjectures or
+    those from other pipelines are left alone; the cap targets only the
+    noise stream that motivated this fix. Reuses the existing obsolete
+    tier — no hard delete, fully auditable via provenance.expire_reason.
+    """
+    try:
+        rows = conn.execute(
+            """
+            SELECT a.id, a.valid_from
+              FROM atoms a
+              LEFT JOIN atom_evidence ae
+                     ON ae.atom_id = a.id
+                    AND ae.event_type = 'conjecture_support'
+             WHERE a.kind = 'conjecture'
+               AND a.tier = 'episodic'
+               AND json_extract(a.provenance_json, '$.origin') = 'dream_replay'
+             GROUP BY a.id
+            HAVING COUNT(ae.atom_id) = 0
+             ORDER BY a.valid_from ASC
+            """
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        log.debug("soft-cap query failed: %s", exc)
+        return []
+    excess = len(rows) - SOFT_CAP_UNSUPPORTED
+    if excess <= 0:
+        return []
+    targets = rows[:excess]
+    expired_records: list[dict] = []
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        for r in targets:
+            atom_id = r[0]
+            _update_conjecture(
+                conn,
+                atom_id,
+                new_tier="obsolete",
+                provenance_patch={
+                    "expired_at": now_iso_str,
+                    "expire_reason": "soft_cap_exceeded",
+                    "last_validation_at": now_iso_str,
+                },
+            )
+            expired_records.append(
+                {
+                    "id": atom_id,
+                    "expire_reason": "soft_cap_exceeded",
+                    "valid_from": r[1],
+                }
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return expired_records
 
 
 if __name__ == "__main__":

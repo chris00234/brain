@@ -644,12 +644,12 @@ def main() -> None:
         # screen-time data, so the ingester + cron + state file are all gone.
         # Keeping this freshness check would have started failing immediately
         # once the 192h window elapsed past the last (Apr 26) write.
-        "gmail": (Path("/Users/chrischo/.openclaw/workspace-jenna/.gmail_ingest_state.json"), 48),
+        "gmail": (Path("/Users/chrischo/server/brain/state/ingest/jenna/gmail_ingest_state.json"), 48),
         "browser": (
-            Path("/Users/chrischo/.openclaw/workspace-sage/.brain_state/browser_ingest_state.json"),
+            Path("/Users/chrischo/server/brain/state/ingest/sage/browser_ingest_state.json"),
             48,
         ),
-        "obsidian_sync": (Path("/Users/chrischo/.openclaw/workspace-jenna/.obsidian_sync_state.json"), 6),
+        "obsidian_sync": (Path("/Users/chrischo/server/brain/state/ingest/jenna/obsidian_sync_state.json"), 6),
         "shell": (BRAIN_DIR / "logs" / "shell-ingest-state.json", 48),
         "claude_code_sessions": (BRAIN_DIR / "logs" / "claude-code-sessions-state.json", 48),
         "code_index": (BRAIN_DIR / "logs" / "code-index-state.json", 48),

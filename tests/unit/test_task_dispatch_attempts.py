@@ -292,7 +292,7 @@ def test_deferred_dispatch_records_failure_lesson(monkeypatch, tmp_path):
     tq = TaskQueue(tmp_path / "autonomy.db")
     task = tq.create_task(
         title="Gateway handoff check",
-        description="Verify OpenClaw gateway dispatch truth.",
+        description="Verify Hermes profile gateway dispatch truth.",
         assigned_agent="sage",
         confidence=0.9,
     )
@@ -371,7 +371,7 @@ def test_retrieved_failure_lessons_are_injected_into_next_task(monkeypatch, tmp_
     tq = TaskQueue(tmp_path / "autonomy.db")
     task = tq.create_task(
         title="Gateway handoff check",
-        description="Retry OpenClaw gateway dispatch truth.",
+        description="Retry Hermes profile gateway dispatch truth.",
         assigned_agent="sage",
         confidence=0.9,
     )
