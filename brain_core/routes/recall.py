@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import re
 import threading
 import time
 from datetime import UTC, datetime
@@ -884,6 +885,527 @@ def _run_cross_encoder_rerank(q: str, fused: list[dict]) -> tuple[list[dict], in
         return fused, None, None
 
 
+_KOREAN_INTENT_EXPANSIONS: dict[str, tuple[str, ...]] = {
+    "추천": ("recommendation", "preference", "decision"),
+    "이미지": ("image", "image generation", "gpt images", "openai", "codex oauth", "subscription cli"),
+    "음악": ("music", "audio generation", "no local generation"),
+    "배경음악": ("background music", "music", "audio generation", "no local generation"),
+    "음성": ("voice", "tts", "audio", "no local generation"),
+    "tts": ("tts", "voice", "audio generation", "no local generation"),
+    "모델": ("model", "local generation", "no local generation"),
+    "설치": ("install", "local install", "local generation"),
+    "새": ("new", "additional", "avoid new paid api"),
+    "피해야": ("avoid", "no", "without"),
+    "피해": ("avoid", "no", "without"),
+    "캘린더": (
+        "calendar",
+        "apple calendar",
+        "macos-calendar",
+        "google-workspace-mcp",
+        "primary tooling choices",
+        "event",
+    ),
+    "달력": (
+        "calendar",
+        "apple calendar",
+        "macos-calendar",
+        "google-workspace-mcp",
+        "primary tooling choices",
+        "event",
+    ),
+    "리마인더": ("reminder", "apple-reminders", "apple reminders", "primary tooling choices", "task"),
+    "일정": ("schedule", "calendar event", "reminder"),
+    "수업": ("class", "class schedule", "calendar event", "school schedule"),
+    "클래스": ("class", "class schedule", "calendar event", "school schedule"),
+    "과금": ("billing", "cost", "paid api", "subscription"),
+    "유료": ("paid", "paid api", "billing", "subscription"),
+    "로컬": ("local", "local generation", "no local generation"),
+    "클라우드": ("cloud", "hosting tradeoff", "cloud only when already available"),
+    "진행상황": ("status", "progress", "live state", "kanban", "task"),
+    "시작했어": ("started", "running", "live state", "kanban"),
+    "완료": ("complete", "completed", "done", "live state", "kanban"),
+    "작업": ("work", "task", "kanban", "live state"),
+    "태스크": ("task", "kanban", "live state"),
+    "칸반": ("kanban", "task", "live state"),
+}
+
+_LIVE_STATE_QUERY_PATTERNS = (
+    r"진행\s*상황",
+    r"시작\s*했어",
+    r"칸반.*(?:태스크|작업|상태|진행|완료)",
+    r"(?:태스크|작업).*(?:상태|진행\s*상황)",
+    r"\bcurrent\s+status\b",
+    r"\btask\s+status\b",
+    r"\bkanban\s+status\b",
+    r"\bstatus\s+(?:of|for)\s+(?:kanban|task)\b",
+    r"\bprogress\s+update\b",
+    r"\bcurrent\s+(?:progress|state)\b",
+    r"\b(?:what(?:'s|\s+is))\s+(?:running|in\s+progress)\s+(?:right\s+now|now|currently)\b",
+    r"\brunning\s+(?:tasks?|processes?|jobs?)\b",
+)
+
+# Historical/completed lookup cues — when any of these appear, the prompt
+# explicitly asks about archived/past/finished state and SHOULD search memory
+# instead of short-circuiting to live tools. _is_live_state_query checks this
+# set first so a "history of kanban task status from last week" query is not
+# mistaken for a live-status query just because "task status" is present.
+#
+# Note: bare English "done" is intentionally NOT listed. "current status of
+# kanban task X done?" is a live-status question (is it done right now?), not
+# a historical lookup, so bare "done" must not flip live-state to False on its
+# own. "done" only counts as historical when combined with one of the explicit
+# cues below (history/archived/last-week/records/logs/past/…), which match
+# independently via their own patterns. Korean 완료한/완료된 stay listed because
+# the -한/-된 suffix grammatically locks them to past/completed state; bare 완료
+# mirrors bare English "done" and is intentionally absent.
+_HISTORICAL_QUERY_PATTERNS = (
+    # English explicit historical/completed lookup cues
+    r"\bhistory\b",
+    r"\bhistorical\b",
+    r"\barchived\b",
+    r"\bcompleted\b",
+    r"\blast\s+week\b",
+    r"\bprevious(?:ly)?\b",
+    r"\bpast\b",
+    r"\brecords?\b",
+    r"\blogs?\b",
+    # Korean historical/completed lookup cues
+    r"지난주",
+    r"기록",
+    r"이력",
+    r"완료한",
+    r"완료된",
+    r"끝난",
+    r"과거",
+)
+
+_TRUTH_CATEGORIES = {"preference", "decision", "correction", "fact"}
+_GENERIC_SUMMARY_MARKERS = (
+    "weekly",
+    "week ",
+    "brain summary",
+    "session summary",
+    "summary (",
+    "raptor",
+    "summaries",
+)
+
+# Explicit summary-exclusion cues — when the prompt says e.g. "summary 말고" or
+# "not the generic weekly summary", penalize generic Summary/session-distilled
+# rows unconditionally, not only when a non-summary topical candidate happens
+# to be in the fused window. The live broad_recommendation_no_generic_summary
+# probe hit this gap: summary rows had preference text and outranked the
+# specific canonical preference because no non-summary topical sibling was
+# available to trigger the conditional penalty.
+_SUMMARY_EXCLUSION_PATTERNS = (
+    # Korean exclusion suffixes attached to summary/요약
+    r"(?:summary|summaries|요약)\s*(?:말고|빼고|제외(?:하고|하)?|아닌|아니라)",
+    # English explicit exclusion of summary blobs
+    r"\b(?:not|no|without|exclude|excluding|other\s+than|skip)\s+(?:the\s+)?"
+    r"(?:generic\s+|weekly\s+|session\s+)?(?:summary|summaries|summarized)\b",
+)
+# Positive summary-intent cues — when the prompt explicitly asks for a
+# summary/recap/요약, generic Summary/session-distilled rows are exactly
+# what the user requested, so the generic_summary_penalty branch must not
+# fire. Exclusion still wins (see `_is_positive_summary_intent_query`).
+_POSITIVE_SUMMARY_INTENT_PATTERNS = (
+    r"요약",
+    r"\bsummar(?:y|ies|ize[ds]?|izing|ization)\b",
+    r"\brecap(?:s|ped|ping)?\b",
+)
+_BUDGET_COST_TOKENS = {
+    "api",
+    "apis",
+    "billing",
+    "cost",
+    "paid",
+    "provider",
+    "saas",
+    "subscription",
+    "과금",
+    "유료",
+}
+_BUDGET_AVOID_TOKENS = {
+    "additional",
+    "another",
+    "avoid",
+    "extra",
+    "free",
+    "new",
+    "no",
+    "separate",
+    "without",
+    "무료",
+}
+_LOCAL_TOKENS = {"local", "locally", "ondevice", "로컬"}
+_CLOUD_TOKENS = {"cloud", "hosted", "remote", "클라우드"}
+_WORKFLOW_TOKENS = {
+    "agent",
+    "automation",
+    "pipeline",
+    "recommendation",
+    "tool",
+    "tools",
+    "workflow",
+    "workflows",
+    "추천",
+    "자동화",
+}
+_MEDIA_GENERATION_TOKENS = {"audio", "music", "tts", "voice", "background"}
+_BUDGET_LOCAL_CLOUD_WORKFLOW_DOMAIN_TOKENS = _WORKFLOW_TOKENS - {"recommendation", "추천"}
+_BUDGET_LOCAL_CLOUD_DOMAIN_STOP_TOKENS = (
+    _BUDGET_COST_TOKENS
+    | _BUDGET_AVOID_TOKENS
+    | _LOCAL_TOKENS
+    | _CLOUD_TOKENS
+    | {
+        "already",
+        "and",
+        "available",
+        "choose",
+        "chris",
+        "first",
+        "generation",
+        "only",
+        "or",
+        "preference",
+        "prefers",
+        "recommendation",
+        "run",
+        "should",
+        "unless",
+        "use",
+        "when",
+        "which",
+    }
+)
+_BUDGET_LOCAL_CLOUD_EXPANSIONS = (
+    "avoid new paid api",
+    "no separate paid api",
+    "existing subscription",
+    "local first",
+    "cloud only when already available",
+)
+
+
+def _augment_query_for_recall(q: str) -> str:
+    """Append deterministic multilingual intent terms for provider-independent recall.
+
+    This is intentionally local and cheap: no LLM, no paid API, no model load.
+    Korean Telegram prompts often contain terse intent words (추천, 과금, 로컬)
+    whose best matching durable memories are English canonical/preferences.
+    """
+    base = (q or "").strip()
+    if not base:
+        return ""
+    lower = base.lower()
+    additions: list[str] = []
+    seen = set(_tokenize_recall_text(base))
+    for marker, terms in _KOREAN_INTENT_EXPANSIONS.items():
+        if marker not in lower and marker not in base:
+            continue
+        for term in terms:
+            term_tokens = _tokenize_recall_text(term)
+            if term_tokens and all(tok in seen for tok in term_tokens):
+                continue
+            additions.append(term)
+            seen.update(term_tokens)
+    if _is_budget_local_cloud_query(seen):
+        for term in _BUDGET_LOCAL_CLOUD_EXPANSIONS:
+            term_tokens = _tokenize_recall_text(term)
+            if term_tokens and all(tok in seen for tok in term_tokens):
+                continue
+            additions.append(term)
+            seen.update(term_tokens)
+    if not additions:
+        return base
+    return base + " " + " ".join(additions)
+
+
+def _is_live_state_query(q: str) -> bool:
+    """True for prompts asking about current status/progress/task state.
+
+    Recall memory is stale by design for these questions; callers should use
+    live tools (Kanban/Calendar/Reminders/process state) instead of treating
+    old memories as current truth.
+
+    Returns False when the prompt has an explicit historical/completed lookup
+    intent (history, last week, 지난주, 기록, …) — those queries WANT to
+    search memory, so don't short-circuit them even if a live-state pattern
+    would otherwise match (e.g. "history of kanban task status from last week"
+    or "지난주 칸반 완료 태스크 기록").
+    """
+    text = (q or "").strip()
+    if not text:
+        return False
+    if any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in _HISTORICAL_QUERY_PATTERNS):
+        return False
+    return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in _LIVE_STATE_QUERY_PATTERNS)
+
+
+def _is_summary_excluded_query(q: str) -> bool:
+    """True when the prompt explicitly excludes generic summary blobs.
+
+    Matches cues like "summary 말고", "요약 빼고", "not the summary",
+    "without weekly summary" so generic Summary/session-distilled rows are
+    penalized unconditionally for the request — not only when a non-summary
+    topical candidate happens to land in the fused window.
+    """
+    text = (q or "").strip()
+    if not text:
+        return False
+    return any(re.search(p, text, flags=re.IGNORECASE) for p in _SUMMARY_EXCLUSION_PATTERNS)
+
+
+def _is_positive_summary_intent_query(q: str) -> bool:
+    """True when the prompt explicitly asks for summaries/recaps/요약.
+
+    Generic Summary/session-distilled rows are the rows the user wants for
+    these queries, so `_apply_recall_governance_inplace` must skip the
+    generic_summary_penalty branch. Explicit exclusion ("summary 말고",
+    "not the summary") always wins — those prompts are not positive intent
+    even though they mention summary/요약.
+    """
+    text = (q or "").strip()
+    if not text:
+        return False
+    if _is_summary_excluded_query(text):
+        return False
+    return any(re.search(p, text, flags=re.IGNORECASE) for p in _POSITIVE_SUMMARY_INTENT_PATTERNS)
+
+
+def _tokenize_recall_text(text: str) -> set[str]:
+    return {tok for tok in re.findall(r"[a-z0-9가-힣]+", (text or "").lower()) if len(tok) > 1}
+
+
+def _result_metadata(result: dict) -> dict[str, Any]:
+    meta = result.get("metadata")
+    return meta if isinstance(meta, dict) else {}
+
+
+def _result_category(result: dict) -> str:
+    meta = _result_metadata(result)
+    value = meta.get("category") or meta.get("type") or result.get("category") or result.get("type") or ""
+    return str(value).lower()
+
+
+def _is_generic_summary_result(result: dict) -> bool:
+    meta = _result_metadata(result)
+    title = str(result.get("title") or meta.get("title") or "").strip().lower()
+    haystack = " ".join(
+        str(part or "")
+        for part in (
+            result.get("title"),
+            result.get("path"),
+            result.get("type"),
+            result.get("source_type"),
+            meta.get("title"),
+            meta.get("path"),
+            meta.get("type"),
+            meta.get("source_type"),
+            meta.get("source_path"),
+            meta.get("source_name"),
+            meta.get("document_title"),
+        )
+    ).lower()
+    return (
+        title in {"summary", "brain summary", "session summary"}
+        or any(marker in haystack for marker in _GENERIC_SUMMARY_MARKERS)
+        or bool(re.search(r"\bw\d{1,2}\b", haystack))
+    )
+
+
+def _query_is_specific(query_tokens: set[str]) -> bool:
+    broad = {"recommendation", "preference", "decision", "status", "progress", "task", "work"}
+    return len(query_tokens - broad) >= 2
+
+
+def _is_budget_local_cloud_query(query_tokens: set[str]) -> bool:
+    has_budget = bool(query_tokens & _BUDGET_COST_TOKENS)
+    avoids_new_cost = bool(query_tokens & _BUDGET_AVOID_TOKENS)
+    compares_hosting = bool(query_tokens & _LOCAL_TOKENS) and bool(query_tokens & _CLOUD_TOKENS)
+    has_domain_context = bool(query_tokens & (_WORKFLOW_TOKENS | _MEDIA_GENERATION_TOKENS))
+    return has_budget and (avoids_new_cost or compares_hosting) and (compares_hosting or has_domain_context)
+
+
+def _is_budget_local_cloud_constraint_result(result_tokens: set[str]) -> bool:
+    has_budget = bool(result_tokens & _BUDGET_COST_TOKENS)
+    has_constraint = bool(result_tokens & (_BUDGET_AVOID_TOKENS | {"existing"}))
+    has_hosting_context = bool(result_tokens & (_LOCAL_TOKENS | _CLOUD_TOKENS))
+    return has_budget and has_constraint and has_hosting_context
+
+
+def _is_generic_api_troubleshooting_result(result_tokens: set[str]) -> bool:
+    has_api_context = bool(result_tokens & {"api", "apis", "cloudflare"})
+    has_troubleshooting = bool(
+        result_tokens
+        & {
+            "auth",
+            "bearer",
+            "error",
+            "external",
+            "fix",
+            "hex",
+            "invalid",
+            "key",
+            "token",
+            "troubleshooting",
+        }
+    )
+    return has_api_context and has_troubleshooting
+
+
+def _has_budget_local_cloud_domain_overlap(query_tokens: set[str], result_tokens: set[str]) -> bool:
+    query_workflow = bool(query_tokens & _BUDGET_LOCAL_CLOUD_WORKFLOW_DOMAIN_TOKENS)
+    result_workflow = bool(result_tokens & _BUDGET_LOCAL_CLOUD_WORKFLOW_DOMAIN_TOKENS)
+    if query_workflow and result_workflow:
+        return True
+
+    query_domain_tokens = query_tokens - _BUDGET_LOCAL_CLOUD_DOMAIN_STOP_TOKENS
+    result_domain_tokens = result_tokens - _BUDGET_LOCAL_CLOUD_DOMAIN_STOP_TOKENS
+    return bool(query_domain_tokens & result_domain_tokens)
+
+
+def _result_text(result: dict) -> str:
+    meta = _result_metadata(result)
+    return " ".join(
+        str(part or "")
+        for part in (
+            result.get("title"),
+            result.get("path"),
+            result.get("content"),
+            meta.get("title"),
+            meta.get("path"),
+        )
+    )
+
+
+def _is_calendar_tooling_query(query_tokens: set[str]) -> bool:
+    has_calendar = bool(query_tokens & {"calendar", "reminder", "reminders", "schedule", "event", "class"})
+    asks_tool = bool(query_tokens & {"tool", "tools", "도구", "manage", "관리", "추천", "preference"}) or any(
+        tok.startswith("도구") or tok.startswith("관리") for tok in query_tokens
+    )
+    return has_calendar and asks_tool
+
+
+def _is_primary_calendar_tooling_result(text: str) -> bool:
+    lower = text.lower()
+    return "primary tooling choices" in lower or (
+        "apple-reminders" in lower and ("macos-calendar" in lower or "google-workspace-mcp" in lower)
+    )
+
+
+def _is_personal_calendar_instance(result: dict, text: str) -> bool:
+    collection = str(result.get("collection") or "").lower()
+    lower = text.lower()
+    return collection == "personal" and (
+        "reminders://" in lower or "reminder:" in lower or "calendar event" in lower
+    )
+
+
+def _apply_recall_governance_inplace(q: str, fused: list[dict]) -> None:
+    """Server-side ranking governance for /recall/v2.
+
+    Boost accepted canonical truth and durable preference/decision/correction
+    rows; penalize broad weekly/summary/raptor documents for specific queries
+    when a non-summary topical candidate exists. Mutates scores in place and
+    annotates each touched row with a `governance` reason list for eval/debug.
+    """
+    query_tokens = _tokenize_recall_text(_augment_query_for_recall(q))
+    if not query_tokens or not fused:
+        return
+
+    specific = _query_is_specific(query_tokens)
+    budget_local_cloud_query = _is_budget_local_cloud_query(query_tokens)
+    non_summary_topical_exists = any(
+        not _is_generic_summary_result(r) and len(query_tokens & _tokenize_recall_text(_result_text(r))) >= 2
+        for r in fused
+        if isinstance(r, dict)
+    )
+    calendar_tooling_query = _is_calendar_tooling_query(query_tokens)
+    summary_excluded = _is_summary_excluded_query(q)
+    positive_summary_intent = _is_positive_summary_intent_query(q)
+
+    for result in fused:
+        if not isinstance(result, dict):
+            continue
+        reasons: list[str] = []
+        delta = 0.0
+        meta = _result_metadata(result)
+        category = _result_category(result)
+        collection = str(result.get("collection") or "").lower()
+        review_state = str(meta.get("review_state") or result.get("review_state") or "").lower()
+        title_path_tokens = _tokenize_recall_text(
+            " ".join(str(result.get(k) or "") for k in ("title", "path"))
+        )
+        all_tokens = _tokenize_recall_text(_result_text(result))
+        title_path_overlap = len(query_tokens & title_path_tokens)
+        total_overlap = len(query_tokens & all_tokens)
+        result_text = _result_text(result)
+
+        if collection == "canonical" and review_state in {"accepted", "approved", "canonical"}:
+            delta += 18.0
+            reasons.append("canonical_accepted")
+        if category in _TRUTH_CATEGORIES:
+            delta += 18.0
+            reasons.append("specific_truth")
+        if collection == "canonical" and category in _TRUTH_CATEGORIES:
+            delta += 8.0
+            reasons.append("canonical_truth")
+        if title_path_overlap:
+            delta += min(24.0, 6.0 * title_path_overlap)
+            reasons.append("title_path_relevance")
+        if total_overlap >= 3:
+            delta += 8.0
+            reasons.append("topical_density")
+
+        if (
+            budget_local_cloud_query
+            and not _is_generic_summary_result(result)
+            and _is_budget_local_cloud_constraint_result(all_tokens)
+            and _has_budget_local_cloud_domain_overlap(query_tokens, all_tokens)
+        ):
+            delta += 80.0
+            reasons.append("budget_local_cloud_constraint")
+
+        if (
+            budget_local_cloud_query
+            and _is_generic_api_troubleshooting_result(all_tokens)
+            and not _has_budget_local_cloud_domain_overlap(query_tokens, all_tokens)
+        ):
+            delta -= 55.0
+            reasons.append("generic_api_troubleshooting_penalty")
+
+        if calendar_tooling_query and _is_primary_calendar_tooling_result(result_text):
+            delta += 70.0
+            reasons.append("primary_tooling_choice")
+
+        if calendar_tooling_query and _is_personal_calendar_instance(result, result_text):
+            delta -= 50.0
+            reasons.append("personal_instance_penalty")
+
+        if _is_generic_summary_result(result):
+            if summary_excluded:
+                # User explicitly said "summary 말고" / "not the summary" /
+                # "without weekly summary" — push generic summary rows below
+                # any non-summary candidate regardless of whether one already
+                # sits in this fused window.
+                delta -= 300.0
+                reasons.append("explicit_summary_exclusion_penalty")
+            elif positive_summary_intent:
+                # User explicitly asked for summary/recap/요약 — generic
+                # Summary rows are the requested rows. Do not penalize.
+                pass
+            elif specific and non_summary_topical_exists:
+                penalty = 85.0 if budget_local_cloud_query else 35.0 if total_overlap >= 2 else 60.0
+                delta -= penalty
+                reasons.append("generic_summary_penalty")
+
+        if delta:
+            result["score"] = float(result.get("score") or 0.0) + delta
+            result["governance"] = list(dict.fromkeys([*result.get("governance", []), *reasons]))
+
+
 def _apply_primary_doc_boost_inplace(fused: list[dict]) -> None:
     """Boost any result whose metadata flags primary_doc_lookup=True.
 
@@ -1559,6 +2081,27 @@ def recall_v2(
     t_start = time.time()
     timing: dict[str, Any] = {}
 
+    if _is_live_state_query(q):
+        timing["live_state_query"] = True
+        timing["total_ms"] = int((time.time() - t_start) * 1000)
+        response = RecallV2Response(
+            query=q,
+            results=[],
+            total_candidates=0,
+            hyde_used=False,
+            hypothetical=None,
+            variants=[],
+            rerank_applied=rerank,
+            time_decay_applied=decay,
+            latency_ms=timing["total_ms"],
+            timing=timing,
+            meta_note="Live-state/status query — use live tools instead of stale memory recall.",
+        )
+        _recall_cache_put(cache_key, response)
+        return response
+
+    search_query = _augment_query_for_recall(q)
+
     start_dt, end_dt = temporal.parse_range(since, until)
     # ChromaDB 1.4.1 rejects string operands in $gte/$lt; filter Python-side instead.
     where = {"agent": agent} if agent else None
@@ -1567,15 +2110,15 @@ def recall_v2(
     search_n_mult = 3 if (start_dt or end_dt) else 2
 
     hypothetical: str | None = None
-    variants: list[str] = [q]
+    variants: list[str] = [search_query]
 
     # Query expansion first — generates variants that downstream HyDE can also use.
     if expand:
         t_expand = time.time()
         try:
-            variants = _hyde.expand_query(q, max_variants=3)
+            variants = _hyde.expand_query(search_query, max_variants=3)
         except Exception:
-            variants = [q]
+            variants = [search_query]
         timing["expansion_ms"] = int((time.time() - t_expand) * 1000)
 
     # Run recall for each variant in parallel and RRF-fuse.
@@ -1685,6 +2228,7 @@ def recall_v2(
         fused, decay_ms = _apply_time_decay(fused)
         timing["decay_ms"] = decay_ms
 
+    _apply_recall_governance_inplace(q, fused)
     _apply_primary_doc_boost_inplace(fused)
     fused = _sort_and_diversify(fused, top_window=n)
 

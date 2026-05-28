@@ -2478,3 +2478,829 @@ def test_metacognitive_surface_top_n_cutoff_respected(monkeypatch):
     assert "confidence" not in fused[1]
     # Only atm_1 was passed to the SQL placeholder list.
     assert conn.last_params == ["atm_1"]
+
+
+# ── Server-side recall governance ──────────────────────────────────────
+
+
+def test_recall_governance_promotes_specific_preference_over_weekly_summary():
+    from routes.recall import _apply_recall_governance_inplace
+
+    fused = [
+        {
+            "id": "weekly",
+            "title": "W20 weekly brain summary",
+            "path": "/canonical/weekly/W20-summary.md",
+            "collection": "canonical",
+            "type": "weekly-summary",
+            "content": "General weekly brain summary with database deployment mentioned once.",
+            "score": 100.0,
+        },
+        {
+            "id": "decision",
+            "title": "Database deployment workflow decision",
+            "path": "/canonical/decisions/database-deployment-workflow.md",
+            "collection": "semantic_memory",
+            "metadata": {"category": "decision"},
+            "content": "Chris prefers database deployment workflow via migrations, verification, and rollback checks.",
+            "score": 80.0,
+        },
+    ]
+
+    _apply_recall_governance_inplace("database deployment workflow recommendation", fused)
+
+    assert fused[1]["score"] > fused[0]["score"]
+    assert "specific_truth" in fused[1]["governance"]
+    assert "generic_summary_penalty" in fused[0]["governance"]
+
+
+def test_recall_governance_prefers_accepted_canonical_truth_for_image_generation():
+    from routes.recall import _apply_recall_governance_inplace
+
+    fused = [
+        {
+            "id": "generic-image",
+            "title": "Image generation notes",
+            "path": "/notes/image.md",
+            "collection": "semantic_memory",
+            "content": "Use generic API image generation when asked for images.",
+            "score": 92.0,
+        },
+        {
+            "id": "accepted-pref",
+            "title": "Image generation provider preference",
+            "path": "/canonical/preferences/image-generation-openai-codex-oauth.md",
+            "collection": "canonical",
+            "metadata": {"category": "preference", "review_state": "accepted"},
+            "content": "For image generation, Chris expects GPT Images / OpenAI through Codex OAuth or subscription CLI, not separate paid API assumptions.",
+            "score": 75.0,
+        },
+    ]
+
+    _apply_recall_governance_inplace("이미지 생성 추천", fused)
+
+    assert fused[1]["score"] > fused[0]["score"]
+    assert "canonical_accepted" in fused[1]["governance"]
+    assert "specific_truth" in fused[1]["governance"]
+
+
+def test_korean_intent_expansion_adds_provider_independent_terms():
+    from routes.recall import _augment_query_for_recall
+
+    expanded = _augment_query_for_recall("음악 음성 과금 유료 로컬 추천")
+
+    assert "music" in expanded
+    assert "tts" in expanded
+    assert "billing" in expanded
+    assert "paid api" in expanded
+    assert "local generation" in expanded
+    assert "recommendation" in expanded
+
+
+def test_korean_calendar_reminder_class_expansion_adds_schedule_terms():
+    from routes.recall import _augment_query_for_recall
+
+    expanded = _augment_query_for_recall("수업 캘린더 리마인더 추천")
+
+    assert "class schedule" in expanded
+    assert "calendar" in expanded
+    assert "macos-calendar" in expanded
+    assert "apple-reminders" in expanded
+    assert "primary tooling choices" in expanded
+
+
+def test_budget_local_cloud_intent_expansion_is_class_based_not_smoke_literal():
+    from routes.recall import _KOREAN_INTENT_EXPANSIONS, _augment_query_for_recall
+
+    expanded = _augment_query_for_recall("agent workflow without another paid provider, local or hosted?")
+
+    assert "avoid new paid api" in expanded
+    assert "existing subscription" in expanded
+    assert "local first" in expanded
+    assert "cloud only when already available" in expanded
+    expanded_lower = expanded.lower()
+    assert "no new paid" not in expanded_lower
+    assert "local vs cloud" not in expanded_lower
+    assert "local-vs-cloud" not in expanded_lower
+    assert "automation workflow" not in expanded_lower
+    expansion_text = " ".join(term for terms in _KOREAN_INTENT_EXPANSIONS.values() for term in terms).lower()
+    assert "no new paid" not in _KOREAN_INTENT_EXPANSIONS
+    assert "no new paid" not in expansion_text
+    assert "local vs cloud" not in expansion_text
+    assert "local-vs-cloud" not in expansion_text
+    assert "automation workflow" not in expansion_text
+
+
+def test_recall_governance_budget_local_cloud_preference_beats_generic_summary():
+    from routes.recall import _apply_recall_governance_inplace
+
+    fused = [
+        {
+            "id": "generic",
+            "title": "W20 weekly brain summary",
+            "path": "/canonical/weekly/W20-summary.md",
+            "collection": "canonical",
+            "type": "weekly-summary",
+            "content": "A broad weekly summary mentioning automation, workflow, paid APIs, local tools, and cloud options.",
+            "score": 180.0,
+        },
+        {
+            "id": "constraint",
+            "title": "Automation workflow cost and hosting preference",
+            "path": "/canonical/preferences/automation-workflow-cost-hosting.md",
+            "collection": "canonical",
+            "metadata": {"category": "preference", "review_state": "accepted"},
+            "content": "Chris prefers automation workflows that avoid separate paid APIs and use local tools unless an existing subscription or already-available cloud workflow fits.",
+            "score": 70.0,
+        },
+    ]
+
+    _apply_recall_governance_inplace(
+        "Which agent pipeline should avoid another paid provider and run locally or hosted?", fused
+    )
+
+    assert fused[1]["score"] > fused[0]["score"]
+    assert "budget_local_cloud_constraint" in fused[1]["governance"]
+    assert "generic_summary_penalty" in fused[0]["governance"]
+
+
+def test_recall_governance_budget_local_cloud_boost_requires_domain_overlap():
+    from routes.recall import _apply_recall_governance_inplace
+
+    fused = [
+        {
+            "id": "workflow",
+            "title": "Workflow preferences",
+            "path": "/canonical/preferences/workflow.md",
+            "collection": "canonical",
+            "metadata": {"category": "preference", "review_state": "accepted"},
+            "content": "Chris prefers agent workflows to avoid another paid provider and choose local tools or already available hosted workflows.",
+            "score": 70.0,
+        },
+        {
+            "id": "music",
+            "title": "Music and TTS recommendation billing constraints",
+            "path": "/canonical/preferences/music-tts-no-local-no-paid-api.md",
+            "collection": "canonical",
+            "metadata": {"category": "preference", "review_state": "accepted"},
+            "content": "Recommendation for music and TTS: avoid local generation and avoid separate paid SaaS/API billing unless Chris explicitly asks.",
+            "score": 90.0,
+        },
+    ]
+
+    _apply_recall_governance_inplace(
+        "Which agent pipeline should avoid another paid provider and run locally or hosted?", fused
+    )
+
+    assert fused[0]["score"] > fused[1]["score"]
+    assert "budget_local_cloud_constraint" in fused[0]["governance"]
+    assert "budget_local_cloud_constraint" not in fused[1].get("governance", [])
+
+
+def test_recall_governance_budget_local_cloud_broad_recommendation_is_not_domain_overlap():
+    from routes.recall import _apply_recall_governance_inplace
+
+    fused = [
+        {
+            "id": "workflow",
+            "title": "Agent workflow recommendation",
+            "path": "/canonical/preferences/agent-workflow-cost-hosting.md",
+            "collection": "canonical",
+            "metadata": {"category": "preference", "review_state": "accepted"},
+            "content": "Chris prefers agent workflows to avoid another paid provider and choose local tools or already available hosted workflows.",
+            "score": 70.0,
+        },
+        {
+            "id": "music",
+            "title": "Music and TTS recommendation billing constraints",
+            "path": "/canonical/preferences/music-tts-no-local-no-paid-api.md",
+            "collection": "canonical",
+            "metadata": {"category": "preference", "review_state": "accepted"},
+            "content": "Recommendation for music and TTS: avoid local generation and avoid separate paid SaaS/API billing unless Chris explicitly asks.",
+            "score": 100.0,
+        },
+    ]
+
+    _apply_recall_governance_inplace(
+        "Which agent recommendation should avoid another paid provider and run locally or hosted?",
+        fused,
+    )
+
+    assert fused[0]["score"] > fused[1]["score"]
+    assert "budget_local_cloud_constraint" in fused[0]["governance"]
+    assert "budget_local_cloud_constraint" not in fused[1].get("governance", [])
+
+
+def test_korean_status_query_is_classified_as_live_state():
+    from routes.recall import _is_live_state_query
+
+    assert _is_live_state_query("칸반 태스크 진행상황 시작했어 완료?") is True
+    assert _is_live_state_query("이미지 생성 추천") is False
+    assert _is_live_state_query("작업 방식 추천") is False
+
+
+def test_live_state_query_requires_explicit_status_intent():
+    from routes.recall import _is_live_state_query
+
+    assert _is_live_state_query("current status of kanban task t_12345678") is True
+    assert _is_live_state_query("progress update for recall governance") is True
+    assert _is_live_state_query("what is running right now") is True
+    assert _is_live_state_query("complete guide to recall governance") is False
+    assert _is_live_state_query("completed migration decision") is False
+    assert _is_live_state_query("started workflow preference") is False
+    assert _is_live_state_query("running local inference decision") is False
+
+
+def test_recall_v2_durable_completion_query_does_not_short_circuit(monkeypatch):
+    from routes import recall as recall_route
+    from starlette.requests import Request
+
+    recall_route._recall_cache.clear()
+    calls: list[dict] = []
+
+    def fake_search_all(query, n, **kwargs):
+        calls.append({"query": query, "n": n, **kwargs})
+        return {"results": [], "total_candidates": 0, "source_timing": {}}
+
+    monkeypatch.setattr(recall_route.search_unified, "search_all", fake_search_all)
+
+    request = Request(
+        {"type": "http", "method": "GET", "path": "/recall/v2", "headers": [], "query_string": b""}
+    )
+    response = recall_route.recall_v2(
+        request,
+        q="complete guide to recall governance",
+        n=3,
+        rerank=False,
+        decay=False,
+    )
+
+    assert calls, "durable completion query should search instead of short-circuiting as live state"
+    assert response.timing.get("live_state_query") is None
+    assert response.meta_note != "Live-state/status query — use live tools instead of stale memory recall."
+
+
+def test_recall_v2_status_query_short_circuits_before_search(monkeypatch):
+    from routes import recall as recall_route
+    from starlette.requests import Request
+
+    recall_route._recall_cache.clear()
+    calls: list[str] = []
+
+    def fake_search_all(*args, **kwargs):
+        calls.append("called")
+        return {"results": [], "total_candidates": 0, "source_timing": {}}
+
+    monkeypatch.setattr(recall_route.search_unified, "search_all", fake_search_all)
+
+    request = Request(
+        {"type": "http", "method": "GET", "path": "/recall/v2", "headers": [], "query_string": b""}
+    )
+    response = recall_route.recall_v2(
+        request,
+        q="current status of kanban task t_12345678",
+        n=3,
+        rerank=False,
+        decay=False,
+    )
+
+    assert calls == []
+    assert response.results == []
+    assert response.timing["live_state_query"] is True
+    assert response.meta_note == "Live-state/status query — use live tools instead of stale memory recall."
+
+
+def test_recall_governance_music_tts_billing_constraints_win():
+    from routes.recall import _apply_recall_governance_inplace
+
+    fused = [
+        {
+            "id": "saas",
+            "title": "Music API recommendation",
+            "path": "/notes/music-api.md",
+            "collection": "semantic_memory",
+            "content": "Recommend a separate paid SaaS API for music and TTS generation.",
+            "score": 92.0,
+        },
+        {
+            "id": "constraint",
+            "title": "Music and TTS billing constraints",
+            "path": "/canonical/preferences/music-tts-no-local-no-paid-api.md",
+            "collection": "canonical",
+            "metadata": {"category": "preference", "review_state": "accepted"},
+            "content": "For music and TTS, avoid local generation and avoid separate paid SaaS/API billing unless Chris explicitly asks.",
+            "score": 74.0,
+        },
+    ]
+
+    _apply_recall_governance_inplace("음악 음성 과금 유료 로컬 추천", fused)
+
+    assert fused[1]["score"] > fused[0]["score"]
+
+
+def test_korean_music_tts_paid_api_avoidance_query_gets_budget_expansion():
+    from routes.recall import _augment_query_for_recall
+
+    expanded = _augment_query_for_recall("배경음악이나 TTS 만들 때 로컬 모델 설치나 새 유료 API는 피해야 해?")
+
+    assert "background music" in expanded
+    assert "tts" in expanded.lower()
+    assert "avoid" in expanded
+    assert "new" in expanded
+    assert "avoid new paid api" in expanded
+    assert "no separate paid api" in expanded
+
+
+def test_recall_governance_music_tts_exact_class_query_penalizes_api_key_noise():
+    from routes.recall import _apply_recall_governance_inplace
+
+    fused = [
+        {
+            "id": "token-noise",
+            "title": "Cloudflare API token troubleshooting",
+            "path": "/learnings/errors.md",
+            "collection": "experience",
+            "content": "Invalid API key. Check token length, bearer auth, hex token format, and external API key setup.",
+            "score": 146.0,
+        },
+        {
+            "id": "preference",
+            "title": "Music and TTS billing constraints",
+            "path": "/semantic/hermes",
+            "collection": "semantic_memory",
+            "metadata": {"category": "preference"},
+            "content": "Chris corrected that music and TTS should avoid local model generation and avoid separate paid API or external paid service unless approved.",
+            "score": 90.0,
+        },
+    ]
+
+    _apply_recall_governance_inplace(
+        "배경음악이나 TTS 만들 때 로컬 모델 설치나 새 유료 API는 피해야 해?", fused
+    )
+
+    assert fused[1]["score"] > fused[0]["score"]
+    assert "budget_local_cloud_constraint" in fused[1]["governance"]
+    assert "generic_api_troubleshooting_penalty" in fused[0]["governance"]
+
+
+def test_recall_governance_apple_calendar_reminders_preference_wins():
+    from routes.recall import _apply_recall_governance_inplace
+
+    fused = [
+        {
+            "id": "google",
+            "title": "Google Calendar default",
+            "path": "/notes/google-calendar.md",
+            "collection": "semantic_memory",
+            "content": "Use Google Calendar and Google Tasks as the default scheduling tools.",
+            "score": 90.0,
+        },
+        {
+            "id": "apple",
+            "title": "Apple Calendar and Reminders preference",
+            "path": "/canonical/preferences/apple-calendar-reminders.md",
+            "collection": "canonical",
+            "metadata": {"category": "preference", "review_state": "accepted"},
+            "content": "Chris uses Apple Calendar and Apple Reminders for calendar events and reminders.",
+            "score": 72.0,
+        },
+    ]
+
+    _apply_recall_governance_inplace("캘린더 리마인더 추천", fused)
+
+    assert fused[1]["score"] > fused[0]["score"]
+
+
+def test_recall_governance_tooling_choice_beats_completed_reminder_for_calendar_tool_query():
+    from routes.recall import _apply_recall_governance_inplace
+
+    fused = [
+        {
+            "id": "completed-reminder",
+            "title": "reminders://Reminders/36",
+            "path": "reminders://Reminders/36",
+            "collection": "personal",
+            "content": "Reminder: 저녁 약속 List: Reminders Status: completed Due: 2026-03-13",
+            "score": 105.0,
+        },
+        {
+            "id": "primary-tooling",
+            "title": "Primary Tooling Choices",
+            "path": "/knowledge/tooling.md",
+            "collection": "knowledge",
+            "content": "Reminders: `apple-reminders` primary. Calendar: `macos-calendar` primary local calendar, `google-workspace-mcp` for Google side.",
+            "score": 70.0,
+        },
+    ]
+
+    _apply_recall_governance_inplace("캘린더 리마인더 수업 일정은 어떤 도구로 관리해야 해?", fused)
+
+    assert fused[1]["score"] > fused[0]["score"]
+    assert "primary_tooling_choice" in fused[1]["governance"]
+    assert "personal_instance_penalty" in fused[0]["governance"]
+
+
+def test_recall_governance_openclaw_historical_loses_to_current_hermes_runtime():
+    from routes.recall import _apply_recall_governance_inplace
+
+    fused = [
+        {
+            "id": "openclaw",
+            "title": "OpenClaw historical runtime",
+            "path": "/archived/openclaw/runtime.md",
+            "collection": "canonical",
+            "type": "summary",
+            "content": "OpenClaw was the historical runtime and has archived credential paths.",
+            "score": 95.0,
+        },
+        {
+            "id": "hermes",
+            "title": "Current Hermes runtime decision",
+            "path": "/canonical/decisions/current-hermes-runtime.md",
+            "collection": "semantic_memory",
+            "metadata": {"category": "decision"},
+            "content": "Current runtime is Hermes; OpenClaw paths are historical/retired and should not be used for current setup.",
+            "score": 78.0,
+        },
+    ]
+
+    _apply_recall_governance_inplace("OpenClaw vs Hermes current runtime", fused)
+
+    assert fused[1]["score"] > fused[0]["score"]
+
+
+# ── Historical-intent narrowing of _is_live_state_query (Sage CR for t_a321da09) ──
+
+
+def test_is_live_state_query_english_historical_kanban_status_is_false():
+    """English explicit historical lookup ("history ... last week") must NOT
+    be classified live-state even though "task status" matches a live pattern —
+    the user is asking memory for an archived record, not the current board.
+    """
+    from routes.recall import _is_live_state_query
+
+    assert _is_live_state_query("history of kanban task status from last week") is False
+
+
+def test_is_live_state_query_korean_historical_kanban_completed_is_false():
+    """Korean explicit historical lookup (지난주 ... 기록) must NOT be
+    classified live-state even though 칸반.*완료/태스크 matches a live pattern.
+    """
+    from routes.recall import _is_live_state_query
+
+    assert _is_live_state_query("지난주 칸반 완료 태스크 기록") is False
+
+
+def test_is_live_state_query_current_status_with_bare_done_is_true():
+    """A current-status prompt that ends with bare "done?" is asking whether
+    the live task is done right now, not asking memory for archived work.
+    Bare English "done" must NOT trigger the historical override on its own —
+    only history/archive/past/record/log/last-week style cues should do that.
+    """
+    from routes.recall import _is_live_state_query
+
+    assert _is_live_state_query("current status of kanban task t_12345678 done?") is True
+
+
+def test_recall_v2_english_historical_kanban_status_searches_memory(monkeypatch):
+    """recall_v2 must invoke search_unified.search_all and NOT short-circuit
+    on the live-state path when the English query carries an explicit
+    historical lookup intent ("history ... last week")."""
+    from routes import recall as recall_route
+    from starlette.requests import Request
+
+    recall_route._recall_cache.clear()
+    calls: list[dict] = []
+
+    def fake_search_all(query, n, **kwargs):
+        calls.append({"query": query, "n": n, **kwargs})
+        return {"results": [], "total_candidates": 0, "source_timing": {}}
+
+    monkeypatch.setattr(recall_route.search_unified, "search_all", fake_search_all)
+
+    request = Request(
+        {"type": "http", "method": "GET", "path": "/recall/v2", "headers": [], "query_string": b""}
+    )
+    response = recall_route.recall_v2(
+        request,
+        q="history of kanban task status from last week",
+        n=3,
+        rerank=False,
+        decay=False,
+    )
+
+    assert calls, "historical kanban status query should search instead of short-circuiting"
+    assert response.timing.get("live_state_query") is None
+    assert response.meta_note != "Live-state/status query — use live tools instead of stale memory recall."
+
+
+def test_recall_v2_korean_historical_kanban_completed_searches_memory(monkeypatch):
+    """recall_v2 must invoke search_unified.search_all and NOT short-circuit
+    on the live-state path when the Korean query carries an explicit
+    historical lookup intent (지난주 ... 기록)."""
+    from routes import recall as recall_route
+    from starlette.requests import Request
+
+    recall_route._recall_cache.clear()
+    calls: list[dict] = []
+
+    def fake_search_all(query, n, **kwargs):
+        calls.append({"query": query, "n": n, **kwargs})
+        return {"results": [], "total_candidates": 0, "source_timing": {}}
+
+    monkeypatch.setattr(recall_route.search_unified, "search_all", fake_search_all)
+
+    request = Request(
+        {"type": "http", "method": "GET", "path": "/recall/v2", "headers": [], "query_string": b""}
+    )
+    response = recall_route.recall_v2(
+        request,
+        q="지난주 칸반 완료 태스크 기록",
+        n=3,
+        rerank=False,
+        decay=False,
+    )
+
+    assert calls, "Korean historical kanban query should search instead of short-circuiting"
+    assert response.timing.get("live_state_query") is None
+    assert response.meta_note != "Live-state/status query — use live tools instead of stale memory recall."
+
+
+# ── Explicit "summary 말고" exclusion (live broad_recommendation probe) ──
+
+
+def test_is_summary_excluded_query_matches_korean_and_english_cues():
+    """Detection covers both 'summary 말고' / '요약 빼고' and English
+    'not the summary' / 'without weekly summary' phrasings, and stays False
+    for prompts that simply ask for a summary or omit the cue entirely.
+    """
+    from routes.recall import _is_summary_excluded_query
+
+    assert _is_summary_excluded_query("generic weekly summary 말고") is True
+    assert _is_summary_excluded_query("요약 말고 구체적인 결정 보여줘") is True
+    assert _is_summary_excluded_query("요약 빼고") is True
+    assert _is_summary_excluded_query("not the summary please") is True
+    assert _is_summary_excluded_query("without weekly summary") is True
+    assert _is_summary_excluded_query("no generic summary") is True
+    assert _is_summary_excluded_query("이미지 생성 추천") is False
+    assert _is_summary_excluded_query("give me the weekly summary") is False
+
+
+def test_recall_governance_broad_recommendation_no_generic_summary():
+    """Live probe regression for broad_recommendation_no_generic_summary:
+    when the prompt explicitly excludes 'generic weekly summary 말고', the
+    specific canonical preference must outrank Summary rows even if every
+    other candidate happens to be another Summary (so the conditional
+    non_summary_topical_exists branch would otherwise skip the penalty)."""
+    from routes.recall import _apply_recall_governance_inplace
+
+    fused = [
+        {
+            "id": "summary_a",
+            "title": "Summary",
+            "path": "/canonical/summaries/weekly-2026-w20-summary.md",
+            "collection": "canonical",
+            "type": "weekly-summary",
+            "content": (
+                "Weekly brain summary: Chris preferences for new tool recommendations, "
+                "principles for selection, and overall workflow."
+            ),
+            "score": 300.0,
+        },
+        {
+            "id": "summary_b",
+            "title": "Summary",
+            "path": "/canonical/summaries/weekly-2026-w19-summary.md",
+            "collection": "canonical",
+            "type": "weekly-summary",
+            "content": (
+                "Weekly brain summary covering preference principles and recommendation "
+                "patterns for new tools across the week."
+            ),
+            "score": 150.0,
+        },
+        {
+            "id": "summary_c",
+            "title": "Summary",
+            "path": "/canonical/summaries/session-distilled-2026-05-21.md",
+            "collection": "canonical",
+            "type": "session-summary",
+            "content": (
+                "Session-distilled summary listing recommendation principles and "
+                "preference cues Chris referenced for new tools."
+            ),
+            "score": 140.0,
+        },
+        {
+            "id": "preference",
+            "title": "Tool recommendation principle preference",
+            "path": "/canonical/preferences/tool-recommendation-principles.md",
+            "collection": "canonical",
+            "metadata": {"category": "preference", "review_state": "accepted"},
+            "content": (
+                "Chris prefers tool recommendations to consult canonical preference "
+                "and decision records first; weekly summaries should never dominate."
+            ),
+            "score": 90.0,
+        },
+    ]
+
+    _apply_recall_governance_inplace(
+        "내 선호에 맞춰 새 도구 추천할 때 어떤 원칙을 먼저 봐야 해? generic weekly summary 말고",
+        fused,
+    )
+
+    fused.sort(key=lambda r: r["score"], reverse=True)
+    assert fused[0]["id"] == "preference", (
+        f"specific preference must win over generic summary rows; got order " f"{[r['id'] for r in fused]}"
+    )
+    for row in fused:
+        if row["id"].startswith("summary"):
+            assert "explicit_summary_exclusion_penalty" in row.get(
+                "governance", []
+            ), f"summary row {row['id']} should be tagged with explicit exclusion penalty"
+
+
+def test_recall_governance_explicit_summary_exclusion_penalty_is_unconditional():
+    """Even when no non-summary topical candidate exists in the window (so
+    the legacy generic_summary_penalty branch would skip), explicit summary
+    exclusion must still penalize summary rows.
+    """
+    from routes.recall import _apply_recall_governance_inplace
+
+    fused = [
+        {
+            "id": "only_summary",
+            "title": "Summary",
+            "path": "/canonical/summaries/weekly-2026-w20-summary.md",
+            "collection": "canonical",
+            "type": "weekly-summary",
+            "content": "Weekly brain summary mentioning recommendation principles for tools.",
+            "score": 100.0,
+        },
+        {
+            "id": "metadata_summary",
+            "title": "Summary",
+            "collection": "canonical",
+            "metadata": {
+                "source_path": "canonical/summaries/session-distilled-2026-05-21.md",
+                "source_name": "session-distilled-2026-05-21.md",
+            },
+            "content": "Session-distilled summary mentioning recommendation principles for tools.",
+            "score": 100.0,
+        },
+    ]
+
+    _apply_recall_governance_inplace("도구 추천 원칙 summary 말고", fused)
+    for row in fused:
+        assert "explicit_summary_exclusion_penalty" in row.get("governance", [])
+        assert row["score"] < 100.0
+
+
+# ── Positive summary intent (user explicitly asks for summary/recap/요약) ──
+
+
+def test_is_positive_summary_intent_query_matches_summary_recap_cues():
+    """Detector returns True when the prompt explicitly asks for summaries,
+    recaps, or 요약. Returns False when the prompt explicitly excludes
+    summaries — exclusion always wins over positive intent."""
+    from routes.recall import _is_positive_summary_intent_query
+
+    # Positive intent cues
+    assert _is_positive_summary_intent_query("give me the weekly summary") is True
+    assert _is_positive_summary_intent_query("주간 요약 보여줘") is True
+    assert _is_positive_summary_intent_query("요약 좀 줄래") is True
+    assert _is_positive_summary_intent_query("history summary please") is True
+    assert _is_positive_summary_intent_query("show me the recap") is True
+    assert _is_positive_summary_intent_query("summarize last week") is True
+    assert _is_positive_summary_intent_query("brain summary for last sprint") is True
+    assert _is_positive_summary_intent_query("weekly summaries from last month") is True
+
+    # Exclusion always wins, even when summary/요약 token is present
+    assert _is_positive_summary_intent_query("generic weekly summary 말고") is False
+    assert _is_positive_summary_intent_query("요약 말고 구체적인 결정 보여줘") is False
+    assert _is_positive_summary_intent_query("요약 빼고") is False
+    assert _is_positive_summary_intent_query("not the summary please") is False
+    assert _is_positive_summary_intent_query("without weekly summary") is False
+    assert _is_positive_summary_intent_query("no generic summary") is False
+
+    # Unrelated prompts stay False
+    assert _is_positive_summary_intent_query("이미지 생성 추천") is False
+    assert _is_positive_summary_intent_query("tool recommendation principle") is False
+    assert _is_positive_summary_intent_query("") is False
+
+
+def test_recall_governance_positive_summary_intent_skips_summary_penalties():
+    """When the prompt explicitly asks for summaries/recaps/요약, generic
+    Summary rows must NOT receive generic_summary_penalty or
+    explicit_summary_exclusion_penalty — those are exactly the rows the
+    user requested."""
+    from routes.recall import _apply_recall_governance_inplace
+
+    fused = [
+        {
+            "id": "summary_a",
+            "title": "Summary",
+            "path": "/canonical/summaries/weekly-2026-w20-summary.md",
+            "collection": "canonical",
+            "type": "weekly-summary",
+            "content": (
+                "Weekly brain summary: Chris preferences for new tool recommendations, "
+                "principles for selection, and overall workflow."
+            ),
+            "score": 100.0,
+        },
+        {
+            "id": "preference_a",
+            "title": "Tool recommendation principle preference",
+            "path": "/canonical/preferences/tool-recommendation-principles.md",
+            "collection": "canonical",
+            "metadata": {"category": "preference", "review_state": "accepted"},
+            "content": (
+                "Chris prefers tool recommendations to consult canonical preference "
+                "records first; weekly summaries should never dominate."
+            ),
+            "score": 90.0,
+        },
+    ]
+
+    _apply_recall_governance_inplace(
+        "give me last week's weekly summary of tool recommendation principles",
+        fused,
+    )
+
+    summary_row = next(r for r in fused if r["id"] == "summary_a")
+    governance = summary_row.get("governance", [])
+    assert (
+        "generic_summary_penalty" not in governance
+    ), f"positive summary intent must not penalize summary rows; got {governance}"
+    assert (
+        "explicit_summary_exclusion_penalty" not in governance
+    ), f"positive intent is not exclusion; got {governance}"
+
+
+def test_recall_governance_korean_summary_intent_skips_generic_summary_penalty():
+    """Korean 요약 prompts must allow generic Summary rows through without
+    the generic_summary_penalty, mirroring the English positive-intent path."""
+    from routes.recall import _apply_recall_governance_inplace
+
+    fused = [
+        {
+            "id": "summary_korean",
+            "title": "Summary",
+            "path": "/canonical/summaries/weekly-2026-w20-summary.md",
+            "collection": "canonical",
+            "type": "weekly-summary",
+            "content": (
+                "주간 brain summary: tool recommendation principles and preference "
+                "decisions covered during the week."
+            ),
+            "score": 100.0,
+        },
+        {
+            "id": "preference_korean",
+            "title": "Tool recommendation principle preference",
+            "path": "/canonical/preferences/tool-recommendation-principles.md",
+            "collection": "canonical",
+            "metadata": {"category": "preference", "review_state": "accepted"},
+            "content": "Chris prefers canonical tool recommendation principles first.",
+            "score": 90.0,
+        },
+    ]
+
+    _apply_recall_governance_inplace("지난주 도구 추천 원칙 주간 요약 보여줘", fused)
+
+    summary_row = next(r for r in fused if r["id"] == "summary_korean")
+    governance = summary_row.get("governance", [])
+    assert "generic_summary_penalty" not in governance
+    assert "explicit_summary_exclusion_penalty" not in governance
+
+
+def test_recall_governance_explicit_exclusion_wins_over_positive_intent():
+    """Explicit exclusion cues ('summary 말고', 'not the summary') beat
+    positive intent cues. Generic Summary rows must still get
+    explicit_summary_exclusion_penalty even when 'summary'/'요약' appear."""
+    from routes.recall import _apply_recall_governance_inplace
+
+    fused = [
+        {
+            "id": "summary_excluded",
+            "title": "Summary",
+            "path": "/canonical/summaries/weekly-2026-w20-summary.md",
+            "collection": "canonical",
+            "type": "weekly-summary",
+            "content": "Weekly brain summary listing tool recommendation principles.",
+            "score": 100.0,
+        },
+    ]
+
+    _apply_recall_governance_inplace(
+        "weekly summary 말고 도구 추천 원칙 보여줘",
+        fused,
+    )
+
+    governance = fused[0].get("governance", [])
+    assert (
+        "explicit_summary_exclusion_penalty" in governance
+    ), f"exclusion must still win when both cues are present; got {governance}"
+    assert fused[0]["score"] < 100.0

@@ -48,6 +48,7 @@ def _default_kwargs():
         iterative=False,
         collection=None,
         domain=None,
+        agent=None,
         since=None,
         until=None,
         entity=None,
@@ -70,7 +71,7 @@ def test_cache_key_baseline_matches_pre_extraction_format():
     key = _build_recall_v2_cache_key(req, "hello", 10, **_default_kwargs())
     expected = (
         "hello:10:False:False:True:True:False:None:"
-        "None:None:None:None:None:"
+        "None:filter_agent=None:None:None:None:None:"
         "False:False:None:False:"
         "excl=False:"
         "sess=:agent=:emb=base"

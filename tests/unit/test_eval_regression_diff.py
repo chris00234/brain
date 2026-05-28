@@ -143,14 +143,18 @@ def test_write_diff_record_reports_error_status_on_oserror(tmp_path, monkeypatch
     """If the JSONL append fails (full disk, perms), write_status must be
     'error' so the CLI can exit nonzero and the scheduler records a real
     failure instead of a silent success."""
+    from datetime import UTC, datetime, timedelta
+
     import eval_regression_diff
 
     monkeypatch.setattr(eval_regression_diff, "LOGS_DIR", tmp_path)
+    fresh = datetime.now(UTC).isoformat(timespec="seconds")
+    prev = (datetime.now(UTC) - timedelta(hours=24)).isoformat(timespec="seconds")
     _write_history(
         tmp_path / "eval-history-extended.jsonl",
         [
-            {"timestamp": "2026-05-14", "failed_ids": ["a"], "accuracy": 80.0},
-            {"timestamp": "2026-05-15", "failed_ids": ["b"], "accuracy": 80.0},
+            {"timestamp": prev, "failed_ids": ["a"], "accuracy": 80.0},
+            {"timestamp": fresh, "failed_ids": ["b"], "accuracy": 80.0},
         ],
     )
 
@@ -168,14 +172,18 @@ def test_write_diff_record_reports_error_status_on_oserror(tmp_path, monkeypatch
 
 
 def test_write_diff_record_appends_jsonl(tmp_path, monkeypatch):
+    from datetime import UTC, datetime, timedelta
+
     import eval_regression_diff
 
     monkeypatch.setattr(eval_regression_diff, "LOGS_DIR", tmp_path)
+    fresh = datetime.now(UTC).isoformat(timespec="seconds")
+    prev = (datetime.now(UTC) - timedelta(hours=24)).isoformat(timespec="seconds")
     _write_history(
         tmp_path / "eval-history-extended.jsonl",
         [
-            {"timestamp": "2026-05-14", "failed_ids": ["a"], "accuracy": 80.0},
-            {"timestamp": "2026-05-15", "failed_ids": ["b"], "accuracy": 80.0},
+            {"timestamp": prev, "failed_ids": ["a"], "accuracy": 80.0},
+            {"timestamp": fresh, "failed_ids": ["b"], "accuracy": 80.0},
         ],
     )
     out = eval_regression_diff.write_diff_record(track="extended")
