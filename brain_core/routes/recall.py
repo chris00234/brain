@@ -931,6 +931,12 @@ _KOREAN_INTENT_EXPANSIONS: dict[str, tuple[str, ...]] = {
 
 _LIVE_STATE_QUERY_PATTERNS = (
     r"진행\s*상황",
+    # Bare elliptical "진행 중" / "실행 중" (in progress / running). Negative
+    # lookahead `(?![가-힣])` blocks Hangul inflections like 중이었어 /
+    # 중이었던 (past tense "was in progress") so historical phrasings aren't
+    # mis-classified as live-state.
+    r"진행\s*중(?![가-힣])",
+    r"실행\s*중(?![가-힣])",
     r"시작\s*했어",
     r"칸반.*(?:태스크|작업|상태|진행|완료)",
     r"(?:태스크|작업).*(?:상태|진행\s*상황)",
@@ -942,6 +948,9 @@ _LIVE_STATE_QUERY_PATTERNS = (
     r"\bcurrent\s+(?:progress|state)\b",
     r"\b(?:what(?:'s|\s+is))\s+(?:running|in\s+progress)\s+(?:right\s+now|now|currently)\b",
     r"\brunning\s+(?:tasks?|processes?|jobs?)\b",
+    # Bare elliptical "running now" / "running right now" — same live-state
+    # intent as "what is running now" without the "what is" prefix.
+    r"\brunning\s+(?:right\s+)?now\b",
 )
 
 # Slash/underscore separators in live-state prompts ("current/status/Kanban/progress",
@@ -1001,6 +1010,16 @@ _HISTORICAL_QUERY_PATTERNS = (
     r"\bpast\b",
     r"\brecords?\b",
     r"\blogs?\b",
+    # Durable-memory lookup cues. These prompts may mention "current" and
+    # "status" while asking for the remembered preference/decision, not the
+    # live board/process state. Keep them on recall instead of live-tool
+    # short-circuiting.
+    r"\bdurable\b",
+    r"\bcanonical\b",
+    r"\bfrom\s+memory\b",
+    r"\bremember(?:ed)?\b",
+    r"\bpreferences?\b",
+    r"\bdecisions?\b",
     # Korean historical/completed lookup cues
     r"지난주",
     r"기록",
@@ -1121,6 +1140,71 @@ _BUDGET_LOCAL_CLOUD_EXPANSIONS = (
     "local first",
     "cloud only when already available",
 )
+_AUTHORIZATION_TOKENS = {
+    "allow",
+    "allowed",
+    "allowlist",
+    "auth",
+    "authorization",
+    "authorized",
+    "permission",
+    "permitted",
+    "허가",
+    "허용",
+    "권한",
+    "권한준거라",
+}
+_TERMINAL_TELEGRAM_CONTEXT_TOKENS = {
+    "fleet",
+    "hermes",
+    "ops",
+    "telegram",
+    "telegrams",
+    "텔레그램",
+    "toolset",
+    "toolsets",
+    "tools",
+    "watchdog",
+}
+_TERMINAL_AUTHORIZATION_EXPANSION = (
+    "market sage telegram terminal allowed authorized permission allowlist false positive"
+)
+# Concise evidence-shaped variants for terminal Telegram authorization recalls.
+# Natural English prompts like "allowed by Chris?" over-weight generic Chris /
+# Telegram allowlist memories; these variants preserve the exact operational
+# correction vocabulary that retrieves the source authorization atom.
+_TERMINAL_AUTHORIZATION_RESCUE_VARIANTS = (
+    "fleet ops watchdog terminal false positive market sage",
+    "이거 내가 권한준거라 false positive market sage telegram terminal",
+)
+_TERMINAL_AUTHORIZATION_EVIDENCE_MARKERS = (
+    "false positive",
+    "권한준거라",
+    "hermes_ops_watchdog",
+    "ops watchdog",
+    "explicitly authorized",
+    "authorized `terminal`",
+    "telegram toolsets for hermes",
+    "terminal access as allowed policy",
+    "toolsets to use terminal",
+    "telegram toolsets to use terminal",
+    "allow market and sage",
+)
+_TERMINAL_AUTHORIZATION_LIVE_NOISE_MARKERS = (
+    "erl_extraction",
+    "memory hygiene",
+    "chris profile preferences",
+    "screen time patterns",
+    "6-agent parallel source review",
+    "parallel source review",
+    "summarized from documented tech preferences",
+    "consolidation week",
+    "weekly arc",
+    "clearer agent roles",
+    "in-process brain scheduler",
+    "external schedulers",
+    "scheduler jobs",
+)
 
 
 def _augment_query_for_recall(q: str) -> str:
@@ -1158,6 +1242,12 @@ def _augment_query_for_recall(q: str) -> str:
             if term_tokens and not all(tok in seen for tok in term_tokens):
                 additions.append(media_term)
                 seen.update(term_tokens)
+    if _is_terminal_telegram_authorization_query(seen):
+        term = _TERMINAL_AUTHORIZATION_EXPANSION
+        term_tokens = _tokenize_recall_text(term)
+        if term_tokens and not all(tok in seen for tok in term_tokens):
+            additions.append(term)
+            seen.update(term_tokens)
     if not additions:
         return base
     return base + " " + " ".join(additions)
@@ -1299,6 +1389,62 @@ def _is_budget_local_cloud_query(query_tokens: set[str]) -> bool:
     return has_budget and (avoids_new_cost or compares_hosting) and (compares_hosting or has_domain_context)
 
 
+def _is_terminal_telegram_authorization_query(query_tokens: set[str]) -> bool:
+    has_profiles = {"market", "sage"}.issubset(query_tokens)
+    has_terminal = "terminal" in query_tokens
+    has_authorization = bool(query_tokens & _AUTHORIZATION_TOKENS) or {"false", "positive"}.issubset(
+        query_tokens
+    )
+    has_ops_context = bool(query_tokens & _TERMINAL_TELEGRAM_CONTEXT_TOKENS)
+    return has_profiles and has_terminal and has_authorization and has_ops_context
+
+
+def _is_terminal_telegram_authorization_evidence(text: str, result_tokens: set[str]) -> bool:
+    lower = text.lower()
+    if any(marker in lower for marker in _TERMINAL_AUTHORIZATION_EVIDENCE_MARKERS):
+        return True
+    return bool(
+        {"fleet", "ops", "watchdog"} & result_tokens and {"false", "positive"}.issubset(result_tokens)
+    )
+
+
+def _is_terminal_telegram_authorization_result(result_tokens: set[str], text: str = "") -> bool:
+    has_profiles = {"market", "sage"}.issubset(result_tokens)
+    has_terminal = "terminal" in result_tokens
+    has_telegram_context = bool(result_tokens & {"telegram", "텔레그램", "toolsets", "toolset"})
+    has_authorization = bool(result_tokens & _AUTHORIZATION_TOKENS) or {"false", "positive"}.issubset(
+        result_tokens
+    )
+    has_evidence = _is_terminal_telegram_authorization_evidence(text, result_tokens)
+    return has_profiles and has_terminal and has_telegram_context and has_authorization and has_evidence
+
+
+def _is_terminal_telegram_authorization_noise_result(
+    result: dict, result_tokens: set[str], text: str
+) -> bool:
+    if _is_terminal_telegram_authorization_result(result_tokens, text):
+        return False
+    lower = text.lower()
+    meta = _result_metadata(result)
+    title = str(result.get("title") or meta.get("document_title") or meta.get("title") or "").lower()
+    path = str(result.get("path") or meta.get("source_path") or meta.get("path") or "").lower()
+    source_name = str(meta.get("source_name") or "").lower()
+    marker_haystack = " ".join((title, path, source_name, lower))
+    if "session keys" in title or "sessions_send" in lower:
+        return True
+    if "openclaw" in lower or "openclaw" in path:
+        return True
+    if "market is actively used" in lower or "used for brainstorming" in lower:
+        return True
+    if any(marker in marker_haystack for marker in _TERMINAL_AUTHORIZATION_LIVE_NOISE_MARKERS):
+        return True
+    has_live_topic = bool(result_tokens & {"chris", "market", "sage", "telegram", "텔레그램", "terminal"})
+    has_authorization_words = bool(
+        result_tokens & (_AUTHORIZATION_TOKENS | {"false", "positive", "governance"})
+    )
+    return has_live_topic and has_authorization_words
+
+
 def _is_budget_local_cloud_constraint_result(result_tokens: set[str]) -> bool:
     has_budget = bool(result_tokens & _BUDGET_COST_TOKENS)
     has_constraint = bool(result_tokens & (_BUDGET_AVOID_TOKENS | {"existing"}))
@@ -1359,16 +1505,71 @@ def _result_text(result: dict) -> str:
 
 def _is_calendar_tooling_query(query_tokens: set[str]) -> bool:
     has_calendar = bool(query_tokens & {"calendar", "reminder", "reminders", "schedule", "event", "class"})
-    asks_tool = bool(query_tokens & {"tool", "tools", "도구", "manage", "관리", "추천", "preference"}) or any(
-        tok.startswith("도구") or tok.startswith("관리") for tok in query_tokens
-    )
-    return has_calendar and asks_tool
+    has_reminders = bool(query_tokens & {"reminder", "reminders"})
+    asks_tool = bool(
+        query_tokens & {"tool", "tooling", "tools", "도구", "manage", "관리", "추천", "preference"}
+    ) or any(tok.startswith("도구") or tok.startswith("관리") for tok in query_tokens)
+    names_apple_calendar_reminders = "apple" in query_tokens and "calendar" in query_tokens and has_reminders
+    return has_calendar and (asks_tool or names_apple_calendar_reminders)
 
 
-def _is_primary_calendar_tooling_result(text: str) -> bool:
+def _is_openclaw_calendar_skill_inventory_result(result: dict, text: str) -> bool:
+    meta = _result_metadata(result)
+    path = str(result.get("path") or meta.get("source_path") or meta.get("path") or "").lower()
+    title = str(result.get("title") or meta.get("document_title") or "").lower()
     lower = text.lower()
-    return "primary tooling choices" in lower or (
-        "apple-reminders" in lower and ("macos-calendar" in lower or "google-workspace-mcp" in lower)
+    is_openclaw_inventory_path = "/.openclaw/workspace-" in path and path.endswith(
+        ("/agents.md", "/tools.md")
+    )
+    if not is_openclaw_inventory_path:
+        return False
+    return (
+        title in {"primary tooling choices", "google workspace", "tool failure recovery"}
+        or "skill inventory" in lower
+        or "primary tooling choices" in lower
+        or "available tools" in lower
+        or ("apple-reminders" in lower and ("macos-calendar" in lower or "google-workspace-mcp" in lower))
+    )
+
+
+def _is_calendar_tooling_preference_analysis_result(result: dict, text: str) -> bool:
+    lower = text.lower()
+    tokens = _tokenize_recall_text(text)
+    has_apple_calendar = "apple calendar" in lower or {"apple", "calendar"}.issubset(tokens)
+    has_apple_reminders = (
+        "apple reminders" in lower or "apple-reminders" in lower or {"apple", "reminders"}.issubset(tokens)
+    )
+    has_preference_signal = bool(
+        tokens
+        & {
+            "prefer",
+            "prefers",
+            "preferred",
+            "preference",
+            "primary",
+            "tool",
+            "tools",
+            "흐름",
+            "선호",
+            "도구",
+        }
+    )
+    return (
+        _is_distilled_brain_analysis_result(result, text)
+        and has_apple_calendar
+        and has_apple_reminders
+        and has_preference_signal
+    )
+
+
+def _is_primary_calendar_tooling_result(result: dict, text: str) -> bool:
+    if _is_openclaw_calendar_skill_inventory_result(result, text):
+        return False
+    lower = text.lower()
+    return (
+        _is_calendar_tooling_preference_analysis_result(result, text)
+        or "primary tooling choices" in lower
+        or ("apple-reminders" in lower and ("macos-calendar" in lower or "google-workspace-mcp" in lower))
     )
 
 
@@ -1406,7 +1607,9 @@ def _is_brain_failure_note_result(text: str) -> bool:
     )
 
 
-def _is_calendar_tooling_offtopic_result(text: str) -> bool:
+def _is_calendar_tooling_offtopic_result(result: dict, text: str) -> bool:
+    if _is_openclaw_calendar_skill_inventory_result(result, text):
+        return True
     lower = text.lower()
     exact_tooling_markers = (
         "primary tooling choices",
@@ -1666,7 +1869,14 @@ def _apply_retrieval_quality_filter(q: str, fused: list[dict]) -> list[dict]:
     """
     if not fused:
         return fused
-    candidates = [r for r in fused if isinstance(r, dict) and not _is_stale_generic_quality_result(r, q)]
+    summary_excluded = _is_summary_excluded_query(q)
+    candidates = [
+        r
+        for r in fused
+        if isinstance(r, dict)
+        and not _is_stale_generic_quality_result(r, q)
+        and not (summary_excluded and _is_generic_summary_result(r))
+    ]
     best_by_key: dict[str, dict] = {}
     for result in candidates:
         key = _near_duplicate_key(result) or str(result.get("id") or result.get("path") or "")
@@ -1708,6 +1918,7 @@ def _apply_recall_governance_inplace(q: str, fused: list[dict]) -> None:
     )
     calendar_tooling_query = _is_calendar_tooling_query(query_tokens)
     broad_tool_recommendation_query = _is_broad_tool_recommendation_query(query_tokens)
+    terminal_telegram_authorization_query = _is_terminal_telegram_authorization_query(query_tokens)
     summary_excluded = _is_summary_excluded_query(q)
     positive_summary_intent = _is_positive_summary_intent_query(q)
 
@@ -1786,7 +1997,8 @@ def _apply_recall_governance_inplace(q: str, fused: list[dict]) -> None:
             delta -= 120.0
             reasons.append("brain_contract_offtopic_penalty")
 
-        if calendar_tooling_query and _is_primary_calendar_tooling_result(result_text):
+        primary_calendar_tooling_result = _is_primary_calendar_tooling_result(result, result_text)
+        if calendar_tooling_query and primary_calendar_tooling_result:
             delta += 90.0
             reasons.append("primary_tooling_choice")
 
@@ -1794,10 +2006,14 @@ def _apply_recall_governance_inplace(q: str, fused: list[dict]) -> None:
             delta -= 50.0
             reasons.append("personal_instance_penalty")
 
+        if calendar_tooling_query and _is_openclaw_calendar_skill_inventory_result(result, result_text):
+            delta -= 220.0
+            reasons.append("openclaw_calendar_inventory_penalty")
+
         if (
             calendar_tooling_query
-            and _is_calendar_tooling_offtopic_result(result_text)
-            and not _is_primary_calendar_tooling_result(result_text)
+            and _is_calendar_tooling_offtopic_result(result, result_text)
+            and not primary_calendar_tooling_result
         ):
             delta -= 85.0
             reasons.append("calendar_tooling_offtopic_penalty")
@@ -1811,6 +2027,18 @@ def _apply_recall_governance_inplace(q: str, fused: list[dict]) -> None:
         ):
             delta -= 95.0
             reasons.append("broad_tool_recommendation_noise_penalty")
+
+        if terminal_telegram_authorization_query and _is_terminal_telegram_authorization_result(
+            all_tokens, result_text
+        ):
+            delta += 180.0
+            reasons.append("terminal_telegram_authorization")
+
+        if terminal_telegram_authorization_query and _is_terminal_telegram_authorization_noise_result(
+            result, all_tokens, result_text
+        ):
+            delta -= 110.0
+            reasons.append("terminal_telegram_authorization_noise_penalty")
 
         if _is_generic_summary_result(result):
             if summary_excluded:
@@ -2529,6 +2757,10 @@ def recall_v2(
 
     search_query = _augment_query_for_recall(q)
     query_tokens_for_governance = _tokenize_recall_text(search_query)
+    calendar_tooling_query = _is_calendar_tooling_query(query_tokens_for_governance)
+    terminal_telegram_authorization_query = _is_terminal_telegram_authorization_query(
+        query_tokens_for_governance
+    )
 
     start_dt, end_dt = temporal.parse_range(since, until)
     # ChromaDB 1.4.1 rejects string operands in $gte/$lt; filter Python-side instead.
@@ -2541,12 +2773,13 @@ def recall_v2(
     # candidate pool; otherwise the exact canonical/tooling row can sit just
     # below the small n=5 inner window and never reach reranking.
     governance_sensitive_query = (
-        _is_calendar_tooling_query(query_tokens_for_governance)
+        calendar_tooling_query
+        or terminal_telegram_authorization_query
         or _is_budget_local_cloud_query(query_tokens_for_governance)
         or _is_broad_tool_recommendation_query(query_tokens_for_governance)
     )
     if governance_sensitive_query:
-        inner_search_n = max(inner_search_n, 40)
+        inner_search_n = max(inner_search_n, 80 if calendar_tooling_query else 40)
 
     hypothetical: str | None = None
     variants: list[str] = [search_query]
@@ -2559,6 +2792,25 @@ def recall_v2(
         except Exception:
             variants = [search_query]
         timing["expansion_ms"] = int((time.time() - t_expand) * 1000)
+
+    if calendar_tooling_query:
+        # Deterministic rescue variant for terse Korean calendar/reminder
+        # preference prompts. The relevant distilled analysis is phrased as
+        # "Apple Calendar/Reminders ... 도구/흐름 ... 선호"; the generic
+        # Korean expansion alone over-matches old AGENTS/TOOLS inventories.
+        preference_variant = f"{q} Apple Calendar Reminders 도구 흐름 선호"
+        if preference_variant not in variants:
+            variants.append(preference_variant)
+
+    if terminal_telegram_authorization_query:
+        # Deterministic rescue variant for natural-language authorization
+        # prompts ("allowed by Chris?"). The initial expanded query still
+        # contains generic Chris/Telegram allowlist terms that can crowd out the
+        # source correction; this concise ops-watchdog/false-positive query is
+        # the known evidence shape and stays scoped by the intent gate above.
+        for authorization_variant in _TERMINAL_AUTHORIZATION_RESCUE_VARIANTS:
+            if authorization_variant not in variants:
+                variants.append(authorization_variant)
 
     # Run recall for each variant in parallel and RRF-fuse.
     t_search = time.time()

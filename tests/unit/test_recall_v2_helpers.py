@@ -2713,6 +2713,14 @@ def test_live_state_query_requires_explicit_status_intent():
     assert _is_live_state_query("running local inference decision") is False
 
 
+def test_live_state_query_does_not_suppress_durable_preference_status_queries():
+    from routes.recall import _is_live_state_query
+
+    assert _is_live_state_query("durable current preference for kanban status recall governance") is False
+    assert _is_live_state_query("Chris current status-control preference from memory") is False
+    assert _is_live_state_query("canonical decision about task status governance") is False
+
+
 def test_recall_v2_durable_completion_query_does_not_short_circuit(monkeypatch):
     from routes import recall as recall_route
     from starlette.requests import Request
@@ -2738,6 +2746,35 @@ def test_recall_v2_durable_completion_query_does_not_short_circuit(monkeypatch):
     )
 
     assert calls, "durable completion query should search instead of short-circuiting as live state"
+    assert response.timing.get("live_state_query") is None
+    assert response.meta_note != "Live-state/status query — use live tools instead of stale memory recall."
+
+
+def test_recall_v2_durable_status_preference_query_searches_memory(monkeypatch):
+    from routes import recall as recall_route
+    from starlette.requests import Request
+
+    recall_route._recall_cache.clear()
+    calls: list[dict] = []
+
+    def fake_search_all(query, n, **kwargs):
+        calls.append({"query": query, "n": n, **kwargs})
+        return {"results": [], "total_candidates": 0, "source_timing": {}}
+
+    monkeypatch.setattr(recall_route.search_unified, "search_all", fake_search_all)
+
+    request = Request(
+        {"type": "http", "method": "GET", "path": "/recall/v2", "headers": [], "query_string": b""}
+    )
+    response = recall_route.recall_v2(
+        request,
+        q="durable current preference for kanban status recall governance",
+        n=3,
+        rerank=False,
+        decay=False,
+    )
+
+    assert calls, "durable status preference query should search instead of short-circuiting as live state"
     assert response.timing.get("live_state_query") is None
     assert response.meta_note != "Live-state/status query — use live tools instead of stale memory recall."
 
@@ -2770,6 +2807,98 @@ def test_recall_v2_status_query_short_circuits_before_search(monkeypatch):
     assert response.results == []
     assert response.timing["live_state_query"] is True
     assert response.meta_note == "Live-state/status query — use live tools instead of stale memory recall."
+
+
+def test_recall_v2_calendar_tooling_query_searches_preference_variant(monkeypatch):
+    from routes import recall as recall_route
+    from starlette.requests import Request
+
+    recall_route._recall_cache.clear()
+    seen_queries: list[str] = []
+    seen_limits: list[int] = []
+
+    def fake_search_all(query, n, **kwargs):
+        seen_queries.append(query)
+        seen_limits.append(n)
+        return {
+            "results": [
+                {
+                    "id": query,
+                    "title": "placeholder",
+                    "path": "/tmp/placeholder.md",
+                    "collection": "knowledge",
+                    "content": query,
+                    "score": 1.0,
+                }
+            ],
+            "total_candidates": 1,
+            "source_timing": {},
+        }
+
+    monkeypatch.setattr(recall_route.search_unified, "search_all", fake_search_all)
+
+    request = Request(
+        {"type": "http", "method": "GET", "path": "/recall/v2", "headers": [], "query_string": b""}
+    )
+    recall_route.recall_v2(
+        request,
+        q="캘린더 리마인더 추천",
+        n=3,
+        rerank=False,
+        decay=False,
+    )
+
+    assert any("Apple Calendar Reminders 도구 흐름 선호" in query for query in seen_queries)
+    assert min(seen_limits) >= 80
+
+
+def test_recall_v2_simple_apple_calendar_reminders_query_searches_preference_variant(monkeypatch):
+    from routes import recall as recall_route
+    from starlette.requests import Request
+
+    recall_route._recall_cache.clear()
+    seen_queries: list[str] = []
+    seen_limits: list[int] = []
+
+    def fake_search_all(query, n, **kwargs):
+        seen_queries.append(query)
+        seen_limits.append(n)
+        return {
+            "results": [
+                {
+                    "id": query,
+                    "title": "placeholder",
+                    "path": "/tmp/placeholder.md",
+                    "collection": "knowledge",
+                    "content": query,
+                    "score": 1.0,
+                }
+            ],
+            "total_candidates": 1,
+            "source_timing": {},
+        }
+
+    monkeypatch.setattr(recall_route.search_unified, "search_all", fake_search_all)
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/recall/v2",
+            "headers": [(b"x-agent", b"sage")],
+            "query_string": b"",
+        }
+    )
+    recall_route.recall_v2(
+        request,
+        q="Apple Calendar/Reminders",
+        n=3,
+        rerank=False,
+        decay=False,
+    )
+
+    assert any("Apple Calendar Reminders 도구 흐름 선호" in query for query in seen_queries)
+    assert min(seen_limits) >= 80
 
 
 def test_recall_governance_music_tts_billing_constraints_win():
@@ -2874,6 +3003,46 @@ def test_recall_governance_apple_calendar_reminders_preference_wins():
     assert fused[1]["score"] > fused[0]["score"]
 
 
+def test_recall_governance_simple_apple_calendar_reminders_promotes_distilled_analysis_over_obsidian_noise():
+    from routes.recall import _apply_recall_governance_inplace
+
+    for query in ("Apple Calendar/Reminders", "Apple Calendar Reminders"):
+        fused = [
+            {
+                "id": "obsidian-brain-architecture",
+                "title": "semantic",
+                "path": (
+                    "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/"
+                    "Obsidian-vault/Chrischodev/brain-system-architecture.md"
+                ),
+                "collection": "obsidian",
+                "content": "Brain system architecture notes mention Apple Calendar and Reminders bridge sources.",
+                "score": 164.95,
+            },
+            {
+                "id": "apple-analysis",
+                "title": "Analysis: 크리스가 Apple Calendar/Reminders 작업을 부탁하면 어떤 도구/흐름을 선호하나?",
+                "path": "distilled/decisions/brain_analysis_73739b05d41b.md",
+                "collection": "distilled",
+                "metadata": {"subtype": "brain-analysis"},
+                "content": (
+                    "Chris prefers Brain-backed recall/bridging for Apple Reminders tasks. "
+                    "For Apple Calendar access, use bounded/fallback access. "
+                    "For Calendar/Reminders specifically, Reminders via Brain source records and "
+                    "Calendar via bounded/fallback access are the key preference."
+                ),
+                "score": 145.11,
+            },
+        ]
+
+        _apply_recall_governance_inplace(query, fused)
+        fused.sort(key=lambda row: row["score"], reverse=True)
+
+        assert fused[0]["id"] == "apple-analysis"
+        assert "primary_tooling_choice" in fused[0]["governance"]
+        assert "calendar_tooling_offtopic_penalty" in fused[1]["governance"]
+
+
 def test_recall_governance_tooling_choice_beats_completed_reminder_for_calendar_tool_query():
     from routes.recall import _apply_recall_governance_inplace
 
@@ -2903,6 +3072,236 @@ def test_recall_governance_tooling_choice_beats_completed_reminder_for_calendar_
     assert "personal_instance_penalty" in fused[0]["governance"]
 
 
+def test_recall_governance_apple_tooling_choice_beats_business_automation_noise():
+    from routes.recall import _apply_recall_governance_inplace
+
+    fused = [
+        {
+            "id": "business-automation",
+            "title": "Business Plan - Automation Platform for Small Businesses",
+            "path": "/obsidian/business/automation-platform.md",
+            "collection": "obsidian",
+            "content": "Business automation plan mentioning calendar automation and reminders in a generic small-business workflow.",
+            "score": 180.0,
+        },
+        {
+            "id": "apple-primary-tooling",
+            "title": "Primary Tooling Choices",
+            "path": "/knowledge/tooling.md",
+            "collection": "knowledge",
+            "content": "Reminders: `apple-reminders` primary. Calendar: `macos-calendar` primary local calendar, `google-workspace-mcp` for Google side.",
+            "score": 70.0,
+        },
+    ]
+
+    _apply_recall_governance_inplace("Apple Calendar Reminders Chris preferred tools automation", fused)
+
+    assert fused[1]["score"] > fused[0]["score"]
+    assert "primary_tooling_choice" in fused[1]["governance"]
+    assert "calendar_tooling_offtopic_penalty" in fused[0]["governance"]
+
+
+def test_recall_governance_primary_tooling_query_promotes_calendar_analysis_over_brain_reflect_noise():
+    from routes.recall import _apply_recall_governance_inplace
+
+    fused = [
+        {
+            "id": "brain-reflect",
+            "title": "brain-reflect:nightly",
+            "path": "brain-reflect:nightly",
+            "collection": "knowledge",
+            "metadata": {"document_type": "pattern", "source_path": "brain-reflect:nightly"},
+            "content": "Consistent push toward using Brain as primary source of truth and MCP-first tooling for reliable answers.",
+            "score": 231.6,
+        },
+        {
+            "id": "apple-analysis",
+            "title": "Analysis: 크리스가 Apple Calendar/Reminders 작업을 부탁하면 어떤 도구/흐름을 선호하나?",
+            "path": "distilled/decisions/brain_analysis_73739b05d41b.md",
+            "collection": "distilled",
+            "metadata": {
+                "id": "dist_brain_analysis_73739b05d41b",
+                "source_path": "distilled/decisions/brain_analysis_73739b05d41b.md",
+                "document_type": "distilled",
+            },
+            "content": (
+                "Chris prefers Brain-backed recall/bridging for Apple Reminders tasks. "
+                "For Apple Calendar access, use bounded/fallback access. "
+                "For Calendar/Reminders specifically, Reminders via Brain source records and "
+                "Calendar via bounded/fallback access are the key preference."
+            ),
+            "score": 128.4,
+        },
+    ]
+
+    _apply_recall_governance_inplace("Primary Tooling Choices Apple Calendar Reminders", fused)
+    fused.sort(key=lambda row: row["score"], reverse=True)
+
+    assert fused[0]["id"] == "apple-analysis"
+    assert "primary_tooling_choice" in fused[0]["governance"]
+    assert "calendar_tooling_offtopic_penalty" in fused[1]["governance"]
+
+
+def test_recall_governance_penalizes_openclaw_skill_inventory_for_calendar_tooling_query():
+    from routes.recall import _apply_recall_governance_inplace
+
+    fused = [
+        {
+            "id": "openclaw-tools",
+            "title": "Primary Tooling Choices",
+            "path": "/Users/chrischo/.openclaw/workspace-jenna/TOOLS.md",
+            "collection": "knowledge",
+            "content": "Primary Tooling Choices\n- `apple-reminders`\n- `macos-calendar`\n- `google-workspace-mcp`",
+            "score": 120.0,
+        },
+        {
+            "id": "apple-analysis",
+            "title": "Analysis: 크리스가 Apple Calendar/Reminders 작업을 부탁하면 어떤 도구/흐름을 선호하나?",
+            "path": "distilled/decisions/brain_analysis_73739b05d41b.md",
+            "collection": "distilled",
+            "metadata": {"subtype": "brain-analysis"},
+            "content": "Chris prefers Apple Calendar for calendar events and Apple Reminders for reminders; use local macOS automation first.",
+            "score": 55.0,
+        },
+    ]
+
+    _apply_recall_governance_inplace("캘린더 리마인더 추천", fused)
+
+    assert fused[1]["score"] > fused[0]["score"]
+    assert "primary_tooling_choice" not in fused[0].get("governance", [])
+    assert "calendar_tooling_offtopic_penalty" in fused[0]["governance"]
+    assert "primary_tooling_choice" in fused[1]["governance"]
+
+
+def test_recall_governance_high_score_openclaw_tools_inventory_loses_to_distilled_calendar_analysis():
+    from routes.recall import _apply_recall_governance_inplace
+
+    fused = [
+        {
+            "id": "openclaw-tools",
+            "title": "Primary Tooling Choices",
+            "path": "/Users/chrischo/.openclaw/workspace-jenna/TOOLS.md",
+            "collection": "knowledge",
+            "content": "Primary Tooling Choices\n- `apple-reminders`\n- `macos-calendar`\n- `google-workspace-mcp`",
+            # Live failure pre-governance shape: after the existing +26 title/topical
+            # and -85 off-topic adjustments, this remained rank1 at ~306.
+            "score": 365.14,
+        },
+        {
+            "id": "apple-analysis",
+            "title": "Analysis: 크리스가 Apple Calendar/Reminders 작업을 부탁하면 어떤 도구/흐름을 선호하나?",
+            "path": "distilled/decisions/brain_analysis_73739b05d41b.md",
+            "collection": "distilled",
+            "metadata": {"subtype": "brain-analysis"},
+            "content": (
+                "Chris prefers Brain-backed recall/bridging for Apple Reminders tasks. "
+                "For Apple Calendar access, use bounded/fallback access. "
+                "For Calendar/Reminders specifically, Reminders via Brain source records and "
+                "Calendar via bounded/fallback access are the key preference."
+            ),
+            # Live failure pre-governance shape: +116 governance lifted this only to
+            # ~237, still below the OpenClaw inventory row.
+            "score": 121.46,
+        },
+    ]
+
+    _apply_recall_governance_inplace("Primary Tooling Choices Apple Calendar Reminders", fused)
+    fused.sort(key=lambda row: row["score"], reverse=True)
+
+    assert fused[0]["id"] == "apple-analysis"
+    assert "primary_tooling_choice" not in fused[1].get("governance", [])
+    assert "openclaw_calendar_inventory_penalty" in fused[1]["governance"]
+    assert "calendar_tooling_offtopic_penalty" in fused[1]["governance"]
+    assert "primary_tooling_choice" in fused[0]["governance"]
+
+
+def test_recall_governance_penalizes_openclaw_agents_inventory_for_korean_class_schedule_query():
+    from routes.recall import _apply_recall_governance_inplace
+
+    fused = [
+        {
+            "id": "openclaw-agents",
+            "title": "Google Workspace",
+            "path": "/Users/chrischo/.openclaw/workspace-jenna/AGENTS.md",
+            "collection": "knowledge",
+            "content": "Skill inventory lists google-workspace, apple-reminders, macos-calendar, and other available tools.",
+            "score": 110.0,
+        },
+        {
+            "id": "apple-analysis",
+            "title": "Analysis: 크리스가 Apple Calendar/Reminders 작업을 부탁하면 어떤 도구/흐름을 선호하나?",
+            "path": "distilled/decisions/brain_analysis_73739b05d41b.md",
+            "collection": "distilled",
+            "metadata": {"subtype": "brain-analysis"},
+            "content": "For class schedules, use Apple Calendar for events and Apple Reminders for reminder tasks.",
+            "score": 40.0,
+        },
+    ]
+
+    _apply_recall_governance_inplace("캘린더 리마인더 수업 일정은 어떤 도구로 관리해야 해?", fused)
+
+    assert fused[1]["score"] > fused[0]["score"]
+    assert "primary_tooling_choice" not in fused[0].get("governance", [])
+    assert "calendar_tooling_offtopic_penalty" in fused[0]["governance"]
+    assert "primary_tooling_choice" in fused[1]["governance"]
+
+
+def test_retrieval_quality_filter_removes_generic_summary_rows_when_summary_excluded():
+    from routes.recall import _apply_retrieval_quality_filter
+
+    fused = [
+        {
+            "id": "generic-summary-1",
+            "title": "Summary",
+            "path": "/Users/chrischo/server/knowledge/distilled/infra/dist_weekly_summary.md",
+            "collection": "distilled",
+            "content": "A generic weekly summary mentioning broad tool recommendation preferences.",
+            "score": 500.0,
+        },
+        {
+            "id": "candidate-tool",
+            "title": "tool_candidate",
+            "path": "/canonical/tools/tool_candidate.md",
+            "collection": "canonical",
+            "metadata": {"category": "decision", "review_state": "accepted"},
+            "content": "Tool: candidate. Chris prefers direct actionable tool recommendations, not generic weekly summaries.",
+            "score": 100.0,
+        },
+        {
+            "id": "generic-summary-2",
+            "title": "Chris Cho — current state (regenerated weekly)",
+            "path": "canonical/chris/_state.md",
+            "collection": "canonical",
+            "content": "Weekly regenerated state summary.",
+            "score": 90.0,
+        },
+    ]
+
+    filtered = _apply_retrieval_quality_filter("broad tool recommendation generic weekly summary 말고", fused)
+
+    assert [result["id"] for result in filtered] == ["candidate-tool"]
+    assert all(result["title"] != "Summary" for result in filtered[:3])
+
+
+def test_retrieval_quality_filter_keeps_generic_summary_rows_for_positive_summary_intent():
+    from routes.recall import _apply_retrieval_quality_filter
+
+    fused = [
+        {
+            "id": "generic-summary",
+            "title": "Summary",
+            "path": "/Users/chrischo/server/knowledge/distilled/infra/dist_weekly_summary.md",
+            "collection": "distilled",
+            "content": "A weekly summary.",
+            "score": 100.0,
+        }
+    ]
+
+    filtered = _apply_retrieval_quality_filter("weekly summary recap", fused)
+
+    assert [result["id"] for result in filtered] == ["generic-summary"]
+
+
 def test_recall_governance_openclaw_historical_loses_to_current_hermes_runtime():
     from routes.recall import _apply_recall_governance_inplace
 
@@ -2930,6 +3329,263 @@ def test_recall_governance_openclaw_historical_loses_to_current_hermes_runtime()
     _apply_recall_governance_inplace("OpenClaw vs Hermes current runtime", fused)
 
     assert fused[1]["score"] > fused[0]["score"]
+
+
+def test_recall_governance_terminal_telegram_authorization_beats_session_key_noise():
+    from routes.recall import _apply_recall_governance_inplace
+
+    fused = [
+        {
+            "id": "session-keys",
+            "title": "Session Keys (for sessions_send)",
+            "path": "/Users/chrischo/.openclaw/workspace-ellie/AGENTS.md",
+            "collection": "knowledge",
+            "content": (
+                "Session Keys for Telegram sessions_send. Jenna, Liz, Ellie, "
+                "Market, and Sage direct Telegram session identifiers."
+            ),
+            "score": 132.0,
+        },
+        {
+            "id": "market-usage",
+            "title": "Market is actively used for brainstorming",
+            "collection": "canonical",
+            "content": "OpenClaw sage session: Market is actively used for brainstorming rather than being idle.",
+            "score": 116.0,
+        },
+        {
+            "id": "semantic_memory:c689ad11cfca1a60",
+            "title": "terminal authorization correction",
+            "collection": "semantic_memory",
+            "metadata": {"category": "correction"},
+            "content": (
+                "Chris said: 이거 내가 권한준거라 false positive야. "
+                "Ellie updated hermes_ops_watchdog.py to allow market and sage "
+                "Telegram toolsets to use terminal."
+            ),
+            "score": 76.0,
+        },
+    ]
+
+    _apply_recall_governance_inplace(
+        "Hermes fleet ops watchdog market sage terminal sensitive telegram tools allowlist authorization",
+        fused,
+    )
+    fused.sort(key=lambda r: r["score"], reverse=True)
+
+    assert fused[0]["id"] == "semantic_memory:c689ad11cfca1a60"
+    assert "terminal_telegram_authorization" in fused[0]["governance"]
+    assert "terminal_telegram_authorization_noise_penalty" in fused[1]["governance"]
+
+
+def test_recall_governance_terminal_telegram_authorization_handles_korean_variant():
+    from routes.recall import _apply_recall_governance_inplace
+
+    fused = [
+        {
+            "id": "market-usage",
+            "title": "Market is actively used for brainstorming",
+            "collection": "canonical",
+            "content": "OpenClaw sage session: Market is actively used for brainstorming rather than being idle.",
+            "score": 141.0,
+        },
+        {
+            "id": "semantic_memory:c689ad11cfca1a60",
+            "title": "terminal authorization correction",
+            "collection": "semantic_memory",
+            "metadata": {"category": "correction"},
+            "content": "내가 권한준거라 false positive야. market sage 텔레그램 terminal 허용 allowlist.",
+            "score": 78.0,
+        },
+    ]
+
+    _apply_recall_governance_inplace("market sage 텔레그램 terminal 권한 내가 허용한 거야?", fused)
+    fused.sort(key=lambda r: r["score"], reverse=True)
+
+    assert fused[0]["id"] == "semantic_memory:c689ad11cfca1a60"
+    assert "terminal_telegram_authorization" in fused[0]["governance"]
+
+
+def test_recall_governance_terminal_authorization_does_not_penalize_session_key_lookup():
+    from routes.recall import _apply_recall_governance_inplace
+
+    fused = [
+        {
+            "id": "session-keys",
+            "title": "Session Keys (for sessions_send)",
+            "path": "/Users/chrischo/.openclaw/workspace-ellie/AGENTS.md",
+            "collection": "knowledge",
+            "content": "Session Keys for Telegram sessions_send. Claude ACP response relay keys.",
+            "score": 132.0,
+        }
+    ]
+
+    _apply_recall_governance_inplace("What session key should Claude ACP responses relay through?", fused)
+
+    assert "terminal_telegram_authorization_noise_penalty" not in fused[0].get("governance", [])
+
+
+def test_recall_governance_terminal_telegram_authorization_allowed_by_chris_beats_final_review_noise():
+    from routes.recall import _apply_recall_governance_inplace
+
+    fused = [
+        {
+            "id": "heuristic:0067fb8d26b90e80",
+            "title": "erl_extraction",
+            "collection": "semantic_memory",
+            "content": "Heuristic extraction about market analysis and Chris governance, but no terminal Telegram authorization.",
+            "score": 260.0,
+        },
+        {
+            "id": "canonical-memory-hygiene-summary",
+            "title": '{"author": "Chris Cho", "body": "Two memory hygiene functions backed by',
+            "collection": "canonical",
+            "content": "Memory hygiene functions mentioning Chris, market, sage, Telegram, and permissions generically.",
+            "score": 220.0,
+        },
+        {
+            "id": "chris_profile_preferences",
+            "title": "Chris profile preferences",
+            "collection": "canonical",
+            "content": "General profile preferences for Chris, with no terminal Telegram authorization correction.",
+            "score": 210.0,
+        },
+        {
+            "id": "canonical-screen-time-patterns",
+            "title": "Chris screen time patterns across March 14 to March 23, 2026",
+            "collection": "canonical",
+            "content": "Chris screen time patterns and Telegram usage notes unrelated to terminal authorization.",
+            "score": 200.0,
+        },
+        {
+            "id": "author_chris_cho_body_ran_a_6_agent_parallel_source_review_ac",
+            "title": '{"author": "Chris Cho", "body": "Ran a 6-agent parallel source review ac',
+            "collection": "canonical",
+            "content": "A parallel source review mentioning Market and Sage as agents but not the terminal Telegram authorization correction.",
+            "score": 190.0,
+        },
+        {
+            "id": "semantic_memory:2590c7b1e60666df",
+            "title": "claude_code",
+            "collection": "semantic_memory",
+            "metadata": {"source_name": "claude_code", "category": "preference"},
+            "content": "Chris prefers in-process brain scheduler jobs over external schedulers.",
+            "score": 180.0,
+        },
+        {
+            "id": "semantic_memory:c689ad11cfca1a60",
+            "title": "terminal authorization correction",
+            "collection": "semantic_memory",
+            "metadata": {"category": "correction"},
+            "content": (
+                "Chris said: 이거 내가 권한준거라 false positive야. "
+                "Ellie updated hermes_ops_watchdog.py to allow market and sage "
+                "Telegram toolsets to use terminal."
+            ),
+            "score": 76.0,
+        },
+    ]
+
+    _apply_recall_governance_inplace("market sage terminal Telegram allowed by Chris?", fused)
+    fused.sort(key=lambda r: r["score"], reverse=True)
+
+    assert fused[0]["id"] == "semantic_memory:c689ad11cfca1a60"
+    assert "terminal_telegram_authorization" in fused[0]["governance"]
+    for noise in fused[1:]:
+        assert "terminal_telegram_authorization_noise_penalty" in noise.get("governance", [])
+
+
+def test_recall_governance_terminal_telegram_authorization_allows_concise_policy_atom():
+    from routes.recall import _apply_recall_governance_inplace
+
+    fused = [
+        {
+            "id": "631ab3eee2416904216c405aa7b319e6",
+            "title": "chris (14) (part 4)",
+            "collection": "canonical",
+            "content": (
+                "Summarized from documented tech preferences. W15 was a consolidation week "
+                "where Chris pushed the brain stack toward stricter verification and clearer agent roles."
+            ),
+            "score": 260.0,
+        },
+        {
+            "id": "semantic_memory:5add1dca0f5f18aa",
+            "title": "mcp",
+            "collection": "semantic_memory",
+            "content": (
+                "Chris explicitly authorized `terminal` in Telegram toolsets for Hermes "
+                "`market` and `sage` profiles; Ellie fleet watchdog should treat "
+                "market/sage terminal access as allowed policy, not drift."
+            ),
+            "score": 170.0,
+        },
+    ]
+
+    _apply_recall_governance_inplace("market sage terminal Telegram allowed by Chris?", fused)
+    fused.sort(key=lambda r: r["score"], reverse=True)
+
+    assert fused[0]["id"] == "semantic_memory:5add1dca0f5f18aa"
+    assert "terminal_telegram_authorization" in fused[0]["governance"]
+    assert "terminal_telegram_authorization_noise_penalty" not in fused[0]["governance"]
+    assert "terminal_telegram_authorization_noise_penalty" in fused[1].get("governance", [])
+
+
+def test_recall_v2_terminal_telegram_authorization_query_deepens_candidate_pool(monkeypatch):
+    from routes import recall as recall_route
+    from starlette.requests import Request
+
+    recall_route._recall_cache.clear()
+    calls: list[dict] = []
+
+    def fake_search_all(query, n, **kwargs):
+        calls.append({"query": query, "n": n, **kwargs})
+        return {"results": [], "total_candidates": 0, "source_timing": {}}
+
+    monkeypatch.setattr(recall_route.search_unified, "search_all", fake_search_all)
+
+    request = Request(
+        {"type": "http", "method": "GET", "path": "/recall/v2", "headers": [], "query_string": b""}
+    )
+    recall_route.recall_v2(
+        request,
+        q="market sage terminal Telegram allowed by Chris?",
+        n=3,
+        rerank=False,
+        decay=False,
+    )
+
+    assert calls
+    assert max(call["n"] for call in calls) >= 40
+
+
+def test_recall_v2_terminal_telegram_authorization_allowed_by_chris_adds_evidence_rescue_variant(monkeypatch):
+    from routes import recall as recall_route
+    from starlette.requests import Request
+
+    recall_route._recall_cache.clear()
+    calls: list[dict] = []
+
+    def fake_search_all(query, n, **kwargs):
+        calls.append({"query": query, "n": n, **kwargs})
+        return {"results": [], "total_candidates": 0, "source_timing": {}}
+
+    monkeypatch.setattr(recall_route.search_unified, "search_all", fake_search_all)
+
+    request = Request(
+        {"type": "http", "method": "GET", "path": "/recall/v2", "headers": [], "query_string": b""}
+    )
+    recall_route.recall_v2(
+        request,
+        q="market sage terminal Telegram allowed by Chris?",
+        n=10,
+        rerank=False,
+        decay=False,
+    )
+
+    queries = [call["query"] for call in calls]
+    assert "fleet ops watchdog terminal false positive market sage" in queries
+    assert "이거 내가 권한준거라 false positive market sage telegram terminal" in queries
 
 
 # ── Historical-intent narrowing of _is_live_state_query (Sage CR for t_a321da09) ──
@@ -3097,6 +3753,53 @@ def test_is_live_state_query_token_cluster_does_not_overfire():
     assert _is_live_state_query("running local inference decision") is False
     assert _is_live_state_query("complete guide to recall governance") is False
     assert _is_live_state_query("started workflow preference") is False
+
+
+# ── Bare elliptical status queries (t_e4275737) ──
+# Live probe: terse "running now" / "진행 중" / "지금 실행 중" prompts arrive
+# without the "what is" prefix the strict English regex requires and without
+# the "진행 상황" tail the strict Korean regex requires. They must still
+# classify as live-state so recall short-circuits to live tools.
+
+
+def test_is_live_state_query_bare_english_running_now_is_live_state():
+    """Bare elliptical 'running now' / 'running right now' must classify as
+    live-state — same intent as 'what is running right now' just without the
+    'what is' prefix."""
+    from routes.recall import _is_live_state_query
+
+    assert _is_live_state_query("running now") is True
+    assert _is_live_state_query("running right now") is True
+
+
+def test_is_live_state_query_bare_korean_in_progress_is_live_state():
+    """Bare elliptical Korean status: '진행 중' (in progress) and
+    '지금 실행 중' (running right now) must classify as live-state, paralleling
+    the existing '진행 상황' coverage."""
+    from routes.recall import _is_live_state_query
+
+    assert _is_live_state_query("진행 중") is True
+    assert _is_live_state_query("진행중") is True
+    assert _is_live_state_query("지금 실행 중") is True
+
+
+def test_is_live_state_query_bare_status_patterns_respect_durable_counterexamples():
+    """Adding bare-running-now / 진행 중 / 실행 중 patterns must NOT flip
+    durable preference / history / from-memory recall queries to live-state.
+    The durable counterexamples from the existing suppression coverage stay
+    False, and Korean past-tense inflections like '진행 중이었어' (was in
+    progress) must not match the new '중' patterns."""
+    from routes.recall import _is_live_state_query
+
+    # Pre-existing durable preference counterexamples remain False
+    assert _is_live_state_query("durable current preference for kanban status recall governance") is False
+    assert _is_live_state_query("Chris current status-control preference from memory") is False
+    assert _is_live_state_query("canonical decision about task status governance") is False
+    # English token "running" without "now" must not flip to live-state
+    assert _is_live_state_query("running local inference decision") is False
+    # Korean past-tense '중이었어' / '중이었던' must not match the bare '중' pattern
+    assert _is_live_state_query("진행 중이었어 어제 작업 기록") is False
+    assert _is_live_state_query("실행 중이었던 과거 작업 기록") is False
 
 
 # ── Explicit "summary 말고" exclusion (live broad_recommendation probe) ──
