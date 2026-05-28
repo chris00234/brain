@@ -2705,6 +2705,8 @@ def test_live_state_query_requires_explicit_status_intent():
     assert _is_live_state_query("current status of kanban task t_12345678") is True
     assert _is_live_state_query("progress update for recall governance") is True
     assert _is_live_state_query("what is running right now") is True
+    assert _is_live_state_query("current Brain mission progress") is True
+    assert _is_live_state_query("current alpha project status") is True
     assert _is_live_state_query("complete guide to recall governance") is False
     assert _is_live_state_query("completed migration decision") is False
     assert _is_live_state_query("started workflow preference") is False
@@ -2809,6 +2811,7 @@ def test_korean_music_tts_paid_api_avoidance_query_gets_budget_expansion():
     assert "new" in expanded
     assert "avoid new paid api" in expanded
     assert "no separate paid api" in expanded
+    assert "cost conscious existing subscriptions integrations no local model hosting music TTS" in expanded
 
 
 def test_recall_governance_music_tts_exact_class_query_penalizes_api_key_noise():
@@ -3026,6 +3029,76 @@ def test_recall_v2_korean_historical_kanban_completed_searches_memory(monkeypatc
     assert response.meta_note != "Live-state/status query — use live tools instead of stale memory recall."
 
 
+# ── Word-order / separator variants of _is_live_state_query (t_89eaf8a6) ──
+# Live spot checks against /recall/v2 for x-agent=liz showed three terse
+# phrasings leaking stale memory results instead of short-circuiting. The
+# strict _LIVE_STATE_QUERY_PATTERNS missed them because:
+#   1. "Kanban task t_<id> status" — the ID slot breaks `\btask\s+status\b`
+#   2. "current/status/Kanban/progress" — slashes block `\s+` boundaries
+#   3. "kanban progress status current task" — words in the wrong order
+# Each test pins one of the three; the historical-exception coverage below
+# guards against the token-cluster fallback over-firing on archived lookups
+# (the t_a321da09 historical-narrowing fix must keep holding).
+
+
+def test_is_live_state_query_kanban_task_id_status_word_order_variant():
+    """Terse 'Kanban task t_<id> status' is a live-status ask; the ID slot
+    between 'task' and 'status' must not break detection."""
+    from routes.recall import _is_live_state_query
+
+    assert _is_live_state_query("Kanban task t_12345678 status") is True
+
+
+def test_is_live_state_query_slash_separated_status_kanban_progress():
+    """Slash-delimited 'current/status/Kanban/progress' is a live-status ask
+    — non-whitespace separators must normalize to spaces so the existing
+    `\\bcurrent\\s+status\\b` pattern still matches."""
+    from routes.recall import _is_live_state_query
+
+    assert _is_live_state_query("current/status/Kanban/progress") is True
+
+
+def test_is_live_state_query_kanban_intent_cluster_reversed_word_order():
+    """'kanban progress status current task' clusters every live-state cue
+    in the wrong order. The token-cluster fallback must catch it after the
+    strict regex misses."""
+    from routes.recall import _is_live_state_query
+
+    assert _is_live_state_query("kanban progress status current task") is True
+
+
+def test_is_live_state_query_word_order_variants_respect_historical_exceptions():
+    """Historical/archived intent (history, last week, 지난주, 기록, archived)
+    must still suppress live-state on the three new word-order/slash variants
+    — the historical guard runs BEFORE the token-cluster fallback so the
+    t_a321da09 historical-narrowing fix keeps holding."""
+    from routes.recall import _is_live_state_query
+
+    assert _is_live_state_query("history of Kanban task status t_12345678 last week") is False
+    assert _is_live_state_query("archived/Kanban/progress/status") is False
+    assert _is_live_state_query("kanban progress status current task records last week") is False
+    # Pre-existing historical fixtures must keep returning False
+    assert _is_live_state_query("history of kanban task status from last week") is False
+    assert _is_live_state_query("지난주 칸반 완료 태스크 기록") is False
+
+
+def test_is_live_state_query_token_cluster_does_not_overfire():
+    """The token-cluster fallback must not over-fire on prompts that mention
+    kanban or task without status/progress/current/running intent, otherwise
+    legitimate definition/setup recalls would be short-circuited."""
+    from routes.recall import _is_live_state_query
+
+    # 'kanban' present but no intent token → False (definition/setup queries)
+    assert _is_live_state_query("kanban definition explanation") is False
+    assert _is_live_state_query("kanban setup instructions") is False
+    # Non-kanban context with only one intent token → False (needs ≥2)
+    assert _is_live_state_query("current task assignments") is False
+    # Pre-existing fixtures the token-cluster path must not flip to True
+    assert _is_live_state_query("running local inference decision") is False
+    assert _is_live_state_query("complete guide to recall governance") is False
+    assert _is_live_state_query("started workflow preference") is False
+
+
 # ── Explicit "summary 말고" exclusion (live broad_recommendation probe) ──
 
 
@@ -3188,6 +3261,209 @@ def test_is_positive_summary_intent_query_matches_summary_recap_cues():
     assert _is_positive_summary_intent_query("이미지 생성 추천") is False
     assert _is_positive_summary_intent_query("tool recommendation principle") is False
     assert _is_positive_summary_intent_query("") is False
+
+
+def test_recall_governance_live_validation_music_tts_suppresses_offtopic_manual_note():
+    from routes.recall import _apply_recall_governance_inplace
+
+    fused = [
+        {
+            "id": "logo",
+            "title": "mcp",
+            "collection": "semantic_memory",
+            "content": "Logo feedback: Chris wants personal brand logo, not generic premium-tech symbol; avoid abstract marks.",
+            "score": 110.0,
+        },
+        {
+            "id": "brain-contract",
+            "title": "Brain contract (2026-04-24)",
+            "collection": "knowledge",
+            "content": "Brain is the primary durable memory store. It mentions local models and no paid API constraints for Brain operations.",
+            "score": 185.0,
+        },
+        {
+            "id": "music-tts",
+            "title": "Music and TTS billing constraints",
+            "collection": "semantic_memory",
+            "metadata": {"category": "preference"},
+            "content": "Chris is cost-conscious for music generation and TTS: avoid local model hosting and avoid new paid API spend; use existing subscriptions/integrations.",
+            "score": 130.0,
+        },
+    ]
+
+    _apply_recall_governance_inplace(
+        "music generation TTS local model no new paid API Chris constraint", fused
+    )
+
+    assert fused[2]["score"] > fused[0]["score"]
+    assert fused[2]["score"] > fused[1]["score"]
+    assert "budget_local_cloud_constraint" in fused[2]["governance"]
+    assert "budget_offtopic_penalty" in fused[0]["governance"]
+    assert "brain_contract_offtopic_penalty" in fused[1]["governance"]
+
+
+def test_recall_governance_mixed_language_music_tts_suppresses_brain_failure_note():
+    from routes.recall import _apply_recall_governance_inplace
+
+    fused = [
+        {
+            "id": "korean-name-failure",
+            "title": "## What happened - Korean name Brain failure",
+            "collection": "experience",
+            "content": "What happened: Chris asked whether his Korean name was stored in Brain. brain_recall failed to surface the correct personal fact.",
+            "score": 240.0,
+        },
+        {
+            "id": "cost-pref",
+            "title": "memory_nudge_pattern",
+            "collection": "semantic_memory",
+            "metadata": {"category": "preference"},
+            "content": "Chris is cost-conscious and prefers existing subscriptions and integrations over new paid API spend or local model hosting for music and TTS.",
+            "score": 140.0,
+        },
+    ]
+
+    _apply_recall_governance_inplace("Chris 음악 TTS local model no paid API 제약", fused)
+
+    assert fused[1]["score"] > fused[0]["score"]
+    assert "brain_failure_note_penalty" in fused[0]["governance"]
+
+
+def test_recall_governance_calendar_tooling_penalizes_business_automation_noise():
+    from routes.recall import _apply_recall_governance_inplace
+
+    fused = [
+        {
+            "id": "business-plan",
+            "title": "semantic",
+            "collection": "obsidian",
+            "content": "Automation Platform for Small Businesses and Individuals. SaaS startup planning for automation workflows.",
+            "score": 205.0,
+        },
+        {
+            "id": "tooling",
+            "title": "Primary Tooling Choices",
+            "collection": "knowledge",
+            "content": "Reminders: `apple-reminders` primary. Calendar: `macos-calendar` primary local calendar, `google-workspace-mcp` for Google side.",
+            "score": 166.0,
+        },
+    ]
+
+    _apply_recall_governance_inplace("Apple Calendar Reminders Chris preferred tools automation", fused)
+
+    assert fused[1]["score"] > fused[0]["score"]
+    assert "calendar_tooling_offtopic_penalty" in fused[0]["governance"]
+    assert "primary_tooling_choice" in fused[1]["governance"]
+
+
+def test_recall_governance_historical_runtime_penalizes_live_state_snapshot():
+    from routes.recall import _apply_recall_governance_inplace
+
+    fused = [
+        {
+            "id": "live-state",
+            "title": "Manual focus items (10) (part 1)",
+            "collection": "canonical",
+            "metadata": {
+                "document_title": "Manual focus items (10) (part 1)",
+                "document_type": "canonical-note",
+                "source_path": "/Users/chrischo/server/knowledge/canonical/live_state/active_goals.md",
+            },
+            "score": 165.0,
+        },
+        {
+            "id": "runtime",
+            "title": "Hermes vs OpenClaw historical runtime distinction",
+            "collection": "canonical",
+            "metadata": {"category": "decision", "review_state": "accepted"},
+            "content": "Hermes is the current runtime. OpenClaw is the historical predecessor; OpenClaw paths and runtime assumptions are retired.",
+            "score": 100.0,
+        },
+    ]
+
+    _apply_recall_governance_inplace("Hermes vs OpenClaw historical runtime distinction", fused)
+
+    assert fused[1]["score"] > fused[0]["score"]
+    assert "live_state_snapshot_penalty" in fused[0]["governance"]
+
+
+def test_recall_governance_broad_tool_recommendation_penalizes_distilled_brain_analysis():
+    from routes.recall import _apply_recall_governance_inplace
+
+    fused = [
+        {
+            "id": "brain-analysis",
+            "title": "Reasoning",
+            "collection": "canonical",
+            "metadata": {
+                "id": "dist_brain_analysis_123",
+                "document_type": "distilled-note",
+                "source_path": "/Users/chrischo/server/knowledge/distilled/decisions/brain_analysis_123.md",
+            },
+            "score": 154.0,
+        },
+        {
+            "id": "ops-pref",
+            "title": "Chris operational preferences for automation and recommendations",
+            "collection": "canonical",
+            "metadata": {"category": "preference", "review_state": "accepted"},
+            "content": "Chris prefers useful tool recommendations with low noise, high leverage, and evidence from operational preferences.",
+            "score": 120.0,
+        },
+    ]
+
+    _apply_recall_governance_inplace(
+        "recommend a useful tool for Chris given his preferences no-noise max-help", fused
+    )
+
+    assert fused[1]["score"] > fused[0]["score"]
+    assert "distilled_brain_analysis_penalty" in fused[0]["governance"]
+
+
+def test_recall_governance_broad_tool_recommendation_penalizes_openclaw_summary_noise():
+    from routes.recall import _apply_recall_governance_inplace
+
+    fused = [
+        {
+            "id": "openclaw-summary",
+            "title": "Chris operational preferences for OpenClaw automation, browser control, and migration",
+            "collection": "canonical",
+            "content": (
+                "## Summary This consolidated page captures Chris's operational rules for how "
+                "OpenClaw should handle browser automation, gateway-sensitive actions, migration/setup "
+                "portability, progress reporting, and standing workflow preferences."
+            ),
+            "score": 149.0,
+        },
+        {
+            "id": "candidate",
+            "title": "claude_code",
+            "collection": "canonical",
+            "content": (
+                "Chris uses a concrete recent gap test before building new tooling; candidate "
+                "tool rows are valid evidence for useful tool recommendations."
+            ),
+            "score": 145.0,
+        },
+        {
+            "id": "pref",
+            "title": "Tool recommendation principle preference",
+            "collection": "canonical",
+            "metadata": {"category": "preference", "review_state": "accepted"},
+            "content": "Chris prefers useful tool recommendations with low noise, max help, and concrete evidence.",
+            "score": 120.0,
+        },
+    ]
+
+    _apply_recall_governance_inplace(
+        "recommend a useful tool for Chris given his preferences no-noise max-help", fused
+    )
+
+    assert fused[1]["score"] > fused[0]["score"]
+    assert fused[2]["score"] > fused[0]["score"]
+    assert "broad_tool_recommendation_noise_penalty" in fused[0]["governance"]
+    assert "broad_tool_recommendation_noise_penalty" not in fused[1].get("governance", [])
+    assert "broad_tool_recommendation_noise_penalty" not in fused[2].get("governance", [])
 
 
 def test_recall_governance_positive_summary_intent_skips_summary_penalties():

@@ -944,6 +944,38 @@ _LIVE_STATE_QUERY_PATTERNS = (
     r"\brunning\s+(?:tasks?|processes?|jobs?)\b",
 )
 
+# Slash/underscore separators in live-state prompts ("current/status/Kanban/progress",
+# "current_status_kanban") must normalize to whitespace so the existing
+# _LIVE_STATE_QUERY_PATTERNS' `\s+` boundaries still match. Hyphens are left
+# alone — they appear in legitimate non-live tokens like "macos-calendar".
+_LIVE_STATE_SEPARATOR_RE = re.compile(r"[/_]+")
+
+# Token-cluster fallback for word-order variants the strict regex set misses
+# (e.g. "Kanban task t_12345678 status" — `\btask\s+status\b` can't span the
+# ID slot; "kanban progress status current task" — words in the wrong order).
+# Two-hit rule, chosen to avoid over-firing on definition/setup queries:
+#   - "kanban" + any intent token → live-state (kanban is operational).
+#   - Non-kanban context (task/job/process) + ≥2 intent tokens → live-state.
+_LIVE_STATE_KANBAN_INTENT_TOKENS = frozenset({"status", "progress", "current", "running", "task", "tasks"})
+_LIVE_STATE_NON_KANBAN_CONTEXT_TOKENS = frozenset(
+    {
+        "task",
+        "tasks",
+        "job",
+        "jobs",
+        "process",
+        "processes",
+        "mission",
+        "missions",
+        "goal",
+        "goals",
+        "project",
+        "projects",
+    }
+)
+_LIVE_STATE_NON_KANBAN_INTENT_TOKENS = frozenset({"status", "progress", "current", "running"})
+_LIVE_STATE_TOKEN_RE = re.compile(r"[a-z0-9]+")
+
 # Historical/completed lookup cues — when any of these appear, the prompt
 # explicitly asks about archived/past/finished state and SHOULD search memory
 # instead of short-circuiting to live tools. _is_live_state_query checks this
@@ -1064,6 +1096,9 @@ _BUDGET_LOCAL_CLOUD_DOMAIN_STOP_TOKENS = (
         "available",
         "choose",
         "chris",
+        "constraint",
+        "constraints",
+        "existing",
         "first",
         "generation",
         "only",
@@ -1117,9 +1152,37 @@ def _augment_query_for_recall(q: str) -> str:
                 continue
             additions.append(term)
             seen.update(term_tokens)
+        if seen & _MEDIA_GENERATION_TOKENS:
+            media_term = "cost conscious existing subscriptions integrations no local model hosting music TTS"
+            term_tokens = _tokenize_recall_text(media_term)
+            if term_tokens and not all(tok in seen for tok in term_tokens):
+                additions.append(media_term)
+                seen.update(term_tokens)
     if not additions:
         return base
     return base + " " + " ".join(additions)
+
+
+def _looks_like_live_state_token_cluster(text: str) -> bool:
+    """Token-cluster fallback for live-state prompts that the strict regex
+    patterns miss.
+
+    Catches word-order variants ("kanban progress status current task") and
+    queries with extra tokens between cues ("Kanban task t_12345678 status"
+    — the ID slot blocks `\\btask\\s+status\\b` from spanning) by tokenizing
+    the normalized prompt and looking for a kanban+intent or context+multi-
+    intent cluster. Two-hit rule, chosen to avoid over-firing on definition/
+    setup queries (e.g. "kanban setup instructions" → no intent → False).
+    """
+    tokens = set(_LIVE_STATE_TOKEN_RE.findall((text or "").lower()))
+    if not tokens:
+        return False
+    if "kanban" in tokens and tokens & _LIVE_STATE_KANBAN_INTENT_TOKENS:
+        return True
+    return bool(
+        tokens & _LIVE_STATE_NON_KANBAN_CONTEXT_TOKENS
+        and len(tokens & _LIVE_STATE_NON_KANBAN_INTENT_TOKENS) >= 2
+    )
 
 
 def _is_live_state_query(q: str) -> bool:
@@ -1134,13 +1197,21 @@ def _is_live_state_query(q: str) -> bool:
     search memory, so don't short-circuit them even if a live-state pattern
     would otherwise match (e.g. "history of kanban task status from last week"
     or "지난주 칸반 완료 태스크 기록").
+
+    Detection order: historical override → strict regex patterns → token-
+    cluster fallback. Slashes/underscores are normalized to spaces first so
+    "current/status/Kanban/progress" matches the same `\\s+`-delimited
+    patterns as the whitespace form.
     """
     text = (q or "").strip()
     if not text:
         return False
-    if any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in _HISTORICAL_QUERY_PATTERNS):
+    normalized = _LIVE_STATE_SEPARATOR_RE.sub(" ", text)
+    if any(re.search(pattern, normalized, flags=re.IGNORECASE) for pattern in _HISTORICAL_QUERY_PATTERNS):
         return False
-    return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in _LIVE_STATE_QUERY_PATTERNS)
+    if any(re.search(pattern, normalized, flags=re.IGNORECASE) for pattern in _LIVE_STATE_QUERY_PATTERNS):
+        return True
+    return _looks_like_live_state_token_cluster(normalized)
 
 
 def _is_summary_excluded_query(q: str) -> bool:
@@ -1276,6 +1347,12 @@ def _result_text(result: dict) -> str:
             result.get("content"),
             meta.get("title"),
             meta.get("path"),
+            meta.get("id"),
+            meta.get("source_path"),
+            meta.get("source_name"),
+            meta.get("document_title"),
+            meta.get("document_section"),
+            meta.get("document_type"),
         )
     )
 
@@ -1300,6 +1377,146 @@ def _is_personal_calendar_instance(result: dict, text: str) -> bool:
     lower = text.lower()
     return collection == "personal" and (
         "reminders://" in lower or "reminder:" in lower or "calendar event" in lower
+    )
+
+
+def _is_live_state_snapshot_result(result: dict, text: str) -> bool:
+    meta = _result_metadata(result)
+    lower = text.lower()
+    title = str(result.get("title") or meta.get("document_title") or "").lower()
+    path = str(result.get("path") or meta.get("source_path") or meta.get("path") or "").lower()
+    doc_type = str(meta.get("document_type") or meta.get("type") or "").lower()
+    return (
+        "live state snapshot" in lower
+        or "active goals and focus" in lower
+        or ("manual focus items" in title and ("active goals" in lower or "active_goals" in path))
+        or "live_state_snapshot" in path
+        or "/live_state/" in path
+        or (doc_type == "canonical-note" and path.endswith("/live_state/active_goals.md"))
+    )
+
+
+def _is_brain_failure_note_result(text: str) -> bool:
+    lower = text.lower()
+    return (
+        "failed to surface" in lower
+        or "brain_recall" in lower
+        or ("what happened" in lower and "brain" in lower)
+        or "brain failure" in lower
+    )
+
+
+def _is_calendar_tooling_offtopic_result(text: str) -> bool:
+    lower = text.lower()
+    exact_tooling_markers = (
+        "primary tooling choices",
+        "apple-reminders",
+        "macos-calendar",
+        "google-workspace-mcp",
+        "todoist",
+        "things-mac",
+    )
+    return not any(marker in lower for marker in exact_tooling_markers)
+
+
+def _is_broad_tool_recommendation_query(query_tokens: set[str]) -> bool:
+    has_recommendation = bool(
+        query_tokens
+        & {"recommend", "recommendation", "tool", "tools", "useful", "max", "help", "no", "noise"}
+    )
+    has_chris_context = "chris" in query_tokens or bool(query_tokens & {"preferences", "preference", "선호"})
+    domain_tokens = query_tokens - {
+        "recommend",
+        "recommendation",
+        "tool",
+        "tools",
+        "useful",
+        "chris",
+        "given",
+        "his",
+        "preferences",
+        "preference",
+        "no",
+        "noise",
+        "noisy",
+        "max",
+        "help",
+    }
+    return has_recommendation and has_chris_context and len(domain_tokens) <= 2
+
+
+def _is_distilled_brain_analysis_result(result: dict, text: str) -> bool:
+    meta = _result_metadata(result)
+    lower = text.lower()
+    meta_text = " ".join(
+        str(meta.get(key) or "") for key in ("id", "subtype", "source_path", "source_name", "document_type")
+    ).lower()
+    title = str(result.get("title") or meta.get("document_title") or "").strip().lower()
+    collection = str(result.get("collection") or "").lower()
+    return (
+        str(meta.get("subtype") or "").lower() == "brain-analysis"
+        or "dist_brain_analysis" in lower
+        or '"subtype": "brain-analysis"' in lower
+        or "dist_brain_analysis" in meta_text
+        or "brain-analysis" in meta_text
+        or (collection in {"canonical", "distilled"} and title == "reasoning")
+    )
+
+
+def _has_direct_tool_candidate_marker(result: dict, text: str) -> bool:
+    """True when a broad recommendation result names an actionable candidate.
+
+    Broad tool-recommendation probes need candidate rows (e.g. `claude_code`,
+    `brain-reflect:nightly`) or concise preference evidence. Generic OpenClaw
+    summaries mention tools/preferences often enough to match semantically, but
+    they are not themselves recommendations.
+    """
+    title = str(result.get("title") or _result_metadata(result).get("document_title") or "").strip().lower()
+    if re.fullmatch(r"[a-z][a-z0-9]*(?:[_:-][a-z0-9]+)+", title):
+        return True
+    candidate_markers = (
+        "tool:",
+        "candidate:",
+        "use `",
+        "run `",
+    )
+    lower = text.lower()
+    return any(marker in lower for marker in candidate_markers)
+
+
+def _is_tool_recommendation_preference_evidence(text: str) -> bool:
+    tokens = _tokenize_recall_text(text)
+    has_recommendation = bool(tokens & {"recommend", "recommendation", "recommendations"})
+    has_signal = bool(tokens & {"noise", "noisy", "leverage", "useful", "help", "helpful", "evidence"})
+    return (
+        has_recommendation and has_signal and bool(tokens & {"chris", "preference", "preferences", "prefers"})
+    )
+
+
+def _is_broad_tool_recommendation_noise_result(result: dict, text: str) -> bool:
+    if _has_direct_tool_candidate_marker(result, text) or _is_tool_recommendation_preference_evidence(text):
+        return False
+    lower = text.lower()
+    title = str(result.get("title") or _result_metadata(result).get("document_title") or "").lower()
+    return (
+        _is_generic_summary_result(result)
+        or "openclaw" in lower
+        or "openclaw" in title
+        or lower.lstrip().startswith("### details")
+    )
+
+
+def _is_brain_contract_result(result: dict, text: str) -> bool:
+    meta = _result_metadata(result)
+    lower = text.lower()
+    title = str(result.get("title") or meta.get("document_title") or "").lower()
+    path = str(result.get("path") or meta.get("source_path") or "").lower()
+    return (
+        "brain contract" in title
+        or "memory protocols" in title
+        or "brain contract" in lower
+        or "mcp.servers.brain" in lower
+        or path.endswith("/brain_contract.md")
     )
 
 
@@ -1490,6 +1707,7 @@ def _apply_recall_governance_inplace(q: str, fused: list[dict]) -> None:
         if isinstance(r, dict)
     )
     calendar_tooling_query = _is_calendar_tooling_query(query_tokens)
+    broad_tool_recommendation_query = _is_broad_tool_recommendation_query(query_tokens)
     summary_excluded = _is_summary_excluded_query(q)
     positive_summary_intent = _is_positive_summary_intent_query(q)
 
@@ -1543,13 +1761,56 @@ def _apply_recall_governance_inplace(q: str, fused: list[dict]) -> None:
             delta -= 55.0
             reasons.append("generic_api_troubleshooting_penalty")
 
+        if (
+            budget_local_cloud_query
+            and not _has_budget_local_cloud_domain_overlap(query_tokens, all_tokens)
+            and not _is_budget_local_cloud_constraint_result(all_tokens)
+            and (total_overlap >= 2 or collection in {"experience", "semantic_memory"})
+        ):
+            delta -= 80.0
+            reasons.append("budget_offtopic_penalty")
+
+        if _is_brain_failure_note_result(result_text) and not _is_brain_quality_query(q):
+            delta -= 140.0
+            reasons.append("brain_failure_note_penalty")
+
+        if _is_live_state_snapshot_result(result, result_text):
+            delta -= 180.0
+            reasons.append("live_state_snapshot_penalty")
+
+        if (
+            budget_local_cloud_query
+            and _is_brain_contract_result(result, result_text)
+            and "brain" not in query_tokens
+        ):
+            delta -= 120.0
+            reasons.append("brain_contract_offtopic_penalty")
+
         if calendar_tooling_query and _is_primary_calendar_tooling_result(result_text):
-            delta += 70.0
+            delta += 90.0
             reasons.append("primary_tooling_choice")
 
         if calendar_tooling_query and _is_personal_calendar_instance(result, result_text):
             delta -= 50.0
             reasons.append("personal_instance_penalty")
+
+        if (
+            calendar_tooling_query
+            and _is_calendar_tooling_offtopic_result(result_text)
+            and not _is_primary_calendar_tooling_result(result_text)
+        ):
+            delta -= 85.0
+            reasons.append("calendar_tooling_offtopic_penalty")
+
+        if broad_tool_recommendation_query and _is_distilled_brain_analysis_result(result, result_text):
+            delta -= 90.0
+            reasons.append("distilled_brain_analysis_penalty")
+
+        if broad_tool_recommendation_query and _is_broad_tool_recommendation_noise_result(
+            result, result_text
+        ):
+            delta -= 95.0
+            reasons.append("broad_tool_recommendation_noise_penalty")
 
         if _is_generic_summary_result(result):
             if summary_excluded:
@@ -2267,6 +2528,7 @@ def recall_v2(
         return response
 
     search_query = _augment_query_for_recall(q)
+    query_tokens_for_governance = _tokenize_recall_text(search_query)
 
     start_dt, end_dt = temporal.parse_range(since, until)
     # ChromaDB 1.4.1 rejects string operands in $gte/$lt; filter Python-side instead.
@@ -2274,6 +2536,17 @@ def recall_v2(
     collections_arg = [collection] if collection else None
     # Widen inner-search n when a temporal filter will post-drop rows.
     search_n_mult = 3 if (start_dt or end_dt) else 2
+    inner_search_n = n * search_n_mult
+    # Governance-sensitive preference probes often need a slightly deeper
+    # candidate pool; otherwise the exact canonical/tooling row can sit just
+    # below the small n=5 inner window and never reach reranking.
+    governance_sensitive_query = (
+        _is_calendar_tooling_query(query_tokens_for_governance)
+        or _is_budget_local_cloud_query(query_tokens_for_governance)
+        or _is_broad_tool_recommendation_query(query_tokens_for_governance)
+    )
+    if governance_sensitive_query:
+        inner_search_n = max(inner_search_n, 40)
 
     hypothetical: str | None = None
     variants: list[str] = [search_query]
@@ -2298,7 +2571,7 @@ def recall_v2(
     def _run_variant(v_query):
         return search_unified.search_all(
             v_query,
-            n * search_n_mult,
+            inner_search_n,
             sources=_sources,
             domain=domain,
             original_query=q,
@@ -2469,6 +2742,13 @@ def recall_v2(
         else:
             timing["crag_ms"] = _crag_ms
             timing["crag"] = _crag_tele
+            # CRAG retry returns rows ranked for the rewritten query. Re-apply
+            # original-query governance so broad tool recommendation and other
+            # preference probes keep their noise penalties after retry.
+            _apply_recall_governance_inplace(q, fused)
+            _apply_primary_doc_boost_inplace(fused)
+            fused = _sort_and_diversify(fused, top_window=n)
+            fused = _apply_retrieval_quality_filter(q, fused)
 
     # Parent-child expand — see _apply_parent_child_expand docstring.
     fused = _apply_parent_child_expand(fused)
