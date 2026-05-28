@@ -156,6 +156,24 @@ def gather_decision_context(
     # Re-sort after decay (decay modifies score in-place)
     reranked.sort(key=lambda r: r.get("score", 0), reverse=True)
 
+    # Share /recall/v2's full quality stack with brain_decide evidence so the
+    # MCP cognitive layer is governed identically whether the agent calls
+    # `brain_recall` or `brain_decide`. Governance boosts canonical-accepted
+    # truth and durable preference/decision/correction rows; the quality filter
+    # then collapses near-duplicate Brain-quality memories and suppresses stale
+    # generic summaries. Decision path must fail open on any filter issue.
+    try:
+        from routes.recall import (
+            _apply_recall_governance_inplace,
+            _apply_retrieval_quality_filter,
+        )
+
+        _apply_recall_governance_inplace(situation, reranked)
+        reranked.sort(key=lambda r: r.get("score", 0), reverse=True)
+        reranked = _apply_retrieval_quality_filter(situation, reranked)
+    except Exception:  # noqa: S110 - decision path must fail open on quality filter issues
+        pass
+
     # Build PreferenceHit list from top 8
     hits: list[PreferenceHit] = []
     for r in reranked[:8]:
@@ -844,7 +862,28 @@ def reason_deep(
     for r in reranked:
         r["score"] = r.get("rerank_score", r.get("score", 0))
     time_decay.apply_to_results(reranked)
-    memory_results = sorted(reranked, key=lambda r: r.get("score", 0), reverse=True)
+    reranked.sort(key=lambda r: r.get("score", 0), reverse=True)
+
+    # Share /recall/v2's governance + retrieval-quality pass so brain_reason
+    # provenance is not dominated by stale generic summaries or duplicate
+    # Brain-quality memories. Without this, the MCP `brain_reason` tool — the
+    # most expensive synthesis path — was the only Brain interface that
+    # bypassed canonical-truth boosting and duplicate collapse. Fail open on
+    # any filter exception so a deep-reasoning request never breaks on
+    # governance issues.
+    try:
+        from routes.recall import (
+            _apply_recall_governance_inplace,
+            _apply_retrieval_quality_filter,
+        )
+
+        _apply_recall_governance_inplace(question, reranked)
+        reranked.sort(key=lambda r: r.get("score", 0), reverse=True)
+        reranked = _apply_retrieval_quality_filter(question, reranked)
+    except Exception:  # noqa: S110 - reasoning path must fail open on quality filter issues
+        pass
+
+    memory_results = reranked
 
     now = datetime.now(UTC)
     provenance: list[PreferenceHit] = []

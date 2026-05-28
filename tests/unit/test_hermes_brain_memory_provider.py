@@ -120,3 +120,129 @@ def test_builtin_memory_write_is_mirrored_to_brain(monkeypatch):
             },
         }
     ]
+
+
+def test_prefetch_collapses_near_duplicate_eval_score_preferences(monkeypatch):
+    def fake_request(path, method="GET", body=None, timeout=5.0, actor=None):
+        return {
+            "results": [
+                {
+                    "id": "old",
+                    "collection": "semantic_memory",
+                    "title": "Brain eval preference",
+                    "content": "Chris wants Brain fine tuning judged by measurable eval score improvements.",
+                    "score": 0.99,
+                },
+                {
+                    "id": "canonical",
+                    "collection": "canonical",
+                    "title": "Brain quality decision",
+                    "content": "Brain fine-tuning should improve measurable eval score improvements, not vibes.",
+                    "score": 0.70,
+                },
+            ]
+        }
+
+    monkeypatch.setattr(provider_mod, "_brain_request", fake_request)
+
+    provider = BrainMemoryProvider()
+    provider._profile = "liz"
+    context = provider.prefetch("브레인 검색품질 평가 점수 개선")
+
+    assert context.count("eval score") == 1
+    assert "canonical: Brain quality decision" in context
+
+
+def test_prefetch_filters_generic_brain_infra_noise(monkeypatch):
+    def fake_request(path, method="GET", body=None, timeout=5.0, actor=None):
+        return {
+            "results": [
+                {
+                    "id": "actionable",
+                    "title": "Brain eval score preference",
+                    "collection": "canonical",
+                    "content": "Chris wants Brain fine-tuning judged by measurable eval score improvements, not vibes.",
+                    "score": 0.97,
+                },
+                {
+                    "id": "noise",
+                    "title": "Knowledge gap bridge: Brain system dependency",
+                    "collection": "canonical",
+                    "content": "Brain depends on FastAPI brain-server, native Qdrant, and native Ollama.",
+                    "score": 0.95,
+                },
+            ]
+        }
+
+    monkeypatch.setattr(provider_mod, "_brain_request", fake_request)
+    provider = BrainMemoryProvider()
+
+    context = provider.prefetch("Brain recall quality should be no-noise and improve eval score")
+
+    assert "Brain recall" in context
+    assert "eval score improvements" in context
+    assert "Knowledge gap bridge" not in context
+
+
+def test_prefetch_returns_empty_when_all_brain_quality_hits_are_noise(monkeypatch):
+    def fake_request(path, method="GET", body=None, timeout=5.0, actor=None):
+        return {
+            "results": [
+                {
+                    "id": "noise",
+                    "title": "Knowledge gap bridge: Brain system dependency",
+                    "collection": "canonical",
+                    "content": "Brain depends on FastAPI brain-server, native Qdrant, and native Ollama.",
+                    "score": 0.95,
+                }
+            ]
+        }
+
+    monkeypatch.setattr(provider_mod, "_brain_request", fake_request)
+    provider = BrainMemoryProvider()
+
+    assert provider.prefetch("Brain recall quality should be no-noise") == ""
+
+
+def test_prefetch_korean_live_status_prompt_suppresses_stale_memory(monkeypatch):
+    calls: list[str] = []
+
+    def fake_request(path, method="GET", body=None, timeout=5.0, actor=None):
+        calls.append(path)
+        return {"results": [{"title": "Old kanban memory", "content": "stale", "score": 1.0}]}
+
+    monkeypatch.setattr(provider_mod, "_brain_request", fake_request)
+    provider = BrainMemoryProvider()
+
+    assert provider.prefetch("칸반 태스크 t_41c206ec 진행상황 업데이트") == ""
+    assert calls == []
+
+
+def test_prefetch_capability_recommendation_keeps_hard_constraints(monkeypatch):
+    def fake_request(path, method="GET", body=None, timeout=5.0, actor=None):
+        return {
+            "results": [
+                {
+                    "id": "constraint",
+                    "title": "Music/TTS capability constraint",
+                    "collection": "canonical",
+                    "content": "For music/TTS capability recommendations, Chris has hard constraints against local generation models and paid SaaS API billing.",
+                    "score": 0.8,
+                },
+                {
+                    "id": "noise",
+                    "title": "Boston session note",
+                    "collection": "experience",
+                    "content": "A trip note that mentioned audio once.",
+                    "score": 0.99,
+                },
+            ]
+        }
+
+    monkeypatch.setattr(provider_mod, "_brain_request", fake_request)
+    provider = BrainMemoryProvider()
+
+    context = provider.prefetch("Get me updated recommendations for music/TTS capability")
+
+    assert "hard constraints against local generation models" in context
+    assert "Boston session note" not in context

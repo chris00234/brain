@@ -30,7 +30,7 @@ def test_readiness_snapshot_surfaces_blocked_backup(tmp_path, monkeypatch):
     monkeypatch.setattr(ops_readiness, "RAGAS_EVAL_REPORT", tmp_path / "missing_ragas.json")
     monkeypatch.setattr(ops_readiness, "RELEASE_READINESS_LOG", tmp_path / "missing_release.json")
     monkeypatch.setattr(ops_readiness, "SLO_REMEDIATION_LOG", tmp_path / "missing_slo.jsonl")
-    monkeypatch.setattr(ops_readiness, "openclaw_gateway_snapshot", lambda: {"status": "ok"})
+    monkeypatch.setattr(ops_readiness, "hermes_gateway_snapshot", lambda: {"status": "ok"})
     monkeypatch.setattr(ops_readiness, "ragas_eval_snapshot", lambda: {"status": "ok"})
     monkeypatch.setattr(ops_readiness, "crag_regression_snapshot", lambda: {"status": "ok"})
     monkeypatch.setattr(ops_readiness, "crag_correction_regression_snapshot", lambda: {"status": "ok"})
@@ -52,7 +52,7 @@ def test_readiness_snapshot_blocks_missing_gate_artifacts(tmp_path, monkeypatch)
     monkeypatch.setattr(ops_readiness, "RAGAS_EVAL_REPORT", tmp_path / "missing_ragas.json")
     monkeypatch.setattr(ops_readiness, "RELEASE_READINESS_LOG", tmp_path / "missing_release.json")
     monkeypatch.setattr(ops_readiness, "SLO_REMEDIATION_LOG", tmp_path / "missing_slo.jsonl")
-    monkeypatch.setattr(ops_readiness, "openclaw_gateway_snapshot", lambda: {"status": "ok"})
+    monkeypatch.setattr(ops_readiness, "hermes_gateway_snapshot", lambda: {"status": "ok"})
     monkeypatch.setattr(ops_readiness, "crag_regression_snapshot", lambda: {"status": "ok"})
     monkeypatch.setattr(ops_readiness, "crag_correction_regression_snapshot", lambda: {"status": "ok"})
 
@@ -84,7 +84,7 @@ def test_remediation_incident_ledger_groups_statuses(tmp_path, monkeypatch):
     assert out["last_by_slo"]["logs_dir_total_mb"]["timestamp"] == "t2"
 
 
-def test_readiness_snapshot_blocks_openclaw_gateway(tmp_path, monkeypatch):
+def test_readiness_snapshot_blocks_hermes_gateway(tmp_path, monkeypatch):
     backup = tmp_path / "backup_restore_drill.json"
     retrieval = tmp_path / "retrieval_regression.json"
     release = tmp_path / "release_readiness.json"
@@ -97,7 +97,7 @@ def test_readiness_snapshot_blocks_openclaw_gateway(tmp_path, monkeypatch):
     monkeypatch.setattr(ops_readiness, "RELEASE_READINESS_LOG", release)
     monkeypatch.setattr(ops_readiness, "SLO_REMEDIATION_LOG", tmp_path / "missing_slo.jsonl")
     monkeypatch.setattr(ops_readiness, "SLO_ESCALATION_LOG", tmp_path / "missing_slo_escalations.jsonl")
-    monkeypatch.setattr(ops_readiness, "openclaw_gateway_snapshot", lambda: {"status": "blocked"})
+    monkeypatch.setattr(ops_readiness, "hermes_gateway_snapshot", lambda: {"status": "blocked"})
     monkeypatch.setattr(ops_readiness, "ragas_eval_snapshot", lambda: {"status": "ok"})
     monkeypatch.setattr(ops_readiness, "crag_regression_snapshot", lambda: {"status": "ok"})
     monkeypatch.setattr(ops_readiness, "crag_correction_regression_snapshot", lambda: {"status": "ok"})
@@ -106,8 +106,8 @@ def test_readiness_snapshot_blocks_openclaw_gateway(tmp_path, monkeypatch):
     out = ops_readiness.readiness_snapshot()
 
     assert out["status"] == "blocked"
-    assert "openclaw_gateway" in out["blockers"]
-    assert out["openclaw_gateway"]["status"] == "blocked"
+    assert "hermes_gateway" in out["blockers"]
+    assert out["hermes_gateway"]["status"] == "blocked"
 
 
 def test_ui_parity_audit_snapshot_blocks_missing_coverage(tmp_path, monkeypatch):
@@ -141,7 +141,7 @@ def test_readiness_snapshot_blocks_ui_parity_audit(tmp_path, monkeypatch):
     monkeypatch.setattr(ops_readiness, "crag_regression_snapshot", lambda: {"status": "ok"})
     monkeypatch.setattr(ops_readiness, "crag_correction_regression_snapshot", lambda: {"status": "ok"})
     monkeypatch.setattr(ops_readiness, "holdout_eval_snapshot", lambda: {"status": "ok"})
-    monkeypatch.setattr(ops_readiness, "openclaw_gateway_snapshot", lambda: {"status": "ok"})
+    monkeypatch.setattr(ops_readiness, "hermes_gateway_snapshot", lambda: {"status": "ok"})
     monkeypatch.setattr(ops_readiness, "source_governance_readiness_snapshot", lambda: {"status": "ok"})
     monkeypatch.setattr(ops_readiness, "skill_promotion_readiness_snapshot", lambda: {"status": "ok"})
 
@@ -317,7 +317,7 @@ def test_readiness_snapshot_blocks_source_governance(tmp_path, monkeypatch):
     monkeypatch.setattr(ops_readiness, "RELEASE_READINESS_LOG", release)
     monkeypatch.setattr(ops_readiness, "SLO_REMEDIATION_LOG", tmp_path / "missing_slo.jsonl")
     monkeypatch.setattr(ops_readiness, "SLO_ESCALATION_LOG", tmp_path / "missing_slo_escalations.jsonl")
-    monkeypatch.setattr(ops_readiness, "openclaw_gateway_snapshot", lambda: {"status": "ok"})
+    monkeypatch.setattr(ops_readiness, "hermes_gateway_snapshot", lambda: {"status": "ok"})
     monkeypatch.setattr(ops_readiness, "crag_regression_snapshot", lambda: {"status": "ok"})
     monkeypatch.setattr(ops_readiness, "crag_correction_regression_snapshot", lambda: {"status": "ok"})
     monkeypatch.setattr(ops_readiness, "holdout_eval_snapshot", lambda: {"status": "ok"})
@@ -413,7 +413,7 @@ def test_readiness_snapshot_blocks_crag_regression(tmp_path, monkeypatch):
     monkeypatch.setattr(ops_readiness, "RELEASE_READINESS_LOG", release)
     monkeypatch.setattr(ops_readiness, "SLO_REMEDIATION_LOG", tmp_path / "missing_slo.jsonl")
     monkeypatch.setattr(ops_readiness, "SLO_ESCALATION_LOG", tmp_path / "missing_slo_escalations.jsonl")
-    monkeypatch.setattr(ops_readiness, "openclaw_gateway_snapshot", lambda: {"status": "ok"})
+    monkeypatch.setattr(ops_readiness, "hermes_gateway_snapshot", lambda: {"status": "ok"})
     monkeypatch.setattr(ops_readiness, "source_governance_readiness_snapshot", lambda: {"status": "ok"})
     monkeypatch.setattr(ops_readiness, "skill_promotion_readiness_snapshot", lambda: {"status": "ok"})
 
@@ -437,7 +437,7 @@ def test_readiness_snapshot_blocks_skill_promotion(tmp_path, monkeypatch):
     monkeypatch.setattr(ops_readiness, "RELEASE_READINESS_LOG", release)
     monkeypatch.setattr(ops_readiness, "SLO_REMEDIATION_LOG", tmp_path / "missing_slo.jsonl")
     monkeypatch.setattr(ops_readiness, "SLO_ESCALATION_LOG", tmp_path / "missing_slo_escalations.jsonl")
-    monkeypatch.setattr(ops_readiness, "openclaw_gateway_snapshot", lambda: {"status": "ok"})
+    monkeypatch.setattr(ops_readiness, "hermes_gateway_snapshot", lambda: {"status": "ok"})
     monkeypatch.setattr(ops_readiness, "crag_regression_snapshot", lambda: {"status": "ok"})
     monkeypatch.setattr(ops_readiness, "crag_correction_regression_snapshot", lambda: {"status": "ok"})
     monkeypatch.setattr(ops_readiness, "holdout_eval_snapshot", lambda: {"status": "ok"})
@@ -518,7 +518,7 @@ def test_readiness_snapshot_blocks_crag_correction_regression(tmp_path, monkeypa
     monkeypatch.setattr(ops_readiness, "RELEASE_READINESS_LOG", release)
     monkeypatch.setattr(ops_readiness, "SLO_REMEDIATION_LOG", tmp_path / "missing_slo.jsonl")
     monkeypatch.setattr(ops_readiness, "SLO_ESCALATION_LOG", tmp_path / "missing_slo_escalations.jsonl")
-    monkeypatch.setattr(ops_readiness, "openclaw_gateway_snapshot", lambda: {"status": "ok"})
+    monkeypatch.setattr(ops_readiness, "hermes_gateway_snapshot", lambda: {"status": "ok"})
     monkeypatch.setattr(ops_readiness, "source_governance_readiness_snapshot", lambda: {"status": "ok"})
     monkeypatch.setattr(ops_readiness, "skill_promotion_readiness_snapshot", lambda: {"status": "ok"})
 
@@ -623,7 +623,7 @@ def test_readiness_snapshot_blocks_insufficient_outcome_maturity(monkeypatch):
     monkeypatch.setattr(ops_readiness, "ragas_eval_snapshot", lambda: {"status": "ok"})
     monkeypatch.setattr(ops_readiness, "release_readiness_snapshot", lambda: {"status": "ok", "blockers": []})
     monkeypatch.setattr(ops_readiness, "ui_parity_audit_snapshot", lambda: {"status": "ok"})
-    monkeypatch.setattr(ops_readiness, "openclaw_gateway_snapshot", lambda: {"status": "ok"})
+    monkeypatch.setattr(ops_readiness, "hermes_gateway_snapshot", lambda: {"status": "ok"})
     monkeypatch.setattr(ops_readiness, "source_governance_readiness_snapshot", lambda: {"status": "ok"})
     monkeypatch.setattr(ops_readiness, "remediation_incident_ledger", lambda: {"status": "ok"})
     monkeypatch.setattr(ops_readiness, "slo_escalation_ledger", lambda: {"status": "ok"})
@@ -659,7 +659,7 @@ def test_readiness_snapshot_blocks_autonomous_work_visibility_gap(monkeypatch):
     monkeypatch.setattr(ops_readiness, "ragas_eval_snapshot", lambda: {"status": "ok"})
     monkeypatch.setattr(ops_readiness, "release_readiness_snapshot", lambda: {"status": "ok"})
     monkeypatch.setattr(ops_readiness, "ui_parity_audit_snapshot", lambda: {"status": "ok"})
-    monkeypatch.setattr(ops_readiness, "openclaw_gateway_snapshot", lambda: {"status": "ok"})
+    monkeypatch.setattr(ops_readiness, "hermes_gateway_snapshot", lambda: {"status": "ok"})
     monkeypatch.setattr(ops_readiness, "source_governance_readiness_snapshot", lambda: {"status": "ok"})
     monkeypatch.setattr(ops_readiness, "skill_promotion_readiness_snapshot", lambda: {"status": "ok"})
     monkeypatch.setattr(

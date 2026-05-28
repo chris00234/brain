@@ -3304,3 +3304,290 @@ def test_recall_governance_explicit_exclusion_wins_over_positive_intent():
         "explicit_summary_exclusion_penalty" in governance
     ), f"exclusion must still win when both cues are present; got {governance}"
     assert fused[0]["score"] < 100.0
+
+
+# ── Duplicate/noisy recall result collapse ───────────────────────────────
+
+
+def test_retrieval_quality_filter_collapses_near_duplicate_brain_quality_rows():
+    """Server raw recall should not return several phrasings of the same
+    Brain-quality preference together. This guards /recall/v2 before Hermes
+    provider prefetch formats the memory-context.
+    """
+    from routes.recall import _apply_retrieval_quality_filter, _sort_and_diversify
+
+    fused = [
+        {
+            "id": "old_semantic",
+            "path": "/atoms/a",
+            "title": "Brain eval preference",
+            "collection": "semantic_memory",
+            "content": "Chris wants Brain fine tuning judged by measurable eval score improvements.",
+            "score": 120.0,
+        },
+        {
+            "id": "canonical_truth",
+            "path": "/canonical/brain-quality.md",
+            "title": "Brain quality decision",
+            "collection": "canonical",
+            "content": "Brain fine-tuning should improve measurable eval-score improvements, not vibes.",
+            "score": 110.0,
+        },
+        {
+            "id": "specific_other",
+            "path": "/canonical/live-state.md",
+            "title": "Brain live-state suppression",
+            "collection": "canonical",
+            "content": "Live status and quota questions should use live tools instead of stale memory prefetch.",
+            "score": 90.0,
+        },
+    ]
+
+    out = _apply_retrieval_quality_filter(
+        "Brain recall quality should improve eval score and avoid noisy duplicate prefetch",
+        _sort_and_diversify(fused, top_window=5),
+    )
+
+    ids = [row["id"] for row in out]
+    assert ids.count("old_semantic") + ids.count("canonical_truth") == 1
+    assert "specific_other" in ids
+
+
+# ── retrieval quality governance ───────────────────────────────────────
+
+
+def test_retrieval_quality_filter_collapses_eval_score_duplicate_memories():
+    from routes.recall import _apply_retrieval_quality_filter
+
+    fused = [
+        {
+            "id": "semantic-old",
+            "collection": "semantic_memory",
+            "score": 95.0,
+            "title": "Brain eval preference",
+            "content": "Chris wants Brain fine tuning to be judged by measurable eval score improvements.",
+            "metadata": {"category": "preference"},
+        },
+        {
+            "id": "canonical-new",
+            "collection": "canonical",
+            "score": 70.0,
+            "title": "Brain quality decision",
+            "content": "Brain fine-tuning work should improve measurable eval score improvements, not vibes.",
+            "metadata": {"category": "decision", "review_state": "accepted"},
+        },
+    ]
+
+    out = _apply_retrieval_quality_filter("브레인 검색품질 평가 점수 개선", fused)
+
+    assert len(out) == 1
+    assert out[0]["id"] == "canonical-new"
+
+
+def test_retrieval_quality_filter_suppresses_generic_brain_infra_summaries():
+    from routes.recall import _apply_retrieval_quality_filter
+
+    fused = [
+        {
+            "id": "summary",
+            "collection": "distilled",
+            "score": 99.0,
+            "title": "Summary",
+            "path": "weekly/2026-W20.md",
+            "content": "Knowledge Gap Bridge: Brain system dependency. Brain depends on FastAPI brain-server and native Qdrant.",
+        },
+        {
+            "id": "specific",
+            "collection": "canonical",
+            "score": 60.0,
+            "title": "Brain prefetch quality",
+            "content": "Brain memory context should avoid noise and duplicate recall blocks.",
+            "metadata": {"category": "preference", "review_state": "accepted"},
+        },
+    ]
+
+    out = _apply_retrieval_quality_filter("Brain memory context noise prefetch", fused)
+
+    assert [r["id"] for r in out] == ["specific"]
+
+
+def test_retrieval_quality_filter_keeps_requested_brain_subsystem_evidence():
+    from routes.recall import _apply_retrieval_quality_filter
+
+    fused = [
+        {
+            "id": "decide-specific",
+            "collection": "canonical",
+            "score": 70.0,
+            "title": "brain_decide retrieval quality",
+            "content": "brain_decide should share the retrieval quality filter with raw recall evidence.",
+            "metadata": {"category": "decision", "review_state": "accepted"},
+        },
+        {
+            "id": "other",
+            "collection": "canonical",
+            "score": 60.0,
+            "title": "Brain prefetch quality",
+            "content": "Brain prefetch should avoid duplicate memory context blocks.",
+            "metadata": {"category": "preference", "review_state": "accepted"},
+        },
+    ]
+
+    out = _apply_retrieval_quality_filter("brain_decide retrieval quality", fused)
+
+    assert [r["id"] for r in out] == ["decide-specific", "other"]
+
+
+def test_retrieval_quality_filter_does_not_treat_generic_memory_query_as_brain_quality():
+    from routes.recall import _apply_retrieval_quality_filter
+
+    fused = [
+        {
+            "id": "boston-summary",
+            "collection": "distilled",
+            "score": 90.0,
+            "title": "Boston trip weekly summary",
+            "path": "weekly/2026-W18.md",
+            "content": "Weekly Summary: Chris planned a Boston trip and captured travel notes.",
+        }
+    ]
+
+    out = _apply_retrieval_quality_filter("memory of my Boston trip", fused)
+
+    assert [r["id"] for r in out] == ["boston-summary"]
+
+
+def test_retrieval_quality_filter_keeps_boston_trip_context_summary():
+    from routes.recall import _apply_retrieval_quality_filter
+
+    fused = [
+        {
+            "id": "boston-context",
+            "collection": "distilled",
+            "score": 90.0,
+            "title": "Boston trip weekly summary",
+            "path": "weekly/2026-W18.md",
+            "content": "Weekly Summary: Chris planned a Boston trip and captured travel context.",
+        }
+    ]
+
+    out = _apply_retrieval_quality_filter("Boston trip context", fused)
+
+    assert [r["id"] for r in out] == ["boston-context"]
+
+
+def test_retrieval_quality_filter_keeps_song_quality_notes_summary():
+    from routes.recall import _apply_retrieval_quality_filter
+
+    fused = [
+        {
+            "id": "song-quality",
+            "collection": "distilled",
+            "score": 90.0,
+            "title": "Song quality notes weekly summary",
+            "path": "weekly/2026-W18.md",
+            "content": "Weekly Summary: Chris captured song quality notes and mix feedback.",
+        }
+    ]
+
+    out = _apply_retrieval_quality_filter("song quality notes", fused)
+
+    assert [r["id"] for r in out] == ["song-quality"]
+
+
+def test_retrieval_quality_filter_suppresses_generic_brain_summary_for_quality_query():
+    from routes.recall import _apply_retrieval_quality_filter
+
+    fused = [
+        {
+            "id": "summary",
+            "collection": "distilled",
+            "score": 99.0,
+            "title": "W20 weekly brain summary",
+            "path": "weekly/2026-W20.md",
+            "content": "Knowledge Gap Bridge: Brain system dependency. Brain depends on FastAPI brain-server.",
+        },
+        {
+            "id": "specific",
+            "collection": "canonical",
+            "score": 60.0,
+            "title": "Brain retrieval quality",
+            "content": "Brain retrieval quality should suppress stale generic infra summaries.",
+            "metadata": {"category": "preference", "review_state": "accepted"},
+        },
+    ]
+
+    out = _apply_retrieval_quality_filter("Brain retrieval quality", fused)
+
+    assert [r["id"] for r in out] == ["specific"]
+
+
+def test_brain_decide_marker_still_counts_as_brain_quality_query():
+    from routes.recall import _is_brain_quality_query
+
+    assert _is_brain_quality_query("brain_decide") is True
+
+
+def test_retrieval_quality_filter_keeps_summary_for_explicit_summary_query():
+    from routes.recall import _apply_retrieval_quality_filter
+
+    fused = [
+        {
+            "id": "summary",
+            "collection": "distilled",
+            "score": 99.0,
+            "title": "Summary",
+            "path": "weekly/2026-W20.md",
+            "content": "Knowledge Gap Bridge: Brain system dependency. Brain depends on FastAPI brain-server.",
+        }
+    ]
+
+    out = _apply_retrieval_quality_filter("Brain system 요약", fused)
+
+    assert [r["id"] for r in out] == ["summary"]
+
+
+def test_recall_batch_uses_shared_quality_filter_and_live_state_gate(monkeypatch):
+    from routes import recall as recall_mod
+
+    calls: list[dict] = []
+
+    def _fake_search(query, limit, **kw):
+        calls.append({"query": query, "limit": limit, "kw": kw})
+        return {
+            "results": [
+                {
+                    "id": "summary",
+                    "collection": "distilled",
+                    "score": 99.0,
+                    "title": "Summary",
+                    "path": "weekly/2026-W20.md",
+                    "content": "Knowledge Gap Bridge: Brain system dependency. Brain depends on FastAPI brain-server.",
+                },
+                {
+                    "id": "specific",
+                    "collection": "canonical",
+                    "score": 60.0,
+                    "title": "Brain prefetch quality",
+                    "content": "Brain memory context should avoid noise and duplicate recall blocks.",
+                    "metadata": {"category": "preference", "review_state": "accepted"},
+                },
+            ]
+        }
+
+    monkeypatch.setattr(recall_mod.search_unified, "search_all", _fake_search)
+
+    class _Req:
+        queries = ["Brain memory context noise", "current kanban task status"]
+        n = 3
+        rerank = True
+        decay = True
+        agent = "test"
+
+    out = recall_mod.recall_batch.__wrapped__(_Req(), _Req())
+
+    by_query = {entry["query"]: entry for entry in out["results"]}
+    assert [h["id"] for h in by_query["Brain memory context noise"]["hits"]] == ["specific"]
+    assert by_query["current kanban task status"]["hits"] == []
+    assert "Live-state/status" in by_query["current kanban task status"]["meta_note"]
+    assert calls and calls[0]["limit"] == 6

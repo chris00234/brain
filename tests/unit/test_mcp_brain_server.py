@@ -221,6 +221,8 @@ TIMEOUT_CAPPED_TOOLS = {
     "brain_store",
     "brain_consolidate",
     "brain_correct",  # 2026-04-26: same POST /memory path, also 4s capped
+    "brain_remember",  # minimal MCP durable writes use POST /memory
+    "brain_think",  # minimal MCP LLM-backed decide/reason/think multiplexer
 }
 
 
@@ -280,6 +282,8 @@ def test_no_new_uncapped_tools_added():
         "brain_forget",
         "brain_tick",
         "brain_doubt",
+        "brain_search",  # minimal MCP: recall/session/WM lookup paths
+        "brain_feedback",  # minimal MCP: outcome/recall feedback audit path
     }
     unclassified = branch_names - TIMEOUT_CAPPED_TOOLS - FAST_TOOLS
     assert not unclassified, (

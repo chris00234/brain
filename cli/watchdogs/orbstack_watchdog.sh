@@ -15,7 +15,12 @@ MEM_STATE_FILE="/Users/chrischo/server/brain/logs/.orbstack_mem_watchdog_state"
 MEM_ALERT_STATE="/Users/chrischo/server/brain/logs/.orbstack_mem_alert_state"
 CPU_THRESHOLD=80
 MEM_RSS_THRESHOLD_MB=10240
-MEM_ALERT_COOLDOWN=3600
+# Memory alerts should be actionable, not hourly RSS noise. OrbStack Helper
+# RSS includes VM/cache/accounting overhead on macOS, so only alert when high
+# RSS coincides with real pressure/swap stress.
+MEM_ALERT_COOLDOWN=21600
+MEM_SWAP_THRESHOLD_MB=1024
+MEM_FREE_PCT_THRESHOLD=10
 CONSECUTIVE_THRESHOLD=3
 RESTART_COOLDOWN=600  # Don't restart more than once per 10 minutes
 CHAT_ID="8484060831"
@@ -187,9 +192,24 @@ fi
 
 # ── Check 3: High RSS alert only ─────────────────────────
 # Conservative by design: no auto-restart for memory. macOS RSS can include
-# VM/cache/accounting overhead; alert after sustained high RSS so Chris can
-# decide whether to restart during a safe window.
-if [ "$MEM_RSS_MB" -gt "$MEM_RSS_THRESHOLD_MB" ]; then
+# VM/cache/accounting overhead; alert only when sustained high RSS coincides
+# with actual pressure/swap stress so Telegram does not get hourly noise.
+PRESSURE_FREE_PCT=100
+PRESSURE_OUT=$(memory_pressure 2>/dev/null || true)
+if echo "$PRESSURE_OUT" | grep -q 'System-wide memory free percentage:'; then
+  PRESSURE_FREE_PCT=$(echo "$PRESSURE_OUT" | awk -F': ' '/System-wide memory free percentage:/ { gsub(/%/, "", $2); print int($2); exit }')
+fi
+SWAP_USED_MB=0
+SWAP_OUT=$(sysctl vm.swapusage 2>/dev/null || true)
+if echo "$SWAP_OUT" | grep -q 'used ='; then
+  SWAP_USED_MB=$(echo "$SWAP_OUT" | sed -n 's/.*used = \([0-9.]*\)M.*/\1/p' | awk '{ printf "%d", $1 }')
+fi
+MEM_PRESSURE_ACTIVE=false
+if [ "$PRESSURE_FREE_PCT" -le "$MEM_FREE_PCT_THRESHOLD" ] || [ "$SWAP_USED_MB" -ge "$MEM_SWAP_THRESHOLD_MB" ]; then
+  MEM_PRESSURE_ACTIVE=true
+fi
+
+if [ "$MEM_RSS_MB" -gt "$MEM_RSS_THRESHOLD_MB" ] && [ "$MEM_PRESSURE_ACTIVE" = true ]; then
   PREV_MEM_COUNT=0
   if [ -f "$MEM_STATE_FILE" ]; then
     PREV_MEM_COUNT=$(cat "$MEM_STATE_FILE" 2>/dev/null || echo 0)
@@ -209,7 +229,8 @@ if [ "$MEM_RSS_MB" -gt "$MEM_RSS_THRESHOLD_MB" ]; then
       echo "$NOW" > "$MEM_ALERT_STATE"
       send_telegram "⚠️ *OrbStack 메모리 경고*
 Helper RSS: ${MEM_RSS_MB}MB (${NEW_MEM_COUNT}회 연속, 임계값 ${MEM_RSS_THRESHOLD_MB}MB)
-자동 재시작은 하지 않음 — pressure/swap 확인 후 수동 판단 권장"
+pressure_free=${PRESSURE_FREE_PCT}%, swap_used=${SWAP_USED_MB}MB
+자동 재시작은 하지 않음 — safe window에서 수동 판단 권장"
     else
       echo "$LOG_TAG Memory alert cooldown active (${ELAPSED}s since last alert)."
     fi
@@ -221,5 +242,5 @@ else
   if [ -f "$MEM_STATE_FILE" ]; then
     echo "0" > "$MEM_STATE_FILE"
   fi
-  echo "$LOG_TAG OK: Docker healthy, OrbStack Helper CPU=${CPU}% RSS=${MEM_RSS_MB}MB"
+  echo "$LOG_TAG OK: Docker healthy, OrbStack Helper CPU=${CPU}% RSS=${MEM_RSS_MB}MB pressure_free=${PRESSURE_FREE_PCT}% swap_used=${SWAP_USED_MB}MB"
 fi

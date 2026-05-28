@@ -65,14 +65,14 @@ CHECKS: tuple[BugCheck, ...] = (
     ),
     BugCheck(
         id="openclaw_primary_bypass",
-        label="OpenClaw-primary background LLM bypass",
+        label="legacy agent-primary background LLM bypass",
         bug=(
             "Background and evaluation jobs could bypass the CLI/subscription path and "
-            "silently depend on OpenClaw agent sessions as the primary transport."
+            "silently depend on profile agent sessions as the primary transport."
         ),
         fix=(
             "Centralize background LLM work through cli_llm with Codex gpt-5.5 first, "
-            "Spark second, and OpenClaw only as final fallback."
+            "Spark second, and Hermes profile chat only as final fallback."
         ),
         evidence=(
             EvidenceToken("brain_core/cli_llm.py", "FALLBACK_CHAIN"),
@@ -80,7 +80,7 @@ CHECKS: tuple[BugCheck, ...] = (
             EvidenceToken("brain_core/cli_llm.py", "gpt-5.3-codex-spark"),
             EvidenceToken("ingest/llm_dispatch.py", "from cli_llm import dispatch"),
             EvidenceToken("brain_core/routes/brain_ops.py", "cli_llm.get_usage_stats"),
-            EvidenceToken("tests/unit/test_cli_first_dispatch_contract.py", "keeps_openclaw_last"),
+            EvidenceToken("tests/unit/test_cli_first_dispatch_contract.py", "keeps_hermes_last"),
         ),
         forbidden=(
             ForbiddenToken(

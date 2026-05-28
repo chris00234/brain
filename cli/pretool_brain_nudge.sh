@@ -14,6 +14,9 @@ set -uo pipefail
 
 BRAIN_URL="${BRAIN_URL:-http://127.0.0.1:8791}"
 SECRET_FILE="$HOME/.brain/credentials/.personal_webhook_secret"
+if [ ! -r "$SECRET_FILE" ] && [ -r "$HOME/.openclaw/credentials/.personal_webhook_secret" ]; then
+  SECRET_FILE="$HOME/.openclaw/credentials/.personal_webhook_secret"
+fi
 AGENT_NAME="${BRAIN_AGENT:-claude}"
 
 CURL_TIMEOUT="0.3"
@@ -46,6 +49,14 @@ case "$TOOL_NAME" in
   Bash)
     QUERY=$(printf '%s' "$PAYLOAD" | jq -r '.tool_input.command // empty' 2>/dev/null || echo "")
     FIRST_TOK=$(printf '%s' "$QUERY" | awk '{print $1}')
+    # Repo plumbing searches are live-state inspection, not a decision point.
+    # Keep them silent even when the searched paths/terms mention brain infra.
+    case "$FIRST_TOK" in
+      rg|grep)
+        case "$QUERY" in
+          *brain_core*|*tests*) exit 0 ;;
+        esac ;;
+    esac
     # Bypass skip filter when the command touches brain/openclaw infra. These
     # introspection commands ARE decision moments — recall context should fire.
     BYPASS_SKIP=""

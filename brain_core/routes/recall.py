@@ -1303,6 +1303,173 @@ def _is_personal_calendar_instance(result: dict, text: str) -> bool:
     )
 
 
+_BRAIN_QUALITY_SUBSYSTEM_TOKENS = {
+    "brain",
+    "recall",
+    "prefetch",
+    "retrieval",
+    "브레인",
+    "리콜",
+    "검색품질",
+}
+_BRAIN_QUALITY_BROAD_TOKENS = {
+    "context",
+    "noise",
+    "noisy",
+    "eval",
+    "evaluation",
+    "score",
+    "quality",
+    "fine",
+    "tuning",
+    "노이즈",
+    "평가",
+    "품질",
+    "튜닝",
+}
+_BRAIN_QUALITY_GENERIC_MARKERS = (
+    "knowledge gap bridge: brain system dependency",
+    "brain depends on fastapi brain-server",
+    "turning brain and openclaw from clever infrastructure",
+    "native qdrant",
+    "native ollama",
+    "underused tools",
+    "brain_decide",
+    "search index",
+    "qdrant vector store",
+    "fastapi server",
+    "port 8791",
+)
+
+
+def _is_brain_quality_query(q: str) -> bool:
+    text = _augment_query_for_recall(q)
+    if "brain_decide" in (text or "").lower():
+        return True
+    tokens = _tokenize_recall_text(text)
+    return bool(tokens & _BRAIN_QUALITY_SUBSYSTEM_TOKENS) and bool(tokens & _BRAIN_QUALITY_BROAD_TOKENS)
+
+
+def _normalize_recall_signature(text: str) -> str:
+    lowered = (text or "").lower()
+    lowered = re.sub(r"https?://\S+", " ", lowered)
+    lowered = re.sub(r"\b20\d{2}(?:[-_/]?w?\d{1,2})?(?:[-_/]\d{1,2})?\b", " ", lowered)
+    lowered = re.sub(r"\b\d+(?:\.\d+)?%?\b", " ", lowered)
+    tokens = [tok for tok in re.findall(r"[a-z0-9가-힣]+", lowered) if len(tok) > 2]
+    stop = {
+        "chris",
+        "wants",
+        "want",
+        "prefers",
+        "preference",
+        "should",
+        "that",
+        "with",
+        "from",
+        "into",
+        "the",
+        "and",
+        "for",
+        "his",
+        "her",
+    }
+    return " ".join(tok for tok in tokens if tok not in stop)
+
+
+def _near_duplicate_key(result: dict) -> str:
+    text = _result_text(result)
+    sig = _normalize_recall_signature(text)
+    tokens = set(sig.split())
+    # Known high-value Brain-quality preference appears in several learned/canonical
+    # phrasings. Collapse it semantically so prefetch does not repeat it 3x.
+    if {"brain", "eval", "score"}.issubset(tokens) and ({"improvement", "improvements"} & tokens):
+        return "brain-eval-score-improvement-preference"
+    if {"브레인", "평가"}.issubset(tokens) and ({"점수", "개선"} & tokens):
+        return "brain-eval-score-improvement-preference"
+    return sig
+
+
+def _is_near_duplicate_signature(candidate: str, kept: list[str]) -> bool:
+    if not candidate:
+        return False
+    c_tokens = set(candidate.split())
+    if len(c_tokens) < 4:
+        return candidate in kept
+    for existing in kept:
+        if candidate == existing:
+            return True
+        e_tokens = set(existing.split())
+        if len(e_tokens) < 4:
+            continue
+        overlap = len(c_tokens & e_tokens) / max(1, min(len(c_tokens), len(e_tokens)))
+        if overlap >= 0.86:
+            return True
+    return False
+
+
+def _is_stale_generic_quality_result(result: dict, q: str) -> bool:
+    if not _is_brain_quality_query(q):
+        return False
+    if _is_positive_summary_intent_query(q):
+        return False
+    query_text = (q or "").lower()
+    haystack = _result_text(result).lower()
+    for marker in _BRAIN_QUALITY_GENERIC_MARKERS:
+        if marker in haystack and marker not in query_text:
+            return True
+    # Weekly/session summary blobs are usually stale noise for concrete Brain
+    # quality fixes unless the user explicitly asks for a recap.
+    return _is_generic_summary_result(result) and not _is_summary_excluded_query(q)
+
+
+def _quality_rank_tuple(result: dict) -> tuple[float, float]:
+    collection = str(result.get("collection") or "").lower()
+    category = _result_category(result)
+    meta = _result_metadata(result)
+    review_state = str(meta.get("review_state") or result.get("review_state") or "").lower()
+    durable = 0.0
+    if collection == "canonical" and review_state in {"accepted", "approved", "canonical"}:
+        durable += 3.0
+    if collection in {"canonical", "distilled"}:
+        durable += 1.0
+    if category in _TRUTH_CATEGORIES:
+        durable += 2.0
+    try:
+        score = float(result.get("score") or 0.0)
+    except (TypeError, ValueError):
+        score = 0.0
+    return durable, score
+
+
+def _apply_retrieval_quality_filter(q: str, fused: list[dict]) -> list[dict]:
+    """Post-rank quality pass shared by raw recall and other Brain tool paths.
+
+    It removes stale Brain-quality summary noise and collapses exact/near
+    duplicate memories while keeping the best canonical/truth-scored row.
+    """
+    if not fused:
+        return fused
+    candidates = [r for r in fused if isinstance(r, dict) and not _is_stale_generic_quality_result(r, q)]
+    best_by_key: dict[str, dict] = {}
+    for result in candidates:
+        key = _near_duplicate_key(result) or str(result.get("id") or result.get("path") or "")
+        if not key:
+            key = str(id(result))
+        prev = best_by_key.get(key)
+        if prev is None or _quality_rank_tuple(result) > _quality_rank_tuple(prev):
+            best_by_key[key] = result
+    deduped: list[dict] = []
+    kept_signatures: list[str] = []
+    for result in sorted(best_by_key.values(), key=lambda r: float(r.get("score") or 0.0), reverse=True):
+        sig = _near_duplicate_key(result)
+        if _is_near_duplicate_signature(sig, kept_signatures):
+            continue
+        deduped.append(result)
+        if sig:
+            kept_signatures.append(sig)
+    return deduped
+
+
 def _apply_recall_governance_inplace(q: str, fused: list[dict]) -> None:
     """Server-side ranking governance for /recall/v2.
 
@@ -1425,11 +1592,10 @@ def _apply_primary_doc_boost_inplace(fused: list[dict]) -> None:
 def _sort_and_diversify(fused: list[dict], top_window: int) -> list[dict]:
     """Score-desc sort + reranker diversification on the top window.
 
-    Diversification caps `max_per_source=2` (limits how many results from
-    a single source can occupy the top window) but leaves
-    max_per_collection unbounded. Wraps diversify_sources in
-    `contextlib.suppress(Exception)` since a failed diversifier should not
-    break the recall — the sorted list stands.
+    Retrieval-quality dedup/noise filtering is handled by
+    _apply_retrieval_quality_filter, which is query-aware and shared by
+    /recall/v2 and batch recall. Keep this helper focused on stable ordering
+    plus source diversification.
     """
     fused.sort(key=lambda r: r.get("score", 0), reverse=True)
     with contextlib.suppress(Exception):
@@ -2230,6 +2396,8 @@ def recall_v2(
 
     _apply_recall_governance_inplace(q, fused)
     _apply_primary_doc_boost_inplace(fused)
+    fused = _sort_and_diversify(fused, top_window=n * 2)
+    fused = _apply_retrieval_quality_filter(q, fused)
     fused = _sort_and_diversify(fused, top_window=n)
 
     # Phase G3: opt-in graph-constraint exclusion. See
@@ -2443,8 +2611,18 @@ def recall_batch(request: Request, req: RecallBatchRequest) -> dict:
 
     def _run_one(q: str) -> dict:
         try:
-            payload = _su.search_all(q, limit=req.n)
-            return {"query": q, "hits": (payload.get("results") or [])[: req.n]}
+            if _is_live_state_query(q):
+                return {
+                    "query": q,
+                    "hits": [],
+                    "meta_note": "Live-state/status query — use live tools instead of stale memory recall.",
+                }
+            search_q = _augment_query_for_recall(q)
+            payload = _su.search_all(search_q, limit=req.n * 2, original_query=q)
+            hits = payload.get("results") or []
+            _apply_recall_governance_inplace(q, hits)
+            hits = _apply_retrieval_quality_filter(q, _sort_and_diversify(hits, top_window=req.n * 2))
+            return {"query": q, "hits": hits[: req.n]}
         except Exception as e:
             return {"query": q, "error": str(e)[:200]}
 

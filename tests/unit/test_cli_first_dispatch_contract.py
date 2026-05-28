@@ -13,7 +13,7 @@ sys.path.insert(0, str(BRAIN_ROOT / "ingest"))
 sys.path.insert(0, str(BRAIN_ROOT / "cli"))
 
 
-def test_cli_llm_default_chain_starts_with_gpt55_and_keeps_openclaw_last():
+def test_cli_llm_default_chain_starts_with_gpt55_and_keeps_hermes_last():
     import cli_llm
 
     first_backend, first_model, _ = cli_llm.FALLBACK_CHAIN[0]
@@ -23,7 +23,7 @@ def test_cli_llm_default_chain_starts_with_gpt55_and_keeps_openclaw_last():
     assert cli_llm.FALLBACK_CHAIN[1][:2] == ("codex", "gpt-5.3-codex-spark")
     assert all(backend != "claude" for backend, _model, _desc in cli_llm.FALLBACK_CHAIN)
     assert not hasattr(cli_llm, "CLAUDE_BIN")
-    assert last_backend == "openclaw"
+    assert last_backend == "hermes"
 
 
 def test_ingest_adapters_use_shared_cli_first_dispatch_not_openclaw_shellout():

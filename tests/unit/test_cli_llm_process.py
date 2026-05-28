@@ -266,7 +266,7 @@ def test_cli_dispatch_records_success_to_breaker(monkeypatch):
     assert recorded == [{"kind": cli_llm.BREAKER_KIND, "ok": True}]
 
 
-def test_cli_dispatch_uses_openclaw_final_fallback_and_closes_breaker(monkeypatch):
+def test_cli_dispatch_uses_hermes_final_fallback_and_closes_breaker(monkeypatch):
     monkeypatch.setattr(cli_llm, "_peek_breaker", lambda kind: _fake_open_snapshot("closed", 0.0))
     cli_llm._BACKEND_COOLDOWN_UNTIL.clear()
     recorded: list[dict] = []
@@ -277,7 +277,7 @@ def test_cli_dispatch_uses_openclaw_final_fallback_and_closes_breaker(monkeypatc
     )
 
     def fake_backend(backend, model, prompt, timeout):
-        if backend == "openclaw":
+        if backend == "hermes":
             return cli_llm.CliResult(ok=True, text="OK", backend=backend, model=model)
         return cli_llm.CliResult(ok=False, error="not logged in", backend=backend, model=model)
 
@@ -286,12 +286,12 @@ def test_cli_dispatch_uses_openclaw_final_fallback_and_closes_breaker(monkeypatc
     r = cli_llm.cli_dispatch("hi", timeout=5, openclaw_agent="sage")
 
     assert r.ok is True
-    assert r.backend == "openclaw"
+    assert r.backend == "hermes"
     assert r.model == "sage"
     assert recorded == [{"kind": cli_llm.BREAKER_KIND, "ok": True}]
 
 
-def test_cli_dispatch_can_disable_openclaw_fallback(monkeypatch):
+def test_cli_dispatch_can_disable_hermes_fallback(monkeypatch):
     monkeypatch.setattr(cli_llm, "_peek_breaker", lambda kind: _fake_open_snapshot("closed", 0.0))
     cli_llm._BACKEND_COOLDOWN_UNTIL.clear()
     monkeypatch.setattr(cli_llm, "_record_breaker", lambda *a, **k: None)
@@ -306,7 +306,7 @@ def test_cli_dispatch_can_disable_openclaw_fallback(monkeypatch):
     r = cli_llm.cli_dispatch("hi", timeout=5, allow_openclaw_fallback=False)
 
     assert r.ok is False
-    assert "openclaw" not in calls
+    assert "hermes" not in calls
     cli_llm._BACKEND_COOLDOWN_UNTIL.clear()
 
 
@@ -320,7 +320,7 @@ def test_cli_dispatch_skips_backend_on_cooldown(monkeypatch):
         calls.append(f"{backend}/{model}")
         if backend == "codex" and model == "gpt-5.5":
             return cli_llm.CliResult(ok=False, error="timeout", backend=backend, model=model)
-        if backend == "openclaw":
+        if backend == "hermes":
             return cli_llm.CliResult(ok=True, text="OK", backend=backend, model=model)
         return cli_llm.CliResult(ok=False, error="not logged in", backend=backend, model=model)
 
@@ -332,7 +332,7 @@ def test_cli_dispatch_skips_backend_on_cooldown(monkeypatch):
 
     assert first.ok and second.ok
     assert calls.count("codex/gpt-5.5") == 1
-    assert calls[-1] == "openclaw/jenna"
+    assert calls[-1] == "hermes/jenna"
     cli_llm._BACKEND_COOLDOWN_UNTIL.clear()
 
 
@@ -436,27 +436,27 @@ def test_single_codex_timeout_error_names_timeout_before_banner(monkeypatch):
     assert "OpenAI Codex" in r.error
 
 
-def test_dispatch_compat_can_prefer_openclaw_backend(monkeypatch):
+def test_dispatch_compat_can_prefer_hermes_backend(monkeypatch):
     captured: dict = {}
 
     def fake_cli_dispatch(message, **kwargs):
         captured["message"] = message
         captured.update(kwargs)
-        return cli_llm.CliResult(ok=True, text="OK", backend="openclaw", model="ellie")
+        return cli_llm.CliResult(ok=True, text="OK", backend="hermes", model="ellie")
 
     monkeypatch.setattr(cli_llm, "cli_dispatch", fake_cli_dispatch)
 
     r = cli_llm.dispatch_compat(
         agent="ellie",
         message="task",
-        backend="openclaw",
+        backend="hermes",
         max_backends=1,
         timeout=120,
     )
 
     assert r.ok is True
-    assert captured["backend"] == "openclaw"
-    assert captured["openclaw_agent"] == "ellie"
+    assert captured["backend"] == "hermes"
+    assert captured["hermes_profile"] == "ellie"
     assert captured["max_backends"] == 1
 
 
@@ -479,7 +479,7 @@ def test_cli_dispatch_respects_max_backends(monkeypatch):
     cli_llm._BACKEND_COOLDOWN_UNTIL.clear()
 
 
-def test_openclaw_fallback_uses_timeout_floor(monkeypatch):
+def test_hermes_fallback_uses_timeout_floor(monkeypatch):
     captured: dict = {}
 
     def fake_run(cmd, timeout, **kwargs):
@@ -502,17 +502,17 @@ def test_openclaw_fallback_uses_timeout_floor(monkeypatch):
     monkeypatch.setattr(cli_llm, "_run_cli_process", fake_run)
     monkeypatch.setattr(cli_llm, "_record_usage", lambda *a, **k: None)
 
-    r = cli_llm._single_openclaw("hi", "jenna", timeout=5)
+    r = cli_llm._single_hermes("hi", "jenna", timeout=5)
 
     assert r.ok is True
-    timeout_arg = captured["cmd"][captured["cmd"].index("--timeout") + 1]
-    assert int(timeout_arg) >= cli_llm.OPENCLAW_TIMEOUT_FLOOR_S
-    assert captured["timeout"] >= cli_llm.OPENCLAW_TIMEOUT_FLOOR_S + 10
+    assert captured["cmd"][:3] == [cli_llm.HERMES_BIN, "--profile", "jenna"]
+    assert "--source" in captured["cmd"]
+    assert captured["timeout"] >= cli_llm.HERMES_TIMEOUT_FLOOR_S + 10
     assert captured["lock_wait_s"] >= cli_llm.DEFAULT_LOCK_WAIT_S
     assert captured["use_slot"] is False
 
 
-def test_openclaw_fallback_parses_top_level_payload(monkeypatch):
+def test_hermes_fallback_parses_top_level_payload(monkeypatch):
     def fake_run(cmd, timeout, **kwargs):
         return (
             subprocess.CompletedProcess(
@@ -527,7 +527,7 @@ def test_openclaw_fallback_parses_top_level_payload(monkeypatch):
     monkeypatch.setattr(cli_llm, "_run_cli_process", fake_run)
     monkeypatch.setattr(cli_llm, "_record_usage", lambda *a, **k: None)
 
-    r = cli_llm._single_openclaw("hi", "jenna", timeout=5)
+    r = cli_llm._single_hermes("hi", "jenna", timeout=5)
 
     assert r.ok is True
     assert r.text == "OK"
@@ -535,7 +535,7 @@ def test_openclaw_fallback_parses_top_level_payload(monkeypatch):
     assert r.rate_limited is False
 
 
-def test_openclaw_fallback_passes_session_id(monkeypatch):
+def test_hermes_fallback_accepts_legacy_session_id(monkeypatch):
     captured: dict = {}
 
     def fake_run(cmd, timeout, **kwargs):
@@ -548,13 +548,14 @@ def test_openclaw_fallback_passes_session_id(monkeypatch):
     monkeypatch.setattr(cli_llm, "_run_cli_process", fake_run)
     monkeypatch.setattr(cli_llm, "_record_usage", lambda *a, **k: None)
 
-    r = cli_llm._single_openclaw("hi", "jenna", timeout=5, session_id="ragas-test")
+    r = cli_llm._single_hermes("hi", "jenna", timeout=5, session_id="ragas-test")
 
     assert r.ok is True
-    assert captured["cmd"][captured["cmd"].index("--session-id") + 1] == "ragas-test"
+    assert "--session-id" not in captured["cmd"]
+    assert captured["cmd"][:3] == [cli_llm.HERMES_BIN, "--profile", "jenna"]
 
 
-def test_single_openclaw_empty_rate_limited_response_carries_error(monkeypatch):
+def test_single_hermes_empty_rate_limited_response_carries_error(monkeypatch):
     def fake_run(cmd, timeout, **kwargs):
         return (
             subprocess.CompletedProcess(
@@ -569,7 +570,7 @@ def test_single_openclaw_empty_rate_limited_response_carries_error(monkeypatch):
     monkeypatch.setattr(cli_llm, "_run_cli_process", fake_run)
     monkeypatch.setattr(cli_llm, "_record_usage", lambda *a, **k: None)
 
-    r = cli_llm._single_openclaw("hi", "sage", timeout=5)
+    r = cli_llm._single_hermes("hi", "sage", timeout=5)
 
     assert r.ok is False
     assert r.rate_limited is True
@@ -610,7 +611,7 @@ def test_cli_dispatch_normalizes_claude_backend_hint_to_codex(monkeypatch):
         "FALLBACK_CHAIN",
         [
             ("codex", "gpt-5.5", "Codex primary"),
-            ("openclaw", "jenna", "Emergency fallback"),
+            ("hermes", "jenna", "Emergency fallback"),
         ],
     )
     calls: list[tuple[str, str]] = []
@@ -661,7 +662,7 @@ def test_failure_taxonomy_snapshot_covers_all_provider_classes_without_cli_calls
 
     assert snapshot["version"] == "cli-failure-taxonomy-v1"
     assert snapshot["dashboard_surface"] == "/brain/usage.llm.failure_taxonomy"
-    assert set(snapshot["provider_classes"]) == {"codex", "openclaw"}
+    assert set(snapshot["provider_classes"]) == {"codex", "hermes"}
     assert [row["reason"] for row in snapshot["classes"]] == list(cli_llm.FAILOVER_REASONS)
     assert {row["reason"] for row in snapshot["classes"]} >= {
         "auth",
@@ -694,4 +695,4 @@ def test_usage_stats_exposes_failure_taxonomy(monkeypatch, tmp_path):
 
     assert stats["source"] == "cli_llm"
     assert stats["failure_taxonomy"]["version"] == "cli-failure-taxonomy-v1"
-    assert stats["failure_taxonomy"]["provider_classes"] == ["codex", "openclaw"]
+    assert stats["failure_taxonomy"]["provider_classes"] == ["codex", "hermes"]

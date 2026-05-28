@@ -72,7 +72,7 @@ def test_dispatch_failure_rate_counts_recent_failures(tmp_path, monkeypatch):
 def test_agent_session_max_mb(tmp_path, monkeypatch):
     slos = _slos()
     # Point Path.home() to tmp_path indirectly by monkeypatching
-    agents = tmp_path / ".openclaw" / "agents" / "jenna" / "sessions"
+    agents = tmp_path / ".hermes" / "profiles" / "jenna" / "sessions"
     agents.mkdir(parents=True)
     # Small session
     (agents / "small.jsonl").write_bytes(b"X" * 1024)

@@ -16,7 +16,7 @@ def test_readiness_surface_manifest_covers_world_level_observability_surfaces():
         "source_governance",
         "skill_promotion",
         "failure_lesson_outcome",
-        "openclaw_gateway",
+        "hermes_gateway",
     } <= ids
     assert manifest.readiness_fields_for("retrieval_eval_gates") == (
         "crag_regression",
