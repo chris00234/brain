@@ -468,10 +468,14 @@ def test_hyde_kwargs_threaded_into_search(monkeypatch):
 # ── _run_rrf_fuse ───────────────────────────────────────────────────────
 
 
-def test_rrf_fuse_calls_rrf_with_path_id_key(monkeypatch):
-    """Helper must invoke _rrf.rrf_fuse with id_key='path' (the original
-    inline call signature) — any other id key changes which results
-    get fused vs. treated as distinct."""
+def test_rrf_fuse_uses_stable_synthetic_key(monkeypatch):
+    """Helper keys RRF on a synthetic per-result key.
+
+    Canonical docs still fuse by path, but semantic memories often share a
+    coarse source/path value such as ``hermes``. Keying those rows by path
+    collapses distinct memories and can hide the exact preference row behind a
+    noisier same-source memory.
+    """
     import rrf as _rrf
     from routes.recall import _run_rrf_fuse
 
@@ -483,11 +487,40 @@ def test_rrf_fuse_calls_rrf_with_path_id_key(monkeypatch):
         return [{"id": "fused"}]
 
     monkeypatch.setattr(_rrf, "rrf_fuse", _fake_fuse)
-    fused, ms = _run_rrf_fuse([[{"id": "a"}], [{"id": "b"}]])
+    fused, ms = _run_rrf_fuse([[{"id": "a", "path": "same"}], [{"id": "b", "path": "same"}]])
     assert fused == [{"id": "fused"}]
-    assert captured["kw"] == {"id_key": "path"}
+    assert captured["kw"] == {"id_key": "_rrf_id"}
+    assert [row["_rrf_id"] for rows in captured["lists"] for row in rows] == ["same", "same"]
     assert isinstance(ms, int)
     assert ms >= 0
+
+
+def test_rrf_fuse_keeps_distinct_semantic_memories_with_same_path():
+    from routes.recall import _run_rrf_fuse
+
+    result_lists = [
+        [
+            {
+                "id": "semantic_memory:sync-note",
+                "path": "hermes",
+                "collection": "semantic_memory",
+                "content": "Codex/Claude Code skill sync notes.",
+            },
+            {
+                "id": "semantic_memory:codex-pref",
+                "path": "hermes",
+                "collection": "semantic_memory",
+                "content": "Chris prefers Codex through Hermes interactive tmux TUI.",
+            },
+        ]
+    ]
+
+    fused, _ = _run_rrf_fuse(result_lists)
+
+    assert {row["id"] for row in fused} == {
+        "semantic_memory:sync-note",
+        "semantic_memory:codex-pref",
+    }
 
 
 def test_rrf_fuse_empty_input_passes_through(monkeypatch):
@@ -2544,6 +2577,143 @@ def test_recall_governance_prefers_accepted_canonical_truth_for_image_generation
     assert "specific_truth" in fused[1]["governance"]
 
 
+def test_recall_governance_openclaw_hermes_distinction_beats_setup_and_live_state_noise():
+    from routes.recall import _apply_recall_governance_inplace
+
+    fused = [
+        {
+            "id": "setup-docs",
+            "title": "OpenClaw Multi-Agent Setup Documentation",
+            "path": "/Users/chrischo/.openclaw/workspace-claude/AGENTS.md",
+            "collection": "obsidian",
+            "content": "OpenClaw setup docs from the old workspace mention Hermes runtime migration history.",
+            "score": 235.0,
+        },
+        {
+            "id": "active-goals",
+            "title": "active_goals",
+            "path": "/Users/chrischo/server/knowledge/canonical/live_state/active_goals.md",
+            "collection": "canonical",
+            "metadata": {"document_type": "canonical-note"},
+            "content": "Active goals and focus: OpenClaw Hermes current runtime tasks and manual focus items.",
+            "score": 225.0,
+        },
+        {
+            "id": "raptor-live-snapshot",
+            "title": "",
+            "path": "raptor:L1:142:20260524",
+            "collection": "canonical",
+            "content": (
+                "These notes center on Chris's OpenClaw/Brain operating model. "
+                "Several notes are current-state snapshots, explicitly regenerated every 10 minutes "
+                "by live_state_snapshot cron and not historical records."
+            ),
+            "score": 230.0,
+        },
+        {
+            "id": "handoff-noise",
+            "title": "hermes",
+            "path": "hermes",
+            "collection": "semantic_memory",
+            "metadata": {"category": "fact"},
+            "content": (
+                "User: work kanban task t_be1032bb Assistant: Verdict: PARTIAL. "
+                "Acceptance probes: OpenClaw/Hermes exact row top3, no live_state/setup noise. "
+                "Focused tests passed, but dirty patch still needs review."
+            ),
+            "score": 245.0,
+        },
+        {
+            "id": "eval-noise",
+            "title": "hermes",
+            "path": "hermes",
+            "collection": "semantic_memory",
+            "metadata": {"category": "fact"},
+            "content": (
+                "Generic regression spot check: OpenClaw vs Hermes current runtime historical distinction "
+                "still has live-state and setup noise in top10; generic_recipe_knowledge_gap surfaced."
+            ),
+            "score": 250.0,
+        },
+        {
+            "id": "distinction",
+            "title": "OpenClaw vs Hermes current runtime historical distinction",
+            "path": "/distilled/openclaw-hermes-distinction.md",
+            "collection": "semantic_memory",
+            "metadata": {"category": "decision", "review_state": "accepted"},
+            "content": (
+                "Distilled current distinction: Hermes Agent is the current runtime; "
+                "OpenClaw is historical provenance and setup context."
+            ),
+            "score": 150.0,
+        },
+    ]
+
+    _apply_recall_governance_inplace("OpenClaw vs Hermes current runtime historical distinction", fused)
+    fused.sort(key=lambda r: r["score"], reverse=True)
+
+    assert fused[0]["id"] == "distinction"
+    assert "openclaw_hermes_distinction" in fused[0]["governance"]
+    by_id = {row["id"]: row for row in fused}
+    assert "openclaw_setup_noise_penalty" in by_id["setup-docs"].get("governance", [])
+    assert "live_state_snapshot_penalty" in by_id["active-goals"].get("governance", [])
+    assert "live_state_snapshot_penalty" in by_id["raptor-live-snapshot"].get("governance", [])
+    assert "openclaw_distinction_handoff_penalty" in by_id["handoff-noise"].get("governance", [])
+    assert "openclaw_distinction_handoff_penalty" in by_id["eval-noise"].get("governance", [])
+    assert by_id["handoff-noise"]["score"] < by_id["distinction"]["score"]
+    assert by_id["eval-noise"]["score"] < by_id["distinction"]["score"]
+
+
+def test_recall_governance_codex_hermes_tui_preference_beats_old_claude_restriction():
+    from routes.recall import _apply_recall_governance_inplace
+
+    fused = [
+        {
+            "id": "old-claude-restriction",
+            "title": "Claude Code usage restriction",
+            "path": "/notes/claude-code-restrictions.md",
+            "collection": "semantic_memory",
+            "content": "Old Claude Code plan-mode restrictions and usage caveats for coding tasks.",
+            "score": 220.0,
+        },
+        {
+            "id": "codex-skill-sync-noise",
+            "title": "Codex/Claude Code skill sync",
+            "path": "/Users/chrischo/.hermes/skills/autonomous-ai-agents/codex/SKILL.md",
+            "collection": "semantic_memory",
+            "content": (
+                "Codex and Claude Code skill sync note: add headless codex exec and tmux TUI snippets "
+                "to the autonomous-ai-agents skills."
+            ),
+            "score": 254.0,
+        },
+        {
+            "id": "codex-current-pref",
+            "title": "Codex Hermes interactive tmux TUI preference",
+            "path": "/canonical/preferences/codex-hermes-tmux-tui.md",
+            "collection": "canonical",
+            "metadata": {"category": "preference", "review_state": "accepted"},
+            "content": (
+                "Chris prefers using Codex through Hermes as an interactive terminal-like tmux TUI "
+                "when quality or steering matters; headless codex exec is only for bounded automation."
+            ),
+            "score": 140.0,
+        },
+    ]
+
+    _apply_recall_governance_inplace("복잡한 코딩 작업은 코덱스를 어떻게 쓰는 게 좋아?", fused)
+    fused.sort(key=lambda r: r["score"], reverse=True)
+
+    assert fused[0]["id"] == "codex-current-pref"
+    assert "codex_hermes_tui_preference" in fused[0]["governance"]
+    assert "old_claude_code_restriction_penalty" in next(
+        r for r in fused if r["id"] == "old-claude-restriction"
+    ).get("governance", [])
+    assert "codex_skill_sync_noise_penalty" in next(
+        r for r in fused if r["id"] == "codex-skill-sync-noise"
+    ).get("governance", [])
+
+
 def test_korean_intent_expansion_adds_provider_independent_terms():
     from routes.recall import _augment_query_for_recall
 
@@ -2555,6 +2725,18 @@ def test_korean_intent_expansion_adds_provider_independent_terms():
     assert "paid api" in expanded
     assert "local generation" in expanded
     assert "recommendation" in expanded
+
+
+def test_korean_codex_recommendation_expansion_adds_current_workflow_terms():
+    from routes.recall import _augment_query_for_recall
+
+    expanded = _augment_query_for_recall("복잡한 코딩 작업은 코덱스를 어떻게 쓰는 게 좋아?")
+
+    assert "codex" in expanded.lower()
+    assert "hermes" in expanded.lower()
+    assert "tmux" in expanded.lower()
+    assert "tui" in expanded.lower()
+    assert "headless codex exec" in expanded.lower()
 
 
 def test_korean_calendar_reminder_class_expansion_adds_schedule_terms():
@@ -2699,6 +2881,20 @@ def test_korean_status_query_is_classified_as_live_state():
     assert _is_live_state_query("작업 방식 추천") is False
 
 
+def test_korean_colloquial_running_query_is_classified_as_live_state():
+    from routes.recall import _is_live_state_query
+
+    assert _is_live_state_query("지금 뭐 돌아가고 있어?") is True
+
+
+def test_korean_recommendation_queries_with_running_phrase_are_not_live_state():
+    from routes.recall import _is_live_state_query
+
+    assert _is_live_state_query("요즘 잘 돌아가는 로컬 모델 추천") is False
+    assert _is_live_state_query("현재 잘 돌아가는 오픈소스 TTS 추천") is False
+    assert _is_live_state_query("현재 어떤 로컬 모델이 잘 돌아가는지 추천해줘") is False
+
+
 def test_live_state_query_requires_explicit_status_intent():
     from routes.recall import _is_live_state_query
 
@@ -2809,6 +3005,36 @@ def test_recall_v2_status_query_short_circuits_before_search(monkeypatch):
     assert response.meta_note == "Live-state/status query — use live tools instead of stale memory recall."
 
 
+def test_recall_v2_korean_colloquial_running_query_short_circuits_before_search(monkeypatch):
+    from routes import recall as recall_route
+    from starlette.requests import Request
+
+    recall_route._recall_cache.clear()
+    calls: list[str] = []
+
+    def fake_search_all(*args, **kwargs):
+        calls.append("called")
+        return {"results": [], "total_candidates": 0, "source_timing": {}}
+
+    monkeypatch.setattr(recall_route.search_unified, "search_all", fake_search_all)
+
+    request = Request(
+        {"type": "http", "method": "GET", "path": "/recall/v2", "headers": [], "query_string": b""}
+    )
+    response = recall_route.recall_v2(
+        request,
+        q="지금 뭐 돌아가고 있어?",
+        n=3,
+        rerank=False,
+        decay=False,
+    )
+
+    assert calls == []
+    assert response.results == []
+    assert response.timing["live_state_query"] is True
+    assert response.meta_note == "Live-state/status query — use live tools instead of stale memory recall."
+
+
 def test_recall_v2_calendar_tooling_query_searches_preference_variant(monkeypatch):
     from routes import recall as recall_route
     from starlette.requests import Request
@@ -2898,6 +3124,105 @@ def test_recall_v2_simple_apple_calendar_reminders_query_searches_preference_var
     )
 
     assert any("Apple Calendar Reminders 도구 흐름 선호" in query for query in seen_queries)
+    assert min(seen_limits) >= 80
+
+
+def test_recall_v2_codex_workflow_query_searches_current_preference_variant(monkeypatch):
+    import threading
+
+    from routes import recall as recall_route
+    from starlette.requests import Request
+
+    recall_route._recall_cache.clear()
+    seen_queries: list[str] = []
+    seen_limits: list[int] = []
+    seen_threads: list[str] = []
+
+    def fake_search_all(query, n, **kwargs):
+        seen_queries.append(query)
+        seen_limits.append(n)
+        seen_threads.append(threading.current_thread().name)
+        return {
+            "results": [
+                {
+                    "id": query,
+                    "title": "placeholder",
+                    "path": "/tmp/placeholder.md",
+                    "collection": "knowledge",
+                    "content": query,
+                    "score": 1.0,
+                }
+            ],
+            "total_candidates": 1,
+            "source_timing": {},
+        }
+
+    monkeypatch.setattr(recall_route.search_unified, "search_all", fake_search_all)
+
+    request = Request(
+        {"type": "http", "method": "GET", "path": "/recall/v2", "headers": [], "query_string": b""}
+    )
+    recall_route.recall_v2(
+        request,
+        q="복잡한 코딩 작업은 코덱스를 어떻게 쓰는 게 좋아?",
+        n=3,
+        rerank=False,
+        decay=False,
+        agent=None,
+        source_type=None,
+        include_history=False,
+        include_obsolete=False,
+        as_of=None,
+        canonical_first=False,
+        exclude_already_used=False,
+    )
+
+    assert any("Codex Hermes interactive tmux TUI preference" in query for query in seen_queries)
+    assert min(seen_limits) >= 80
+    assert seen_threads
+    assert set(seen_threads) == {threading.current_thread().name}
+
+
+def test_recall_v2_openclaw_hermes_query_searches_distinction_variant(monkeypatch):
+    from routes import recall as recall_route
+    from starlette.requests import Request
+
+    recall_route._recall_cache.clear()
+    seen_queries: list[str] = []
+    seen_limits: list[int] = []
+
+    def fake_search_all(query, n, **kwargs):
+        seen_queries.append(query)
+        seen_limits.append(n)
+        return {
+            "results": [
+                {
+                    "id": query,
+                    "title": "placeholder",
+                    "path": "/tmp/placeholder.md",
+                    "collection": "knowledge",
+                    "content": query,
+                    "score": 1.0,
+                }
+            ],
+            "total_candidates": 1,
+            "source_timing": {},
+        }
+
+    monkeypatch.setattr(recall_route.search_unified, "search_all", fake_search_all)
+
+    request = Request(
+        {"type": "http", "method": "GET", "path": "/recall/v2", "headers": [], "query_string": b""}
+    )
+    recall_route.recall_v2(
+        request,
+        q="OpenClaw vs Hermes current runtime historical distinction",
+        n=3,
+        rerank=False,
+        decay=False,
+    )
+
+    assert any(query == "OpenClaw Hermes current runtime historical distinction" for query in seen_queries)
     assert min(seen_limits) >= 80
 
 
@@ -3300,6 +3625,94 @@ def test_retrieval_quality_filter_keeps_generic_summary_rows_for_positive_summar
     filtered = _apply_retrieval_quality_filter("weekly summary recap", fused)
 
     assert [result["id"] for result in filtered] == ["generic-summary"]
+
+
+def test_retrieval_quality_filter_removes_personal_noise_for_generic_recipe_query():
+    from routes.recall import _apply_retrieval_quality_filter
+
+    fused = [
+        {
+            "id": "agents-noise",
+            "title": "AGENTS Make It Yours",
+            "path": "/Users/chrischo/server/brain/AGENTS.md",
+            "collection": "canonical",
+            "content": "Make It Yours: agent workflow and codebase conventions.",
+            "score": 250.0,
+        },
+        {
+            "id": "identity-noise",
+            "title": "Chris identity",
+            "path": "/Users/chrischo/server/knowledge/canonical/chris/_identity.md",
+            "collection": "canonical",
+            "content": "Chris profile and preferences, unrelated to cooking.",
+            "score": 225.0,
+        },
+        {
+            "id": "recipe-note",
+            "title": "Tomato pasta sauce recipe",
+            "path": "/recipes/tomato-pasta.md",
+            "collection": "knowledge",
+            "content": "Tomato pasta sauce recipe steps: simmer tomatoes, garlic, olive oil, and basil.",
+            "score": 90.0,
+        },
+    ]
+
+    filtered = _apply_retrieval_quality_filter("how do I make tomato pasta sauce recipe steps", fused)
+
+    assert [result["id"] for result in filtered] == ["recipe-note"]
+
+
+def test_retrieval_quality_filter_removes_openclaw_hermes_acceptance_handoff_noise():
+    from routes.recall import _apply_retrieval_quality_filter
+
+    fused = [
+        {
+            "id": "distinction",
+            "title": "OpenClaw vs Hermes current runtime historical distinction",
+            "path": "mcp",
+            "collection": "semantic_memory",
+            "content": (
+                "Chris is currently interacting with Jenna running on Hermes Agent; "
+                "when comparing Hermes Agent vs OpenClaw, distinguish the historical "
+                "platform decision from the current runtime context."
+            ),
+            "score": 150.0,
+        },
+        {
+            "id": "handoff-noise",
+            "title": "hermes",
+            "path": "hermes",
+            "collection": "semantic_memory",
+            "content": (
+                "Generic regression spot check: OpenClaw vs Hermes current runtime historical distinction "
+                "still has live-state and setup noise in top10; generic_recipe_knowledge_gap surfaced."
+            ),
+            "score": 96.0,
+        },
+        {
+            "id": "setup-noise",
+            "title": "OpenClaw setup guide",
+            "path": "/notes/openclaw-setup.md",
+            "collection": "obsidian",
+            "content": "Sub-Agent Configuration and Active Hours for Heartbeat in the old OpenClaw setup.",
+            "score": 95.0,
+        },
+        {
+            "id": "live-state-noise",
+            "title": "active_goals",
+            "path": "/Users/chrischo/server/knowledge/canonical/live_state/active_goals.md",
+            "collection": "canonical",
+            "content": "Active goals and focus: OpenClaw Hermes current runtime work queue.",
+            "score": 94.0,
+        },
+    ]
+
+    filtered = _apply_retrieval_quality_filter(
+        "OpenClaw vs Hermes current runtime historical distinction",
+        fused,
+    )
+
+    assert [result["id"] for result in filtered] == ["distinction"]
 
 
 def test_recall_governance_openclaw_historical_loses_to_current_hermes_runtime():

@@ -127,6 +127,9 @@ intents:
       - brain direction
       - no regression
       - defect free
+      - recall quality
+      - prefetch quality
+      - retrieval quality
     keywords_ko:
       - 브레인 품질
       - 브레인 지능
@@ -184,6 +187,20 @@ intents:
       - Claude GPT subscription CLI no paid API billing
     priority: critical
     max_tokens: 700
+
+  codex_workflow:
+    keywords_en:
+      - codex
+      - codex exec
+      - codex cli
+    keywords_ko:
+      - 코덱스
+    canonical_paths: []
+    always_push_queries:
+      - Chris prefers using Codex through Hermes as an interactive terminal-like tmux TUI when quality or steering matters; headless codex exec is only for bounded automation
+      - Codex Hermes interactive tmux TUI preference headless codex exec bounded automation quality steering
+    priority: high
+    max_tokens: 500
 
   openclaw:
     keywords_en:

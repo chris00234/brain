@@ -887,6 +887,15 @@ def _run_cross_encoder_rerank(q: str, fused: list[dict]) -> tuple[list[dict], in
 
 _KOREAN_INTENT_EXPANSIONS: dict[str, tuple[str, ...]] = {
     "추천": ("recommendation", "preference", "decision"),
+    "코덱스": (
+        "codex",
+        "codex through hermes",
+        "interactive terminal",
+        "tmux",
+        "tui",
+        "headless codex exec",
+        "quality steering",
+    ),
     "이미지": ("image", "image generation", "gpt images", "openai", "codex oauth", "subscription cli"),
     "음악": ("music", "audio generation", "no local generation"),
     "배경음악": ("background music", "music", "audio generation", "no local generation"),
@@ -938,6 +947,7 @@ _LIVE_STATE_QUERY_PATTERNS = (
     r"진행\s*중(?![가-힣])",
     r"실행\s*중(?![가-힣])",
     r"시작\s*했어",
+    r"(?:지금|현재).{0,12}(?:뭐|무엇|무슨|뭐가|어떤).{0,12}돌아가(?:고|는\s*중|니|나요|냐|\?)",
     r"칸반.*(?:태스크|작업|상태|진행|완료)",
     r"(?:태스크|작업).*(?:상태|진행\s*상황)",
     r"\bcurrent\s+status\b",
@@ -1220,8 +1230,12 @@ def _augment_query_for_recall(q: str) -> str:
     lower = base.lower()
     additions: list[str] = []
     seen = set(_tokenize_recall_text(base))
+    live_state_query = _is_live_state_query(base)
+    live_state_expansion_markers = {"진행상황", "시작했어", "완료", "작업", "태스크", "칸반"}
     for marker, terms in _KOREAN_INTENT_EXPANSIONS.items():
         if marker not in lower and marker not in base:
+            continue
+        if marker in live_state_expansion_markers and not live_state_query:
             continue
         for term in terms:
             term_tokens = _tokenize_recall_text(term)
@@ -1590,6 +1604,8 @@ def _is_live_state_snapshot_result(result: dict, text: str) -> bool:
     return (
         "live state snapshot" in lower
         or "active goals and focus" in lower
+        or "current-state snapshots" in lower
+        or "live_state_snapshot cron" in lower
         or ("manual focus items" in title and ("active goals" in lower or "active_goals" in path))
         or "live_state_snapshot" in path
         or "/live_state/" in path
@@ -1706,6 +1722,134 @@ def _is_broad_tool_recommendation_noise_result(result: dict, text: str) -> bool:
         or "openclaw" in lower
         or "openclaw" in title
         or lower.lstrip().startswith("### details")
+    )
+
+
+def _is_openclaw_hermes_distinction_query(query_tokens: set[str]) -> bool:
+    return {"openclaw", "hermes"}.issubset(query_tokens) and bool(
+        query_tokens & {"current", "runtime", "historical", "distinction", "history"}
+    )
+
+
+def _is_openclaw_hermes_distinction_result(result_tokens: set[str], text: str) -> bool:
+    lower = text.lower()
+    return {"openclaw", "hermes"}.issubset(result_tokens) and (
+        bool(result_tokens & {"current", "runtime", "historical", "distinction"})
+        or "hermes agent is" in lower
+        or "current runtime is hermes" in lower
+    )
+
+
+def _is_openclaw_setup_noise_result(result: dict, text: str) -> bool:
+    lower = text.lower()
+    meta = _result_metadata(result)
+    title = str(result.get("title") or meta.get("document_title") or "").lower()
+    path = str(result.get("path") or meta.get("source_path") or meta.get("path") or "").lower()
+    return (
+        "openclaw multi-agent setup documentation" in title
+        or "/.openclaw/workspace-" in path
+        or "openclaw-setup" in path
+        or "sub-agent configuration" in lower
+        or ("active hours for heartbeat" in lower and "openclaw" in lower)
+        or ("openclaw setup" in lower and "current runtime is hermes" not in lower)
+    )
+
+
+def _is_openclaw_hermes_handoff_noise_result(result: dict, text: str) -> bool:
+    """True for task/test handoff rows about recall quality, not durable truth.
+
+    These rows often quote the exact OpenClaw/Hermes acceptance probe plus
+    nearby ``live_state``/setup text. They are useful run history, but they are
+    meta-evidence about this tuning task rather than the current-runtime fact
+    itself, so they should not receive the same distinction boost.
+    """
+    lower = text.lower()
+    meta = _result_metadata(result)
+    source_hint = " ".join(
+        str(part or "")
+        for part in (
+            result.get("title"),
+            result.get("path"),
+            meta.get("source_name"),
+            meta.get("source_path"),
+        )
+    ).lower()
+    marker_haystack = f"{source_hint}\n{lower[:1500]}"
+    return (
+        "work kanban task t_" in marker_haystack
+        or "acceptance probe" in marker_haystack
+        or "focused tests passed" in marker_haystack
+        or "review-required handoff" in marker_haystack
+        or "dirty patch" in marker_haystack
+        or "verdict: partial" in marker_haystack
+        or "generic regression" in marker_haystack
+        or "generic_recipe_knowledge_gap" in marker_haystack
+        or "spot check" in marker_haystack
+        or "no setup/live_state" in marker_haystack
+    )
+
+
+def _is_openclaw_hermes_distinction_noise_result(result: dict, text: str) -> bool:
+    """True for accepted non-answer rows in OpenClaw/Hermes distinction recall."""
+    return (
+        _is_openclaw_setup_noise_result(result, text)
+        or _is_openclaw_hermes_handoff_noise_result(result, text)
+        or _is_live_state_snapshot_result(result, text)
+    )
+
+
+def _is_codex_skill_sync_noise_result(result: dict, text: str) -> bool:
+    lower = text.lower()
+    title = str(result.get("title") or _result_metadata(result).get("document_title") or "").lower()
+    path = str(result.get("path") or _result_metadata(result).get("source_path") or "").lower()
+    haystack = f"{title}\n{path}\n{lower[:1000]}"
+    if _is_codex_hermes_tui_result(_tokenize_recall_text(haystack), haystack) and any(
+        marker in haystack for marker in ("prefers", "preference", "선호")
+    ):
+        return False
+    return (
+        "codex/claude code skill" in haystack
+        or "skills/autonomous-ai-agents" in haystack
+        or "skill sync" in haystack
+        or ("codex" in haystack and "claude code" in haystack and "skill" in haystack)
+    )
+
+
+def _is_codex_hermes_tui_query(query_tokens: set[str]) -> bool:
+    return "codex" in query_tokens and bool(
+        query_tokens
+        & {
+            "hermes",
+            "tmux",
+            "tui",
+            "headless",
+            "steering",
+            "quality",
+            "coding",
+            "preference",
+            "recommendation",
+            "어떻게",
+            "좋아",
+        }
+    )
+
+
+def _is_codex_hermes_tui_result(result_tokens: set[str], text: str) -> bool:
+    lower = text.lower()
+    return {"codex", "hermes"}.issubset(result_tokens) and (
+        bool(result_tokens & {"tmux", "tui", "headless", "interactive"})
+        or "terminal-like" in lower
+        or "terminal like" in lower
+    )
+
+
+def _is_old_claude_code_restriction_noise(result_tokens: set[str], text: str) -> bool:
+    lower = text.lower()
+    return (
+        "claude" in result_tokens
+        and "code" in result_tokens
+        and "codex" not in result_tokens
+        and ("restriction" in result_tokens or "plan-mode" in lower or "usage caveat" in lower)
     )
 
 
@@ -1842,6 +1986,42 @@ def _is_stale_generic_quality_result(result: dict, q: str) -> bool:
     return _is_generic_summary_result(result) and not _is_summary_excluded_query(q)
 
 
+_GENERIC_RECIPE_QUERY_TOKENS = {"recipe", "tomato", "pasta", "sauce", "cook", "cooking", "make", "steps"}
+_PERSONAL_MEMORY_TOKENS = {
+    "brain",
+    "chris",
+    "memory",
+    "preference",
+    "preferences",
+    "remember",
+    "브레인",
+    "기억",
+    "선호",
+}
+_RECIPE_RESULT_TOKENS = {
+    "recipe",
+    "tomato",
+    "tomatoes",
+    "pasta",
+    "sauce",
+    "garlic",
+    "basil",
+    "olive",
+    "ingredients",
+}
+
+
+def _is_generic_recipe_query(q: str) -> bool:
+    tokens = _tokenize_recall_text(q)
+    if not tokens or tokens & _PERSONAL_MEMORY_TOKENS:
+        return False
+    return "recipe" in tokens or len(tokens & _GENERIC_RECIPE_QUERY_TOKENS) >= 3
+
+
+def _is_recipe_result(result: dict) -> bool:
+    return bool(_tokenize_recall_text(_result_text(result)) & _RECIPE_RESULT_TOKENS)
+
+
 def _quality_rank_tuple(result: dict) -> tuple[float, float]:
     collection = str(result.get("collection") or "").lower()
     category = _result_category(result)
@@ -1870,13 +2050,26 @@ def _apply_retrieval_quality_filter(q: str, fused: list[dict]) -> list[dict]:
     if not fused:
         return fused
     summary_excluded = _is_summary_excluded_query(q)
-    candidates = [
-        r
-        for r in fused
-        if isinstance(r, dict)
-        and not _is_stale_generic_quality_result(r, q)
-        and not (summary_excluded and _is_generic_summary_result(r))
-    ]
+    generic_recipe_query = _is_generic_recipe_query(q)
+    openclaw_hermes_distinction_query = _is_openclaw_hermes_distinction_query(
+        _tokenize_recall_text(_augment_query_for_recall(q))
+    )
+    candidates = []
+    for result in fused:
+        if not isinstance(result, dict):
+            continue
+        result_text = _result_text(result)
+        if _is_stale_generic_quality_result(result, q):
+            continue
+        if summary_excluded and _is_generic_summary_result(result):
+            continue
+        if generic_recipe_query and not _is_recipe_result(result):
+            continue
+        if openclaw_hermes_distinction_query and _is_openclaw_hermes_distinction_noise_result(
+            result, result_text
+        ):
+            continue
+        candidates.append(result)
     best_by_key: dict[str, dict] = {}
     for result in candidates:
         key = _near_duplicate_key(result) or str(result.get("id") or result.get("path") or "")
@@ -1919,6 +2112,8 @@ def _apply_recall_governance_inplace(q: str, fused: list[dict]) -> None:
     calendar_tooling_query = _is_calendar_tooling_query(query_tokens)
     broad_tool_recommendation_query = _is_broad_tool_recommendation_query(query_tokens)
     terminal_telegram_authorization_query = _is_terminal_telegram_authorization_query(query_tokens)
+    openclaw_hermes_distinction_query = _is_openclaw_hermes_distinction_query(query_tokens)
+    codex_hermes_tui_query = _is_codex_hermes_tui_query(query_tokens)
     summary_excluded = _is_summary_excluded_query(q)
     positive_summary_intent = _is_positive_summary_intent_query(q)
 
@@ -1985,9 +2180,38 @@ def _apply_recall_governance_inplace(q: str, fused: list[dict]) -> None:
             delta -= 140.0
             reasons.append("brain_failure_note_penalty")
 
-        if _is_live_state_snapshot_result(result, result_text):
+        live_state_snapshot = _is_live_state_snapshot_result(result, result_text)
+        if live_state_snapshot:
             delta -= 180.0
             reasons.append("live_state_snapshot_penalty")
+
+        if openclaw_hermes_distinction_query:
+            openclaw_setup_noise = _is_openclaw_setup_noise_result(result, result_text)
+            openclaw_handoff_noise = _is_openclaw_hermes_handoff_noise_result(result, result_text)
+            if _is_openclaw_hermes_distinction_result(all_tokens, result_text) and not (
+                openclaw_setup_noise or openclaw_handoff_noise or live_state_snapshot
+            ):
+                delta += 140.0
+                reasons.append("openclaw_hermes_distinction")
+            if openclaw_setup_noise:
+                delta -= 360.0
+                reasons.append("openclaw_setup_noise_penalty")
+            if openclaw_handoff_noise:
+                delta -= 140.0
+                reasons.append("openclaw_distinction_handoff_penalty")
+
+        if codex_hermes_tui_query:
+            codex_skill_sync_noise = _is_codex_skill_sync_noise_result(result, result_text)
+            if codex_skill_sync_noise:
+                delta -= 160.0
+                reasons.append("codex_skill_sync_noise_penalty")
+            elif _is_codex_hermes_tui_result(all_tokens, result_text):
+                delta += 110.0
+                reasons.append("codex_hermes_tui_preference")
+
+        if codex_hermes_tui_query and _is_old_claude_code_restriction_noise(all_tokens, result_text):
+            delta -= 120.0
+            reasons.append("old_claude_code_restriction_penalty")
 
         if (
             budget_local_cloud_query
@@ -2094,14 +2318,33 @@ def _sort_and_diversify(fused: list[dict], top_window: int) -> list[dict]:
     return fused
 
 
+def _result_rrf_id(result: dict) -> str:
+    """Stable RRF key for recall/v2 result fusion.
+
+    Canonical and document-like rows should still fuse by normalized path, but
+    learned memories frequently share a coarse source/path value (for example
+    ``hermes``). For those memory rows, key by the row id first so distinct
+    preferences are not collapsed before governance can rank them.
+    """
+    collection = str(result.get("collection") or "").lower()
+    if collection in {"semantic_memory", "experience", "patterns"} and result.get("id"):
+        return str(result["id"])
+    return str(result.get("path") or result.get("id") or result.get("title") or "")
+
+
 def _run_rrf_fuse(result_lists: list[list[dict]]) -> tuple[list[dict], int]:
-    """RRF-fuse a list of result lists, keyed by 'path'.
+    """RRF-fuse a list of result lists with recall-specific stable keys.
 
     Returns (fused_results, elapsed_ms). The caller writes
     `timing['rrf_ms'] = elapsed_ms`.
     """
+    keyed_lists = [
+        [dict(result, _rrf_id=_result_rrf_id(result)) for result in results] for results in result_lists
+    ]
     t_rrf = time.time()
-    fused = _rrf.rrf_fuse(result_lists, id_key="path")
+    fused = _rrf.rrf_fuse(keyed_lists, id_key="_rrf_id")
+    for result in fused:
+        result.pop("_rrf_id", None)
     return fused, int((time.time() - t_rrf) * 1000)
 
 
@@ -2761,6 +3004,8 @@ def recall_v2(
     terminal_telegram_authorization_query = _is_terminal_telegram_authorization_query(
         query_tokens_for_governance
     )
+    openclaw_hermes_distinction_query = _is_openclaw_hermes_distinction_query(query_tokens_for_governance)
+    codex_hermes_tui_query = _is_codex_hermes_tui_query(query_tokens_for_governance)
 
     start_dt, end_dt = temporal.parse_range(since, until)
     # ChromaDB 1.4.1 rejects string operands in $gte/$lt; filter Python-side instead.
@@ -2775,11 +3020,18 @@ def recall_v2(
     governance_sensitive_query = (
         calendar_tooling_query
         or terminal_telegram_authorization_query
+        or openclaw_hermes_distinction_query
+        or codex_hermes_tui_query
         or _is_budget_local_cloud_query(query_tokens_for_governance)
         or _is_broad_tool_recommendation_query(query_tokens_for_governance)
     )
     if governance_sensitive_query:
-        inner_search_n = max(inner_search_n, 80 if calendar_tooling_query else 40)
+        inner_floor = (
+            80
+            if (calendar_tooling_query or openclaw_hermes_distinction_query or codex_hermes_tui_query)
+            else 40
+        )
+        inner_search_n = max(inner_search_n, inner_floor)
 
     hypothetical: str | None = None
     variants: list[str] = [search_query]
@@ -2812,6 +3064,20 @@ def recall_v2(
             if authorization_variant not in variants:
                 variants.append(authorization_variant)
 
+    if codex_hermes_tui_query:
+        workflow_variants = (
+            "Chris prefers using Codex through Hermes as an interactive terminal-like tmux TUI when quality or steering matters; headless codex exec is only for bounded automation",
+            "Codex Hermes interactive tmux TUI preference headless codex exec bounded automation quality steering",
+        )
+        for workflow_variant in workflow_variants:
+            if workflow_variant not in variants:
+                variants.append(workflow_variant)
+
+    if openclaw_hermes_distinction_query:
+        distinction_variant = "OpenClaw Hermes current runtime historical distinction"
+        if distinction_variant not in variants:
+            variants.append(distinction_variant)
+
     # Run recall for each variant in parallel and RRF-fuse.
     t_search = time.time()
     all_payloads: list[dict] = []
@@ -2837,9 +3103,16 @@ def recall_v2(
             as_of=as_of,
         )
 
-    if len(variants) == 1:
-        with contextlib.suppress(Exception):
-            all_payloads.append(_run_variant(variants[0]))
+    if len(variants) == 1 or governance_sensitive_query:
+        # Governance-sensitive probes add deterministic rescue variants that
+        # often hit the same Qdrant collections as the base query. Running
+        # those variants concurrently can trip the inner fanout deadline and
+        # drop the semantic/preference rows we added the rescue for. Keep the
+        # normal fast parallel path for generic expansion, but serialize these
+        # small governed variant sets for recall quality.
+        for variant in variants:
+            with contextlib.suppress(Exception):
+                all_payloads.append(_run_variant(variant))
     else:
         with _VariantPool(max_workers=min(len(variants), 4)) as _vpool:
             futures = {_vpool.submit(_run_variant, v): v for v in variants}

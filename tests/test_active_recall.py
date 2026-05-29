@@ -70,6 +70,16 @@ def test_intent_matches_english_design_keyword():
     assert "frontend_design" in intents
 
 
+def test_short_latin_design_keywords_do_not_match_inside_quality_or_tui():
+    matches = active_recall._match_canonical_routes(
+        "When a coding task needs quality or steering, should Chris use Codex "
+        "through Hermes as an interactive tmux TUI or headless codex exec?"
+    )
+    intents = [m.intent for m in matches]
+
+    assert "frontend_design" not in intents
+
+
 def test_intent_matches_infra_homelab():
     matches = active_recall._match_canonical_routes("docker compose cloudflare tunnel")
     intents = [m.intent for m in matches]
@@ -87,6 +97,16 @@ def test_brain_quality_prompt_does_not_inject_ops_runbook():
     intents = [m.intent for m in matches]
     assert "brain_quality" in intents
     assert "brain_self" not in intents
+
+
+def test_brain_recall_prefetch_quality_right_now_routes_to_quality_not_live_state():
+    matches = active_recall._match_canonical_routes(
+        "How healthy is Brain recall and prefetch quality right now?"
+    )
+    intents = [m.intent for m in matches]
+
+    assert "brain_quality" in intents
+    assert "live_state" not in intents
 
 
 def test_brain_ops_prompt_still_injects_runbook_route():
@@ -668,6 +688,247 @@ def test_build_injection_can_include_opt_in_confidence_sentinel(monkeypatch):
         agent="codex",
     )
     assert any(b.get("source") == "confidence_sentinel" for b in result["blocks"])
+
+
+def test_active_recall_korean_codex_prompt_uses_workflow_preference_variant(monkeypatch):
+    seen_queries: list[str] = []
+
+    def fake_search_all(query, *args, **kwargs):
+        seen_queries.append(query)
+        if "Codex Hermes interactive tmux TUI preference" not in query:
+            return {"results": []}
+        return {
+            "results": [
+                {
+                    "id": "codex-hermes-tmux-tui",
+                    "title": "Codex Hermes interactive tmux TUI preference",
+                    "content": (
+                        "Chris prefers using Codex through Hermes as an interactive "
+                        "terminal-like tmux TUI when a coding task needs quality or steering; "
+                        "headless codex exec is only for bounded automation."
+                    ),
+                    "score": 96,
+                    "collection": "semantic_memory",
+                    "path": "/prefs/codex-hermes-tmux-tui.md",
+                }
+            ]
+        }
+
+    monkeypatch.setitem(sys.modules, "search_unified", types.SimpleNamespace(search_all=fake_search_all))
+
+    result = active_recall.build_injection(
+        prompt="복잡한 코딩 작업은 코덱스를 어떻게 쓰는 게 좋아?",
+        session_id="t-korean-codex-pref",
+        turn_idx=0,
+        agent="codex",
+    )
+
+    assert any("Codex Hermes interactive tmux TUI preference" in q for q in seen_queries)
+    assert any(b.get("memory_id") == "codex-hermes-tmux-tui" for b in result["blocks"])
+
+
+def test_active_recall_codex_workflow_ranks_current_preference_over_skill_sync(monkeypatch):
+    def fake_search_all(query, *args, **kwargs):
+        if "Chris prefers using Codex through Hermes" in query:
+            return {
+                "results": [
+                    {
+                        "id": "codex-current-pref",
+                        "title": "Codex Hermes interactive tmux TUI preference",
+                        "content": (
+                            "Chris prefers using Codex through Hermes as an interactive "
+                            "terminal-like TUI session in tmux, similar to how he manually uses Codex, "
+                            "when quality or steering matters; headless codex exec is only for bounded automation."
+                        ),
+                        "score": 95,
+                        "collection": "semantic_memory",
+                        "path": "hermes",
+                    }
+                ]
+            }
+        if "코덱스" in query or "Codex Hermes interactive" in query:
+            return {
+                "results": [
+                    {
+                        "id": "codex-skill-sync-noise",
+                        "title": "hermes",
+                        "content": (
+                            "User: 진행해줘. Assistant: 완료. 적용한 범위: Codex/Claude Code skill을 "
+                            "~/.hermes/skills/autonomous-ai-agents/ 위치에 동기화했어."
+                        ),
+                        "score": 110,
+                        "collection": "semantic_memory",
+                        "path": "hermes",
+                    },
+                    {
+                        "id": "old-claude-restriction",
+                        "title": "claude_code",
+                        "content": "Old Claude Code restrictions and plan-mode usage caveats for coding tasks.",
+                        "score": 108,
+                        "collection": "semantic_memory",
+                        "path": "claude_code",
+                    },
+                ]
+            }
+        return {"results": []}
+
+    monkeypatch.setitem(sys.modules, "search_unified", types.SimpleNamespace(search_all=fake_search_all))
+
+    result = active_recall.build_injection(
+        prompt="복잡한 코딩 작업은 코덱스를 어떻게 쓰는 게 좋아?",
+        session_id="t-korean-codex-pref-ranking",
+        turn_idx=0,
+        agent="codex",
+    )
+
+    assert result["blocks"]
+    assert result["blocks"][0]["memory_id"] == "codex-current-pref"
+
+
+def test_active_recall_codex_workflow_rescue_preference_survives_small_block_budget(monkeypatch):
+    def fake_search_all(query, *args, **kwargs):
+        if "Chris prefers using Codex through Hermes" in query:
+            return {
+                "results": [
+                    {
+                        "id": "codex-current-pref",
+                        "title": "Codex Hermes interactive tmux TUI preference",
+                        "content": (
+                            "Chris prefers using Codex through Hermes as an interactive terminal-like "
+                            "TUI session in tmux when quality or steering matters; headless codex exec "
+                            "is only for bounded automation."
+                        ),
+                        "score": 95,
+                        "collection": "semantic_memory",
+                        "path": "hermes",
+                    }
+                ]
+            }
+        if "복잡한" in query:
+            return {
+                "results": [
+                    {
+                        "id": "generic-workflow-summary-1",
+                        "title": "untitled",
+                        "content": "General coding workflow and preference summary with Codex context.",
+                        "score": 98,
+                        "collection": "canonical",
+                        "path": "",
+                    },
+                    {
+                        "id": "generic-workflow-summary-2",
+                        "title": "untitled",
+                        "content": "Another broad workflow summary mentioning coding quality and Codex.",
+                        "score": 97,
+                        "collection": "canonical",
+                        "path": "",
+                    },
+                ]
+            }
+        return {"results": []}
+
+    monkeypatch.setitem(sys.modules, "search_unified", types.SimpleNamespace(search_all=fake_search_all))
+    monkeypatch.setattr(
+        active_recall,
+        "_classify_prompt",
+        lambda *args, **kwargs: types.SimpleNamespace(
+            needs_memory=True,
+            allow_semantic=True,
+            allow_proactive=False,
+            max_blocks=2,
+            min_semantic_score=0.0,
+            max_tokens=500,
+            intent="policy_or_memory",
+        ),
+    )
+
+    result = active_recall.build_injection(
+        prompt="복잡한 코딩 작업은 코덱스를 어떻게 쓰는 게 좋아?",
+        session_id="t-korean-codex-small-budget",
+        turn_idx=0,
+        agent="codex",
+    )
+
+    assert [block["memory_id"] for block in result["blocks"]][:1] == ["codex-current-pref"]
+
+
+def test_active_recall_openclaw_hermes_distinction_skips_live_state_and_setup_noise(monkeypatch):
+    def fake_search_all(query, *args, **kwargs):
+        if "openclaw agent configuration heartbeat" in query.lower():
+            return {
+                "results": [
+                    {
+                        "id": "generic-openclaw-setup-guide",
+                        "title": "OpenClaw setup guide",
+                        "content": "Sub-Agent Configuration and Active Hours for Heartbeat in the old OpenClaw setup.",
+                        "score": 120,
+                        "collection": "obsidian",
+                        "path": "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/Chrischodev/OpenClaw/openclaw-setup.md",
+                    }
+                ]
+            }
+        if (
+            "OpenClaw vs Hermes" not in query
+            and "OpenClaw Hermes current runtime historical distinction" not in query
+        ):
+            return {"results": []}
+        return {
+            "results": [
+                {
+                    "id": "broad-runtime-theme",
+                    "title": "untitled",
+                    "content": (
+                        "These notes share a common theme: Chris is tightening OpenClaw/Brain operational reliability "
+                        "and evaluating memory behavior with Hermes runtime mentions."
+                    ),
+                    "score": 115,
+                    "collection": "canonical",
+                    "path": "",
+                },
+                {
+                    "id": "stale-openclaw-setup",
+                    "title": "semantic",
+                    "content": "Active Hours for Heartbeat and Sub-Agent Configuration for old OpenClaw setup.",
+                    "score": 110,
+                    "collection": "obsidian",
+                    "path": "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/Chrischodev/OpenClaw/openclaw-setup.md",
+                },
+                {
+                    "id": "distinction",
+                    "title": "OpenClaw vs Hermes current runtime historical distinction",
+                    "content": (
+                        "Chris is currently interacting with Jenna running on Hermes Agent; when comparing "
+                        "Hermes Agent vs OpenClaw, distinguish the historical platform decision from the current runtime context."
+                    ),
+                    "score": 96,
+                    "collection": "semantic_memory",
+                    "path": "mcp",
+                },
+                {
+                    "id": "live-active-goals",
+                    "title": "active_goals",
+                    "content": "Active goals and focus: OpenClaw Hermes current runtime work queue.",
+                    "score": 95,
+                    "collection": "canonical",
+                    "path": "/Users/chrischo/server/knowledge/canonical/live_state/active_goals.md",
+                },
+            ]
+        }
+
+    monkeypatch.setitem(sys.modules, "search_unified", types.SimpleNamespace(search_all=fake_search_all))
+    monkeypatch.setattr(active_recall, "_canonical_blocks_from_matches", lambda *args, **kwargs: [])
+
+    result = active_recall.build_injection(
+        prompt="OpenClaw vs Hermes current runtime historical distinction",
+        session_id="t-openclaw-hermes-distinction",
+        turn_idx=0,
+        agent="codex",
+    )
+
+    assert result["blocks"]
+    assert result["blocks"][0]["memory_id"] == "distinction"
+    assert not any("live_state/active_goals" in (b.get("path") or "") for b in result["blocks"])
+    assert not any("openclaw-setup.md" in (b.get("path") or "") for b in result["blocks"])
 
 
 def test_build_injection_exposes_compiler_metadata(monkeypatch):

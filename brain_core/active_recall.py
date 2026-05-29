@@ -94,7 +94,12 @@ except ImportError:
 
 log = logging.getLogger("brain.active_recall")
 
-INTENT_ROUTES_PATH = BRAIN_CORE_DIR / "intent_routes.yaml"
+_CONFIG_INTENT_ROUTES_PATH = BRAIN_CORE_DIR / "intent_routes.yaml"
+INTENT_ROUTES_PATH = (
+    _CONFIG_INTENT_ROUTES_PATH
+    if _CONFIG_INTENT_ROUTES_PATH.exists()
+    else Path(__file__).with_name("intent_routes.yaml")
+)
 DOORBELL_DIR = Path("/tmp")  # noqa: S108 — brain_loop writes per-session-id doorbell files here; the hook script reads+clears them in-process.
 DOORBELL_TEMPLATE = "{session_id}"
 BUDGET_TOKEN_LIMIT = 2048
@@ -210,10 +215,14 @@ def _load_routes(force_reload: bool = False) -> dict:
 
 
 def _match_canonical_routes(prompt: str) -> list[IntentMatch]:
-    """Return all intents whose keywords match the prompt. An intent matches
-    if ANY of its keywords (EN or KO) is a substring of the lowercased prompt.
-    Multiple intents may match — we return them all so every guaranteed path
-    surfaces."""
+    """Return all intents whose keywords match the prompt.
+
+    English keywords match on token boundaries so short route triggers such as
+    ``ui`` do not fire inside unrelated words such as ``quality``. Korean and
+    other non-ASCII phrases keep substring matching because spacing and suffixes
+    are less reliable. Multiple intents may match — we return them all so every
+    guaranteed path surfaces.
+    """
     if not prompt:
         return []
 
@@ -231,12 +240,12 @@ def _match_canonical_routes(prompt: str) -> list[IntentMatch]:
         keywords_ko = cfg.get("keywords_ko") or []  # Korean doesn't need lowercasing
         hit = False
         for kw in keywords_en:
-            if kw and kw in lowered:
+            if _english_keyword_matches(kw, lowered):
                 hit = True
                 break
         if not hit:
             for kw in keywords_ko:
-                if kw and kw in prompt:
+                if _route_keyword_matches(kw, prompt=prompt, lowered_prompt=lowered):
                     hit = True
                     break
         if hit:
@@ -252,6 +261,30 @@ def _match_canonical_routes(prompt: str) -> list[IntentMatch]:
     return matches
 
 
+def _english_keyword_matches(keyword: str, lowered_prompt: str) -> bool:
+    """Match English route keywords on token boundaries.
+
+    Short keywords such as `ui` and `ux` are useful route triggers when they
+    appear as standalone words, but plain substring matching misroutes prompts
+    containing words like `quality` or `TUI`. Use ASCII word boundaries for all
+    English keywords while preserving phrase matching across whitespace.
+    """
+    kw = (keyword or "").strip().lower()
+    if not kw:
+        return False
+    escaped = re.escape(kw).replace(r"\ ", r"\s+")
+    return re.search(rf"(?<![a-z0-9]){escaped}(?![a-z0-9])", lowered_prompt) is not None
+
+
+def _route_keyword_matches(keyword: str, *, prompt: str, lowered_prompt: str) -> bool:
+    kw = (keyword or "").strip()
+    if not kw:
+        return False
+    if kw.isascii():
+        return _english_keyword_matches(kw, lowered_prompt)
+    return kw in prompt
+
+
 def _intent_blocked_by_context(intent_name: str, lowered_prompt: str) -> bool:
     """Suppress broad intent routes when the prompt is about implementation,
     not the domain object itself.
@@ -264,6 +297,9 @@ def _intent_blocked_by_context(intent_name: str, lowered_prompt: str) -> bool:
     if intent_name == "brain_self" and (
         _looks_like_llm_budget_prompt(lowered_prompt) or not _looks_like_brain_ops_prompt(lowered_prompt)
     ):
+        return True
+
+    if intent_name == "live_state" and _looks_like_brain_quality_prompt(lowered_prompt):
         return True
 
     if intent_name != "visual":
@@ -315,6 +351,26 @@ def _looks_like_llm_budget_prompt(lowered_prompt: str) -> bool:
         "클로드 구독",
     )
     return any(marker in lowered_prompt for marker in budget_markers)
+
+
+def _looks_like_brain_quality_prompt(lowered_prompt: str) -> bool:
+    quality_markers = (
+        "brain quality",
+        "brain recall",
+        "prefetch quality",
+        "recall quality",
+        "retrieval quality",
+        "brain intelligence",
+        "improve brain",
+        "actual brain",
+        "real brain",
+        "브레인 품질",
+        "브레인 지능",
+        "실제 브레인",
+        "진짜 브레인",
+        "검색품질",
+    )
+    return any(marker in lowered_prompt for marker in quality_markers)
 
 
 def _looks_like_brain_ops_prompt(lowered_prompt: str) -> bool:
@@ -480,10 +536,7 @@ def _semantic_blocks(
     from concurrent.futures import TimeoutError as _FutTimeout
     from concurrent.futures import as_completed
 
-    queries = [prompt]
-    for m in matches:
-        queries.extend(m.always_push_queries)
-    queries = [q for q in queries[:4] if q and q.strip()]
+    queries = _semantic_queries_for_prompt(prompt, matches)
     if not queries:
         return []
 
@@ -491,7 +544,7 @@ def _semantic_blocks(
         try:
             resp = search_unified.search_all(
                 q,
-                limit=limit,
+                limit=max(limit, 5),
                 sources=["rag", "canonical", "obsidian"],
                 original_query=prompt,
             )
@@ -551,16 +604,20 @@ def _semantic_blocks(
             prompt
         ):
             continue
+        if _semantic_result_excluded_for_prompt(prompt, title, content, r.get("path")):
+            continue
         is_generic_summary = _is_generic_summary_title(title)
         if is_generic_summary and (DISABLE_GENERIC_SUMMARY_BLOCKS or generic_summary_seen):
             continue
-        norm_score = min(1.0, max(0.0, score / 100.0))
+        norm_score = min(1.0, max(0.0, score / 100.0)) + _semantic_score_adjustment_for_prompt(
+            prompt, title, content, r.get("path")
+        )
         score_floor = min_score
         if score_floor is None:
             score_floor = SEMANTIC_MIN_SCORE_WITH_INTENT if matches else SEMANTIC_MIN_SCORE
         if norm_score < score_floor:
             continue
-        if not _semantic_result_matches_prompt(prompt, title, content):
+        if not _semantic_result_matches_any_query(prompt, matches, title, content):
             continue
         h = _hash(f"semantic:{rid}:{title}:{content[:200]}")
         if h in seen_hashes or h in hashes_this_call:
@@ -573,6 +630,11 @@ def _semantic_blocks(
             content_signatures.append(signature)
         if is_generic_summary:
             generic_summary_seen = True
+        priority = "high" if norm_score >= 0.6 else "medium"
+        if _looks_like_codex_workflow_prompt(prompt) and _is_codex_current_preference_result(
+            title, content, r.get("path")
+        ):
+            priority = "critical"
         blocks.append(
             InjectionBlock(
                 id=h,
@@ -580,19 +642,192 @@ def _semantic_blocks(
                 content=content,
                 source=f"semantic:{collection}" if collection else "semantic",
                 score=norm_score,
-                priority="high" if norm_score >= 0.6 else "medium",
+                priority=priority,
                 path=r.get("path"),
                 # 2026-04-18: propagate real ChromaDB id for reinforce_on_access.
                 memory_id=r.get("id"),
             )
         )
-        if len(blocks) >= limit:
-            break
-    return blocks
+    # Search variants finish in nondeterministic order. Do not let two fast,
+    # generic rows from the base prompt consume a small classifier max_blocks
+    # budget before a deterministic rescue/preference variant arrives.
+    return sorted(
+        blocks,
+        key=lambda b: (PRIORITY_ORDER.get(b.priority, 9), -b.score),
+    )[:limit]
 
 
 def _is_generic_summary_title(title: str) -> bool:
     return bool(re.match(r"(?i)^\s*summary(?:\s*\(part\s*\d+\))?\s*$", title or ""))
+
+
+def _semantic_queries_for_prompt(prompt: str, matches: list[IntentMatch]) -> list[str]:
+    queries = [prompt]
+    for match in matches:
+        queries.extend(match.always_push_queries)
+    return [q for q in queries[:4] if q and q.strip()]
+
+
+def _semantic_result_matches_any_query(
+    prompt: str,
+    matches: list[IntentMatch],
+    title: str,
+    content: str,
+) -> bool:
+    return any(
+        _semantic_result_matches_prompt(query, title, content)
+        for query in _semantic_queries_for_prompt(prompt, matches)
+    )
+
+
+def _semantic_result_excluded_for_prompt(prompt: str, title: str, content: str, path: str | None) -> bool:
+    query = (prompt or "").lower()
+    haystack = f"{title}\n{path or ''}\n{content[:500]}".lower()
+    asks_openclaw_hermes_distinction = (
+        "openclaw" in query
+        and "hermes" in query
+        and any(marker in query for marker in ("distinction", "historical", "runtime", "current"))
+    )
+    if asks_openclaw_hermes_distinction and (
+        "/live_state/" in haystack
+        or "live_state" in haystack
+        or "active goals and focus" in haystack
+        or "openclaw multi-agent setup documentation" in haystack
+        or "openclaw-setup" in haystack
+        or "sub-agent configuration" in haystack
+        or "/.openclaw/workspace-" in haystack
+        or _is_openclaw_hermes_handoff_noise(title, content, path)
+    ):
+        return True
+    if asks_openclaw_hermes_distinction and _is_broad_openclaw_hermes_theme_noise(title, content):
+        return True
+    return _looks_like_codex_workflow_prompt(prompt) and _is_codex_skill_sync_noise(title, content, path)
+
+
+def _semantic_score_adjustment_for_prompt(
+    prompt: str,
+    title: str,
+    content: str,
+    path: str | None,
+) -> float:
+    if _looks_like_codex_workflow_prompt(prompt) and _is_codex_current_preference_result(
+        title, content, path
+    ):
+        return 0.35
+    if _looks_like_openclaw_hermes_distinction_prompt(prompt) and _is_openclaw_hermes_distinction_result(
+        title, content, path
+    ):
+        return 0.35
+    return 0.0
+
+
+def _looks_like_codex_workflow_prompt(prompt: str) -> bool:
+    lower = (prompt or "").lower()
+    if "codex" not in lower and "코덱스" not in (prompt or ""):
+        return False
+    return any(
+        marker in lower
+        for marker in (
+            "hermes",
+            "tmux",
+            "tui",
+            "headless",
+            "steering",
+            "quality",
+            "coding",
+            "preference",
+            "recommendation",
+            "코딩",
+            "복잡한",
+            "어떻게",
+        )
+    )
+
+
+def _looks_like_openclaw_hermes_distinction_prompt(prompt: str) -> bool:
+    lower = (prompt or "").lower()
+    return (
+        "openclaw" in lower
+        and "hermes" in lower
+        and any(marker in lower for marker in ("distinction", "historical", "history", "runtime", "current"))
+    )
+
+
+def _is_codex_current_preference_result(title: str, content: str, path: str | None) -> bool:
+    haystack = f"{title}\n{path or ''}\n{content[:800]}".lower()
+    return (
+        "codex" in haystack
+        and "hermes" in haystack
+        and any(
+            marker in haystack
+            for marker in (
+                "tmux",
+                "tui",
+                "terminal-like",
+                "terminal like",
+                "interactive terminal",
+                "headless codex",
+            )
+        )
+        and any(marker in haystack for marker in ("prefers", "preference", "선호"))
+    )
+
+
+def _is_codex_skill_sync_noise(title: str, content: str, path: str | None) -> bool:
+    haystack = f"{title}\n{path or ''}\n{content[:800]}".lower()
+    if _is_codex_current_preference_result(title, content, path):
+        return False
+    return (
+        "codex/claude code skill" in haystack
+        or "skill sync" in haystack
+        or "skills/autonomous-ai-agents" in haystack
+        or ("codex" in haystack and "claude code" in haystack and "skill" in haystack)
+    )
+
+
+def _is_openclaw_hermes_distinction_result(title: str, content: str, path: str | None) -> bool:
+    haystack = f"{title}\n{path or ''}\n{content[:800]}".lower()
+    return (
+        "openclaw" in haystack
+        and "hermes" in haystack
+        and any(
+            marker in haystack
+            for marker in (
+                "distinction",
+                "distinguish",
+                "historical",
+                "provenance",
+                "current runtime",
+                "current runtime context",
+                "hermes agent is",
+            )
+        )
+    )
+
+
+def _is_openclaw_hermes_handoff_noise(title: str, content: str, path: str | None) -> bool:
+    haystack = f"{title}\n{path or ''}\n{content[:1500]}".lower()
+    return (
+        "work kanban task t_" in haystack
+        or "acceptance probe" in haystack
+        or "focused tests passed" in haystack
+        or "review-required handoff" in haystack
+        or "dirty patch" in haystack
+        or "verdict: partial" in haystack
+        or "generic regression" in haystack
+        or "generic_recipe_knowledge_gap" in haystack
+        or "spot check" in haystack
+        or "no setup/live_state" in haystack
+    )
+
+
+def _is_broad_openclaw_hermes_theme_noise(title: str, content: str) -> bool:
+    haystack = f"{title}\n{content[:800]}".lower()
+    if _is_openclaw_hermes_distinction_result(title, content, None):
+        return False
+    return "these notes share a common theme" in haystack or (
+        "openclaw" in haystack and "hermes" in haystack and "common theme" in haystack
+    )
 
 
 def _is_noisy_semantic_result(title: str, content: str, path: str | None) -> bool:
