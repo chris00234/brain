@@ -1,0 +1,120 @@
+# route_guarantees.yaml — first-class DURABLE route facts for recall governance.
+#
+# Unlike intent_routes.yaml (which overloads `always_push_queries` as both
+# search probes AND guarantees), this file separates the two contracts:
+#
+#   guarantee_facts : durable policy/preference/fact statements that may be
+#                     surfaced/injected directly when a high-priority route is
+#                     matched and retrieval is missing or under-served. They are
+#                     standalone memory blocks — NOT search strings.
+#   search_variants : query strings used only to RETRIEVE supporting evidence.
+#
+# Matching is token-boundary safe (Latin keywords match on word boundaries, so
+# `ui` never fires inside `quality`; Korean matches by substring). No task ids,
+# exact acceptance-probe strings, or one-off failure prompts — only class-level
+# tokens and durable fact text.
+#
+# Consumed by brain_core/recall_governance/route_guarantees.py and, through it,
+# by /recall/active (active_recall.build_injection) and the shared analyzer.
+
+version: 1
+updated: 2026-05-29
+
+routes:
+  codex_workflow:
+    match:
+      any_tokens: [codex, "codex exec", "codex cli", 코덱스]
+      support_any:
+        [hermes, tmux, tui, headless, steering, quality, workflow, interactive, coding, recommendation, preference, preferences, 헤르메스, 품질, 조율]
+    guarantee_facts:
+      - id: codex_through_hermes_tui_current_preference
+        authority: direct_current_truth
+        status: current
+        text: >-
+          Chris prefers using Codex through Hermes as an interactive
+          terminal-like tmux TUI when quality or steering matters; headless
+          codex exec is only for bounded automation.
+    search_variants:
+      - Codex Hermes interactive tmux TUI preference headless codex exec bounded automation quality steering
+
+  runtime_distinction:
+    match:
+      all_any_groups:
+        - [openclaw, 오픈클로]
+        - [hermes, 헤르메스]
+      support_any:
+        [current, runtime, historical, history, distinction, difference, 현재, 과거, 런타임, 차이, 구분, 역사]
+    guarantee_facts:
+      - id: openclaw_historical_hermes_current_runtime
+        authority: direct_current_truth
+        status: current
+        text: >-
+          OpenClaw is historical context; Hermes is Chris's current agent
+          runtime. Do not treat old OpenClaw setup docs as current runtime
+          instructions.
+    search_variants:
+      - OpenClaw historical context Hermes current agent runtime distinction
+
+  # Cost/tooling policy class. Matched by MEANING, not a single spend noun: a
+  # spend/pricing cue AND a tooling/model/hosting cue must BOTH appear. This
+  # covers the "avoid new paid APIs / no self-hosted generation models" framing
+  # (paid + tooling/hosting/models, no billing/cost/subscription noun) without
+  # over-firing on a bare spend word or a bare tooling word. Class-level tokens
+  # (EN+KO), no probe strings.
+  cost_billing:
+    match:
+      all_any_groups:
+        - [billing, cost, budget, subscription, paid, pricing, 과금, 비용, 유료, 구독, 무료]
+        - [llm, api, apis, model, models, tool, tools, tooling, hosting, host, generation, local, recommend, recommendation, approach, 추천, 모델, 도구, 로컬, 호스팅]
+    guarantee_facts:
+      - id: cost_conscious_subscription_over_paid_api_or_local
+        authority: direct_current_truth
+        status: current
+        text: >-
+          Chris is cost-conscious about LLM and tooling spend: prefer existing
+          subscriptions and already-approved integrations over new paid API
+          billing or local model hosting. Local models are embeddings-only; no
+          local LLM generation.
+    search_variants:
+      - cost-conscious existing subscription integrations over new paid API billing no local model hosting embeddings-only
+
+  # Brain's own recall/prefetch quality is a durable evaluation policy, not a
+  # status read: "how good is recall/prefetch" should return the current quality
+  # contract (eval-scored, noise-suppressed), not stale weakness diagnoses or
+  # infra-dependency rows. Requires the brain subject AND a recall/quality cue.
+  brain_recall_quality:
+    match:
+      all_any_groups:
+        - [brain, 브레인]
+        - [recall, prefetch, retrieval, "memory context", quality, noise, noisy, eval, tuning, 리콜, 검색품질, 메모리, 노이즈, 품질, 평가, 튜닝]
+    guarantee_facts:
+      - id: brain_recall_prefetch_quality_eval_no_noise
+        authority: direct_current_truth
+        status: current
+        text: >-
+          Chris judges Brain recall and prefetch quality by measurable eval
+          scores: maximize useful current memory context while suppressing stale
+          or noisy rows. 브레인 리콜·프리페치 품질은 노이즈(noise)를 줄이고 현재
+          유용한 메모리 컨텍스트를 올리는 eval 점수로 평가한다.
+    search_variants:
+      - Brain recall prefetch quality eval score noise suppression useful current memory context
+
+  # Image generation routes to the existing subscription path, not a new paid
+  # image API or a self-hosted image model. Requires an image subject AND a
+  # billing/cost/generation cue so it does not over-fire on generic photo recall.
+  image_generation_billing:
+    match:
+      all_any_groups:
+        - [image, 이미지, "image generation"]
+        - [billing, cost, subscription, paid, api, generation, generate, "no extra", 과금, 유료, 구독, 생성, 비용]
+    guarantee_facts:
+      - id: image_generation_subscription_no_separate_billing
+        authority: direct_current_truth
+        status: current
+        text: >-
+          For image generation Chris uses GPT Images through the existing
+          OpenAI/Codex subscription (OAuth) — no separate paid image API and no
+          self-hosted image model. 이미지 생성은 기존 OpenAI 구독(OAuth)으로 GPT
+          Images를 쓰고 별도 과금이나 로컬 이미지 생성 모델을 새로 붙이지 않는다.
+    search_variants:
+      - image generation GPT Images OpenAI subscription OAuth no separate billing no self-hosted image model

@@ -31,6 +31,64 @@ from indexer import get_embedding as _get_embedding
 from metrics_buffer import metrics_buffer as _metrics_buf
 from pydantic import BaseModel, Field
 from rate_limit import limiter
+
+# ── Shared recall-governance layer ────────────────────────────────────────
+# Query analysis, source authority, and the multilingual tokenizer now live in
+# brain_core/recall_governance/ so /recall/v2, /recall/active, and Hermes
+# provider prefetch consume ONE contract instead of drifting copies. These
+# module-level aliases preserve every existing `routes.recall._is_*` /
+# `_result_*` import site; the topic-specific governance below (augment,
+# governance-inplace, retrieval-quality filter) stays here and calls them.
+from recall_governance import query_analyzer as _query_analyzer
+from recall_governance import source_authority as _source_authority
+from recall_governance.normalization import (
+    tokenize as _tokenize_recall_text,
+)
+from recall_governance.query_analyzer import (
+    is_live_state_query as _is_live_state_query,
+)
+from recall_governance.query_analyzer import (
+    is_out_of_domain_world_knowledge_query as _is_out_of_domain_world_knowledge_query,
+)
+from recall_governance.query_analyzer import (
+    is_positive_summary_intent_query as _is_positive_summary_intent_query,
+)
+from recall_governance.query_analyzer import (
+    is_summary_excluded_query as _is_summary_excluded_query,
+)
+from recall_governance.route_guarantees import (
+    guarantee_tokens as _guarantee_tokens,
+)
+from recall_governance.route_guarantees import (
+    match_route_guarantees as _match_route_guarantees,
+)
+from recall_governance.source_authority import (
+    is_distilled_brain_analysis_result as _is_distilled_brain_analysis_result,
+)
+from recall_governance.source_authority import (
+    is_durable_truth_result as _is_durable_truth_result,
+)
+from recall_governance.source_authority import (
+    is_episodic_event_log_result as _is_episodic_event_log_result,
+)
+from recall_governance.source_authority import (
+    is_generic_summary_result as _is_generic_summary_result,
+)
+from recall_governance.source_authority import (
+    is_low_authority_result as _is_low_authority_result,
+)
+from recall_governance.source_authority import (
+    is_source_or_test_file_result as _is_source_or_test_file_result,
+)
+from recall_governance.source_authority import (
+    result_category as _result_category,
+)
+from recall_governance.source_authority import (
+    result_metadata as _result_metadata,
+)
+from recall_governance.source_authority import (
+    result_text as _result_text,
+)
 from vector_store import get_vector_store
 
 from config import (
@@ -41,6 +99,226 @@ from config import (
     OBSIDIAN_VAULT_LOCAL,
     OPENCLAW_DIR,
 )
+
+# Constants kept under their original names for the topic-specific governance
+# and quality-filter functions that still live in this module.
+_TRUTH_CATEGORIES = _source_authority._TRUTH_CATEGORIES
+_GENERIC_SUMMARY_MARKERS = _source_authority._GENERIC_SUMMARY_MARKERS
+_GENERIC_PROCEDURE_STOPWORDS = _query_analyzer._GENERIC_PROCEDURE_STOPWORDS
+_PERSONAL_MEMORY_TOKENS = _query_analyzer._PERSONAL_MEMORY_TOKENS
+_WORLD_KNOWLEDGE_ANCHOR_TOKENS = _query_analyzer._WORLD_KNOWLEDGE_ANCHOR_TOKENS
+# Tool/media/runtime domain nouns whose durable answers use synonym-rich,
+# NON-literal vocabulary (Apple Calendar / macOS for "calendar", GPT Images for
+# "image", Codex-through-Hermes for "codex"). A query naming one of these is a
+# tooling/constraint probe, so the strict whole-word personal_factoid overlap
+# gate must NOT fire for it — the relevant row rarely repeats the prompt's
+# literal term, and Korean prompts glue particles onto the noun. Mirrors the
+# Hermes provider's _CONSTRAINT_QUERY_RE domain nouns. Deliberately EXCLUDES
+# abstract attribute nouns (cost/spend/ai/model/local) that ARE answered
+# literally, where the gate usefully drops generic profile noise — and pure
+# personal-memory tokens (omscs/chris), keeping the gate ON for real factoid
+# probes (the KO domain nouns enter via _augment_query_for_recall expansions).
+_FACTOID_GATE_OFF_DOMAIN_TOKENS = frozenset(
+    {
+        "calendar",
+        "calendars",
+        "reminder",
+        "reminders",
+        "schedule",
+        "music",
+        "tts",
+        "voice",
+        "audio",
+        "image",
+        "images",
+        "codex",
+        "openclaw",
+        "hermes",
+        "tool",
+        "tools",
+        "tooling",
+        "workflow",
+        "workflows",
+        "provider",
+        "brain",
+        "recall",
+        "prefetch",
+        "retrieval",
+    }
+)
+
+
+# ── Stale OpenClaw per-agent workspace instruction docs ───────────────────
+# `~/.openclaw/workspace-<agent>/AGENTS.md` and `TOOLS.md` are migration-era
+# per-agent instruction/config files for a HISTORICAL runtime (Hermes is
+# current). They dominate raw recall for durable-advice queries (cost/tooling/
+# brain-quality) and inject stale workspace instructions. Drop them from
+# retrieval for any query NOT actually about OpenClaw/the agents themselves;
+# durable truth lives in canonical/distilled, not these workspace files.
+_OPENCLAW_WORKSPACE_INSTRUCTION_RE = re.compile(
+    r"\.openclaw/workspace-[^/]+/(?:agents|tools)\.md\b", re.IGNORECASE
+)
+_OPENCLAW_QUERY_TOKENS = frozenset(
+    {
+        "openclaw",
+        "오픈클로",
+        "jenna",
+        "liz",
+        "ellie",
+        "sage",
+        "market",
+        "제나",
+        "리즈",
+        "엘리",
+        "세이지",
+        "마켓",
+        "agent",
+        "agents",
+        "workspace",
+        "에이전트",
+    }
+)
+
+
+def _is_openclaw_workspace_instruction_result(result: dict) -> bool:
+    meta = _result_metadata(result)
+    path = str(result.get("path") or meta.get("source_path") or meta.get("path") or "")
+    return bool(_OPENCLAW_WORKSPACE_INSTRUCTION_RE.search(path))
+
+
+# ── Route-guarantee injection for /recall/v2 (mirror of active recall) ─────
+# When a guaranteed route (codex_workflow, runtime_distinction, cost_billing, …)
+# is matched but no retrieved row already carries the durable fact, inject the
+# curated guarantee as a synthetic high-authority result so /recall/v2 — and the
+# Hermes provider prefetch that calls it — surface the same current truth as
+# /recall/active instead of stale/noisy rows. No exact-probe/task-id logic: the
+# routes/facts come from brain_core/route_guarantees.yaml.
+
+
+def _route_guarantee_served_by_results(guarantee, fused: list[dict]) -> bool:
+    """True only when a DIRECT/CURRENT durable-truth row already states this
+    guarantee fact (shares a strong majority of its DISTINCTIVE tokens), so the
+    synthetic guarantee is not duplicated. A derived summary / distilled
+    historical analysis does NOT serve a current route guarantee even if it
+    overlaps wording — those rows lack the distinctive current/headless/bounded
+    terms, and only direct current truth can substitute for the guarantee.
+    Generic (authority tier + distinctive-token overlap), not per-intent."""
+    gtokens = _guarantee_tokens(guarantee)
+    if not gtokens:
+        return False
+    need = max(3, int(0.6 * len(gtokens)))
+    for result in fused:
+        if not isinstance(result, dict):
+            continue
+        if not _is_durable_truth_result(result):
+            continue
+        if len(gtokens & _tokenize_recall_text(_result_text(result))) >= need:
+            return True
+    return False
+
+
+def _inject_route_guarantee_results(q: str, fused: list[dict]) -> None:
+    """Append matched durable route-guarantee facts as synthetic high-authority
+    results when retrieval under-serves them. Fail-open: any guarantee-load/match
+    error leaves ``fused`` unchanged."""
+    try:
+        guarantees = _match_route_guarantees(q)
+    except Exception:
+        return
+    if not guarantees:
+        return
+    existing_ids = {str(r.get("id")) for r in fused if isinstance(r, dict)}
+    top_score = max(
+        (float(r.get("score") or 0.0) for r in fused if isinstance(r, dict)),
+        default=0.0,
+    )
+    rank_offset = 0.0
+    for guarantee in guarantees:
+        rid = f"route_guarantee:{guarantee.id}"
+        if rid in existing_ids:
+            continue
+        if _route_guarantee_served_by_results(guarantee, fused):
+            continue
+        rank_offset += 5.0
+        fused.append(
+            {
+                "id": rid,
+                "title": f"{guarantee.route} route guarantee",
+                "content": guarantee.text,
+                "collection": "canonical",
+                "source_type": "route_guarantee",
+                "score": top_score + 20.0 + rank_offset,
+                "governance": ["route_guarantee"],
+                "metadata": {
+                    "review_state": "accepted",
+                    "category": "preference",
+                    "authority_tier": "direct_current_truth",
+                },
+            }
+        )
+
+
+def _inject_personal_factoid_answer(q: str, fused: list[dict]) -> None:
+    """Surface the durable answer for a PURE personal-fact probe whose fact lives
+    in a raw_events hot-path atom (not in the vector store).
+
+    Those atoms are reachable only by FTS literal-AND, and once retrieved the RRF
+    pipeline can't reliably lift the decayed, low-authority row over broad
+    session/canonical rows that merely mention the subject — so the clean fact
+    gets buried. When no copy of a clean answer atom is already present, FTS the
+    distinctive ASCII terms (acronyms/years/proper nouns survive cross-language)
+    and inject the top durable atom that states the requested attributes as a
+    high-authority answer. Mirror of _inject_route_guarantee_results.
+
+    Precision is structural, never a probe string: the FTS AND-match requires
+    every distinctive term, and the row must pass the whole-word factoid-overlap
+    test and be neither a conversation transcript, a generic summary, an episodic
+    coding/session log, nor a source/test-file quote — so a probe with no matching
+    durable atom (teacher/childhood) injects nothing and stays empty. Fail-open.
+    """
+    if not _is_pure_personal_factoid_probe(q):
+        return
+    terms = _query_analyzer.personal_factoid_query_terms(q)
+    ascii_focus = " ".join(dict.fromkeys(w for w in re.findall(r"[A-Za-z0-9]+", q) if w.lower() in terms))
+    if not ascii_focus:
+        return
+    existing_ids = {str(r.get("id")) for r in fused if isinstance(r, dict)}
+    try:
+        from raw_events_fts import search as _raw_fts_search
+
+        hits = _raw_fts_search(ascii_focus, limit=8) or []
+    except Exception:
+        return
+    for hit in hits:
+        text = str(hit.get("content") or "")
+        rid = str(hit.get("id") or "")
+        row = {
+            "id": rid,
+            "title": str(hit.get("title") or ""),
+            "content": text,
+            "collection": "raw_events_fts",
+            "source_type": str(hit.get("raw_source_type") or hit.get("source_type") or ""),
+            "score": 0.0,
+        }
+        if (
+            _is_conversation_transcript_row(row)
+            or _is_generic_summary_result(row)
+            or _is_episodic_event_log_result(row, text)
+            or _is_source_or_test_file_result(row)
+        ):
+            continue
+        if _query_analyzer.personal_factoid_result_has_strong_attribute_overlap(q, text) is not True:
+            continue
+        # The clean answer atom is the FTS BM25 winner — if a copy is already in the
+        # fused set, ranking governance already handles it; do not duplicate.
+        if rid and (rid in existing_ids or f"raw_events:{rid}" in existing_ids):
+            return
+        top_score = max((float(r.get("score") or 0.0) for r in fused if isinstance(r, dict)), default=0.0)
+        row["score"] = top_score + 20.0
+        row["governance"] = ["personal_factoid_answer_injected"]
+        fused.append(row)
+        return
+
 
 # First-failure flag so hook telemetry bugs surface once in logs instead of
 # being silently swallowed on every request.
@@ -936,144 +1214,19 @@ _KOREAN_INTENT_EXPANSIONS: dict[str, tuple[str, ...]] = {
     "작업": ("work", "task", "kanban", "live state"),
     "태스크": ("task", "kanban", "live state"),
     "칸반": ("kanban", "task", "live state"),
+    # Loanword/runtime/comparison class terms — same KO→EN mechanism as
+    # 코덱스→codex / 캘린더→calendar above (substring-matched, so particles like
+    # 오픈클로랑 / 차이가 still hit). Lets language-agnostic intent gates fire for
+    # KO without any probe-specific runtime detector.
+    "오픈클로": ("openclaw",),
+    "헤르메스": ("hermes",),
+    "런타임": ("runtime",),
+    "구분": ("distinction", "difference"),
+    "차이": ("distinction", "difference"),
+    "역사": ("historical", "history"),
+    "과거": ("historical", "history", "past"),
 }
 
-_LIVE_STATE_QUERY_PATTERNS = (
-    r"진행\s*상황",
-    # Bare elliptical "진행 중" / "실행 중" (in progress / running). Negative
-    # lookahead `(?![가-힣])` blocks Hangul inflections like 중이었어 /
-    # 중이었던 (past tense "was in progress") so historical phrasings aren't
-    # mis-classified as live-state.
-    r"진행\s*중(?![가-힣])",
-    r"실행\s*중(?![가-힣])",
-    r"시작\s*했어",
-    r"(?:지금|현재).{0,12}(?:뭐|무엇|무슨|뭐가|어떤).{0,12}돌아가(?:고|는\s*중|니|나요|냐|\?)",
-    r"칸반.*(?:태스크|작업|상태|진행|완료)",
-    r"(?:태스크|작업).*(?:상태|진행\s*상황)",
-    r"\bcurrent\s+status\b",
-    r"\btask\s+status\b",
-    r"\bkanban\s+status\b",
-    r"\bstatus\s+(?:of|for)\s+(?:kanban|task)\b",
-    r"\bprogress\s+update\b",
-    r"\bcurrent\s+(?:progress|state)\b",
-    r"\b(?:what(?:'s|\s+is))\s+(?:running|in\s+progress)\s+(?:right\s+now|now|currently)\b",
-    r"\brunning\s+(?:tasks?|processes?|jobs?)\b",
-    # Bare elliptical "running now" / "running right now" — same live-state
-    # intent as "what is running now" without the "what is" prefix.
-    r"\brunning\s+(?:right\s+)?now\b",
-)
-
-# Slash/underscore separators in live-state prompts ("current/status/Kanban/progress",
-# "current_status_kanban") must normalize to whitespace so the existing
-# _LIVE_STATE_QUERY_PATTERNS' `\s+` boundaries still match. Hyphens are left
-# alone — they appear in legitimate non-live tokens like "macos-calendar".
-_LIVE_STATE_SEPARATOR_RE = re.compile(r"[/_]+")
-
-# Token-cluster fallback for word-order variants the strict regex set misses
-# (e.g. "Kanban task t_12345678 status" — `\btask\s+status\b` can't span the
-# ID slot; "kanban progress status current task" — words in the wrong order).
-# Two-hit rule, chosen to avoid over-firing on definition/setup queries:
-#   - "kanban" + any intent token → live-state (kanban is operational).
-#   - Non-kanban context (task/job/process) + ≥2 intent tokens → live-state.
-_LIVE_STATE_KANBAN_INTENT_TOKENS = frozenset({"status", "progress", "current", "running", "task", "tasks"})
-_LIVE_STATE_NON_KANBAN_CONTEXT_TOKENS = frozenset(
-    {
-        "task",
-        "tasks",
-        "job",
-        "jobs",
-        "process",
-        "processes",
-        "mission",
-        "missions",
-        "goal",
-        "goals",
-        "project",
-        "projects",
-    }
-)
-_LIVE_STATE_NON_KANBAN_INTENT_TOKENS = frozenset({"status", "progress", "current", "running"})
-_LIVE_STATE_TOKEN_RE = re.compile(r"[a-z0-9]+")
-
-# Historical/completed lookup cues — when any of these appear, the prompt
-# explicitly asks about archived/past/finished state and SHOULD search memory
-# instead of short-circuiting to live tools. _is_live_state_query checks this
-# set first so a "history of kanban task status from last week" query is not
-# mistaken for a live-status query just because "task status" is present.
-#
-# Note: bare English "done" is intentionally NOT listed. "current status of
-# kanban task X done?" is a live-status question (is it done right now?), not
-# a historical lookup, so bare "done" must not flip live-state to False on its
-# own. "done" only counts as historical when combined with one of the explicit
-# cues below (history/archived/last-week/records/logs/past/…), which match
-# independently via their own patterns. Korean 완료한/완료된 stay listed because
-# the -한/-된 suffix grammatically locks them to past/completed state; bare 완료
-# mirrors bare English "done" and is intentionally absent.
-_HISTORICAL_QUERY_PATTERNS = (
-    # English explicit historical/completed lookup cues
-    r"\bhistory\b",
-    r"\bhistorical\b",
-    r"\barchived\b",
-    r"\bcompleted\b",
-    r"\blast\s+week\b",
-    r"\bprevious(?:ly)?\b",
-    r"\bpast\b",
-    r"\brecords?\b",
-    r"\blogs?\b",
-    # Durable-memory lookup cues. These prompts may mention "current" and
-    # "status" while asking for the remembered preference/decision, not the
-    # live board/process state. Keep them on recall instead of live-tool
-    # short-circuiting.
-    r"\bdurable\b",
-    r"\bcanonical\b",
-    r"\bfrom\s+memory\b",
-    r"\bremember(?:ed)?\b",
-    r"\bpreferences?\b",
-    r"\bdecisions?\b",
-    # Korean historical/completed lookup cues
-    r"지난주",
-    r"기록",
-    r"이력",
-    r"완료한",
-    r"완료된",
-    r"끝난",
-    r"과거",
-)
-
-_TRUTH_CATEGORIES = {"preference", "decision", "correction", "fact"}
-_GENERIC_SUMMARY_MARKERS = (
-    "weekly",
-    "week ",
-    "brain summary",
-    "session summary",
-    "summary (",
-    "raptor",
-    "summaries",
-)
-
-# Explicit summary-exclusion cues — when the prompt says e.g. "summary 말고" or
-# "not the generic weekly summary", penalize generic Summary/session-distilled
-# rows unconditionally, not only when a non-summary topical candidate happens
-# to be in the fused window. The live broad_recommendation_no_generic_summary
-# probe hit this gap: summary rows had preference text and outranked the
-# specific canonical preference because no non-summary topical sibling was
-# available to trigger the conditional penalty.
-_SUMMARY_EXCLUSION_PATTERNS = (
-    # Korean exclusion suffixes attached to summary/요약
-    r"(?:summary|summaries|요약)\s*(?:말고|빼고|제외(?:하고|하)?|아닌|아니라)",
-    # English explicit exclusion of summary blobs
-    r"\b(?:not|no|without|exclude|excluding|other\s+than|skip)\s+(?:the\s+)?"
-    r"(?:generic\s+|weekly\s+|session\s+)?(?:summary|summaries|summarized)\b",
-)
-# Positive summary-intent cues — when the prompt explicitly asks for a
-# summary/recap/요약, generic Summary/session-distilled rows are exactly
-# what the user requested, so the generic_summary_penalty branch must not
-# fire. Exclusion still wins (see `_is_positive_summary_intent_query`).
-_POSITIVE_SUMMARY_INTENT_PATTERNS = (
-    r"요약",
-    r"\bsummar(?:y|ies|ize[ds]?|izing|ization)\b",
-    r"\brecap(?:s|ped|ping)?\b",
-)
 _BUDGET_COST_TOKENS = {
     "api",
     "apis",
@@ -1267,129 +1420,6 @@ def _augment_query_for_recall(q: str) -> str:
     return base + " " + " ".join(additions)
 
 
-def _looks_like_live_state_token_cluster(text: str) -> bool:
-    """Token-cluster fallback for live-state prompts that the strict regex
-    patterns miss.
-
-    Catches word-order variants ("kanban progress status current task") and
-    queries with extra tokens between cues ("Kanban task t_12345678 status"
-    — the ID slot blocks `\\btask\\s+status\\b` from spanning) by tokenizing
-    the normalized prompt and looking for a kanban+intent or context+multi-
-    intent cluster. Two-hit rule, chosen to avoid over-firing on definition/
-    setup queries (e.g. "kanban setup instructions" → no intent → False).
-    """
-    tokens = set(_LIVE_STATE_TOKEN_RE.findall((text or "").lower()))
-    if not tokens:
-        return False
-    if "kanban" in tokens and tokens & _LIVE_STATE_KANBAN_INTENT_TOKENS:
-        return True
-    return bool(
-        tokens & _LIVE_STATE_NON_KANBAN_CONTEXT_TOKENS
-        and len(tokens & _LIVE_STATE_NON_KANBAN_INTENT_TOKENS) >= 2
-    )
-
-
-def _is_live_state_query(q: str) -> bool:
-    """True for prompts asking about current status/progress/task state.
-
-    Recall memory is stale by design for these questions; callers should use
-    live tools (Kanban/Calendar/Reminders/process state) instead of treating
-    old memories as current truth.
-
-    Returns False when the prompt has an explicit historical/completed lookup
-    intent (history, last week, 지난주, 기록, …) — those queries WANT to
-    search memory, so don't short-circuit them even if a live-state pattern
-    would otherwise match (e.g. "history of kanban task status from last week"
-    or "지난주 칸반 완료 태스크 기록").
-
-    Detection order: historical override → strict regex patterns → token-
-    cluster fallback. Slashes/underscores are normalized to spaces first so
-    "current/status/Kanban/progress" matches the same `\\s+`-delimited
-    patterns as the whitespace form.
-    """
-    text = (q or "").strip()
-    if not text:
-        return False
-    normalized = _LIVE_STATE_SEPARATOR_RE.sub(" ", text)
-    if any(re.search(pattern, normalized, flags=re.IGNORECASE) for pattern in _HISTORICAL_QUERY_PATTERNS):
-        return False
-    if any(re.search(pattern, normalized, flags=re.IGNORECASE) for pattern in _LIVE_STATE_QUERY_PATTERNS):
-        return True
-    return _looks_like_live_state_token_cluster(normalized)
-
-
-def _is_summary_excluded_query(q: str) -> bool:
-    """True when the prompt explicitly excludes generic summary blobs.
-
-    Matches cues like "summary 말고", "요약 빼고", "not the summary",
-    "without weekly summary" so generic Summary/session-distilled rows are
-    penalized unconditionally for the request — not only when a non-summary
-    topical candidate happens to land in the fused window.
-    """
-    text = (q or "").strip()
-    if not text:
-        return False
-    return any(re.search(p, text, flags=re.IGNORECASE) for p in _SUMMARY_EXCLUSION_PATTERNS)
-
-
-def _is_positive_summary_intent_query(q: str) -> bool:
-    """True when the prompt explicitly asks for summaries/recaps/요약.
-
-    Generic Summary/session-distilled rows are the rows the user wants for
-    these queries, so `_apply_recall_governance_inplace` must skip the
-    generic_summary_penalty branch. Explicit exclusion ("summary 말고",
-    "not the summary") always wins — those prompts are not positive intent
-    even though they mention summary/요약.
-    """
-    text = (q or "").strip()
-    if not text:
-        return False
-    if _is_summary_excluded_query(text):
-        return False
-    return any(re.search(p, text, flags=re.IGNORECASE) for p in _POSITIVE_SUMMARY_INTENT_PATTERNS)
-
-
-def _tokenize_recall_text(text: str) -> set[str]:
-    return {tok for tok in re.findall(r"[a-z0-9가-힣]+", (text or "").lower()) if len(tok) > 1}
-
-
-def _result_metadata(result: dict) -> dict[str, Any]:
-    meta = result.get("metadata")
-    return meta if isinstance(meta, dict) else {}
-
-
-def _result_category(result: dict) -> str:
-    meta = _result_metadata(result)
-    value = meta.get("category") or meta.get("type") or result.get("category") or result.get("type") or ""
-    return str(value).lower()
-
-
-def _is_generic_summary_result(result: dict) -> bool:
-    meta = _result_metadata(result)
-    title = str(result.get("title") or meta.get("title") or "").strip().lower()
-    haystack = " ".join(
-        str(part or "")
-        for part in (
-            result.get("title"),
-            result.get("path"),
-            result.get("type"),
-            result.get("source_type"),
-            meta.get("title"),
-            meta.get("path"),
-            meta.get("type"),
-            meta.get("source_type"),
-            meta.get("source_path"),
-            meta.get("source_name"),
-            meta.get("document_title"),
-        )
-    ).lower()
-    return (
-        title in {"summary", "brain summary", "session summary"}
-        or any(marker in haystack for marker in _GENERIC_SUMMARY_MARKERS)
-        or bool(re.search(r"\bw\d{1,2}\b", haystack))
-    )
-
-
 def _query_is_specific(query_tokens: set[str]) -> bool:
     broad = {"recommendation", "preference", "decision", "status", "progress", "task", "work"}
     return len(query_tokens - broad) >= 2
@@ -1497,26 +1527,6 @@ def _has_budget_local_cloud_domain_overlap(query_tokens: set[str], result_tokens
     return bool(query_domain_tokens & result_domain_tokens)
 
 
-def _result_text(result: dict) -> str:
-    meta = _result_metadata(result)
-    return " ".join(
-        str(part or "")
-        for part in (
-            result.get("title"),
-            result.get("path"),
-            result.get("content"),
-            meta.get("title"),
-            meta.get("path"),
-            meta.get("id"),
-            meta.get("source_path"),
-            meta.get("source_name"),
-            meta.get("document_title"),
-            meta.get("document_section"),
-            meta.get("document_type"),
-        )
-    )
-
-
 def _is_calendar_tooling_query(query_tokens: set[str]) -> bool:
     has_calendar = bool(query_tokens & {"calendar", "reminder", "reminders", "schedule", "event", "class"})
     has_reminders = bool(query_tokens & {"reminder", "reminders"})
@@ -1524,7 +1534,13 @@ def _is_calendar_tooling_query(query_tokens: set[str]) -> bool:
         query_tokens & {"tool", "tooling", "tools", "도구", "manage", "관리", "추천", "preference"}
     ) or any(tok.startswith("도구") or tok.startswith("관리") for tok in query_tokens)
     names_apple_calendar_reminders = "apple" in query_tokens and "calendar" in query_tokens and has_reminders
-    return has_calendar and (asks_tool or names_apple_calendar_reminders)
+    # Naming BOTH calendar AND reminders (the two distinct PIM domains) is itself a
+    # tooling-preference signal even without an explicit tool/도구 word or the
+    # "apple" brand — "what should I remember about Chris using Calendar and
+    # Reminders?" is asking which tools/flow he uses. Generic structural cue
+    # (two co-named PIM nouns), not a probe string.
+    names_calendar_and_reminders = "calendar" in query_tokens and has_reminders
+    return has_calendar and (asks_tool or names_apple_calendar_reminders or names_calendar_and_reminders)
 
 
 def _is_openclaw_calendar_skill_inventory_result(result: dict, text: str) -> bool:
@@ -1664,22 +1680,22 @@ def _is_broad_tool_recommendation_query(query_tokens: set[str]) -> bool:
     return has_recommendation and has_chris_context and len(domain_tokens) <= 2
 
 
-def _is_distilled_brain_analysis_result(result: dict, text: str) -> bool:
-    meta = _result_metadata(result)
-    lower = text.lower()
-    meta_text = " ".join(
-        str(meta.get(key) or "") for key in ("id", "subtype", "source_path", "source_name", "document_type")
-    ).lower()
-    title = str(result.get("title") or meta.get("document_title") or "").strip().lower()
-    collection = str(result.get("collection") or "").lower()
-    return (
-        str(meta.get("subtype") or "").lower() == "brain-analysis"
-        or "dist_brain_analysis" in lower
-        or '"subtype": "brain-analysis"' in lower
-        or "dist_brain_analysis" in meta_text
-        or "brain-analysis" in meta_text
-        or (collection in {"canonical", "distilled"} and title == "reasoning")
-    )
+# ── Generic source-quality contract (provenance-only, topic-agnostic) ─────
+# The recall corpus mixes direct durable truth (semantic memories, accepted
+# canonical facts/preferences/decisions) with derived/secondary formats
+# (summaries, reflections, session/weekly digests, procedure/voyager logs,
+# distilled brain-analysis meta). For any query that is not explicitly asking
+# for a summary, the former should outrank the latter. These two classifiers
+# express that contract from PROVENANCE signals (collection / category /
+# review_state / doc format) — never topic markers — so one rule serves every
+# recall class instead of a per-probe boost/penalty pair.
+
+
+# Episodic event/coding-session capture shapes. Agent-session logs and raw
+# coding-events record *what happened in a session*, not durable truth, so they
+# are low-authority for any non-summary recall — the same provenance contract as
+# summaries/reflections. Lesson/root-cause scaffolds ("## Why this matters") are
+# deliberately NOT listed: those carry durable learnings worth surfacing.
 
 
 def _has_direct_tool_candidate_marker(result: dict, text: str) -> bool:
@@ -1987,17 +2003,6 @@ def _is_stale_generic_quality_result(result: dict, q: str) -> bool:
 
 
 _GENERIC_RECIPE_QUERY_TOKENS = {"recipe", "tomato", "pasta", "sauce", "cook", "cooking", "make", "steps"}
-_PERSONAL_MEMORY_TOKENS = {
-    "brain",
-    "chris",
-    "memory",
-    "preference",
-    "preferences",
-    "remember",
-    "브레인",
-    "기억",
-    "선호",
-}
 _RECIPE_RESULT_TOKENS = {
     "recipe",
     "tomato",
@@ -2022,6 +2027,18 @@ def _is_recipe_result(result: dict) -> bool:
     return bool(_tokenize_recall_text(_result_text(result)) & _RECIPE_RESULT_TOKENS)
 
 
+# ── Generic out-of-domain (world-knowledge) gate ─────────────────────────
+# The personal-memory corpus is about Chris's world (his preferences, tools,
+# systems, work). A prompt with NO anchor into that world whose only content is
+# an external topic (after stripping generic ask/procedure scaffolding) is a
+# world-knowledge request the corpus cannot answer — recipes, general how-tos,
+# trivia. This generalizes the English-only recipe gate to any such prompt in
+# any language; the recipe case is just one instance.
+# Domain anchors: personal-memory tokens plus first-person/tooling/work
+# vocabulary. A query touching any of these is about Chris's world, not generic
+# world-knowledge. Class-level vocabulary, not probe strings.
+
+
 def _quality_rank_tuple(result: dict) -> tuple[float, float]:
     collection = str(result.get("collection") or "").lower()
     category = _result_category(result)
@@ -2041,6 +2058,42 @@ def _quality_rank_tuple(result: dict) -> tuple[float, float]:
     return durable, score
 
 
+# Raw conversation / session-turn capture shape: a row whose text is a dialogue
+# transcript (role-prefixed 'User:'/'Assistant:' turns). These are ingested
+# session turns (and validation transcripts that merely QUOTE a probe), not
+# curated answer atoms. Format/provenance signal, not a topic marker — mirror of
+# the Hermes provider's same-named gate so both surfaces agree.
+_CONVERSATION_TURN_RE = re.compile(r"(?im)(?:^|\n)\s*(?:user|assistant|human|유저|사용자|어시스턴트)\s*:")
+
+
+def _is_conversation_transcript_row(result: dict) -> bool:
+    hay = "\n".join(str(result.get(k) or "") for k in ("title", "content"))
+    if _CONVERSATION_TURN_RE.search(hay):
+        return True
+    low = hay.lower()
+    return "user:" in low and "assistant:" in low
+
+
+def _is_pure_personal_factoid_probe(q: str) -> bool:
+    """A PURE personal-fact probe: names a personal subject (Chris/my/user) with
+    distinctive attribute terms, carries NO tool/media/runtime domain noun, no
+    matched route guarantee, and is not an explicit summary request.
+
+    For this class the strict factoid contract applies (literal-answer boost,
+    transcript demotion, whole-word overlap gate); tooling/cost/route prompts are
+    excluded — their answers use synonym-rich vocabulary. Mirrors the Hermes
+    provider's apply_factoid_gate scoping so both surfaces share ONE factoid-probe
+    contract. Shared analyzer class (EN+KO), never a probe string.
+    """
+    if not _query_analyzer.personal_factoid_query_terms(q):
+        return False
+    if _is_positive_summary_intent_query(q):
+        return False
+    if _tokenize_recall_text(_augment_query_for_recall(q)) & _FACTOID_GATE_OFF_DOMAIN_TOKENS:
+        return False
+    return not _match_route_guarantees(q)
+
+
 def _apply_retrieval_quality_filter(q: str, fused: list[dict]) -> list[dict]:
     """Post-rank quality pass shared by raw recall and other Brain tool paths.
 
@@ -2051,9 +2104,34 @@ def _apply_retrieval_quality_filter(q: str, fused: list[dict]) -> list[dict]:
         return fused
     summary_excluded = _is_summary_excluded_query(q)
     generic_recipe_query = _is_generic_recipe_query(q)
+    # Genuine out-of-domain world-knowledge prompt: an anchorless recipe / generic
+    # how-to with NO matched durable route. A named-runtime/tool/cost topic the OOD
+    # classifier flags only because it pairs two anchors (OpenClaw + Hermes) carries
+    # a matched route guarantee and is exempted, keeping its distinction rows.
+    out_of_domain_query = _is_out_of_domain_world_knowledge_query(q) and not _match_route_guarantees(q)
+    # Personal-attribute identity/attribute guard: a self/possessive attribute
+    # query ("what is my address?", "when is Chris's birthday?", "내 주소가 뭐야?",
+    # "what is Ellie's phone number?") targets ONE identity's ONE attribute. Keep
+    # ONLY a row that states the SAME subject's SAME attribute; a different
+    # identity's value, a different attribute of the same identity, or an unrelated
+    # row is identity/attribute contamination. A legitimate explicit third-person
+    # query keeps its matching row; birthday is one instance of this class. Shared
+    # analyzer class (EN+KO), never a hardcoded name list or probe string.
+    personal_attribute_query = _query_analyzer.personal_attribute_query_binding(q) is not None
+    # Scope the strict whole-word factoid overlap drop to PURE personal-fact
+    # probes (see _is_pure_personal_factoid_probe): a tooling/cost/route prompt is
+    # answered with DIFFERENT vocabulary than its literal terms ("Apple Calendar"
+    # for "Calendar and Reminders"), and Korean prompts glue particles onto the
+    # nouns (리마인더는/일정이랑) that no atom carries — so the literal-overlap gate
+    # would wrongly EMPTY those. Genuine factoid probes (teacher/OMSCS …) keep it.
+    pure_personal_factoid_probe = _is_pure_personal_factoid_probe(q)
     openclaw_hermes_distinction_query = _is_openclaw_hermes_distinction_query(
         _tokenize_recall_text(_augment_query_for_recall(q))
     )
+    # Only keep stale per-agent OpenClaw workspace instruction docs (AGENTS.md/
+    # TOOLS.md) when the query is actually about OpenClaw/the agents; otherwise
+    # they inject migration-era instructions over current durable truth.
+    openclaw_targeted_query = bool(_tokenize_recall_text(q) & _OPENCLAW_QUERY_TOKENS)
     candidates = []
     for result in fused:
         if not isinstance(result, dict):
@@ -2061,9 +2139,31 @@ def _apply_retrieval_quality_filter(q: str, fused: list[dict]) -> list[dict]:
         result_text = _result_text(result)
         if _is_stale_generic_quality_result(result, q):
             continue
+        if (
+            personal_attribute_query
+            and _query_analyzer.personal_attribute_result_matches_query(q, result_text) is False
+        ):
+            continue
+        if (
+            pure_personal_factoid_probe
+            and _query_analyzer.personal_factoid_result_has_strong_attribute_overlap(q, result_text) is False
+        ):
+            continue
+        if not openclaw_targeted_query and _is_openclaw_workspace_instruction_result(result):
+            continue
         if summary_excluded and _is_generic_summary_result(result):
             continue
         if generic_recipe_query and not _is_recipe_result(result):
+            continue
+        # Out-of-domain world-knowledge prompt: the personal corpus is not the
+        # right source even when it happens to hold an EXACT recipe/procedure/graph
+        # memory (a stored "tomato_pasta_sauce_recipe" procedure, a "tomato pasta
+        # recipe" graph concept) — the model answers world-knowledge from its own
+        # knowledge, and surfacing those rows is off-domain leakage. Drop EVERY row
+        # so the set is empty. In-domain prompts are never classified OOD here (they
+        # carry a world-knowledge anchor or a matched route), so this only empties
+        # genuine world-knowledge asks.
+        if out_of_domain_query:
             continue
         if openclaw_hermes_distinction_query and _is_openclaw_hermes_distinction_noise_result(
             result, result_text
@@ -2116,6 +2216,8 @@ def _apply_recall_governance_inplace(q: str, fused: list[dict]) -> None:
     codex_hermes_tui_query = _is_codex_hermes_tui_query(query_tokens)
     summary_excluded = _is_summary_excluded_query(q)
     positive_summary_intent = _is_positive_summary_intent_query(q)
+    personal_attribute_binding = _query_analyzer.personal_attribute_query_binding(q)
+    pure_personal_factoid_probe = _is_pure_personal_factoid_probe(q)
 
     for result in fused:
         if not isinstance(result, dict):
@@ -2158,6 +2260,18 @@ def _apply_recall_governance_inplace(q: str, fused: list[dict]) -> None:
         ):
             delta += 80.0
             reasons.append("budget_local_cloud_constraint")
+            if category in _TRUTH_CATEGORIES:
+                # A specifically paid-API/local-hosting prompt is answered by the
+                # STATED durable cost preference/decision (existing subscriptions,
+                # no new paid API, no local hosting), not by a generic procedural
+                # heuristic that merely shares the "recommending a new tool"
+                # framing. Lift the stated cost-constraint TRUTH row decisively so
+                # an IF-THEN "how to recommend a tool" extraction — which earns the
+                # generic durable-truth prior on its strong lexical match — cannot
+                # preempt it. Class-level (truth category + budget-constraint
+                # result + budget query), never a probe string.
+                delta += 45.0
+                reasons.append("budget_constraint_truth_priority")
 
         if (
             budget_local_cloud_query
@@ -2185,11 +2299,73 @@ def _apply_recall_governance_inplace(q: str, fused: list[dict]) -> None:
             delta -= 180.0
             reasons.append("live_state_snapshot_penalty")
 
+        low_authority = _is_low_authority_result(result, result_text)
+
+        # Generic source-quality prior (provenance-based, topic-agnostic): direct
+        # durable truth outranks derived summary/reflection/session/procedure/
+        # voyager/meta rows for any query not explicitly asking for a summary.
+        # One contract serves every recall class; the per-intent branches below
+        # remain as sharper, topic-specific reinforcements.
+        if not positive_summary_intent:
+            if _is_durable_truth_result(result):
+                delta += 30.0
+                reasons.append("durable_truth_priority")
+            elif low_authority:
+                delta -= 45.0
+                reasons.append("low_authority_source_penalty")
+
+        if (
+            personal_attribute_binding is not None
+            and _query_analyzer.personal_attribute_result_matches_query(q, result_text) is True
+            and not _is_generic_summary_result(result)
+            and not _is_source_or_test_file_result(result)
+        ):
+            # Scoped owner+attribute queries ("what is my address", "Chris birthday",
+            # "내 주소가 뭐야") need the direct matching row to reach the served
+            # window before the identity/attribute guard runs. Otherwise a short,
+            # exact personal fact can be crowded out by high-scoring unrelated rows
+            # and the guard sees only noise, producing a false zero-result response.
+            # This is generic: same shared analyzer binding as the guard, excluding
+            # summary/source-file quotation noise, with no probe/value/name-specific
+            # logic. The boost intentionally applies to direct personal/raw-event
+            # rows as well as canonical semantic truth because personal-collection
+            # facts can be typed as notes/messages rather than truth categories.
+            delta += 240.0
+            reasons.append("personal_attribute_match_priority")
+
+        if pure_personal_factoid_probe:
+            # Pure personal-fact probe ("What should I remember about Chris OMSCS
+            # Fall 2026?"): the durable answer atom often lives in a low-authority
+            # raw_events hot-path row that earns no canonical/truth boost, so a
+            # generic canonical summary / graph-entity stub / session log that
+            # merely mentions the subject crowds it out. Boost a row that states
+            # the requested distinctive attribute terms as WHOLE words (the literal
+            # answer), and demote a conversation/session transcript that only QUOTES
+            # them — mirror of the provider's answer-only personal-fact contract.
+            # Shared analyzer overlap (EN+KO), provenance-neutral, no probe string.
+            if _is_conversation_transcript_row(result):
+                delta -= 200.0
+                reasons.append("personal_factoid_transcript_penalty")
+            elif (
+                _query_analyzer.personal_factoid_result_has_strong_attribute_overlap(q, result_text) is True
+                and not _is_generic_summary_result(result)
+                and not _is_source_or_test_file_result(result)
+                # A graph-entity node ("Entity: omscs fall 2026 (concept)") restates
+                # the query terms as a concept stub, not a durable answer — exclude
+                # it so the answer-bearing memory atom, not the stub, leads.
+                and collection != "graph"
+            ):
+                delta += 120.0
+                reasons.append("personal_factoid_answer_priority")
+
         if openclaw_hermes_distinction_query:
             openclaw_setup_noise = _is_openclaw_setup_noise_result(result, result_text)
             openclaw_handoff_noise = _is_openclaw_hermes_handoff_noise_result(result, result_text)
+            # Only direct durable rows earn the distinction boost; derived
+            # summary/reflection/brain-analysis rows are handled generically by
+            # the source-quality prior below (no probe-specific exclusion list).
             if _is_openclaw_hermes_distinction_result(all_tokens, result_text) and not (
-                openclaw_setup_noise or openclaw_handoff_noise or live_state_snapshot
+                openclaw_setup_noise or openclaw_handoff_noise or live_state_snapshot or low_authority
             ):
                 delta += 140.0
                 reasons.append("openclaw_hermes_distinction")
@@ -3006,6 +3182,8 @@ def recall_v2(
     )
     openclaw_hermes_distinction_query = _is_openclaw_hermes_distinction_query(query_tokens_for_governance)
     codex_hermes_tui_query = _is_codex_hermes_tui_query(query_tokens_for_governance)
+    personal_attribute_query = _query_analyzer.personal_attribute_query_binding(q) is not None
+    pure_personal_factoid_probe = _is_pure_personal_factoid_probe(q)
 
     start_dt, end_dt = temporal.parse_range(since, until)
     # ChromaDB 1.4.1 rejects string operands in $gte/$lt; filter Python-side instead.
@@ -3024,6 +3202,8 @@ def recall_v2(
         or codex_hermes_tui_query
         or _is_budget_local_cloud_query(query_tokens_for_governance)
         or _is_broad_tool_recommendation_query(query_tokens_for_governance)
+        or personal_attribute_query
+        or pure_personal_factoid_probe
     )
     if governance_sensitive_query:
         inner_floor = (
@@ -3053,6 +3233,23 @@ def recall_v2(
         preference_variant = f"{q} Apple Calendar Reminders 도구 흐름 선호"
         if preference_variant not in variants:
             variants.append(preference_variant)
+
+    if pure_personal_factoid_probe:
+        # The natural-language scaffolding ("What should I remember about …")
+        # makes the raw_events FTS literal-AND match miss a durable hot-path atom
+        # that carries ONLY the distinctive terms. Add a focused variant of just
+        # the distinctive ASCII tokens (acronyms/years/proper nouns survive
+        # cross-language — "OMSCS 2026" for both the EN and KO prompt) so FTS can
+        # AND-match the fact. Generic: terms come from the shared factoid analyzer,
+        # never a probe string. Skipped when the prompt has no ASCII anchor (a
+        # pure-Hangul fact probe), leaving its negative behavior unchanged.
+        factoid_terms = _query_analyzer.personal_factoid_query_terms(q)
+        ascii_focus = list(
+            dict.fromkeys(w for w in re.findall(r"[A-Za-z0-9]+", q) if w.lower() in factoid_terms)
+        )
+        focused_variant = " ".join(ascii_focus)
+        if focused_variant and focused_variant not in variants:
+            variants.append(focused_variant)
 
     if terminal_telegram_authorization_query:
         # Deterministic rescue variant for natural-language authorization
@@ -3086,7 +3283,7 @@ def recall_v2(
 
     _sources = ["canonical"] if canonical_first else ["rag", "canonical", "obsidian"]
 
-    def _run_variant(v_query):
+    def _run_variant(v_query, *, override_collections: list[str] | None = None):
         return search_unified.search_all(
             v_query,
             inner_search_n,
@@ -3094,7 +3291,7 @@ def recall_v2(
             domain=domain,
             original_query=q,
             where=where,
-            collections=collections_arg,
+            collections=override_collections if override_collections is not None else collections_arg,
             entity=entity,
             explain=False,
             source_type=source_type,
@@ -3121,6 +3318,18 @@ def recall_v2(
                     all_payloads.append(fut.result())
                 except Exception:
                     continue
+
+    if personal_attribute_query and collections_arg is None and not canonical_first:
+        # Scoped owner+attribute lookups are personal-memory lookups even when the
+        # caller does not pass collection=personal. The generic all-source path can
+        # under-serve terse attribute prompts because vector/rerank candidates from
+        # obsidian/experience crowd out the personal collection before the
+        # identity/attribute guard runs. Add one scoped personal-collection payload
+        # (same query, same filters) so direct personal notes/messages enter the
+        # normal RRF/governance/filter pipeline instead of special-casing answers.
+        with contextlib.suppress(Exception):
+            all_payloads.append(_run_variant(search_query, override_collections=["personal"]))
+
     timing["search_ms"] = int((time.time() - t_search) * 1000)
     # See _merge_source_timing for the per-source timing aggregation contract
     # (max across variants since sources run in parallel inside each search_all).
@@ -3196,6 +3405,8 @@ def recall_v2(
     _apply_primary_doc_boost_inplace(fused)
     fused = _sort_and_diversify(fused, top_window=n * 2)
     fused = _apply_retrieval_quality_filter(q, fused)
+    _inject_route_guarantee_results(q, fused)
+    _inject_personal_factoid_answer(q, fused)
     fused = _sort_and_diversify(fused, top_window=n)
 
     # Phase G3: opt-in graph-constraint exclusion. See

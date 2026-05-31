@@ -92,6 +92,16 @@ try:
 except ImportError:
     _record_judgment_feedback = None  # type: ignore[assignment]
 
+# Shared recall-governance layer (leaf package — safe eager import, no cycle).
+# active_recall is a CONSUMER of the same query-intent / source-authority /
+# route-guarantee contract used by /recall/v2 and Hermes provider prefetch, so
+# passing one surface implies passing the others.
+from recall_governance import normalization as _govern_norm
+from recall_governance import route_guarantees as _govern_routes
+from recall_governance import source_authority as _govern_authority
+from recall_governance.query_analyzer import is_live_state_query as _govern_is_live_state_query
+from recall_governance.route_guarantees import RouteGuarantee
+
 log = logging.getLogger("brain.active_recall")
 
 _CONFIG_INTENT_ROUTES_PATH = BRAIN_CORE_DIR / "intent_routes.yaml"
@@ -273,7 +283,10 @@ def _english_keyword_matches(keyword: str, lowered_prompt: str) -> bool:
     if not kw:
         return False
     escaped = re.escape(kw).replace(r"\ ", r"\s+")
-    return re.search(rf"(?<![a-z0-9]){escaped}(?![a-z0-9])", lowered_prompt) is not None
+    pattern = re.compile(rf"(?<![a-z0-9]){escaped}(?![a-z0-9])")
+    # A keyword inside an explicit negation ("not about codex") is not positive
+    # route evidence — require at least one non-negated occurrence.
+    return _govern_norm.has_unnegated_match(pattern, lowered_prompt)
 
 
 def _route_keyword_matches(keyword: str, *, prompt: str, lowered_prompt: str) -> bool:
@@ -282,7 +295,15 @@ def _route_keyword_matches(keyword: str, *, prompt: str, lowered_prompt: str) ->
         return False
     if kw.isascii():
         return _english_keyword_matches(kw, lowered_prompt)
-    return kw in prompt
+    # non-ASCII (Korean): substring match, skipping explicitly negated
+    # occurrences ("코덱스 말고", "코덱스 아니라") — Korean negates after the noun.
+    low_kw = kw.lower()
+    idx = lowered_prompt.find(low_kw)
+    while idx != -1:
+        if not _govern_norm.occurrence_is_negated(lowered_prompt, idx, idx + len(low_kw)):
+            return True
+        idx = lowered_prompt.find(low_kw, idx + 1)
+    return False
 
 
 def _intent_blocked_by_context(intent_name: str, lowered_prompt: str) -> bool:
@@ -498,6 +519,226 @@ def _canonical_blocks_from_matches(
     return blocks
 
 
+def _is_declarative_route_guarantee(text: str) -> bool:
+    """Delegate to the shared declarative-guarantee shape test (length + subject
+    + policy cue). Thin wrapper so existing call sites and tests keep working
+    while the implementation lives once in recall_governance.route_guarantees."""
+    return _govern_routes.is_declarative_route_guarantee(text)
+
+
+def _route_hint_blocks_from_matches(
+    matches: list[IntentMatch],
+    seen_hashes: set[str],
+) -> list[InjectionBlock]:
+    """Curated route guarantees for high-priority matched intents.
+
+    ``always_push_queries`` are maintained as canonical intent guarantees. When
+    retrieval is empty or under-served (see ``_matched_route_underserved``),
+    surface the curated statement itself rather than producing zero/low-quality
+    context. Only emit entries that are declarative policy/preference statements
+    (``_is_declarative_route_guarantee``); bare keyword search probes like
+    ``design standard`` are NOT valid standalone memory blocks.
+    """
+    blocks: list[InjectionBlock] = []
+    hashes_this_call: set[str] = set()
+    for match in matches:
+        if match.priority not in {"critical", "high"}:
+            continue
+        for query in match.always_push_queries:
+            if not _is_declarative_route_guarantee(query):
+                continue
+            h = _hash(f"canonical_route_hint:{match.intent}:{query}")
+            if h in seen_hashes or h in hashes_this_call:
+                continue
+            hashes_this_call.add(h)
+            blocks.append(
+                InjectionBlock(
+                    id=h,
+                    title=f"{match.intent} route guarantee",
+                    content=query[: match.max_tokens * 4],
+                    source="canonical_route_hint",
+                    score=0.95,
+                    priority=match.priority,
+                )
+            )
+    return blocks
+
+
+def _guarantee_already_served(guarantee: RouteGuarantee, existing_blocks: list[InjectionBlock]) -> bool:
+    """True when a high-authority retrieved/hint block already carries this
+    durable guarantee fact (so we don't duplicate it). Near-duplicate guard:
+    a non-low-authority block sharing a strong majority (>=60%, floor 3) of the
+    guarantee's distinctive tokens is treated as serving it. Generic provenance +
+    vocabulary overlap, never per-intent — so a stale OpenClaw setup doc (only a
+    few generic shared tokens) does NOT suppress the distinction fact."""
+    gtokens = _govern_routes.guarantee_tokens(guarantee)
+    if not gtokens:
+        return False
+    need = max(3, int(0.6 * len(gtokens)))
+    for block in existing_blocks:
+        if _is_low_authority_block(block):
+            continue
+        block_text = f"{block.title or ''} {block.content or ''}".lower()
+        block_tokens = {t for t in re.findall(r"[a-z0-9]+|[가-힣]+", block_text) if len(t) > 1}
+        if len(gtokens & block_tokens) >= need:
+            return True
+    return False
+
+
+def _route_guarantee_blocks(
+    prompt: str,
+    existing_blocks: list[InjectionBlock],
+    seen_hashes: set[str],
+) -> list[InjectionBlock]:
+    """Curated durable route-guarantee facts from the shared layer for routes the
+    prompt matches but no retrieved block already states. Fail-open: any
+    guarantee-load/match error returns no blocks rather than breaking injection."""
+    try:
+        guarantees = _govern_routes.match_route_guarantees(prompt)
+    except Exception:
+        return []
+    if not guarantees:
+        return []
+    blocks: list[InjectionBlock] = []
+    existing_ids = {b.id for b in existing_blocks}
+    emitted: set[str] = set()
+    for g in guarantees:
+        # guarantee_facts from route_guarantees.yaml are curated declarative
+        # durable facts by construction — no probe-vs-fact shape gate needed
+        # (that gate is only for the overloaded always_push_queries path).
+        if _guarantee_already_served(g, existing_blocks):
+            continue
+        h = _hash(f"route_guarantee:{g.id}")
+        if h in seen_hashes or h in existing_ids or h in emitted:
+            continue
+        emitted.add(h)
+        blocks.append(
+            InjectionBlock(
+                id=h,
+                title=f"{g.route} route guarantee",
+                content=g.text,
+                source="route_guarantee",
+                score=0.95,
+                # Critical: a matched, not-already-served durable route fact is
+                # the server's first-class direct_current_truth for that route.
+                # _enforce_budget sorts by (priority, score), so a "high" block
+                # sinks below higher-scoring off-route semantic hits and drops
+                # out of the top window. Critical keeps the durable fact in the
+                # top blocks — the active-recall analogue of /recall/v2 force-
+                # ranking the synthetic guarantee result above retrieval.
+                priority="critical",
+            )
+        )
+    return blocks
+
+
+def _is_low_authority_block(block: InjectionBlock) -> bool:
+    """Delegate to the shared block-level source-authority classifier
+    (provenance via title/source/path). One contract for every surface."""
+    return _govern_authority.is_low_authority_block(block)
+
+
+# Generic route-relevance stopwords: function words plus subject/ownership and
+# policy/modal cue words that carry no route TOPIC. Stripping them leaves only
+# the distinctive topical vocabulary a route is about (codex/hermes/tmux/tui/
+# quality/steering for codex_workflow, etc.), so "serving the route" can be
+# tested by shared distinctive vocabulary rather than mere high cosine.
+_ROUTE_RELEVANCE_STOPWORDS = {
+    "chris",
+    "user",
+    "users",
+    "team",
+    "팀",
+    "사용자",
+    "prefer",
+    "prefers",
+    "preferred",
+    "preference",
+    "using",
+    "use",
+    "used",
+    "want",
+    "wants",
+    "should",
+    "must",
+    "when",
+    "only",
+    "for",
+    "the",
+    "as",
+    "is",
+    "are",
+    "to",
+    "of",
+    "and",
+    "or",
+    "with",
+    "matters",
+    "his",
+    "her",
+    "that",
+    "this",
+    "in",
+    "on",
+    "by",
+    "via",
+    "like",
+    "than",
+    "into",
+    "from",
+    "선호",
+    "필수",
+}
+
+
+def _route_relevance_tokens(match: IntentMatch) -> set[str]:
+    """Distinctive topical tokens for a route: its intent name plus its
+    always_push_query vocabulary, minus generic function/subject/policy words.
+    Class-level (derived from the route's own curated text), not a hardcoded
+    per-intent marker list."""
+    text = " ".join([match.intent.replace("_", " "), *match.always_push_queries])
+    toks = {t for t in re.findall(r"[a-z0-9]+|[가-힣]+", text.lower()) if len(t) > 1}
+    return toks - _ROUTE_RELEVANCE_STOPWORDS
+
+
+def _block_serves_route(block: InjectionBlock, match: IntentMatch) -> bool:
+    """True only when a high/critical block carries route-RELEVANT durable
+    evidence for ``match``. A high-cosine but off-route canonical/semantic row
+    (e.g. a self-model or operating-model page) must NOT count as serving a
+    route just by being high-priority — it has to share the route's distinctive
+    topical vocabulary. Generic: priority + provenance + score + route
+    relevance, independent of any specific intent."""
+    if block.priority not in {"critical", "high"}:
+        return False
+    if _is_low_authority_block(block):
+        return False
+    source = block.source or ""
+    strong_source = (
+        source.startswith("canonical")
+        or source.startswith("semantic")
+        or source.startswith("doorbell")
+        or block.score >= 0.6
+    )
+    if not strong_source:
+        return False
+    route_tokens = _route_relevance_tokens(match)
+    if not route_tokens:
+        return True  # route has no distinctive vocabulary to discriminate on
+    block_text = f"{block.title or ''} {block.content or ''}".lower()
+    block_tokens = {t for t in re.findall(r"[a-z0-9]+|[가-힣]+", block_text) if len(t) > 1}
+    return len(route_tokens & block_tokens) >= 2
+
+
+def _matched_route_underserved(all_blocks: list[InjectionBlock], match: IntentMatch) -> bool:
+    """True when a single high/critical route has no block carrying
+    route-relevant durable evidence — retrieval was empty or returned only
+    off-route/low-authority/weak rows. Generic (priority + provenance + score +
+    route relevance), independent of any specific intent."""
+    if match.priority not in {"critical", "high"}:
+        return False
+    return not any(_block_serves_route(b, match) for b in all_blocks)
+
+
 # ── Semantic layer via search_all ─────────────────────────────────
 
 
@@ -658,7 +899,7 @@ def _semantic_blocks(
 
 
 def _is_generic_summary_title(title: str) -> bool:
-    return bool(re.match(r"(?i)^\s*summary(?:\s*\(part\s*\d+\))?\s*$", title or ""))
+    return _govern_authority.is_generic_summary_title(title)
 
 
 def _semantic_queries_for_prompt(prompt: str, matches: list[IntentMatch]) -> list[str]:
@@ -1671,6 +1912,25 @@ def _hash(s: str) -> str:
 
 from db import now_iso as _now_iso  # noqa: E402  — single-source UTC stamp helper
 
+
+def _is_live_state_prompt(prompt: str) -> bool:
+    """True when the prompt asks about present operational/live state
+    (current status, in-progress, done-right-now) in EN or KO.
+
+    Mirrors the /recall/v2 short-circuit so active prefetch skips semantic
+    search + injection for questions only live tools can answer. Uses the SAME
+    shared classifier (recall_governance.query_analyzer.is_live_state_query —
+    present-time deixis x progress/completion predicate, historical/durable
+    override first) that /recall/v2 uses, so durable preference and history
+    lookups stay searchable. Fail-open to False so a classifier hiccup never
+    suppresses normal injection.
+    """
+    try:
+        return bool(_govern_is_live_state_query(prompt))
+    except Exception:
+        return False
+
+
 # ── Public entry point ────────────────────────────────────────────
 
 
@@ -1690,6 +1950,21 @@ def build_injection(
     """
     t0 = time.time()
     try:
+        # Live/current-state short-circuit (mirror of the /recall/v2 gate):
+        # present-status / in-progress / done-right-now prompts (EN+KO) are
+        # answerable only by live tools, not stale memory. Skip route matching,
+        # semantic search, and proactive/doorbell injection entirely. Durable
+        # preference/history prompts are not classified live-state and fall
+        # through to normal injection below.
+        if _is_live_state_prompt(prompt):
+            return {
+                "blocks": [],
+                "intent": "live_state",
+                "total_tokens": 0,
+                "latency_ms": int((time.time() - t0) * 1000),
+                "new_since_last_turn": False,
+                "degraded": False,
+            }
         judgment = _classify_prompt(prompt, cwd=cwd) if _classify_prompt is not None else None
         memory_needed = bool(getattr(judgment, "needs_memory", True))
         allow_semantic = bool(getattr(judgment, "allow_semantic", True))
@@ -1720,11 +1995,33 @@ def build_injection(
         doorbell = _doorbell_blocks(session_id, prompt=prompt) if session_id else []
 
         all_blocks = canonical + doorbell + semantic + proactive
+        # Route guarantees participate per-route when that route is empty OR
+        # under-served: a high-priority matched route whose only blocks are
+        # off-route/low-authority/weak still needs its curated durable statement
+        # (generic relevance check, not per-intent). A route already served by a
+        # route-relevant durable block does not get its guarantee duplicated.
+        underserved = [m for m in matches if _matched_route_underserved(all_blocks, m)]
+        if underserved:
+            existing_ids = {b.id for b in all_blocks}
+            hint_blocks = [
+                b for b in _route_hint_blocks_from_matches(underserved, seen_set) if b.id not in existing_ids
+            ]
+            all_blocks = all_blocks + hint_blocks
         filtered = _apply_decay_filter(all_blocks, seen_registry, turn_idx)
         arbitration = None
         if _arbitrate_blocks is not None and judgment is not None:
             arbitration = _arbitrate_blocks(filtered, judgment)
             filtered = list(arbitration.blocks)
+        # First-class durable route guarantees (shared layer): OpenClaw-historical-
+        # vs-Hermes-current, Codex-through-Hermes TUI, cost/billing constraints.
+        # Injected AFTER decay + arbitration so a judgment that suppresses generic
+        # memory (e.g. a terse cost/billing recommendation that matched no
+        # canonical intent route) cannot drop the matched durable fact. Only
+        # injected when the prompt matches a guaranteed route and no surviving
+        # block already states it; seen-dedup preserved by the helper. Fail-open.
+        guarantee_blocks = _route_guarantee_blocks(prompt, filtered, seen_set)
+        if guarantee_blocks:
+            filtered = guarantee_blocks + filtered
 
         if (
             _confidence_sentinel_enabled()

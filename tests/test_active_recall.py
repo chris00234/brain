@@ -101,7 +101,7 @@ def test_brain_quality_prompt_does_not_inject_ops_runbook():
 
 def test_brain_recall_prefetch_quality_right_now_routes_to_quality_not_live_state():
     matches = active_recall._match_canonical_routes(
-        "How healthy is Brain recall and prefetch quality right now?"
+        "Right now, is Brain's recall and prefetch quality healthy or noisy?"
     )
     intents = [m.intent for m in matches]
 
@@ -727,6 +727,25 @@ def test_active_recall_korean_codex_prompt_uses_workflow_preference_variant(monk
     assert any(b.get("memory_id") == "codex-hermes-tmux-tui" for b in result["blocks"])
 
 
+def test_active_recall_korean_codex_prompt_falls_back_to_route_guarantee(monkeypatch):
+    monkeypatch.setitem(
+        sys.modules,
+        "search_unified",
+        types.SimpleNamespace(search_all=lambda *args, **kwargs: {"results": []}),
+    )
+
+    result = active_recall.build_injection(
+        prompt="복잡한 코딩 작업은 코덱스를 어떻게 쓰는 게 좋아?",
+        session_id="t-korean-codex-route-fallback",
+        turn_idx=0,
+        agent="codex",
+    )
+
+    assert result["blocks"]
+    assert result["blocks"][0]["source"] == "canonical_route_hint"
+    assert "interactive terminal-like tmux TUI" in result["blocks"][0]["content"]
+
+
 def test_active_recall_codex_workflow_ranks_current_preference_over_skill_sync(monkeypatch):
     def fake_search_all(query, *args, **kwargs):
         if "Chris prefers using Codex through Hermes" in query:
@@ -1009,3 +1028,513 @@ def test_update_seen_persists_to_session_context():
     assert "persist_test" in seen
     assert seen["persist_test"]["last_turn"] == 5
     assert seen["persist_test"]["priority"] == "critical"
+
+
+# ── Route-guarantee participation when under-served ──────────────────────
+# Generic: a high-priority matched route's curated guarantee should fire when
+# blocks are empty OR when the surviving blocks are low-authority/noisy and do
+# not actually serve the route — not only when all_blocks is empty.
+
+
+def test_active_recall_route_guarantee_fires_when_blocks_low_quality(monkeypatch):
+    """A high-priority intent (codex) whose only surviving semantic hit is a
+    low-authority session/reflection row is under-served — the route guarantee
+    must participate even though all_blocks is non-empty."""
+    session_row = {
+        "id": "sess-1",
+        "title": "Codex session log",
+        "content": (
+            "Codex through Hermes coding session log; tmux usage noted across the "
+            "run while steering quality on a complex task."
+        ),
+        "score": 92.0,
+        "collection": "rag",
+        "path": "/sessions/2026-05-10-codex.md",
+    }
+    monkeypatch.setitem(
+        sys.modules,
+        "search_unified",
+        types.SimpleNamespace(search_all=lambda *a, **k: {"results": [session_row]}),
+    )
+
+    result = active_recall.build_injection(
+        prompt="복잡한 코딩 작업은 코덱스를 어떻게 쓰는 게 좋아?",
+        session_id="t-route-underserved",
+        turn_idx=0,
+        agent="codex",
+    )
+
+    sources = [b["source"] for b in result["blocks"]]
+    assert "canonical_route_hint" in sources, f"expected route guarantee, got {sources}"
+    hint = next(b for b in result["blocks"] if b["source"] == "canonical_route_hint")
+    assert "interactive terminal-like tmux TUI" in hint["content"]
+
+
+def test_active_recall_route_guarantee_skipped_when_strong_block_present(monkeypatch):
+    """Negative control: when a strong, on-topic durable block already serves
+    the high-priority route, the route guarantee must NOT also fire."""
+    preference_row = {
+        "id": "codex-pref-1",
+        "title": "Codex workflow preference",
+        "content": (
+            "Chris prefers using Codex through Hermes as an interactive terminal-like "
+            "tmux TUI when quality or steering matters; headless codex exec is only "
+            "for bounded automation."
+        ),
+        "score": 95.0,
+        "collection": "semantic_memory",
+        "path": "/semantic/codex_pref.md",
+    }
+    monkeypatch.setitem(
+        sys.modules,
+        "search_unified",
+        types.SimpleNamespace(search_all=lambda *a, **k: {"results": [preference_row]}),
+    )
+
+    result = active_recall.build_injection(
+        prompt="복잡한 코딩 작업은 코덱스를 어떻게 쓰는 게 좋아?",
+        session_id="t-route-served",
+        turn_idx=0,
+        agent="codex",
+    )
+
+    sources = [b["source"] for b in result["blocks"]]
+    assert "canonical_route_hint" not in sources, f"should not duplicate guarantee, got {sources}"
+    assert any("tmux TUI" in b["content"] for b in result["blocks"])
+
+
+def test_is_declarative_route_guarantee_excludes_search_probes():
+    """Route guarantees must be declarative policy/preference statements, not
+    short keyword/search-probe fragments (generic shape test, not task-specific)."""
+    from active_recall import _is_declarative_route_guarantee
+
+    # Bare search probes -> not eligible as standalone guarantee blocks.
+    assert _is_declarative_route_guarantee("design standard") is False
+    assert _is_declarative_route_guarantee("openclaw agent configuration heartbeat") is False
+    assert _is_declarative_route_guarantee("image caption description") is False
+
+    # Declarative policy/preference statements -> eligible.
+    assert (
+        _is_declarative_route_guarantee(
+            "Chris wants OMX and Codex CLI orchestration from Hermes to use the same "
+            "terminal-like tmux pattern when quality matters"
+        )
+        is True
+    )
+    assert (
+        _is_declarative_route_guarantee(
+            "Chris prefers using Codex through Hermes as an interactive terminal-like "
+            "tmux TUI when quality or steering matters; headless codex exec is only for "
+            "bounded automation"
+        )
+        is True
+    )
+
+
+# ── Live-state short-circuit before active semantic injection ──────────────
+# /recall/v2 already short-circuits present-state / current-status /
+# done-right-now prompts via routes.recall._is_live_state_query. The active
+# prefetch path must MIRROR that: skip route matching + semantic search +
+# proactive/doorbell injection entirely, so stale memory is never searched for
+# questions only live tools can answer. Generic EN/KO classifier; durable
+# preference/history prompts must remain searchable.
+
+
+def _counting_search_unified():
+    """Fake search_unified whose search_all records how many times it ran."""
+    calls = {"n": 0}
+
+    def search_all(*args, **kwargs):
+        calls["n"] += 1
+        return {"results": []}
+
+    return calls, types.SimpleNamespace(search_all=search_all)
+
+
+def test_is_live_state_prompt_classifies_present_state_en_ko():
+    from active_recall import _is_live_state_prompt
+
+    for q in [
+        "Is Liz done with the Brain recall fix right now?",
+        "What is the current status of the active kanban task?",
+        "What is happening on the diagnostics tasks at this moment?",
+        "브레인 리콜 수정 지금 끝났어?",
+        "현재 진단 태스크들 어디까지 됐어?",
+    ]:
+        assert _is_live_state_prompt(q) is True, q
+
+    # Durable preference / history / topic prompts (incl. an adjectival "right
+    # now") must NOT be classified live-state — they stay searchable.
+    for q in [
+        "What does Chris prefer for coding agents right now?",
+        "OpenClaw하고 Hermes 런타임 차이 지금 기준으로 알려줘",
+        "복잡한 코딩 작업은 코덱스를 어떻게 쓰는 게 좋아?",
+        "추가 유료 API 없이 자동화 도구 추천해줘.",
+    ]:
+        assert _is_live_state_prompt(q) is False, q
+
+
+def test_build_injection_live_state_en_skips_search_and_blocks(monkeypatch):
+    calls, fake = _counting_search_unified()
+    monkeypatch.setitem(sys.modules, "search_unified", fake)
+
+    result = active_recall.build_injection(
+        prompt="Is Liz done with the Brain recall fix right now?",
+        session_id="t-live-state-en",
+        turn_idx=0,
+        agent="sage",
+    )
+
+    assert result["blocks"] == []
+    assert result["degraded"] is False
+    assert calls["n"] == 0, "EN live-state prompt must not run semantic search"
+
+
+def test_build_injection_live_state_ko_skips_search_and_blocks(monkeypatch):
+    calls, fake = _counting_search_unified()
+    monkeypatch.setitem(sys.modules, "search_unified", fake)
+
+    result = active_recall.build_injection(
+        prompt="브레인 리콜 수정 지금 끝났어?",
+        session_id="t-live-state-ko",
+        turn_idx=0,
+        agent="sage",
+    )
+
+    assert result["blocks"] == []
+    assert result["degraded"] is False
+    assert calls["n"] == 0, "KO live-state prompt must not run semantic search"
+
+
+def test_build_injection_durable_prompt_remains_searchable(monkeypatch):
+    """Negative control: a durable preference prompt is NOT short-circuited —
+    active prefetch still runs semantic search (remains searchable)."""
+    calls, fake = _counting_search_unified()
+    monkeypatch.setitem(sys.modules, "search_unified", fake)
+
+    result = active_recall.build_injection(
+        prompt="복잡한 코딩 작업은 코덱스를 어떻게 쓰는 게 좋아?",
+        session_id="t-durable-searchable",
+        turn_idx=0,
+        agent="codex",
+    )
+
+    assert result["degraded"] is False
+    assert calls["n"] >= 1, "durable prompt must remain searchable (semantic search runs)"
+
+
+# ── Route service requires route-RELEVANT evidence (failure class 1) ───────
+# A high/critical route must be considered "served" (so its curated guarantee
+# is suppressed) only when a returned block carries route-relevant durable
+# evidence — NOT merely because some high-cosine off-route canonical/semantic
+# row was retrieved. Otherwise an unrelated high-score row (a self-model /
+# operating-model page) silently suppresses the codex route guarantee.
+
+
+def test_block_serves_route_requires_route_relevant_evidence():
+    from active_recall import (
+        InjectionBlock,
+        IntentMatch,
+        _block_serves_route,
+        _matched_route_underserved,
+    )
+
+    codex = IntentMatch(
+        intent="codex_workflow",
+        always_push_queries=[
+            "Chris prefers using Codex through Hermes as an interactive terminal-like "
+            "tmux TUI when quality or steering matters; headless codex exec is only for "
+            "bounded automation",
+        ],
+        priority="high",
+    )
+    off_route = InjectionBlock(
+        id="off",
+        title="Chris's OpenClaw operating model for planning, execution, review",
+        content="OpenClaw operating model: planning, execution, review, visibility across agents",
+        source="semantic:canonical",
+        score=0.9,
+        priority="high",
+    )
+    on_route = InjectionBlock(
+        id="on",
+        title="Codex workflow preference",
+        content="Chris prefers Codex through Hermes interactive tmux TUI when steering quality matters",
+        source="semantic:semantic_memory",
+        score=0.9,
+        priority="high",
+    )
+
+    # High-cosine but off-route → does NOT serve the codex route.
+    assert _block_serves_route(off_route, codex) is False
+    # Route-relevant durable evidence → serves it.
+    assert _block_serves_route(on_route, codex) is True
+
+    # A high-priority route with only an off-route block is under-served; a
+    # route-relevant block serves it; an empty set is always under-served.
+    assert _matched_route_underserved([off_route], codex) is True
+    assert _matched_route_underserved([on_route], codex) is False
+    assert _matched_route_underserved([], codex) is True
+
+
+def test_active_recall_route_guarantee_fires_for_high_score_off_route_block(monkeypatch):
+    """A high-cosine but OFF-route semantic:canonical row (e.g. the OpenClaw
+    operating model) must not suppress the codex route guarantee — it does not
+    serve the codex route, so the curated guarantee still participates."""
+    off_route = {
+        "id": "openclaw-opmodel",
+        "title": "Chris's OpenClaw operating model for planning, execution, review, and visibility",
+        "content": (
+            "OpenClaw operating model for planning, execution, review, and visibility "
+            "across agents; orchestration and steering of work for Chris."
+        ),
+        "score": 92.0,
+        "collection": "canonical",
+        "path": "/canonical/openclaw_operating_model.md",
+    }
+    monkeypatch.setitem(
+        sys.modules,
+        "search_unified",
+        types.SimpleNamespace(search_all=lambda *a, **k: {"results": [off_route]}),
+    )
+
+    result = active_recall.build_injection(
+        prompt="복잡한 코딩 작업은 코덱스를 어떻게 쓰는 게 좋아?",
+        session_id="t-codex-offroute",
+        turn_idx=0,
+        agent="codex",
+    )
+
+    sources = [b["source"] for b in result["blocks"]]
+    assert "canonical_route_hint" in sources, f"off-route block must not suppress guarantee, got {sources}"
+    hint = next(b for b in result["blocks"] if b["source"] == "canonical_route_hint")
+    assert "interactive terminal-like tmux TUI" in hint["content"]
+
+
+# ── First-class durable route guarantees via the shared layer ──────────────
+# The OpenClaw-historical-vs-Hermes-current runtime distinction has no
+# canonical_paths / declarative always_push_query in intent_routes.yaml, so it
+# was never injectable on the active path. The shared route_guarantees layer
+# makes it a first-class durable fact, surfaced when the prompt matches the
+# guaranteed route and retrieval carries no durable statement of it.
+
+
+def test_active_recall_runtime_distinction_route_guarantee_injected(monkeypatch):
+    """A current OpenClaw-vs-Hermes distinction prompt must surface the durable
+    historical/current runtime fact even when retrieval returns only a stale
+    OpenClaw setup doc (which must NOT suppress the guarantee)."""
+    setup_doc = {
+        "id": "openclaw-setup",
+        "title": "OpenClaw Multi-Agent Setup Documentation",
+        "content": "OpenClaw workspace agents heartbeat configuration; Hermes migration notes.",
+        "score": 88.0,
+        "collection": "obsidian",
+        "path": "/Users/chrischo/.openclaw/workspace-claude/AGENTS.md",
+    }
+    monkeypatch.setitem(
+        sys.modules,
+        "search_unified",
+        types.SimpleNamespace(search_all=lambda *a, **k: {"results": [setup_doc]}),
+    )
+
+    result = active_recall.build_injection(
+        prompt="What is the current OpenClaw vs Hermes runtime distinction?",
+        session_id="t-runtime-distinction",
+        turn_idx=0,
+        agent="claude",
+    )
+
+    sources = [b["source"] for b in result["blocks"]]
+    assert "route_guarantee" in sources, f"expected route_guarantee, got {sources}"
+    g = next(b for b in result["blocks"] if b["source"] == "route_guarantee")
+    assert "historical" in g["content"].lower()
+    assert "current agent runtime" in g["content"].lower()
+
+
+def test_active_recall_runtime_distinction_not_injected_for_setup_query(monkeypatch):
+    """Negative control: a bare setup question naming both runtimes but with NO
+    distinction cue must NOT trigger the runtime-distinction guarantee."""
+    monkeypatch.setitem(
+        sys.modules,
+        "search_unified",
+        types.SimpleNamespace(search_all=lambda *a, **k: {"results": []}),
+    )
+
+    result = active_recall.build_injection(
+        prompt="OpenClaw and Hermes setup guide",
+        session_id="t-runtime-setup",
+        turn_idx=0,
+        agent="claude",
+    )
+
+    sources = [b["source"] for b in result["blocks"]]
+    assert "route_guarantee" not in sources, f"setup query must not inject distinction, got {sources}"
+
+
+def test_active_recall_quality_prompt_does_not_match_frontend_design():
+    """Token-boundary safety: `ui` inside `quality`/`prefetch` must not route a
+    Brain-quality prompt to frontend_design (no DESIGN.md injection)."""
+    from active_recall import _match_canonical_routes
+
+    matches = _match_canonical_routes("Right now, is Brain's recall and prefetch quality healthy or noisy?")
+    intents = {m.intent for m in matches}
+    assert "frontend_design" not in intents, f"`ui` matched inside quality/prefetch: {intents}"
+
+
+def test_active_recall_cost_route_guarantee_survives_to_output(monkeypatch):
+    """A cost/billing recommendation must surface the cost route guarantee on
+    /recall/active. The guarantee is injected after decay+arbitration, so even a
+    low-memory judgment (no canonical intent route matched) cannot drop it."""
+    monkeypatch.setitem(
+        sys.modules,
+        "search_unified",
+        types.SimpleNamespace(search_all=lambda *a, **k: {"results": []}),
+    )
+
+    result = active_recall.build_injection(
+        prompt="What's a budget-conscious tooling approach you'd recommend for me?",
+        session_id="t-cost-route-guarantee",
+        turn_idx=0,
+        agent="liz",
+    )
+
+    sources = [b["source"] for b in result["blocks"]]
+    assert "route_guarantee" in sources, f"cost route guarantee must reach output, got {sources}"
+    g = next(b for b in result["blocks"] if b["source"] == "route_guarantee")
+    assert "subscription" in g["content"].lower() and "local model" in g["content"].lower()
+
+
+def test_route_guarantee_blocks_emitted_at_critical_priority():
+    """A matched, not-already-served durable route fact is direct_current_truth
+    for that route, so its block must be critical — otherwise _enforce_budget
+    (sort by priority then score) sinks it below higher-scoring off-route
+    semantic hits and it drops out of the top window."""
+    blocks = active_recall._route_guarantee_blocks(
+        "What is the current OpenClaw vs Hermes runtime distinction?", [], set()
+    )
+    assert blocks, "runtime distinction route guarantee should fire"
+    assert all(b.source == "route_guarantee" for b in blocks)
+    assert all(b.priority == "critical" for b in blocks)
+
+
+def test_critical_route_guarantee_survives_budget_over_high_score_offroute_blocks():
+    """Regression for the KO runtime-distinction active failure: 3 high-scoring
+    off-route semantic blocks must not push the (smaller, lower-scored) route
+    guarantee out of the top window. Critical priority keeps it at the top."""
+    guarantee = active_recall.InjectionBlock(
+        id="g",
+        title="runtime_distinction route guarantee",
+        content="OpenClaw is historical; Hermes is the current agent runtime.",
+        source="route_guarantee",
+        score=0.95,
+        priority="critical",
+    )
+    offroute = [
+        active_recall.InjectionBlock(
+            id=f"s{i}",
+            title=f"OpenClaw operating model {i}",
+            content="OpenClaw and Hermes operating model notes " * 20,
+            source="semantic:canonical",
+            score=1.0,
+            priority="high",
+        )
+        for i in range(3)
+    ]
+    kept = active_recall._enforce_budget([*offroute, guarantee], active_recall.BUDGET_TOKEN_LIMIT)
+    top3 = kept[:3]
+    assert any(
+        b.source == "route_guarantee" for b in top3
+    ), f"guarantee dropped out of top window: {[b.source for b in kept]}"
+    assert kept[0].source == "route_guarantee"
+
+
+# ── Holdout regressions (t_c7453635) ───────────────────────────────────────
+
+
+def test_active_recall_cost_paraphrase_avoid_paid_self_hosting_surfaces_guarantee(monkeypatch):
+    """Holdout cost failure: a cost paraphrase with NO spend noun (avoid new paid
+    APIs / no self-hosted generation models) must still surface the cost route
+    guarantee on /recall/active — the route must match by meaning, not by a noun."""
+    monkeypatch.setitem(
+        sys.modules,
+        "search_unified",
+        types.SimpleNamespace(search_all=lambda *a, **k: {"results": []}),
+    )
+
+    result = active_recall.build_injection(
+        prompt="Choose an AI tooling path that avoids new paid APIs and avoids self-hosting generation models.",
+        session_id="t-cost-paraphrase",
+        turn_idx=0,
+        agent="liz",
+    )
+
+    sources = [b["source"] for b in result["blocks"]]
+    assert "route_guarantee" in sources, f"cost route guarantee must surface, got {sources}"
+    g = next(b for b in result["blocks"] if b["source"] == "route_guarantee")
+    low = g["content"].lower()
+    assert "subscription" in low and ("local model" in low or "embeddings" in low)
+
+
+def test_active_recall_codex_tui_prompt_routes_codex_not_frontend_design(monkeypatch):
+    """Route-arbitration false-positive control: a Codex-in-tmux-TUI workflow
+    prompt must surface the codex workflow guarantee, never a frontend/design
+    block ('ui'/'tui' are not design tokens)."""
+    monkeypatch.setitem(
+        sys.modules,
+        "search_unified",
+        types.SimpleNamespace(search_all=lambda *a, **k: {"results": []}),
+    )
+
+    result = active_recall.build_injection(
+        prompt="When careful coding guidance matters, should Codex run in a Hermes tmux TUI instead of headless exec?",
+        session_id="t-codex-arbitration",
+        turn_idx=0,
+        agent="liz",
+    )
+
+    blob = " ".join(f"{b.get('title') or ''} {b.get('source') or ''}" for b in result["blocks"]).lower()
+    assert "frontend_design" not in blob, f"design false-positive: {result['blocks']}"
+    assert any(
+        "codex" in f"{b.get('title') or ''} {b.get('content') or ''}".lower() for b in result["blocks"]
+    ), f"codex workflow guarantee missing: {result['blocks']}"
+
+
+# ── REQUEST_CHANGES f4: explicit route negation arbitration ────────────────
+
+
+def test_active_recall_negated_codex_design_prompt_drops_codex_route(monkeypatch):
+    """Finding 4 (active_frontend_design_codex_false_positive): when the prompt
+    explicitly negates the Codex route ('not about codex') and asks for a
+    frontend/design critique, active recall must NOT emit a codex_workflow route
+    guarantee. The design route is positive evidence; codex is negated keyword
+    residue. EN + KO."""
+    monkeypatch.setitem(
+        sys.modules,
+        "search_unified",
+        types.SimpleNamespace(search_all=lambda *a, **k: {"results": []}),
+    )
+
+    for prompt, sid in (
+        (
+            "This is not about codex — critique the frontend design quality of this layout workflow.",
+            "t-neg-codex-en",
+        ),
+        ("코덱스 얘기 아니라 프론트엔드 디자인 품질을 워크플로우 관점에서 봐줘", "t-neg-codex-ko"),
+    ):
+        result = active_recall.build_injection(prompt=prompt, session_id=sid, turn_idx=0, agent="liz")
+        blob = " ".join(
+            f"{b.get('title') or ''} {b.get('content') or ''} {b.get('source') or ''}"
+            for b in result["blocks"]
+        ).lower()
+        assert "codex" not in blob, f"negated codex route leaked: {result['blocks']}"
+
+
+def test_active_recall_negated_codex_keeps_frontend_design_route():
+    """Control for f4: the design intent still matches when codex is negated, so
+    suppression targets only the negated route — it does not blank the prompt."""
+    matches = active_recall._match_canonical_routes(
+        "This is not about codex — critique the frontend design quality of this layout."
+    )
+    intents = [m.intent for m in matches]
+    assert "frontend_design" in intents
+    assert "codex_workflow" not in intents

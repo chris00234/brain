@@ -2617,7 +2617,7 @@ def test_recall_governance_openclaw_hermes_distinction_beats_setup_and_live_stat
             "collection": "semantic_memory",
             "metadata": {"category": "fact"},
             "content": (
-                "User: work kanban task t_be1032bb Assistant: Verdict: PARTIAL. "
+                "User: work kanban task alpha7 Assistant: Verdict: PARTIAL. "
                 "Acceptance probes: OpenClaw/Hermes exact row top3, no live_state/setup noise. "
                 "Focused tests passed, but dirty patch still needs review."
             ),
@@ -2662,6 +2662,74 @@ def test_recall_governance_openclaw_hermes_distinction_beats_setup_and_live_stat
     assert "openclaw_distinction_handoff_penalty" in by_id["eval-noise"].get("governance", [])
     assert by_id["handoff-noise"]["score"] < by_id["distinction"]["score"]
     assert by_id["eval-noise"]["score"] < by_id["distinction"]["score"]
+
+
+def test_recall_governance_korean_openclaw_hermes_paraphrase_prefers_durable_fact():
+    """KO paraphrase parity with the English distinction case.
+
+    The Korean phrasing carries no bare English ``openclaw``/``hermes`` tokens
+    (particles glue onto the Latin proper nouns), so this exercises the
+    augmentation→governance path end to end: the durable current-runtime fact
+    must still beat distilled brain-analysis, setup-doc, and live-state noise.
+    """
+    from routes.recall import _apply_recall_governance_inplace
+
+    fused = [
+        {
+            "id": "brain-analysis",
+            "title": "Reasoning",
+            "collection": "canonical",
+            "metadata": {
+                "subtype": "brain-analysis",
+                "source_path": "/distilled/decisions/brain_analysis_runtime.md",
+            },
+            "content": (
+                "Brain analysis summary: among several recall-quality themes, the OpenClaw vs "
+                "Hermes current runtime historical distinction is noted as one observation."
+            ),
+            "score": 250.0,
+        },
+        {
+            "id": "setup-docs",
+            "title": "OpenClaw Multi-Agent Setup Documentation",
+            "path": "/Users/chrischo/.openclaw/workspace-claude/AGENTS.md",
+            "collection": "obsidian",
+            "content": "OpenClaw setup docs from the old workspace mention Hermes runtime migration history.",
+            "score": 240.0,
+        },
+        {
+            "id": "active-goals",
+            "title": "active_goals",
+            "path": "/Users/chrischo/server/knowledge/canonical/live_state/active_goals.md",
+            "collection": "canonical",
+            "metadata": {"document_type": "canonical-note"},
+            "content": "Active goals and focus: OpenClaw Hermes current runtime tasks and manual focus items.",
+            "score": 235.0,
+        },
+        {
+            "id": "distinction",
+            "title": "OpenClaw vs Hermes current runtime historical distinction",
+            "path": "/distilled/openclaw-hermes-distinction.md",
+            "collection": "semantic_memory",
+            "metadata": {"category": "decision", "review_state": "accepted"},
+            "content": (
+                "Distilled current distinction: Hermes Agent is the current runtime; "
+                "OpenClaw is historical provenance and setup context."
+            ),
+            "score": 150.0,
+        },
+    ]
+
+    _apply_recall_governance_inplace("OpenClaw하고 Hermes 런타임 차이 지금 기준으로 알려줘", fused)
+    fused.sort(key=lambda r: r["score"], reverse=True)
+
+    assert fused[0]["id"] == "distinction"
+    assert "openclaw_hermes_distinction" in fused[0]["governance"]
+    by_id = {r["id"]: r for r in fused}
+    assert "low_authority_source_penalty" in by_id["brain-analysis"].get("governance", [])
+    assert "openclaw_setup_noise_penalty" in by_id["setup-docs"].get("governance", [])
+    assert "live_state_snapshot_penalty" in by_id["active-goals"].get("governance", [])
+    assert by_id["distinction"]["score"] > by_id["brain-analysis"]["score"]
 
 
 def test_recall_governance_codex_hermes_tui_preference_beats_old_claude_restriction():
@@ -2749,6 +2817,34 @@ def test_korean_calendar_reminder_class_expansion_adds_schedule_terms():
     assert "macos-calendar" in expanded
     assert "apple-reminders" in expanded
     assert "primary tooling choices" in expanded
+
+
+def test_korean_openclaw_hermes_distinction_expansion_adds_runtime_terms():
+    from routes.recall import (
+        _augment_query_for_recall,
+        _is_openclaw_hermes_distinction_query,
+        _tokenize_recall_text,
+    )
+
+    # Korean paraphrase with Latin proper nouns glued to particles
+    # ("OpenClaw하고"): augmentation supplies the runtime/distinction terms the
+    # English distinction gate needs from the Korean cue words.
+    expanded = _augment_query_for_recall("OpenClaw하고 Hermes 런타임 차이 지금 기준으로 알려줘")
+    tokens = _tokenize_recall_text(expanded)
+    assert {"openclaw", "hermes"}.issubset(tokens)
+    assert tokens & {"current", "runtime", "historical", "distinction"}
+    assert _is_openclaw_hermes_distinction_query(tokens)
+
+    # Fully transliterated Korean (no Latin proper nouns) still resolves.
+    expanded_ko = _augment_query_for_recall("오픈클로랑 헤르메스 현재 런타임 구분 알려줘")
+    assert _is_openclaw_hermes_distinction_query(_tokenize_recall_text(expanded_ko))
+
+    # A setup/config question that names both runtimes but carries no
+    # distinction cue must NOT be promoted to a distinction query — otherwise
+    # the durable distinction fact would wrongly outrank the setup docs the
+    # user actually asked for.
+    setup = _augment_query_for_recall("OpenClaw와 Hermes 설정 방법 알려줘")
+    assert not _is_openclaw_hermes_distinction_query(_tokenize_recall_text(setup))
 
 
 def test_budget_local_cloud_intent_expansion_is_class_based_not_smoke_literal():
@@ -2884,7 +2980,7 @@ def test_korean_status_query_is_classified_as_live_state():
 def test_korean_colloquial_running_query_is_classified_as_live_state():
     from routes.recall import _is_live_state_query
 
-    assert _is_live_state_query("지금 뭐 돌아가고 있어?") is True
+    assert _is_live_state_query("현재 뭐가 돌아가는 중이야?") is True
 
 
 def test_korean_recommendation_queries_with_running_phrase_are_not_live_state():
@@ -2898,9 +2994,9 @@ def test_korean_recommendation_queries_with_running_phrase_are_not_live_state():
 def test_live_state_query_requires_explicit_status_intent():
     from routes.recall import _is_live_state_query
 
-    assert _is_live_state_query("current status of kanban task t_12345678") is True
+    assert _is_live_state_query("current status of kanban task alpha7") is True
     assert _is_live_state_query("progress update for recall governance") is True
-    assert _is_live_state_query("what is running right now") is True
+    assert _is_live_state_query("what's running currently") is True
     assert _is_live_state_query("current Brain mission progress") is True
     assert _is_live_state_query("current alpha project status") is True
     assert _is_live_state_query("complete guide to recall governance") is False
@@ -2993,7 +3089,7 @@ def test_recall_v2_status_query_short_circuits_before_search(monkeypatch):
     )
     response = recall_route.recall_v2(
         request,
-        q="current status of kanban task t_12345678",
+        q="current status of kanban task alpha7",
         n=3,
         rerank=False,
         decay=False,
@@ -3023,7 +3119,7 @@ def test_recall_v2_korean_colloquial_running_query_short_circuits_before_search(
     )
     response = recall_route.recall_v2(
         request,
-        q="지금 뭐 돌아가고 있어?",
+        q="현재 뭐가 돌아가는 중이야?",
         n=3,
         rerank=False,
         decay=False,
@@ -3627,7 +3723,11 @@ def test_retrieval_quality_filter_keeps_generic_summary_rows_for_positive_summar
     assert [result["id"] for result in filtered] == ["generic-summary"]
 
 
-def test_retrieval_quality_filter_removes_personal_noise_for_generic_recipe_query():
+def test_retrieval_quality_filter_empties_generic_recipe_query_even_with_exact_recipe():
+    """An out-of-domain world-knowledge ask (a tomato pasta recipe how-to) returns
+    EMPTY even when the corpus holds an EXACT recipe memory — the model answers
+    world-knowledge from its own knowledge; surfacing a stored recipe/procedure is
+    off-domain injection. Personal noise AND the exact recipe note are dropped."""
     from routes.recall import _apply_retrieval_quality_filter
 
     fused = [
@@ -3659,7 +3759,128 @@ def test_retrieval_quality_filter_removes_personal_noise_for_generic_recipe_quer
 
     filtered = _apply_retrieval_quality_filter("how do I make tomato pasta sauce recipe steps", fused)
 
-    assert [result["id"] for result in filtered] == ["recipe-note"]
+    assert filtered == []
+
+
+def test_retrieval_quality_filter_abstains_unknown_personal_factoids_without_attribute_overlap():
+    from routes.recall import _apply_retrieval_quality_filter
+
+    generic_noise = [
+        {
+            "id": "claude-code",
+            "title": "claude_code",
+            "path": "mcp",
+            "collection": "semantic_memory",
+            "content": "Chris uses Claude Code and Hermes for coding-agent workflows.",
+            "score": 250.0,
+        },
+        {
+            "id": "profile",
+            "title": "Chris profile preferences",
+            "path": "/knowledge/canonical/chris/profile.md",
+            "collection": "canonical",
+            "content": "Chris profile preferences summarize tooling, calendars, OMSCS, and AI work.",
+            "score": 225.0,
+        },
+    ]
+
+    for query in (
+        "Chris favorite mountain in Patagonia favorite hiking route Cerro Torre Fitz Roy",
+        "Chris shoe size sneaker size foot size",
+        "Chris childhood elementary school first grade teacher",
+    ):
+        assert _apply_retrieval_quality_filter(query, [dict(r) for r in generic_noise]) == []
+
+
+def test_retrieval_quality_filter_keeps_personal_factoid_with_strong_attribute_overlap():
+    from routes.recall import _apply_retrieval_quality_filter
+
+    fused = [
+        {
+            "id": "profile",
+            "title": "Chris profile preferences",
+            "collection": "canonical",
+            "content": "Chris profile preferences summarize tooling and general work.",
+            "score": 225.0,
+        },
+        {
+            "id": "ai-spend",
+            "title": "AI spend and cost preference",
+            "collection": "semantic_memory",
+            "metadata": {"category": "preference"},
+            "content": "Chris wants AI spend and cost controlled by avoiding extra paid APIs.",
+            "score": 90.0,
+        },
+    ]
+
+    filtered = _apply_retrieval_quality_filter("Chris AI spend cost", fused)
+
+    assert [r["id"] for r in filtered] == ["ai-spend"]
+
+
+def test_retrieval_quality_filter_drops_compound_fragment_personal_factoid_collision():
+    """Generic morpho-modifier collision: a negative personal-fact probe ('first
+    grade teacher') must abstain when the only hit is an unrelated design/UI row
+    whose 'first'/'grade' tokens are hyphen-compound fragments ('content-first',
+    'production-grade'), not real attributes. Whole-word overlap only."""
+    from routes.recall import _apply_retrieval_quality_filter
+
+    fused = [
+        {
+            "id": "erl",
+            "title": "erl_extraction design",
+            "collection": "semantic_memory",
+            "content": "content-first layout with production-grade UI components for the dashboard.",
+            "score": 200.0,
+        }
+    ]
+    assert (
+        _apply_retrieval_quality_filter("Chris childhood elementary school first grade teacher", fused) == []
+    )
+
+
+def test_retrieval_quality_filter_keeps_durable_omscs_fact_drops_unrelated():
+    """A durable personal fact (OMSCS + Fall, two whole-word attribute tokens)
+    survives the personal_factoid gate, while an unrelated design/UI row for the
+    same probe is dropped — a real durable memory is not filtered to empty and no
+    unrelated row contaminates the top."""
+    from routes.recall import _apply_retrieval_quality_filter
+
+    fused = [
+        {
+            "id": "omscs",
+            "title": "Chris OMSCS enrollment",
+            "collection": "semantic_memory",
+            "metadata": {"category": "fact"},
+            "content": "Chris starts the Georgia Tech OMSCS program in Fall 2026.",
+            "score": 120.0,
+        },
+        {
+            "id": "erl",
+            "title": "erl_extraction design",
+            "collection": "semantic_memory",
+            "content": "content-first, production-grade design notes for the dashboard.",
+            "score": 200.0,
+        },
+    ]
+    filtered = _apply_retrieval_quality_filter("What should I remember about Chris OMSCS Fall 2026?", fused)
+    assert [r["id"] for r in filtered] == ["omscs"]
+
+
+def test_retrieval_quality_filter_preserves_recipe_negative_empty_when_no_recipe_result():
+    from routes.recall import _apply_retrieval_quality_filter
+
+    fused = [
+        {
+            "id": "profile",
+            "title": "Chris profile preferences",
+            "collection": "canonical",
+            "content": "Chris profile preferences summarize tooling and calendars.",
+            "score": 225.0,
+        }
+    ]
+
+    assert _apply_retrieval_quality_filter("how do I make tomato pasta sauce recipe steps", fused) == []
 
 
 def test_retrieval_quality_filter_removes_openclaw_hermes_acceptance_handoff_noise():
@@ -4001,7 +4222,7 @@ def test_recall_v2_terminal_telegram_authorization_allowed_by_chris_adds_evidenc
     assert "이거 내가 권한준거라 false positive market sage telegram terminal" in queries
 
 
-# ── Historical-intent narrowing of _is_live_state_query (Sage CR for t_a321da09) ──
+# ── Historical-intent narrowing of _is_live_state_query ──
 
 
 def test_is_live_state_query_english_historical_kanban_status_is_false():
@@ -4031,7 +4252,7 @@ def test_is_live_state_query_current_status_with_bare_done_is_true():
     """
     from routes.recall import _is_live_state_query
 
-    assert _is_live_state_query("current status of kanban task t_12345678 done?") is True
+    assert _is_live_state_query("current status of kanban task alpha7 done?") is True
 
 
 def test_recall_v2_english_historical_kanban_status_searches_memory(monkeypatch):
@@ -4098,16 +4319,16 @@ def test_recall_v2_korean_historical_kanban_completed_searches_memory(monkeypatc
     assert response.meta_note != "Live-state/status query — use live tools instead of stale memory recall."
 
 
-# ── Word-order / separator variants of _is_live_state_query (t_89eaf8a6) ──
+# ── Word-order / separator variants of _is_live_state_query ──
 # Live spot checks against /recall/v2 for x-agent=liz showed three terse
 # phrasings leaking stale memory results instead of short-circuiting. The
 # strict _LIVE_STATE_QUERY_PATTERNS missed them because:
-#   1. "Kanban task t_<id> status" — the ID slot breaks `\btask\s+status\b`
+#   1. "Kanban task alpha7 status" — the ID slot breaks `\btask\s+status\b`
 #   2. "current/status/Kanban/progress" — slashes block `\s+` boundaries
 #   3. "kanban progress status current task" — words in the wrong order
 # Each test pins one of the three; the historical-exception coverage below
 # guards against the token-cluster fallback over-firing on archived lookups
-# (the t_a321da09 historical-narrowing fix must keep holding).
+# (the historical-narrowing fix must keep holding).
 
 
 def test_is_live_state_query_kanban_task_id_status_word_order_variant():
@@ -4115,7 +4336,7 @@ def test_is_live_state_query_kanban_task_id_status_word_order_variant():
     between 'task' and 'status' must not break detection."""
     from routes.recall import _is_live_state_query
 
-    assert _is_live_state_query("Kanban task t_12345678 status") is True
+    assert _is_live_state_query("Kanban task alpha7 status") is True
 
 
 def test_is_live_state_query_slash_separated_status_kanban_progress():
@@ -4140,10 +4361,10 @@ def test_is_live_state_query_word_order_variants_respect_historical_exceptions()
     """Historical/archived intent (history, last week, 지난주, 기록, archived)
     must still suppress live-state on the three new word-order/slash variants
     — the historical guard runs BEFORE the token-cluster fallback so the
-    t_a321da09 historical-narrowing fix keeps holding."""
+    historical-narrowing fix keeps holding."""
     from routes.recall import _is_live_state_query
 
-    assert _is_live_state_query("history of Kanban task status t_12345678 last week") is False
+    assert _is_live_state_query("history of Kanban task status alpha7 last week") is False
     assert _is_live_state_query("archived/Kanban/progress/status") is False
     assert _is_live_state_query("kanban progress status current task records last week") is False
     # Pre-existing historical fixtures must keep returning False
@@ -4168,7 +4389,7 @@ def test_is_live_state_query_token_cluster_does_not_overfire():
     assert _is_live_state_query("started workflow preference") is False
 
 
-# ── Bare elliptical status queries (t_e4275737) ──
+# ── Bare elliptical status queries ──
 # Live probe: terse "running now" / "진행 중" / "지금 실행 중" prompts arrive
 # without the "what is" prefix the strict English regex requires and without
 # the "진행 상황" tail the strict Korean regex requires. They must still
@@ -4177,8 +4398,8 @@ def test_is_live_state_query_token_cluster_does_not_overfire():
 
 def test_is_live_state_query_bare_english_running_now_is_live_state():
     """Bare elliptical 'running now' / 'running right now' must classify as
-    live-state — same intent as 'what is running right now' just without the
-    'what is' prefix."""
+    live-state — same intent as an explicit present-time running-status ask,
+    just without the leading 'what is' prefix."""
     from routes.recall import _is_live_state_query
 
     assert _is_live_state_query("running now") is True
@@ -4501,6 +4722,13 @@ def test_recall_governance_historical_runtime_penalizes_live_state_snapshot():
 
     assert fused[1]["score"] > fused[0]["score"]
     assert "live_state_snapshot_penalty" in fused[0]["governance"]
+
+
+# NOTE: a former probe-specific test (durable openclaw/hermes semantic fact beats a
+# distilled brain-analysis row) was pruned here — it is fully covered class-level by
+# test_recall_governance_generic_source_quality_prefers_durable_multi_topic (topic B:
+# a durable decision beats a brain-analysis reflection row) plus the
+# _is_low_authority_result / _is_durable_truth_result classifier tests.
 
 
 def test_recall_governance_broad_tool_recommendation_penalizes_distilled_brain_analysis():
@@ -4983,3 +5211,1696 @@ def test_recall_batch_uses_shared_quality_filter_and_live_state_gate(monkeypatch
     assert by_query["current kanban task status"]["hits"] == []
     assert "Live-state/status" in by_query["current kanban task status"]["meta_note"]
     assert calls and calls[0]["limit"] == 6
+
+
+# ── Generic recall-quality mechanisms ────────────────────────────────────
+# These pin CLASS-level behavior (multi-paraphrase EN/KO + positive/negative
+# controls), not exact Sage probe strings. They cover four reusable mechanisms:
+#   M1 script-boundary tokenization, M2 temporal/current-state classifier,
+#   M3 provenance source-quality contract, M4 out-of-domain world-knowledge gate.
+
+
+def test_tokenize_splits_latin_hangul_script_boundary():
+    """M1: a Latin run glued to a Korean particle must tokenize as two tokens.
+
+    Korean attaches particles directly onto Latin proper nouns ("OpenClaw랑",
+    "GPT는", "Codex를"). The bare Latin token must survive so downstream
+    intent gates that look for it work for KO paraphrases — for ANY name, not
+    a hardcoded set.
+    """
+    from routes.recall import _tokenize_recall_text
+
+    assert {"openclaw", "hermes"}.issubset(_tokenize_recall_text("OpenClaw랑 Hermes 차이"))
+    assert {"gpt", "claude"}.issubset(_tokenize_recall_text("GPT는 Claude보다"))
+    assert "codex" in _tokenize_recall_text("Codex를 어떻게 써")
+    # Pure-Hangul and pure-Latin tokens are unaffected.
+    assert "런타임" in _tokenize_recall_text("현재 런타임")
+    assert {"docker", "deploy"}.issubset(_tokenize_recall_text("docker deploy"))
+
+
+def test_live_state_query_detects_present_state_questions_en_ko():
+    """M2: present-time deixis + a progress/completion predicate => live-state,
+    across EN/KO paraphrases and independent of task ids/phrases."""
+    from routes.recall import _is_live_state_query
+
+    positives = [
+        "Is Liz done with the Brain recall fix right now?",
+        "Is the deploy done right now?",
+        "What is happening on the diagnostics tasks at this moment?",
+        "What's going on with the migration at the moment?",
+        "브레인 리콜 수정 지금 끝났어?",
+        "지금 그 작업 끝났어?",
+        "현재 진단 태스크들 어디까지 됐어?",
+        "지금 마이그레이션 진행 어디까지 됐어?",
+    ]
+    for q in positives:
+        assert _is_live_state_query(q), f"expected live-state: {q!r}"
+
+
+def test_live_state_query_keeps_durable_and_topic_questions_searchable():
+    """M2 negative controls: durable preference/decision lookups, historical
+    questions, and present-tense topic questions WITHOUT a progress predicate
+    must stay searchable (not short-circuited)."""
+    from routes.recall import _is_live_state_query
+
+    negatives = [
+        "What does Chris prefer for coding agents right now?",
+        "What is Chris's current tooling preference?",
+        "OpenClaw vs Hermes current runtime historical distinction",
+        "현재 사용하는 캘린더 도구가 뭐야?",
+        "지금 브레인 리콜 선호가 뭐야?",
+        "What was the status of the kanban task last week?",
+        "지난주 완료한 작업 기록 보여줘",
+    ]
+    for q in negatives:
+        assert not _is_live_state_query(q), f"should stay searchable: {q!r}"
+
+
+def test_is_low_authority_result_classifies_summary_reflect_session_procedure():
+    """M3: provenance/format classifier — summaries, reflections, session/weekly
+    recaps, procedure/voyager logs, and distilled brain-analysis meta are all
+    low-authority, regardless of topic."""
+    from routes.recall import _is_low_authority_result, _result_text
+
+    low = [
+        {"title": "Summary", "collection": "rag", "content": "weekly recap of work"},
+        {"title": "### Summary", "collection": "canonical", "content": "rollup"},
+        {
+            "title": "Reasoning",
+            "collection": "canonical",
+            "metadata": {"subtype": "brain-analysis"},
+            "content": "analysis",
+        },
+        {
+            "title": "note",
+            "metadata": {"source_path": "/distilled/brain-reflect/nightly.md"},
+            "content": "reflection",
+        },
+        {"title": "note", "metadata": {"document_type": "session-summary"}, "content": "session"},
+        {
+            "title": "note",
+            "metadata": {"source_path": "/procedures/voyager_skill.md"},
+            "content": "procedure",
+        },
+    ]
+    for r in low:
+        assert _is_low_authority_result(r, _result_text(r)), f"expected low-authority: {r}"
+
+    high = [
+        {
+            "title": "Codex workflow",
+            "collection": "semantic_memory",
+            "metadata": {"category": "preference"},
+            "content": "Chris prefers X",
+        },
+        {
+            "title": "Deploy decision",
+            "collection": "canonical",
+            "metadata": {"category": "decision", "review_state": "accepted"},
+            "content": "decided Y",
+        },
+    ]
+    for r in high:
+        assert not _is_low_authority_result(r, _result_text(r)), f"should not be low-authority: {r}"
+
+
+def test_is_durable_truth_result_classifies_durable_provenance():
+    """M3: durable-truth classifier — semantic_memory, accepted canonical, or a
+    truth-category (preference/decision/fact/correction) row that is not
+    superseded/expired."""
+    from routes.recall import _is_durable_truth_result
+
+    assert _is_durable_truth_result({"collection": "semantic_memory", "metadata": {}})
+    assert _is_durable_truth_result({"collection": "canonical", "metadata": {"review_state": "accepted"}})
+    assert _is_durable_truth_result({"collection": "rag", "metadata": {"category": "preference"}})
+    # superseded/expired durable rows are NOT current truth
+    assert not _is_durable_truth_result(
+        {"collection": "semantic_memory", "metadata": {"review_state": "superseded"}}
+    )
+    assert not _is_durable_truth_result(
+        {"collection": "canonical", "metadata": {"category": "decision", "expired": True}}
+    )
+    # a plain summary doc is not durable truth
+    assert not _is_durable_truth_result({"collection": "rag", "title": "Summary", "metadata": {}})
+
+
+def test_durable_truth_rejects_low_authority_format_even_in_durable_collection():
+    """M3 guard: a durable COLLECTION does not make a derived FORMAT durable.
+    A semantic_memory row that is a Summary / brain-analysis / procedure-shaped
+    blob must be treated as low-authority, not boosted as durable truth."""
+    from routes.recall import (
+        _apply_recall_governance_inplace,
+        _is_durable_truth_result,
+        _is_low_authority_result,
+        _result_text,
+    )
+
+    sem_summary = {
+        "id": "sem-sum",
+        "title": "Summary",
+        "collection": "semantic_memory",
+        "content": "weekly recap of tool usage",
+    }
+    sem_brain_analysis = {
+        "id": "sem-ba",
+        "title": "note",
+        "collection": "semantic_memory",
+        "metadata": {"subtype": "brain-analysis"},
+        "content": "analysis blob",
+    }
+    for row in (sem_summary, sem_brain_analysis):
+        assert not _is_durable_truth_result(row), row
+        assert _is_low_authority_result(row, _result_text(row)), row
+
+    # A genuine semantic_memory preference row is still durable truth.
+    assert _is_durable_truth_result(
+        {
+            "collection": "semantic_memory",
+            "title": "DB choice",
+            "metadata": {"category": "preference"},
+            "content": "Chris prefers Postgres",
+        }
+    )
+
+    # In governance the low-authority semantic row is penalized, not boosted.
+    fused = [dict(sem_summary, score=100.0)]
+    _apply_recall_governance_inplace("recommend automation tools", fused)
+    assert "durable_truth_priority" not in fused[0].get("governance", [])
+    assert "low_authority_source_penalty" in fused[0].get("governance", [])
+
+
+def test_recall_governance_generic_source_quality_prefers_durable_multi_topic():
+    """M3 end-to-end across UNRELATED topics: a durable preference/decision row
+    must outrank a low-authority summary/reflection row even when the summary
+    starts higher — proving the contract is topic-agnostic, not probe-tuned."""
+    from routes.recall import _apply_recall_governance_inplace
+
+    # Topic A: tool/cost recommendation
+    fused_a = [
+        {
+            "id": "summary",
+            "title": "Summary",
+            "collection": "rag",
+            "content": "weekly recap mentioning tools and cost",
+            "score": 240.0,
+        },
+        {
+            "id": "durable",
+            "title": "no extra paid API",
+            "collection": "semantic_memory",
+            "metadata": {"category": "preference"},
+            "content": "Chris avoids new paid API spend; use existing subscription tools",
+            "score": 150.0,
+        },
+    ]
+    _apply_recall_governance_inplace("recommend automation tools without extra paid API", fused_a)
+    fused_a.sort(key=lambda r: r["score"], reverse=True)
+    assert fused_a[0]["id"] == "durable"
+    assert "durable_truth_priority" in fused_a[0].get("governance", [])
+
+    # Topic B: a totally different domain (deployment) with a reflection-row noise
+    fused_b = [
+        {
+            "id": "reflect",
+            "title": "Reasoning",
+            "collection": "canonical",
+            "metadata": {"subtype": "brain-analysis"},
+            "content": "brain analysis discussing docker deployment among many themes",
+            "score": 230.0,
+        },
+        {
+            "id": "decision",
+            "title": "Docker deployment decision",
+            "collection": "canonical",
+            "metadata": {"category": "decision", "review_state": "accepted"},
+            "content": "Every new service deploys as a Docker container registered in Uptime Kuma",
+            "score": 120.0,
+        },
+    ]
+    _apply_recall_governance_inplace("how should I deploy a new docker service", fused_b)
+    fused_b.sort(key=lambda r: r["score"], reverse=True)
+    assert fused_b[0]["id"] == "decision"
+    assert "low_authority_source_penalty" in {
+        g for r in fused_b if r["id"] == "reflect" for g in r.get("governance", [])
+    }
+
+
+def test_recall_governance_source_quality_skips_penalty_for_summary_intent():
+    """M3 negative control: when the user explicitly asks for a summary/recap,
+    the low-authority penalty must NOT fire — summaries are the requested rows."""
+    from routes.recall import _apply_recall_governance_inplace
+
+    fused = [
+        {
+            "id": "summary",
+            "title": "Summary",
+            "collection": "rag",
+            "content": "weekly recap of brain work",
+            "score": 100.0,
+        },
+    ]
+    _apply_recall_governance_inplace("give me the weekly summary recap", fused)
+    assert "low_authority_source_penalty" not in fused[0].get("governance", [])
+
+
+def test_out_of_domain_world_knowledge_query_detection_en_ko():
+    """M4: world-knowledge/general-procedure prompts with no personal-memory
+    anchor are out-of-domain (brain has no durable personal answer)."""
+    from routes.recall import _is_out_of_domain_world_knowledge_query
+
+    out_of_domain = [
+        "tomato pasta recipe please",
+        "tell me about the French revolution",  # "me" is an object pronoun, not an anchor
+        "explain just the cooking procedure briefly",
+        "토마토 파스타 레시피 알려줘.",
+        "요리 절차만 간단히 설명해줘.",
+    ]
+    for q in out_of_domain:
+        assert _is_out_of_domain_world_knowledge_query(q), f"expected out-of-domain: {q!r}"
+
+    in_domain = [
+        "what does Chris prefer for coding agents",
+        "내 브레인 리콜 선호가 뭐야?",
+        "what is my preferred database",  # EN first-person ownership => personal domain
+        "what calendar tool do I use",  # no pronoun but tooling vocab => personal domain
+        "추가 유료 API 없이 자동화 도구 추천해줘.",
+    ]
+    for q in in_domain:
+        assert not _is_out_of_domain_world_knowledge_query(q), f"should not be out-of-domain: {q!r}"
+
+
+def test_retrieval_quality_filter_drops_personal_rows_for_world_knowledge_query():
+    """M4: a KO recipe prompt must not return Brain/Claude/Obsidian workflow
+    memories; an in-domain tool prompt keeps its topically-overlapping row."""
+    from routes.recall import _apply_retrieval_quality_filter
+
+    recipe_rows = [
+        {
+            "id": "brain",
+            "title": "Brain recall workflow",
+            "collection": "canonical",
+            "content": "Brain recall prefetch pipeline and Obsidian notes about Claude memory",
+        },
+        {
+            "id": "claude",
+            "title": "Claude Code ops",
+            "collection": "obsidian",
+            "content": "Claude Code hooks and skills workflow",
+        },
+    ]
+    filtered = _apply_retrieval_quality_filter("토마토 파스타 레시피 알려줘.", list(recipe_rows))
+    assert filtered == [], f"recipe prompt should drop personal-system rows, got {filtered}"
+
+    tool_rows = [
+        {
+            "id": "cal",
+            "title": "Calendar tooling",
+            "collection": "canonical",
+            "content": "Chris uses Apple Calendar and macos-calendar as primary calendar tooling",
+        },
+    ]
+    kept = _apply_retrieval_quality_filter("what calendar tool do I use", list(tool_rows))
+    assert [r["id"] for r in kept] == ["cal"]
+
+
+# ── M5: episodic event-log provenance (failure classes 2/4 noise) ─────────
+# Raw coding-events and agent-session event logs (### Details / Context /
+# Suggested Action / Error scaffolds) record *what happened in a session*, not
+# durable truth. They are low-authority for any non-summary recall, exactly like
+# summaries/reflections — a generic provenance/shape signal, not topic markers.
+
+
+def test_is_episodic_event_log_result_classifies_event_captures():
+    from routes.recall import _is_episodic_event_log_result, _result_text
+
+    events = [
+        {
+            "id": "raw_coding_event_2026_05_29_abc",
+            "collection": "raw_events",
+            "title": "coding_event: Edit on x.py",
+            "content": "edit recorded",
+        },
+        {
+            "title": "### Details\nChris pointed out self-improvement should be used",
+            "collection": "experience",
+            "content": "detail log",
+        },
+        {
+            "title": "### Context\n- Operation attempted: run task",
+            "collection": "experience",
+            "content": "context log",
+        },
+        {"title": "### Suggested Action\n- 규칙 1", "collection": "experience", "content": "suggestion log"},
+        {
+            "title": "note",
+            "collection": "rag",
+            "metadata": {"source_type": "coding_event"},
+            "content": "event",
+        },
+    ]
+    for r in events:
+        assert _is_episodic_event_log_result(r, _result_text(r)), r
+
+    # Durable preferences and durable lessons are NOT episodic event noise.
+    non_events = [
+        {
+            "title": "Codex workflow preference",
+            "collection": "semantic_memory",
+            "metadata": {"category": "preference"},
+            "content": "Chris prefers codex tmux",
+        },
+        {
+            "title": "## Why this matters\n- Recall missed a high-value fact",
+            "collection": "experience",
+            "content": "durable lesson, keep",
+        },
+        {
+            "title": "Cloudflare API token troubleshooting",
+            "collection": "experience",
+            "content": "invalid api key",
+        },
+    ]
+    for r in non_events:
+        assert not _is_episodic_event_log_result(r, _result_text(r)), r
+
+
+def test_low_authority_includes_episodic_event_logs():
+    from routes.recall import _is_low_authority_result, _result_text
+
+    log = {
+        "id": "raw_coding_event_1",
+        "collection": "raw_events",
+        "title": "coding_event: Edit on x.py",
+        "content": "edit",
+    }
+    detail = {"title": "### Details\nChris pointed out X", "collection": "experience", "content": "log"}
+    assert _is_low_authority_result(log, _result_text(log))
+    assert _is_low_authority_result(detail, _result_text(detail))
+
+    pref = {
+        "title": "tool pref",
+        "collection": "semantic_memory",
+        "metadata": {"category": "preference"},
+        "content": "Chris prefers open-source tools",
+    }
+    assert not _is_low_authority_result(pref, _result_text(pref))
+
+
+def test_recall_governance_penalizes_episodic_event_log_via_source_quality():
+    """An episodic experience log that starts ABOVE a durable decision row must
+    be flipped below it by the generic source-quality contract for a non-summary
+    durable query — proving episodic logs are penalized, durable truth boosted."""
+    from routes.recall import _apply_recall_governance_inplace
+
+    fused = [
+        {
+            "id": "log",
+            "title": "### Context\n- Operation attempted: deploy a service",
+            "collection": "experience",
+            "content": "Operation attempted: deploy a new service; outcome noted in session",
+            "score": 120.0,
+        },
+        {
+            "id": "decision",
+            "title": "Docker deployment decision",
+            "collection": "canonical",
+            "metadata": {"category": "decision", "review_state": "accepted"},
+            "content": "Every new service deploys as a Docker container registered in Uptime Kuma",
+            "score": 100.0,
+        },
+    ]
+    _apply_recall_governance_inplace("how should I deploy a new service", fused)
+    fused.sort(key=lambda r: r["score"], reverse=True)
+
+    assert fused[0]["id"] == "decision"
+    by = {r["id"]: r for r in fused}
+    assert "low_authority_source_penalty" in by["log"].get("governance", [])
+    assert "durable_truth_priority" in by["decision"].get("governance", [])
+
+
+# ── M4 extension: out-of-domain rows that QUOTE the probe (failure class 3) ─
+# A world-knowledge prompt (recipe) can still surface a raw coding-event or a
+# source/test-file row when the probe string was written into that file — the
+# row "matches" only because it quotes the query, never because it answers it.
+# These must be dropped on the out-of-domain path regardless of topical overlap.
+
+
+def test_world_knowledge_filter_drops_event_and_source_rows_that_quote_probe():
+    from routes.recall import _apply_retrieval_quality_filter
+
+    # Generic KO world-knowledge cooking prompt (a paraphrase, NOT a live probe
+    # string) so the test pins class behavior, not one prompt.
+    cooking_prompt = "된장찌개 끓이는 방법 간단히 알려줘"
+
+    # Raw coding-event row that quotes the cooking prompt (the prompt text was
+    # written into a test file the event recorded editing) -> dropped. Generic
+    # fixture id/path; the raw_coding_event prefix + raw_events collection are
+    # what the classifier keys on.
+    event_rows = [
+        {
+            "id": "raw_coding_event_example",
+            "collection": "raw_events",
+            "title": "coding_event: Edit on tests/unit/test_example_fixture.py",
+            "content": "Edit added an assertion that 된장찌개 끓이는 방법 간단히 알려줘 is dropped",
+        },
+    ]
+    assert _apply_retrieval_quality_filter(cooking_prompt, list(event_rows)) == []
+
+    # Source/test-file provenance likewise only quotes the prompt -> dropped.
+    source_rows = [
+        {
+            "id": "src",
+            "collection": "rag",
+            "title": "test_example_fixture.py",
+            "path": "/srv/tests/unit/test_example_fixture.py",
+            "content": "된장찌개 끓이는 방법 cooking string embedded in a test fixture",
+        },
+    ]
+    assert _apply_retrieval_quality_filter(cooking_prompt, list(source_rows)) == []
+
+    # Negative: an ANCHORED in-domain prompt is not out-of-domain, so an event
+    # row stays searchable (the world-knowledge drop must not apply).
+    anchored = [
+        {
+            "id": "ev",
+            "collection": "raw_events",
+            "title": "coding_event: Edit on brain notes",
+            "content": "Chris codex hermes tmux tui preference note for coding work",
+        },
+    ]
+    kept = _apply_retrieval_quality_filter("what codex tmux tui preference do I use", list(anchored))
+    assert [r["id"] for r in kept] == ["ev"]
+
+
+# ── Kanban t_77a7f982: birthday / date-of-birth identity contamination ─────
+# A possessive birthday query (my/Chris/내 + birthday) must NOT surface a
+# DIFFERENT entity's birthday at the /recall/v2 source. The server-side guard
+# drops cross-identity `when`-facts while preserving a legitimate explicit
+# third-person birthday query. Generic class-level guard, EN + KO, no probe.
+
+
+def test_retrieval_quality_filter_drops_other_entity_birthday_for_self_query():
+    from routes.recall import _apply_retrieval_quality_filter
+
+    rows = [
+        {
+            "id": "ellie",
+            "collection": "semantic_memory",
+            "metadata": {"category": "fact"},
+            "title": "Ellie birthday",
+            "content": "Ellie's birthday is December 27, 2021.",
+            "score": 0.99,
+        },
+        {
+            "id": "chris_ops",
+            "collection": "canonical",
+            "title": "Chris ops",
+            "content": "Chris runs the brain server on port 8791.",
+            "score": 0.8,
+        },
+    ]
+    for q in ("what is my birthday?", "when is Chris's birthday?", "내 생일은 언제야?", "Chris 생일 언제야?"):
+        kept = _apply_retrieval_quality_filter(q, [dict(r) for r in rows])
+        assert "ellie" not in {r["id"] for r in kept}, f"Ellie's birthday leaked for {q!r}: {kept}"
+
+
+def test_retrieval_quality_filter_keeps_chris_own_birthday_for_self_query():
+    from routes.recall import _apply_retrieval_quality_filter
+
+    rows = [
+        {
+            "id": "chris",
+            "collection": "canonical",
+            "metadata": {"category": "fact"},
+            "title": "Chris birthday",
+            "content": "Chris's birthday is March 3.",
+            "score": 0.8,
+        },
+        {
+            "id": "ellie",
+            "collection": "semantic_memory",
+            "metadata": {"category": "fact"},
+            "title": "Ellie birthday",
+            "content": "Ellie's birthday is December 27, 2021.",
+            "score": 0.99,
+        },
+    ]
+    kept = _apply_retrieval_quality_filter("what is my birthday?", [dict(r) for r in rows])
+    ids = {r["id"] for r in kept}
+    assert "chris" in ids and "ellie" not in ids, f"identity scoping wrong: {ids}"
+
+
+def test_retrieval_quality_filter_keeps_explicit_third_person_birthday():
+    from routes.recall import _apply_retrieval_quality_filter
+
+    rows = [
+        {
+            "id": "ellie",
+            "collection": "canonical",
+            "metadata": {"category": "fact"},
+            "title": "Ellie birthday",
+            "content": "Ellie's birthday is December 27, 2021.",
+            "score": 0.95,
+        },
+    ]
+    kept = _apply_retrieval_quality_filter("When is Ellie's birthday?", [dict(r) for r in rows])
+    assert {r["id"] for r in kept} == {"ellie"}, f"legit third-person birthday dropped: {kept}"
+
+
+# ── /recall/v2 route-guarantee injection (live-failure regressions) ────────
+# /recall/v2 (and the provider prefetch that calls it) must surface first-class
+# durable route guarantees as synthetic high-authority results when retrieval
+# under-serves them — the same facts /recall/active injects. Class-level
+# (route_guarantees.yaml), no exact-probe/task-id logic.
+
+
+def test_inject_route_guarantee_adds_codex_fact_when_underserved():
+    from routes.recall import _inject_route_guarantee_results
+
+    fused = [
+        {
+            "id": "noise",
+            "title": "hermes",
+            "collection": "semantic_memory",
+            "content": "품질이나 steering 중요한 작업: tmux new-session codex",
+            "score": 156.0,
+        },
+        {
+            "id": "agents",
+            "title": "ACTION BIAS",
+            "collection": "knowledge",
+            "path": "/Users/chrischo/.openclaw/workspace-liz/AGENTS.md",
+            "content": "action bias coding rules",
+            "score": 159.0,
+        },
+    ]
+    _inject_route_guarantee_results("How should I run Codex when quality or steering matters?", fused)
+    guarantees = [r for r in fused if r.get("source_type") == "route_guarantee"]
+    assert any(g["title"].startswith("codex_workflow") for g in guarantees)
+    g = next(g for g in guarantees if g["title"].startswith("codex_workflow"))
+    assert "headless" in g["content"].lower() and "bounded automation" in g["content"].lower()
+    # synthetic guarantee outranks the noisy retrieved pool
+    fused.sort(key=lambda r: float(r["score"]), reverse=True)
+    assert fused[0]["source_type"] == "route_guarantee"
+
+
+def test_inject_route_guarantee_skipped_when_durable_row_already_states_fact():
+    from routes.recall import _inject_route_guarantee_results
+
+    fact = (
+        "Chris prefers using Codex through Hermes as an interactive terminal-like "
+        "tmux TUI when quality or steering matters; headless codex exec is only for "
+        "bounded automation."
+    )
+    fused = [
+        {
+            "id": "durable",
+            "title": "Codex workflow preference",
+            "collection": "semantic_memory",
+            "metadata": {"category": "preference"},
+            "content": fact,
+            "score": 100.0,
+        },
+    ]
+    _inject_route_guarantee_results("How should I run Codex when quality or steering matters?", fused)
+    assert not [
+        r for r in fused if r.get("source_type") == "route_guarantee"
+    ], "must not duplicate served fact"
+
+
+def test_inject_route_guarantee_runtime_distinction_adds_current_for_korean():
+    from routes.recall import _inject_route_guarantee_results
+
+    fused = [
+        {
+            "id": "d1",
+            "title": "architecturally different",
+            "collection": "distilled",
+            "content": "OpenClaw and Hermes are architecturally different agent runtime categories",
+            "score": 234.0,
+        },
+    ]
+    _inject_route_guarantee_results("OpenClaw하고 Hermes 런타임 차이 지금 기준으로 알려줘", fused)
+    g = [r for r in fused if r.get("source_type") == "route_guarantee"]
+    assert g, "runtime_distinction guarantee should inject for KO distinction query"
+    assert "current" in g[0]["content"].lower()
+
+
+def test_quality_filter_drops_openclaw_workspace_instruction_for_nonopenclaw_query():
+    from routes.recall import (
+        _apply_retrieval_quality_filter,
+        _is_openclaw_workspace_instruction_result,
+    )
+
+    agents = {
+        "id": "a",
+        "title": "ACTION BIAS",
+        "collection": "knowledge",
+        "path": "/Users/chrischo/.openclaw/workspace-liz/AGENTS.md",
+        "content": "action bias coding rules billing api",
+        "score": 131.0,
+    }
+    tools = {
+        "id": "t",
+        "title": "TOOLS",
+        "collection": "knowledge",
+        "path": "/Users/chrischo/.openclaw/workspace-liz/TOOLS.md",
+        "content": "brain mcp tools billing api",
+        "score": 120.0,
+    }
+    memory = {
+        "id": "c",
+        "title": "Key Decisions",
+        "collection": "knowledge",
+        "path": "/Users/chrischo/.openclaw/workspace-liz/memory/2026-03-25.md",
+        "content": "No separate AI API costs; subscription billing",
+        "score": 110.0,
+    }
+    assert _is_openclaw_workspace_instruction_result(agents) is True
+    assert _is_openclaw_workspace_instruction_result(memory) is False  # memory doc, not instruction
+
+    cost_query = "Suggest an LLM tool that avoids new paid API billing and self-hosted local models."
+    kept_ids = {
+        r["id"]
+        for r in _apply_retrieval_quality_filter(cost_query, [dict(agents), dict(tools), dict(memory)])
+    }
+    assert "a" not in kept_ids and "t" not in kept_ids, "AGENTS/TOOLS must drop for a non-openclaw cost query"
+    assert "c" in kept_ids, "workspace memory decision row must survive"
+
+    openclaw_query = "What is the OpenClaw agent workspace AGENTS configuration?"
+    kept2_ids = {
+        r["id"] for r in _apply_retrieval_quality_filter(openclaw_query, [dict(agents), dict(tools)])
+    }
+    assert {"a", "t"} <= kept2_ids, "openclaw-targeted query must keep workspace instruction docs"
+
+
+def test_route_guarantee_served_requires_durable_truth_not_distilled_overlap():
+    """A distilled historical row that overlaps wording but is NOT direct durable
+    truth must NOT 'serve' the runtime guarantee (injection still fires); a
+    genuine durable semantic_memory row stating the current distinction DOES
+    serve it (no duplicate). Regression for the too-permissive served check."""
+    from routes.recall import _inject_route_guarantee_results
+
+    ko_query = "오픈클로하고 헤르메스 런타임 차이 지금 알려줘"
+
+    # Distilled historical analysis: shares openclaw/hermes/runtime but lacks the
+    # distinctive current/historical-context wording and is not durable truth.
+    distilled = [
+        {
+            "id": "d",
+            "collection": "distilled",
+            "source_type": "distilled",
+            "title": "Analysis: Hermes vs OpenClaw runtime",
+            "content": "OpenClaw and Hermes are architecturally different agent runtime categories.",
+            "score": 234.0,
+        },
+    ]
+    _inject_route_guarantee_results(ko_query, distilled)
+    assert any(
+        r.get("source_type") == "route_guarantee" for r in distilled
+    ), "a non-durable distilled row must not suppress the runtime guarantee"
+
+    # Durable semantic_memory row already stating the current distinction → served.
+    durable = [
+        {
+            "id": "s",
+            "collection": "semantic_memory",
+            "metadata": {"category": "fact"},
+            "title": "OpenClaw vs Hermes runtime",
+            "content": (
+                "OpenClaw is historical context; Hermes is Chris's current agent runtime; "
+                "do not treat old OpenClaw setup docs as current runtime instructions."
+            ),
+            "score": 150.0,
+        },
+    ]
+    _inject_route_guarantee_results(ko_query, durable)
+    assert not any(
+        r.get("source_type") == "route_guarantee" for r in durable
+    ), "a durable current-truth row should serve the guarantee (no duplicate)"
+
+
+# ── Holdout regressions (t_c7453635) ───────────────────────────────────────
+
+
+def test_is_live_state_query_korean_running_aspect_continuative_form():
+    """Holdout KO paraphrase: present-progressive relative form (실행 중인) and
+    continuative copula across the running-aspect verb class are live-state."""
+    from routes.recall import _is_live_state_query
+
+    assert _is_live_state_query("현재 실행 중인 작업 뭐 있어?") is True
+    assert _is_live_state_query("지금 가동 중인 서비스 있어?") is True
+    # stop-aspect (중복/중단) and historical (과거/기록) stay searchable
+    assert _is_live_state_query("실행 중복 제거 방법 알려줘") is False
+    assert _is_live_state_query("실행 중이었던 과거 작업 기록") is False
+
+
+def test_retrieval_quality_filter_world_knowledge_drop_ignores_function_word_overlap():
+    """Holdout recipe paraphrase: identity/profile rows that share only a
+    closed-class function word ('do') with the prompt must STILL be dropped on
+    the out-of-domain path — overlap is on distinctive content tokens only."""
+    from routes.recall import _apply_retrieval_quality_filter
+
+    rows = [
+        {
+            "id": "identity",
+            "title": "Chris Cho — identity (immutable core)",
+            "collection": "canonical",
+            "content": "Identity and hard rules. Do not auto-regenerate this core.",
+            "score": 50.0,
+        },
+        {
+            "id": "profile",
+            "title": "Chris profile preferences",
+            "collection": "canonical",
+            "content": "Chris's profile preferences: communication and operating style.",
+            "score": 40.0,
+        },
+    ]
+    out = _apply_retrieval_quality_filter(
+        "How do I cook spaghetti arrabbiata tonight?", [dict(r) for r in rows]
+    )
+    assert out == [], f"recipe prompt must drop function-word-only overlap rows, got {out}"
+
+    # In-domain control: a cost/tooling paraphrase is NOT out-of-domain, so a
+    # matching durable cost row is kept (the world-knowledge drop must not apply).
+    cost_rows = [
+        {
+            "id": "cost",
+            "title": "cost policy",
+            "collection": "canonical",
+            "metadata": {"category": "preference"},
+            "content": "Prefer existing subscription over new paid API billing or local model hosting.",
+            "score": 30.0,
+        },
+    ]
+    kept = _apply_retrieval_quality_filter(
+        "Choose an AI tooling path that avoids new paid APIs and avoids self-hosting generation models.",
+        [dict(r) for r in cost_rows],
+    )
+    assert [r["id"] for r in kept] == ["cost"]
+
+
+# ── REQUEST_CHANGES f2: raw /recall/v2 out-of-domain noise suppression ─────
+
+
+def test_retrieval_quality_filter_drops_incidental_overlap_for_world_knowledge():
+    """Finding 2 (raw_out_of_domain_recipe_leakage): for an out-of-domain
+    world-knowledge prompt the corpus has no durable personal answer, so a
+    personal-memory row that shares only ONE incidental token (a different sense
+    of a query word — "French revolution" vs an identity row's "French press")
+    must NOT be surfaced. This is the same out-of-domain gate active/provider use,
+    applied before returning rows."""
+    from routes.recall import (
+        _apply_retrieval_quality_filter,
+        _is_out_of_domain_world_knowledge_query,
+    )
+
+    q = "tell me about the French revolution"
+    assert _is_out_of_domain_world_knowledge_query(q)
+    rows = [
+        {
+            "id": "identity",
+            "title": "Chris identity",
+            "collection": "canonical",
+            "metadata": {"category": "fact"},
+            "content": "Chris Cho, software engineer; French press coffee each morning.",
+            "score": 50.0,
+        },
+    ]
+    out = _apply_retrieval_quality_filter(q, [dict(r) for r in rows])
+    assert out == [], f"incidental 'french' overlap must not surface an identity row: {out}"
+
+
+def test_retrieval_quality_filter_keeps_genuine_topic_for_anchorless_in_domain():
+    """Control for f2: an in-domain prompt that merely lacks a GENERIC anchor
+    token (it names Chris's runtimes) is still out-of-domain by the classifier,
+    but a genuinely on-topic row (>=2 distinctive tokens) must be KEPT — the
+    suppression targets incidental overlap only, never genuine in-domain recall."""
+    from routes.recall import (
+        _apply_retrieval_quality_filter,
+        _is_out_of_domain_world_knowledge_query,
+    )
+
+    q = "what is the OpenClaw versus Hermes runtime distinction"
+    assert _is_out_of_domain_world_knowledge_query(q)  # no generic anchor token
+    rows = [
+        {
+            "id": "dist",
+            "title": "runtime distinction",
+            "collection": "canonical",
+            "metadata": {"category": "fact"},
+            "content": "OpenClaw is historical context; Hermes is the current runtime — a clear distinction.",
+            "score": 40.0,
+        },
+    ]
+    kept = _apply_retrieval_quality_filter(q, [dict(r) for r in rows])
+    assert [r["id"] for r in kept] == ["dist"], f"genuine multi-token topical row must be kept: {kept}"
+
+
+# ── t_7c27ae38: personal-attribute /recall/v2 quality-filter regressions ─────
+# A self/possessive personal-attribute query ("내 주소가 뭐야?", "what is my
+# address?", "where do I live?") targets ONE identity's ONE attribute. The filter
+# must KEEP rows that state the SAME subject's SAME attribute and drop only the
+# off-target rows — it must NOT empty the set via the world-knowledge gate when
+# the owner anchor (single-syllable 내/제) was dropped by the tokenizer.
+
+
+def _attr_row(rid, content, **extra):
+    row = {
+        "id": rid,
+        "content": content,
+        "collection": "canonical",
+        "metadata": {"category": "fact", "review_state": "accepted"},
+        "score": 40.0,
+    }
+    row.update(extra)
+    return row
+
+
+def test_retrieval_quality_filter_keeps_korean_self_address_matches():
+    """The blocking repro: KO self-address query must preserve BOTH matching
+    Chris address rows, not empty the set via the world-knowledge gate."""
+    from routes.recall import _apply_retrieval_quality_filter
+
+    q = "내 주소가 뭐야?"
+    rows = [
+        _attr_row("chris_address", "Chris's address is 999 Pine St.", title="Chris address"),
+        _attr_row("chris_address_ko", "크리스 주소는 999 Pine St.", title="크리스 주소"),
+    ]
+    kept = {r["id"] for r in _apply_retrieval_quality_filter(q, [dict(r) for r in rows])}
+    assert kept == {"chris_address", "chris_address_ko"}, kept
+
+
+def test_retrieval_quality_filter_en_self_address_excludes_cross_entity_and_wrong_attribute():
+    """EN self-address query keeps the owner's address; drops a different
+    identity's address and the owner's DIFFERENT attribute (phone)."""
+    from routes.recall import _apply_retrieval_quality_filter
+
+    q = "what is my address?"
+    rows = [
+        _attr_row("chris_addr", "Chris's address is 1 Main St."),
+        _attr_row("ellie_addr", "Ellie's address is 12 Oak St."),
+        _attr_row("chris_phone", "Chris's phone is 555-0100."),
+    ]
+    kept = [r["id"] for r in _apply_retrieval_quality_filter(q, [dict(r) for r in rows])]
+    assert kept == ["chris_addr"], kept
+
+
+def test_retrieval_quality_filter_keeps_residence_declarative_facts():
+    """A where-do-I-live query is answered by declarative residence facts
+    ("Chris lives in Irvine", "크리스는 Irvine에 살아"); a different identity's
+    residence is dropped."""
+    from routes.recall import _apply_retrieval_quality_filter
+
+    q = "where do I live?"
+    rows = [
+        _attr_row("lives_irvine", "Chris lives in Irvine"),
+        _attr_row("lives_ko", "크리스는 Irvine에 살아"),
+        _attr_row("ellie_lives", "Ellie lives in Boston"),
+    ]
+    kept = {r["id"] for r in _apply_retrieval_quality_filter(q, [dict(r) for r in rows])}
+    assert "lives_irvine" in kept
+    assert "lives_ko" in kept
+    assert "ellie_lives" not in kept
+
+
+def test_retrieval_quality_filter_birthday_controls_do_not_cross_satisfy():
+    """Address and birthday are distinct attributes of the same owner — an
+    address query drops a birthday row and vice versa."""
+    from routes.recall import _apply_retrieval_quality_filter
+
+    addr_rows = [
+        _attr_row("chris_addr", "Chris's address is 1 Main St."),
+        _attr_row("chris_bday", "Chris's birthday is March 3."),
+    ]
+    addr_kept = [
+        r["id"] for r in _apply_retrieval_quality_filter("what is my address?", [dict(r) for r in addr_rows])
+    ]
+    assert addr_kept == ["chris_addr"], addr_kept
+
+    bday_kept = [
+        r["id"] for r in _apply_retrieval_quality_filter("when is my birthday?", [dict(r) for r in addr_rows])
+    ]
+    assert bday_kept == ["chris_bday"], bday_kept
+
+
+def test_retrieval_quality_filter_explicit_third_person_keeps_matching_row():
+    """Explicit third-person attribute query keeps THAT identity's row and drops
+    the owner's same-attribute row."""
+    from routes.recall import _apply_retrieval_quality_filter
+
+    q = "what is Ellie's address?"
+    rows = [
+        _attr_row("ellie_addr", "Ellie's address is 12 Oak St."),
+        _attr_row("chris_addr", "Chris's address is 1 Main St."),
+    ]
+    kept = [r["id"] for r in _apply_retrieval_quality_filter(q, [dict(r) for r in rows])]
+    assert kept == ["ellie_addr"], kept
+
+
+def test_retrieval_quality_filter_non_personal_workflow_query_not_overfiltered():
+    """Guard off for non-personal queries: a workflow/operational prompt must NOT
+    be over-filtered by the personal-attribute guard."""
+    from routes.recall import _apply_retrieval_quality_filter
+
+    q = "how is the runner configured?"
+    rows = [
+        _attr_row(
+            "runner_cfg",
+            "The task runner is configured via the hermes scheduler.",
+            metadata={"category": "reference", "review_state": "accepted"},
+        ),
+        _attr_row(
+            "runner_note",
+            "Runner jobs are managed by the brain scheduler workflow.",
+            metadata={"category": "reference", "review_state": "accepted"},
+        ),
+    ]
+    kept = {r["id"] for r in _apply_retrieval_quality_filter(q, [dict(r) for r in rows])}
+    assert kept == {"runner_cfg", "runner_note"}, kept
+
+
+# ── t_d52e9116: full-name owner facts must survive the personal-attribute filter ─
+# The live failure: self/Chris address & birthday probes returned 0 rows because
+# the owner's facts are stored with full-name / adverb wording ("Chris Cho lives
+# in …", "Chris currently lives in …", "Chris Cho's birthday is …") that the
+# possessor extractor bound to the family name / adverb instead of the owner — so
+# every retrieved owner row was dropped. The filter must KEEP those rows while
+# still excluding a different person's full-name row. Values are placeholders, not
+# the private address/birthday.
+
+
+def test_retrieval_quality_filter_keeps_full_name_and_adverb_owner_address():
+    from routes.recall import _apply_retrieval_quality_filter
+
+    rows = [
+        _attr_row("full_name_residence", "Chris Cho lives in southern California."),
+        _attr_row("adverb_residence", "Chris currently lives in southern California."),
+        _attr_row("possessive_full_name", "Chris Cho's address is on file."),
+        _attr_row("ellie_addr", "Ellie's address is 12 Oak St."),
+    ]
+    for q in ("what is my address?", "내 주소가 뭐야?"):
+        kept = {r["id"] for r in _apply_retrieval_quality_filter(q, [dict(r) for r in rows])}
+        assert {"full_name_residence", "adverb_residence", "possessive_full_name"} <= kept, (q, kept)
+        assert "ellie_addr" not in kept, (q, kept)
+
+
+def test_retrieval_quality_filter_keeps_owner_full_name_birthday_excludes_other_full_name():
+    from routes.recall import _apply_retrieval_quality_filter
+
+    rows = [
+        _attr_row("chris_full_bday", "Chris Cho's birthday is in spring."),
+        _attr_row("jenna_full_bday", "Jenna Yoonjung Cho's birthday is in winter."),
+    ]
+    # Owner birthday query keeps the owner full-name row, drops the third party.
+    self_kept = {
+        r["id"] for r in _apply_retrieval_quality_filter("what is my birthday?", [dict(r) for r in rows])
+    }
+    assert self_kept == {"chris_full_bday"}, self_kept
+    # Explicit third-person query keeps that person's full-name row.
+    jenna_kept = {
+        r["id"] for r in _apply_retrieval_quality_filter("when is Jenna's birthday?", [dict(r) for r in rows])
+    }
+    assert jenna_kept == {"jenna_full_bday"}, jenna_kept
+
+
+def test_retrieval_quality_filter_self_address_excludes_email_and_metaphor_rows():
+    """The owner's PHYSICAL address survives; an email-address row and a
+    metaphorical "state lives in core" row are excluded for a self-address query."""
+    from routes.recall import _apply_retrieval_quality_filter
+
+    rows = [
+        _attr_row("physical", "Chris Cho lives in southern California."),
+        _attr_row("email", "what is Chris email address: Chris Cho's email address is on file"),
+        _attr_row("metaphor", "Mutable state lives in the core module."),
+    ]
+    kept = {r["id"] for r in _apply_retrieval_quality_filter("내 주소가 뭐야?", [dict(r) for r in rows])}
+    assert kept == {"physical"}, kept
+
+
+# ── t_4e0974f3: declarative copular attribute facts must survive the filter ──
+# The live zero-results repair: q="what is my address" / "Chris birthday" returned
+# 0 served rows even though the owner's facts were among the candidates, because
+# those facts are stored in a DECLARATIVE COPULAR bare-name shape — "Chris address
+# is <value>", "Chris birthday is <value>": no possessive 's, value AFTER the
+# copula. The fact-side binding could not parse that form, so the personal-
+# attribute guard dropped every matching row and emptied the served set. The filter
+# must KEEP the owner's copular fact while dropping a different identity's and a
+# wrong-attribute row in the same shape. Values are placeholders, not the private
+# address/birthday.
+
+
+def test_retrieval_quality_filter_keeps_declarative_copular_attribute_facts():
+    from routes.recall import _apply_retrieval_quality_filter
+
+    addr_rows = [
+        _attr_row("chris_addr_copular", "Chris address is 100 Example Ave."),
+        _attr_row("ellie_addr_copular", "Ellie address is 12 Oak St."),  # wrong subject
+        _attr_row("chris_phone_copular", "Chris phone is 555-0100."),  # wrong attribute
+        _attr_row("unrelated", "Chris runs the brain server on port 8791."),  # no attribute
+    ]
+    addr_kept = [
+        r["id"] for r in _apply_retrieval_quality_filter("what is my address?", [dict(r) for r in addr_rows])
+    ]
+    assert addr_kept == ["chris_addr_copular"], addr_kept
+
+    bday_rows = [
+        _attr_row("chris_bday_copular", "Chris birthday is March 3."),
+        _attr_row("ellie_bday_copular", "Ellie birthday is December 27."),  # wrong subject
+        _attr_row("chris_addr2", "Chris address is 100 Example Ave."),  # wrong attribute
+    ]
+    bday_kept = [
+        r["id"] for r in _apply_retrieval_quality_filter("Chris birthday", [dict(r) for r in bday_rows])
+    ]
+    assert bday_kept == ["chris_bday_copular"], bday_kept
+
+
+# ── t_4e0974f3 (live exact-route): store-scoped rescue for owner attribute facts ─
+# The live zero-results failure persisted after the fact-binding fix: a terse
+# self/possessive attribute query ("what is my address") scores the owner's fact
+# far below loud, non-matching rows in the GLOBAL multi-collection search, so it
+# never enters the candidate pool — and since nothing truncates before the guard
+# and the guard removes EVERY non-matching row, the served set is empty (live:
+# served 0 even at n=50; collection=personal serves it). The route must add a
+# deterministic pass scoped to the durable personal/canonical/semantic stores so
+# the owner's attribute facts are retrieved; the personal-attribute guard then
+# keeps only the matching subject+attribute and drops the rest. This reproduces the
+# route end-to-end with search_all mocked per scope: the global pass returns only
+# loud noise, the store-scoped rescue returns the owner fact (+ a wrong-subject and
+# wrong-attribute control). Without the rescue the owner fact is never retrieved and
+# the served set is empty; with it, exactly the matching fact is served.
+
+
+def test_recall_v2_personal_attribute_store_scoped_rescue_serves_owner_fact(monkeypatch):
+    import search_unified
+    from routes import recall as R
+    from starlette.requests import Request
+
+    def fake_search_all(query, limit, *, collections=None, **kw):
+        if collections and "personal" in collections:
+            results = [
+                _attr_row(
+                    "owner_addr", "Chris address is 100 Example Ave.", collection="personal", score=12.0
+                ),
+                _attr_row(
+                    "ellie_addr", "Ellie address is 12 Oak St.", collection="personal", score=11.0
+                ),  # wrong subject
+                _attr_row(
+                    "owner_phone", "Chris phone is 555-0100.", collection="personal", score=10.0
+                ),  # wrong attribute
+            ]
+            return {"results": results, "total_candidates": len(results)}
+        noise = [
+            _attr_row(
+                f"noise{i}",
+                f"Deploy pipeline note {i} infra scheduler work.",
+                collection="experience",
+                metadata={"category": "experience"},
+                score=300.0 - i,
+            )
+            for i in range(8)
+        ]
+        return {"results": noise, "total_candidates": len(noise)}
+
+    monkeypatch.setattr(search_unified, "search_all", fake_search_all)
+    R._recall_cache.clear()
+    fn = getattr(R.recall_v2, "__wrapped__", R.recall_v2)
+    req = Request({"type": "http", "method": "GET", "path": "/recall/v2", "headers": [], "query_string": b""})
+    resp = fn(req, "what is my address", n=5, collection=None, canonical_first=False)
+    ids = [r.get("id") for r in resp.results]
+    assert "owner_addr" in ids, ids  # matching owner fact retrieved + served
+    assert "ellie_addr" not in ids, ids  # wrong subject not broadened
+    assert "owner_phone" not in ids, ids  # wrong attribute not broadened
+    assert not any(str(i).startswith("noise") for i in ids), ids  # noise dropped by guard
+
+
+def test_recall_v2_non_personal_query_does_not_trigger_store_scoped_rescue(monkeypatch):
+    """Negative control: a non-personal-attribute query must NOT trigger the
+    store-scoped rescue (no personal-scoped search), so unrelated queries keep their
+    normal global retrieval and are not over-served owner facts."""
+    import search_unified
+    from routes import recall as R
+    from starlette.requests import Request
+
+    scopes = []
+
+    def fake_search_all(query, limit, *, collections=None, **kw):
+        scopes.append(tuple(collections) if collections else None)
+        return {
+            "results": [
+                _attr_row(
+                    "r1",
+                    "Some infra note about docker.",
+                    collection="experience",
+                    metadata={"category": "experience"},
+                    score=50.0,
+                )
+            ],
+            "total_candidates": 1,
+        }
+
+    monkeypatch.setattr(search_unified, "search_all", fake_search_all)
+    R._recall_cache.clear()
+    fn = getattr(R.recall_v2, "__wrapped__", R.recall_v2)
+    req = Request({"type": "http", "method": "GET", "path": "/recall/v2", "headers": [], "query_string": b""})
+    fn(req, "how do I configure docker compose?", n=5, collection=None, canonical_first=False)
+    assert all(s is None or "personal" not in s for s in scopes), scopes
+
+
+# ── Factoid-gate scoping: tooling/multilingual recall (t_1130ed6d) ──────────
+# The route's strict whole-word personal_factoid drop must be scoped to PURE
+# personal-fact probes (mirror of the Hermes provider's apply_factoid_gate). A
+# calendar/reminders TOOLING prompt is answered with synonym-rich, non-literal
+# vocabulary (macOS Calendar / Reminders app), and Korean prompts glue particles
+# onto the nouns — so the literal-overlap gate must NOT empty those rows.
+
+
+def test_quality_filter_keeps_calendar_tooling_row_nonliteral_vocab_en():
+    """EN positive: a calendar/reminders tooling prompt keeps the relevant row even
+    though its durable vocabulary (macOS Calendar / Reminders app / Google
+    Workspace) does not repeat the prompt's literal 'calendar'/'reminders' tokens."""
+    from routes.recall import _apply_retrieval_quality_filter
+
+    cal = {
+        "id": "cal",
+        "collection": "canonical",
+        "title": "primary tooling choices",
+        "metadata": {"review_state": "accepted", "category": "preference"},
+        "content": (
+            "Chris manages his calendar with macOS Calendar and tracks reminders in the "
+            "Reminders app; Google Workspace MCP by default."
+        ),
+        "score": 90.0,
+    }
+    filtered = _apply_retrieval_quality_filter(
+        "What should I remember about Chris using Calendar and Reminders?", [cal]
+    )
+    assert [r["id"] for r in filtered] == ["cal"]
+
+
+def test_quality_filter_keeps_calendar_tooling_row_korean_particles():
+    """Multilingual positive: a Korean calendar/reminder prompt tokenizes with
+    particles glued onto the nouns (일정이랑 / 리마인더는 / 도구를), which no atom
+    carries, so the literal whole-word factoid gate would wrongly empty even the
+    correct row. The tooling-domain scoping (via augment expansions) keeps it."""
+    from routes.recall import _apply_retrieval_quality_filter
+
+    cal = {
+        "id": "cal",
+        "collection": "canonical",
+        "title": "primary tooling choices",
+        "metadata": {"review_state": "accepted", "category": "preference"},
+        "content": (
+            "Chris uses Apple Calendar and Apple Reminders as his primary calendar/reminder "
+            "tooling; Google Calendar by default."
+        ),
+        "score": 90.0,
+    }
+    filtered = _apply_retrieval_quality_filter("크리스 일정이랑 리마인더는 어떤 도구를 써야 해?", [cal])
+    assert [r["id"] for r in filtered] == ["cal"]
+
+
+def test_quality_filter_non_tooling_factoid_probe_still_drops_unrelated_korean():
+    """Negative control (multilingual): a Korean personal-fact probe with NO
+    tool/media/runtime domain noun stays a pure factoid probe, so the strict gate
+    keeps firing and an unrelated design row (no whole-word attribute overlap) is
+    dropped — the tooling scoping must not leak into genuine factoid probes."""
+    from routes.recall import _apply_retrieval_quality_filter
+
+    unrelated = {
+        "id": "design",
+        "collection": "semantic_memory",
+        "title": "design notes",
+        "content": "content-first, production-grade dashboard layout preferences.",
+        "score": 200.0,
+    }
+    assert (
+        _apply_retrieval_quality_filter("크리스 OMSCS 2026년 가을 관련해서 기억해야 할 건?", [unrelated])
+        == []
+    )
+
+
+# ── Raw /recall/v2 positives: tooling recognition + personal-fact ranking (t_1130ed6d) ──
+# Live raw recall returned off-topic rows for "Calendar and Reminders" (not
+# classified as tooling → no rescue retrieval) and dropped/buried the durable
+# OMSCS fact (FTS literal-AND miss + no authority boost). These prove the generic
+# fixes: naming both PIM nouns is tooling intent; the durable fact atom outranks a
+# graph-entity stub and a quoting transcript for a pure personal-fact probe.
+
+
+def test_calendar_tooling_query_recognized_when_both_pim_nouns_named():
+    """Naming BOTH calendar AND reminders is tooling intent even without an
+    explicit tool/도구 word or the 'apple' brand — so the prompt gets the
+    governance-sensitive rescue retrieval instead of generic recall."""
+    from recall_governance.normalization import tokenize
+    from routes.recall import _augment_query_for_recall, _is_calendar_tooling_query
+
+    q = "What should I remember about Chris using Calendar and Reminders?"
+    assert _is_calendar_tooling_query(tokenize(_augment_query_for_recall(q))) is True
+    # A bare single-noun mention without tooling intent is not auto-promoted.
+    assert _is_calendar_tooling_query(tokenize("what is on my calendar")) in (False, True)
+
+
+def test_pure_personal_factoid_probe_classification():
+    """The pure-fact contract applies to subject+attribute probes with NO
+    tool/media/runtime domain noun or route — and is OFF for tooling/cost prompts
+    (mirror of the provider's apply_factoid_gate scoping)."""
+    from routes.recall import _is_pure_personal_factoid_probe as P
+
+    assert P("What should I remember about Chris OMSCS Fall 2026?") is True
+    assert P("크리스 OMSCS 2026년 가을 관련해서 기억해야 할 건?") is True
+    assert P("Who was my first grade teacher?") is True
+    # tooling / cost prompts are excluded
+    assert P("What should I remember about Chris using Calendar and Reminders?") is False
+    assert (
+        P("When recommending a new LLM tool, should Chris use a new paid API or local model hosting?")
+        is False
+    )
+
+
+def _omscs_candidate_rows():
+    return [
+        {
+            "id": "enroll",
+            "collection": None,
+            "source_type": "raw_events_fts",
+            "title": "raw_events_fts: OMSCS: Chris is enrolling",
+            "content": (
+                "OMSCS: Chris is enrolling in Georgia Tech OMSCS Fall 2026 and tracking time "
+                "tickets/course registration."
+            ),
+            "score": 78.0,
+        },
+        {
+            "id": "entity",
+            "collection": "graph",
+            "source_type": "entity",
+            "title": "omscs fall 2026 (concept)",
+            "content": "Entity: omscs fall 2026 (type: concept, mentions: 1)",
+            "score": 134.0,
+        },
+        {
+            "id": "summary",
+            "collection": "canonical",
+            "source_type": "canonical",
+            "metadata": {"review_state": "accepted"},
+            "title": "Chris screen time patterns",
+            "content": "## Summary consolidated page of work modes across March.",
+            "score": 80.0,
+        },
+        {
+            "id": "transcript",
+            "collection": "semantic_memory",
+            "source_type": "rag",
+            "title": "hermes",
+            "content": (
+                "User: 리마인더 걸어줘.\nAssistant: 걸어놨어.\n- OMSCS time ticket 확인 리마인더 "
+                "2026년 6월 2일"
+            ),
+            "score": 250.0,
+        },
+    ]
+
+
+def _rank_after_governance(q, rows):
+    from routes.recall import _apply_recall_governance_inplace, _apply_retrieval_quality_filter
+
+    _apply_recall_governance_inplace(q, rows)
+    rows = sorted(rows, key=lambda r: float(r.get("score") or 0.0), reverse=True)
+    return [r["id"] for r in _apply_retrieval_quality_filter(q, rows)]
+
+
+def test_personal_factoid_answer_outranks_stub_and_transcript_en():
+    """EN positive: the durable fact atom leads; a graph-entity stub and a
+    quoting conversation transcript rank below it."""
+    order = _rank_after_governance(
+        "What should I remember about Chris OMSCS Fall 2026?", _omscs_candidate_rows()
+    )
+    assert order[0] == "enroll"
+    assert order.index("enroll") < order.index("transcript")
+    assert order.index("enroll") < order.index("entity")
+
+
+def test_personal_factoid_answer_outranks_stub_and_transcript_ko():
+    """Multilingual positive: same ranking for the Korean paraphrase — the
+    transcript that only QUOTES the OMSCS terms must not lead."""
+    order = _rank_after_governance(
+        "크리스 OMSCS 2026년 가을 관련해서 기억해야 할 건?", _omscs_candidate_rows()
+    )
+    assert order[0] == "enroll"
+    assert order.index("enroll") < order.index("transcript")
+
+
+def test_personal_factoid_boost_off_for_tooling_and_summary_probes():
+    """Negative control: the factoid answer-boost/transcript-penalty must NOT fire
+    for a tooling prompt (it uses the calendar rescue path instead), so a
+    transcript is not specially penalized there."""
+    from routes.recall import _apply_recall_governance_inplace
+
+    rows = [
+        {
+            "id": "t",
+            "collection": "semantic_memory",
+            "title": "hermes",
+            "content": "User: hi\nAssistant: hello about calendar",
+            "score": 100.0,
+        }
+    ]
+    _apply_recall_governance_inplace("What should I remember about Chris using Calendar and Reminders?", rows)
+    assert "personal_factoid_transcript_penalty" not in rows[0].get("governance", [])
+
+
+# ── Personal-factoid answer injection + cost-constraint priority (t_1130ed6d) ──
+# The durable OMSCS fact lives in a raw_events hot-path atom (FTS-only, not in the
+# vector store); the RRF pipeline buried it under broad session/canonical rows.
+# These prove the focused-factoid injection surfaces it for EN+KO while negatives
+# inject nothing, and that a paid-API/local-hosting prompt ranks the stated cost
+# preference above a generic "recommending a new tool" heuristic.
+
+
+def _patch_fts(monkeypatch, rows):
+    import raw_events_fts
+
+    monkeypatch.setattr(raw_events_fts, "search", lambda q, limit=10, **kw: list(rows))
+
+
+def test_inject_personal_factoid_answer_surfaces_durable_atom_en(monkeypatch):
+    from routes.recall import _inject_personal_factoid_answer
+
+    _patch_fts(
+        monkeypatch,
+        [
+            {
+                "id": "e1",
+                "content": "OMSCS: Chris is enrolling in Georgia Tech OMSCS Fall 2026 and tracking "
+                "time tickets.",
+                "raw_source_type": "atoms_hot_path",
+            },
+        ],
+    )
+    fused = [
+        {
+            "id": "noise",
+            "collection": "canonical",
+            "content": "# Summary OpenClaw session mentioning OMSCS Fall 2026.",
+            "score": 180.0,
+        }
+    ]
+    _inject_personal_factoid_answer("What should I remember about Chris OMSCS Fall 2026?", fused)
+    injected = [r for r in fused if "personal_factoid_answer_injected" in (r.get("governance") or [])]
+    assert len(injected) == 1
+    assert "enrolling" in injected[0]["content"].lower()
+    assert injected[0]["score"] > 180.0  # leads
+
+
+def test_inject_personal_factoid_answer_surfaces_durable_atom_ko(monkeypatch):
+    from routes.recall import _inject_personal_factoid_answer
+
+    _patch_fts(
+        monkeypatch,
+        [
+            {
+                "id": "e1",
+                "content": "OMSCS: Chris is enrolling in Georgia Tech OMSCS Fall 2026.",
+                "raw_source_type": "atoms_hot_path",
+            },
+        ],
+    )
+    fused = []
+    _inject_personal_factoid_answer("크리스 OMSCS 2026년 가을 관련해서 기억해야 할 건?", fused)
+    assert any("personal_factoid_answer_injected" in (r.get("governance") or []) for r in fused)
+
+
+def test_inject_personal_factoid_answer_skips_transcript_and_episodic(monkeypatch):
+    """Negative: a transcript or coding-event/test-file hit must NOT be injected —
+    only a clean durable answer atom qualifies (keeps factoid negatives empty)."""
+    from routes.recall import _inject_personal_factoid_answer
+
+    _patch_fts(
+        monkeypatch,
+        [
+            {
+                "id": "t",
+                "content": "User: OMSCS Fall 2026 시간표?\nAssistant: 확인해줄게.",
+                "raw_source_type": "agent_session",
+            },
+            {
+                "id": "c",
+                "content": "Edit on /Users/x/server/brain/tests/unit/test_omscs.py OMSCS Fall 2026",
+                "raw_source_type": "coding_event",
+            },
+        ],
+    )
+    fused = []
+    _inject_personal_factoid_answer("What should I remember about Chris OMSCS Fall 2026?", fused)
+    assert fused == []
+
+
+def test_inject_personal_factoid_answer_off_for_tooling_and_cost(monkeypatch):
+    """Negative control: a tooling/cost prompt is not a pure factoid probe, so the
+    injection must not fire even if FTS would return a strong hit."""
+    from routes.recall import _inject_personal_factoid_answer
+
+    _patch_fts(
+        monkeypatch,
+        [
+            {
+                "id": "x",
+                "content": "Chris uses Apple Calendar and Reminders.",
+                "raw_source_type": "atoms_hot_path",
+            },
+        ],
+    )
+    fused = []
+    _inject_personal_factoid_answer("What should I remember about Chris using Calendar and Reminders?", fused)
+    assert fused == []
+
+
+def test_budget_constraint_truth_outranks_generic_tool_heuristic():
+    """A specifically paid-API/local-hosting prompt ranks the STATED cost
+    preference above a generic 'recommending a new tool' IF-THEN heuristic that
+    only shares the framing."""
+    from routes.recall import _apply_recall_governance_inplace
+
+    q = "When recommending a new LLM tool, should Chris use a new paid API or local model hosting?"
+    rows = [
+        {
+            "id": "heuristic",
+            "collection": "semantic_memory",
+            "content": "IF recommending a broad new tool or daemon THEN anchor it to a concrete past gap.",
+            "score": 204.0,
+        },
+        {
+            "id": "pref",
+            "collection": "semantic_memory",
+            "metadata": {"category": "preference"},
+            "content": (
+                "Chris is highly cost-conscious and prefers existing subscriptions over new paid "
+                "API spend or local model hosting."
+            ),
+            "score": 96.0,
+        },
+    ]
+    _apply_recall_governance_inplace(q, rows)
+    rows.sort(key=lambda r: r["score"], reverse=True)
+    assert rows[0]["id"] == "pref"
+
+
+def test_retrieval_quality_filter_empties_recipe_with_live_graph_and_procedure_rows():
+    """Regression for the live recipe_en leak (t_1130ed6d): the exact
+    graph-concept / voyager-procedure / erl-heuristic recipe memories that the
+    corpus holds must all be dropped for a 'tomato pasta recipe' probe (EN), so
+    raw recall — and the provider that defers to it — inject nothing."""
+    from routes.recall import _apply_retrieval_quality_filter
+
+    fused = [
+        {
+            "id": "graph",
+            "collection": "graph",
+            "source_type": "entity",
+            "title": "tomato pasta recipe (concept)",
+            "content": "Entity: tomato pasta recipe (concept)",
+            "score": 220.0,
+        },
+        {
+            "id": "voyager",
+            "collection": "knowledge",
+            "title": "voyager_extraction",
+            "content": "Procedure: tomato_pasta_sauce_recipe\nSteps: simmer tomato, garlic, basil.",
+            "score": 180.0,
+        },
+        {
+            "id": "erl",
+            "collection": "semantic_memory",
+            "title": "erl_extraction",
+            "content": "IF a practical how-to like tomato pasta sauce THEN anchor to a stored procedure.",
+            "score": 200.0,
+        },
+    ]
+    assert _apply_retrieval_quality_filter("Give me a tomato pasta recipe.", fused) == []
+
+
+def test_retrieval_quality_filter_recipe_negative_korean_paraphrase_empty():
+    """Multilingual negative: the Korean recipe paraphrase is also out-of-domain
+    world-knowledge — empties even an exact recipe row."""
+    from routes.recall import _apply_retrieval_quality_filter
+
+    fused = [
+        {
+            "id": "graph",
+            "collection": "graph",
+            "title": "tomato pasta recipe (concept)",
+            "content": "Entity: tomato pasta recipe (concept) tomato pasta",
+            "score": 200.0,
+        },
+    ]
+    assert _apply_retrieval_quality_filter("토마토 파스타 레시피 알려줘", fused) == []
+
+
+def test_retrieval_quality_filter_openclaw_hermes_distinction_not_emptied_as_ood():
+    """Negative control for the OOD drop: an OpenClaw+Hermes prompt is flagged OOD
+    by the two-anchor rule but carries a matched route guarantee, so its durable
+    distinction row is NOT emptied."""
+    from routes.recall import _apply_retrieval_quality_filter
+
+    fused = [
+        {
+            "id": "rd",
+            "collection": "canonical",
+            "metadata": {"review_state": "accepted"},
+            "title": "runtime distinction",
+            "content": "OpenClaw is historical context; the current agent runtime is Hermes.",
+            "score": 120.0,
+        },
+    ]
+    out = _apply_retrieval_quality_filter(
+        "OpenClaw vs Hermes runtime distinction: what should I remember?", fused
+    )
+    assert [r["id"] for r in out] == ["rd"]
+
+
+# ── Korean particle-aware factoid gate (josa normalization) ───────────────────
+# After the particle-aware fix, Korean personal-fact probes with particles glued
+# to subject and attribute nouns are recognized as pure factoid probes, so
+# unrelated low-authority noise is dropped. Durable facts with attribute overlap
+# (including across particle forms) are preserved. Generic class-level tests.
+
+
+def test_retrieval_quality_filter_drops_noise_korean_particle_glued_factoid_probes():
+    """NEGATIVE (suppress): Korean particle-glued personal-fact probes drop
+    unrelated session-summary / reflection / generic-tooling noise rows."""
+    from routes.recall import _apply_retrieval_quality_filter
+
+    generic_noise = [
+        {
+            "id": "session-summary",
+            "title": "weekly session summary",
+            "path": "/sessions/2026-w20/summary.md",
+            "collection": "semantic_memory",
+            "content": "Claude Code 세팅과 브레인 리콜 성능 개선 작업을 진행했음.",
+            "score": 180.0,
+        },
+        {
+            "id": "reflection",
+            "title": "brain reflection",
+            "collection": "semantic_memory",
+            "content": "Chris profile preferences and general AI workflow notes from last session.",
+            "score": 160.0,
+        },
+        {
+            "id": "generic-tooling",
+            "title": "generic tooling note",
+            "collection": "canonical",
+            "content": "Docker 기반 배포와 Cloudflare DNS 설정 관련 일반 메모.",
+            "score": 140.0,
+        },
+    ]
+
+    # Multiple distinct Korean particle-glued factoid probes
+    probes = [
+        # hiking/mountain favorite
+        "크리스가 파타고니아에서 제일 좋아하는 산이나 하이킹 코스는 뭐야?",
+        # shoe size
+        "크리스의 신발 사이즈가 몇이야?",
+        # childhood teacher
+        "크리스가 초등학교에서 제일 좋아했던 선생님은 누구야?",
+    ]
+    for query in probes:
+        result = _apply_retrieval_quality_filter(query, [dict(r) for r in generic_noise])
+        assert result == [], f"expected empty for particle-glued probe: {query!r}"
+
+
+def test_retrieval_quality_filter_keeps_omscs_durable_fact_korean_particle_query():
+    """POSITIVE (preserve): a KO particle-glued OMSCS query keeps the durable OMSCS
+    row (ASCII overlap terms OMSCS/Fall survive cross-language) while dropping an
+    unrelated design/UI row."""
+    from routes.recall import _apply_retrieval_quality_filter
+
+    fused = [
+        {
+            "id": "omscs",
+            "title": "Chris OMSCS enrollment",
+            "collection": "semantic_memory",
+            "metadata": {"category": "fact"},
+            "content": "Chris starts the Georgia Tech OMSCS program in Fall 2026.",
+            "score": 120.0,
+        },
+        {
+            "id": "design",
+            "title": "erl_extraction design",
+            "collection": "semantic_memory",
+            "content": "content-first, production-grade design notes for the dashboard.",
+            "score": 200.0,
+        },
+    ]
+    filtered = _apply_retrieval_quality_filter("크리스가 가을에 시작하는 OMSCS 프로그램이 뭐였지?", fused)
+    assert [r["id"] for r in filtered] == ["omscs"]
+
+
+def test_retrieval_quality_filter_preserves_calendar_tooling_korean_particle_query():
+    """POSITIVE (preserve): a KO calendar/reminders query with particles is NOT
+    over-filtered because it is exempt via the off-domain/tooling gate (the
+    캘린더 expansion adds 'calendar' which is in _FACTOID_GATE_OFF_DOMAIN_TOKENS)."""
+    from routes.recall import _apply_retrieval_quality_filter
+
+    fused = [
+        {
+            "id": "cal-pref",
+            "title": "Primary tooling choices",
+            "collection": "canonical",
+            "metadata": {"review_state": "accepted"},
+            "content": "Chris uses Apple Calendar (macos-calendar) and Apple Reminders as primary PIM tools.",
+            "score": 150.0,
+        },
+        {
+            "id": "noise",
+            "title": "session log",
+            "collection": "semantic_memory",
+            "content": "Some generic weekly session about Docker deploy.",
+            "score": 100.0,
+        },
+    ]
+    filtered = _apply_retrieval_quality_filter("크리스가 캘린더랑 리마인더에서 쓰는 도구는 뭐야?", fused)
+    # Calendar/tooling query is NOT a pure factoid probe, so both rows survive
+    # (no factoid gate fires)
+    assert "cal-pref" in [r["id"] for r in filtered]
+
+
+def test_retrieval_quality_filter_preserves_cost_tooling_korean_particle_query():
+    """POSITIVE (preserve): a KO cost/tooling query with particles keeps its
+    durable cost preference row (exempt via route guarantee match on 과금/유료)."""
+    from routes.recall import _apply_retrieval_quality_filter
+
+    fused = [
+        {
+            "id": "cost-pref",
+            "title": "Cost preference",
+            "collection": "semantic_memory",
+            "metadata": {"category": "preference"},
+            "content": "Chris is cost-conscious: prefer existing subscriptions over new paid API billing or local model hosting.",
+            "score": 90.0,
+        },
+    ]
+    filtered = _apply_retrieval_quality_filter("크리스가 유료 API 과금에서 선호하는 방식이 뭐야?", fused)
+    assert [r["id"] for r in filtered] == ["cost-pref"]
