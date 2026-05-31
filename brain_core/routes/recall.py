@@ -3365,9 +3365,17 @@ def recall_v2(
     # why empty/missing-results payloads must be dropped before fusion.
     result_lists = _filter_nonempty_result_lists(all_payloads)
     if not result_lists:
+        # Empty/missing retrieval still owes a matched high-priority route its
+        # durable guarantee_fact (route_guarantees.yaml lines 6-8: inject directly
+        # when the route matches and retrieval is missing/under-served). Active
+        # recall already does this; mirror it here so /recall/v2 doesn't drop the
+        # guarantee on the empty-retrieval path. No route match → the list stays
+        # empty → the existing empty response is returned unchanged.
+        guarantee_only: list[dict] = []
+        _inject_route_guarantee_results(q, guarantee_only)
         timing["total_ms"] = int((time.time() - t_start) * 1000)
         _metrics_buf.record_search_latency(timing["total_ms"], timing)
-        return _build_empty_recall_v2_response(
+        response = _build_empty_recall_v2_response(
             q,
             hyde=hyde,
             hypothetical=hypothetical,
@@ -3378,6 +3386,10 @@ def recall_v2(
             t_start=t_start,
             timing=timing,
         )
+        if guarantee_only:
+            response.results = guarantee_only[:n]
+            _recall_cache_put(cache_key, response)
+        return response
 
     fused, rrf_ms = _run_rrf_fuse(result_lists)
     timing["rrf_ms"] = rrf_ms

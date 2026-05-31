@@ -5940,6 +5940,73 @@ def test_route_guarantee_served_requires_durable_truth_not_distilled_overlap():
     ), "a durable current-truth row should serve the guarantee (no duplicate)"
 
 
+# ── /recall/v2 empty-retrieval route-guarantee injection (t_88c3b3c6) ───────
+# When search_all returns only empty/missing result lists, recall_v2 used to
+# short-circuit into _build_empty_recall_v2_response BEFORE the route-guarantee
+# injection step ran, so a matched high-priority route's guarantee_fact was
+# dropped on the empty-retrieval path (active recall surfaces it, /recall/v2
+# did not). The route_guarantees.yaml contract (lines 6-8) says guarantee_facts
+# may be injected directly when the route is matched and retrieval is missing.
+
+
+def test_recall_v2_empty_retrieval_injects_matched_route_guarantee(monkeypatch):
+    """A route-matching query whose retrieval comes back fully empty must still
+    surface the synthetic route_guarantee result instead of an empty list."""
+    from routes import recall as recall_route
+    from starlette.requests import Request
+
+    recall_route._recall_cache.clear()
+
+    def fake_search_all(query, n, **kwargs):
+        return {"results": [], "total_candidates": 0, "source_timing": {}}
+
+    monkeypatch.setattr(recall_route.search_unified, "search_all", fake_search_all)
+
+    request = Request(
+        {"type": "http", "method": "GET", "path": "/recall/v2", "headers": [], "query_string": b""}
+    )
+    response = recall_route.recall_v2(
+        request,
+        q="Tell me Chris's actual Codex workflow preference, not a digest.",
+        n=3,
+        rerank=False,
+        decay=False,
+    )
+
+    guarantees = [r for r in response.results if r.get("source_type") == "route_guarantee"]
+    assert guarantees, f"expected a route_guarantee result on empty retrieval, got {response.results}"
+    g = guarantees[0]
+    assert str(g.get("id")).startswith("route_guarantee:"), g.get("id")
+    assert "interactive terminal-like tmux TUI" in g.get("content", ""), g.get("content")
+
+
+def test_recall_v2_empty_retrieval_non_matching_query_stays_empty(monkeypatch):
+    """Negative control: an empty-retrieval query that matches no route guarantee
+    must preserve the existing empty-results behavior."""
+    from routes import recall as recall_route
+    from starlette.requests import Request
+
+    recall_route._recall_cache.clear()
+
+    def fake_search_all(query, n, **kwargs):
+        return {"results": [], "total_candidates": 0, "source_timing": {}}
+
+    monkeypatch.setattr(recall_route.search_unified, "search_all", fake_search_all)
+
+    request = Request(
+        {"type": "http", "method": "GET", "path": "/recall/v2", "headers": [], "query_string": b""}
+    )
+    response = recall_route.recall_v2(
+        request,
+        q="How do I bake sourdough bread at home?",
+        n=3,
+        rerank=False,
+        decay=False,
+    )
+
+    assert response.results == []
+
+
 # ── Holdout regressions (t_c7453635) ───────────────────────────────────────
 
 
