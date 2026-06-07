@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -575,6 +576,99 @@ def test_single_hermes_empty_rate_limited_response_carries_error(monkeypatch):
     assert r.ok is False
     assert r.rate_limited is True
     assert "rate limit" in r.error.lower()
+
+
+def _write_hermes_state(home: Path, profile: str, session_id: str, assistant_content: str | None) -> None:
+    state_db = home / "profiles" / profile / "state.db"
+    state_db.parent.mkdir(parents=True)
+    conn = sqlite3.connect(state_db)
+    try:
+        conn.execute(
+            "CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, role TEXT, content TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content) VALUES (?, 'user', 'prompt')", (session_id,)
+        )
+        if assistant_content is not None:
+            conn.execute(
+                "INSERT INTO messages (session_id, role, content) VALUES (?, 'assistant', ?)",
+                (session_id, assistant_content),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_hermes_fallback_recovers_empty_stdout_from_persisted_assistant(monkeypatch, tmp_path):
+    session_id = "20260607_063318_c79542"
+    hermes_home = tmp_path / ".hermes"
+    _write_hermes_state(hermes_home, "sage", session_id, '{"entities":[]}')
+
+    def fake_run(cmd, timeout, **kwargs):
+        return (
+            subprocess.CompletedProcess(cmd, 0, "", f"session_id: {session_id}\n"),
+            0,
+        )
+
+    monkeypatch.setattr(cli_llm, "HERMES_HOME", hermes_home)
+    monkeypatch.setattr(cli_llm, "_run_cli_process", fake_run)
+    monkeypatch.setattr(cli_llm, "_record_usage", lambda *a, **k: None)
+
+    r = cli_llm._single_hermes("hi", "sage", timeout=5)
+
+    assert r.ok is True
+    assert r.text == '{"entities":[]}'
+    assert r.error == ""
+    assert r.rate_limited is False
+
+
+def test_hermes_fallback_empty_stdout_without_persisted_assistant_remains_failure(monkeypatch, tmp_path):
+    session_id = "20260607_065457_cc6d23"
+    hermes_home = tmp_path / ".hermes"
+    _write_hermes_state(hermes_home, "sage", session_id, None)
+
+    def fake_run(cmd, timeout, **kwargs):
+        return (
+            subprocess.CompletedProcess(cmd, 0, "", f"session_id: {session_id}\n"),
+            0,
+        )
+
+    monkeypatch.setattr(cli_llm, "HERMES_HOME", hermes_home)
+    monkeypatch.setattr(cli_llm, "_run_cli_process", fake_run)
+    monkeypatch.setattr(cli_llm, "_record_usage", lambda *a, **k: None)
+
+    r = cli_llm._single_hermes("hi", "sage", timeout=5)
+
+    assert r.ok is False
+    assert r.text == ""
+    assert "hermes returned empty response" in r.error
+
+
+def test_cli_dispatch_records_recovered_hermes_response_as_success(monkeypatch, tmp_path):
+    session_id = "20260607_070000_recovered"
+    hermes_home = tmp_path / ".hermes"
+    _write_hermes_state(hermes_home, "sage", session_id, "OK")
+    recorded: list[dict] = []
+
+    def fake_run(cmd, timeout, **kwargs):
+        return (
+            subprocess.CompletedProcess(cmd, 0, "", f"session_id: {session_id}\n"),
+            0,
+        )
+
+    monkeypatch.setattr(cli_llm, "HERMES_HOME", hermes_home)
+    monkeypatch.setattr(cli_llm, "FALLBACK_CHAIN", [("hermes", "sage", "Hermes test")])
+    monkeypatch.setattr(cli_llm, "_peek_breaker", lambda kind: _fake_open_snapshot("closed", 0.0))
+    monkeypatch.setattr(cli_llm, "_record_breaker", lambda kind, **kw: recorded.append({"kind": kind, **kw}))
+    monkeypatch.setattr(cli_llm, "_run_cli_process", fake_run)
+    monkeypatch.setattr(cli_llm, "_record_usage", lambda *a, **k: None)
+
+    r = cli_llm.cli_dispatch("hi", timeout=5)
+
+    assert r.ok is True
+    assert r.text == "OK"
+    assert recorded == [{"kind": cli_llm.BREAKER_KIND, "ok": True}]
+    cli_llm._BACKEND_COOLDOWN_UNTIL.clear()
 
 
 def test_legacy_claude_backend_compat_routes_to_codex_primary(monkeypatch):

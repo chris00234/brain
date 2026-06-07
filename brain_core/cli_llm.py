@@ -98,6 +98,7 @@ CODEX_PRIMARY_MODEL = os.getenv("BRAIN_CODEX_PRIMARY_MODEL", "gpt-5.5")
 CODEX_FALLBACK_MODEL = os.getenv("BRAIN_CODEX_FALLBACK_MODEL", "gpt-5.3-codex-spark")
 HERMES_BIN = os.getenv("BRAIN_HERMES_BIN", os.getenv("HERMES_BIN", "/Users/chrischo/.local/bin/hermes"))
 HERMES_FALLBACK_PROFILE = os.getenv("BRAIN_HERMES_FALLBACK_PROFILE", "jenna")
+HERMES_HOME = Path(os.getenv("BRAIN_HERMES_HOME", "/Users/chrischo/.hermes"))
 HERMES_TIMEOUT_FLOOR_S = max(5, int(os.getenv("BRAIN_HERMES_TIMEOUT_FLOOR_S", "45")))
 HERMES_TIMEOUT_CAP_S = max(HERMES_TIMEOUT_FLOOR_S, int(os.getenv("BRAIN_HERMES_TIMEOUT_CAP_S", "90")))
 HERMES_FALLBACK_ENABLED = os.getenv("BRAIN_HERMES_FALLBACK_ENABLED", "1").lower() not in {
@@ -854,6 +855,60 @@ def _parse_hermes_payload(stdout: str) -> tuple[str, int]:
     return text, tokens
 
 
+_HERMES_SESSION_ID_RE = re.compile(r"session_id:\s*([A-Za-z0-9_-]+)")
+
+
+def _hermes_profile_state_db(profile: str) -> Path:
+    return HERMES_HOME / "profiles" / profile / "state.db"
+
+
+def _hermes_session_id_from_stderr(stderr: str) -> str | None:
+    match = _HERMES_SESSION_ID_RE.search(stderr or "")
+    return match.group(1) if match else None
+
+
+def _recover_hermes_assistant_from_state(profile: str, session_id: str) -> str:
+    """Read the saved Hermes assistant answer for a completed one-shot session.
+
+    Hermes sometimes persists the final assistant message to the profile state
+    DB while the parent process receives empty stdout. Recovery is intentionally
+    narrow: exact profile + exact session id + latest non-empty assistant row.
+    Missing DB/schema/row returns empty so the original failure path remains.
+    """
+
+    state_db = _hermes_profile_state_db(profile)
+    if not state_db.exists():
+        return ""
+    conn = None
+    try:
+        conn = sqlite3.connect(f"file:{state_db}?mode=ro", uri=True, timeout=1.0)
+        row = conn.execute(
+            """
+            SELECT content
+            FROM messages
+            WHERE session_id = ?
+              AND role = 'assistant'
+              AND content IS NOT NULL
+              AND length(trim(content)) > 0
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (session_id,),
+        ).fetchone()
+    except sqlite3.Error as exc:
+        log.debug(
+            "hermes state recovery failed for profile=%s session_id=%s: %s",
+            profile,
+            session_id,
+            exc,
+        )
+        return ""
+    finally:
+        if conn is not None:
+            conn.close()
+    return str(row[0]).strip() if row and row[0] else ""
+
+
 def _single_hermes(prompt: str, model: str, timeout: int, *, session_id: str | None = None) -> CliResult:
     """Emergency fallback through a Hermes authenticated profile path.
 
@@ -918,11 +973,21 @@ def _single_hermes(prompt: str, model: str, timeout: int, *, session_id: str | N
             lock_wait_ms=lock_wait_ms,
         )
     text, tokens = _parse_hermes_payload(proc.stdout)
+    recovered_from_state = False
+    if not text:
+        recovered_session_id = _hermes_session_id_from_stderr(proc.stderr)
+        if recovered_session_id:
+            text = _recover_hermes_assistant_from_state(
+                model or HERMES_FALLBACK_PROFILE, recovered_session_id
+            )
+            recovered_from_state = bool(text)
     if text:
         # Hermes can print a fallback warning while still returning a
         # valid embedded-agent answer. A successful answer must not poison the
         # backend cooldown state as a rate limit.
         rate_limited = False
+        if recovered_from_state:
+            log.info("recovered hermes assistant response from profile state db")
     _record_usage("hermes", model, tokens, dur, bool(text), rate_limited)
     return CliResult(
         ok=bool(text),

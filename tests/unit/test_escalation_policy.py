@@ -51,6 +51,38 @@ def test_escalation_policy_routes_knowledge_gaps_to_agents_first():
     assert route.reason == "knowledge_gap_agent_remediation"
 
 
+def test_escalation_policy_identifies_silent_personal_factoid_gaps():
+    examples = [
+        ("Knowledge gap: Chris shoe size sneaker size foot size", "Chris must provide this personal fact."),
+        ("Knowledge gap: what is my birthday?", "Chris must provide his date of birth."),
+        ("Knowledge gap: 내 주소가 뭐야?", "Chris must provide the private address."),
+        ("Knowledge gap: Who was my first grade teacher?", "Chris must provide this childhood fact."),
+    ]
+
+    for title, reason in examples:
+        assert escalation_policy.should_silence_personal_factoid_gap(
+            title=title,
+            content="Recall returned no reliable source.",
+            metadata={},
+            llm_reason=f"HUMAN_NEEDED: {reason}",
+        )
+
+
+def test_escalation_policy_does_not_silence_remediable_or_credential_gaps():
+    assert not escalation_policy.should_silence_personal_factoid_gap(
+        title="Knowledge gap: TurboTax 결제 확인 메일 어디 있지?",
+        content="Find or ingest a source that answers it.",
+        metadata={"gap_query": "TurboTax 결제 확인 메일 어디 있지?"},
+        llm_reason="HUMAN_NEEDED: Chris must provide missing context.",
+    )
+    assert not escalation_policy.should_silence_personal_factoid_gap(
+        title="Knowledge gap: GitHub account 2FA recovery code",
+        content="Account login blocked.",
+        metadata={},
+        llm_reason="HUMAN_NEEDED: Chris must provide a 2FA code for account access.",
+    )
+
+
 def test_escalation_policy_keeps_brain_speak_urgent_wrapper_with_agents():
     route = escalation_policy.classify_escalation(
         title=(

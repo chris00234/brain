@@ -1203,7 +1203,11 @@ class TaskQueue:
             if _bc not in _sys.path:
                 _sys.path.insert(0, _bc)
             from cli_llm import dispatch
-            from escalation_policy import llm_review_prompt, llm_says_human_needed
+            from escalation_policy import (
+                llm_review_prompt,
+                llm_says_human_needed,
+                should_silence_personal_factoid_gap,
+            )
 
             handled: set[str] = set()
             for t in tasks:
@@ -1221,16 +1225,33 @@ class TaskQueue:
                     log.warning("task escalation LLM review failed for %s: %s", t.get("id"), result.error)
                     continue
                 if llm_says_human_needed(result.text):
-                    self._notify_task_evaluation_actions(
-                        [
-                            (
-                                t,
-                                "held_for_safe_followup",
-                                result.text,
-                                "llm_human_needed",
-                            )
-                        ]
-                    )
+                    if should_silence_personal_factoid_gap(
+                        title=t.get("title", ""),
+                        content=t.get("description", ""),
+                        metadata=t.get("metadata") or {},
+                        llm_reason=result.text,
+                    ):
+                        self._record_silent_task_evaluation_actions(
+                            [
+                                (
+                                    t,
+                                    "held_as_silent_personal_factoid_gap",
+                                    result.text,
+                                    "llm_human_needed_personal_factoid_gap",
+                                )
+                            ]
+                        )
+                    else:
+                        self._notify_task_evaluation_actions(
+                            [
+                                (
+                                    t,
+                                    "held_for_safe_followup",
+                                    result.text,
+                                    "llm_human_needed",
+                                )
+                            ]
+                        )
                     handled.add(t["id"])
                 elif _approve_for_agent(t, result.text):
                     handled.add(t["id"])
@@ -1239,6 +1260,49 @@ class TaskQueue:
         except Exception as e:
             log.warning("task escalation LLM review error: %s", e)
         return set()
+
+    def _record_silent_task_evaluation_actions(
+        self,
+        actions: list[tuple[dict, str, str, str]],
+    ) -> None:
+        """Record task-evaluation holds internally without Chris-facing Telegram."""
+        if not actions:
+            return
+
+        routed_at = self._now()
+        for t, action, reason, source in actions:
+            tid = t["id"]
+            reason_preview = " ".join(str(reason or "").split())[:500]
+            decision = "human_needed_silent"
+            self._merge_task_metadata(
+                tid,
+                {
+                    "task_evaluation_alert_policy": "silent_hold",
+                    "task_evaluation_action": action,
+                    "task_evaluation_brain_action": action,
+                    "task_evaluation_decision": decision,
+                    "task_evaluation_reason": reason_preview,
+                    "task_evaluation_source": source,
+                    "task_evaluation_routed_at": routed_at,
+                    "task_evaluation_next_evidence": f"/brain/tasks/{tid}/execution",
+                    "escalation_llm_route": decision,
+                    "escalation_llm_reason": reason_preview,
+                    "escalation_llm_routed_at": routed_at,
+                },
+            )
+            self._append_task_execution_event(
+                tid,
+                {
+                    "event": "task_evaluation",
+                    "by": source,
+                    "decision": decision,
+                    "action": action,
+                    "brain_action": action,
+                    "reason": reason_preview,
+                    "evidence": f"/brain/tasks/{tid}/execution",
+                    "at": routed_at,
+                },
+            )
 
     def _notify_task_evaluation_actions(
         self,

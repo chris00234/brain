@@ -82,6 +82,35 @@ _AGENT_ROUTING_INSTRUCTION_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bdo not (?:alert|notify) chris if\b[^.]{0,240}\.", re.I),
 )
 
+_CRITICAL_HUMAN_REASONS = {
+    "credential_or_account_blocker",
+    "irreversible_or_external_authority",
+    "metadata_requires_human",
+    "metadata_escalation_target",
+}
+
+_PERSONAL_FACTOID_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\b(?:my|chris(?:'s)?)\s+(?:birthday|birth\s*date|date of birth)\b", re.I),
+    re.compile(r"\b(?:my|chris(?:'s)?)\s+(?:home\s+)?address\b", re.I),
+    re.compile(
+        r"\b(?:my|chris(?:'s)?)\s+(?:(?:shoe|sneaker|foot)(?:\s+or\s+(?:shoe|sneaker|foot))?\s+size|shoe\s+size\s+sneaker\s+size\s+foot\s+size)\b",
+        re.I,
+    ),
+    re.compile(
+        r"\b(?:my|chris(?:'s)?)\s+(?:(?:childhood|elementary\s+school|first[- ]grade|1st[- ]grade)\s+){0,4}(?:teacher|homeroom\s+teacher)\b",
+        re.I,
+    ),
+    re.compile(
+        r"\b(?:my|chris(?:'s)?)\s+(?:blood\s+type|height|weight|middle\s+name|phone\s+number)\b", re.I
+    ),
+    re.compile(
+        r"(?:내|제|Chris(?:의)?|크리스(?:의)?)\s*(?:생일|주소|집\s*주소|신발\s*사이즈|발\s*사이즈|혈액형|키|몸무게|전화번호)"
+    ),
+    re.compile(r"(?:초등학교|1학년|일학년).{0,12}(?:선생님|담임)"),
+)
+
+_KNOWLEDGE_GAP_PREFIX_RE = re.compile(r"^\s*knowledge gap\s*:", re.I)
+
 
 def _candidate_text(title: str, content: str, metadata: dict[str, Any]) -> str:
     text = " ".join(str(part or "") for part in (title, content, metadata.get("reason", "")))
@@ -151,3 +180,37 @@ def llm_says_human_needed(text: str) -> bool:
     """True when the subscription LLM explicitly asks for human input."""
 
     return bool(re.search(r"^\s*HUMAN_NEEDED\s*:", text or "", re.I | re.M))
+
+
+def should_silence_personal_factoid_gap(
+    *,
+    title: str = "",
+    content: str = "",
+    metadata: dict[str, Any] | None = None,
+    llm_reason: str = "",
+) -> bool:
+    """True for background personal-factoid gaps that should be held silently.
+
+    These are questions only Chris can answer (birthday, address, shoe size,
+    childhood teacher, etc.). They are useful as internal recall gaps, but a
+    HUMAN_NEEDED LLM verdict should not create a Telegram action-summary burst.
+    Account/credential/destructive blockers remain Chris-facing.
+    """
+
+    meta = metadata or {}
+    reason_route = classify_escalation(
+        title=title,
+        content=" ".join(str(part or "") for part in (content, llm_reason)),
+        metadata=meta,
+    )
+    if reason_route.reason in _CRITICAL_HUMAN_REASONS:
+        return False
+
+    title_text = str(title or "")
+    if not _KNOWLEDGE_GAP_PREFIX_RE.search(title_text):
+        return False
+
+    text = _candidate_text(title_text, content, meta)
+    gap_query = str(meta.get("gap_query") or meta.get("query") or "")
+    text = " ".join([text, gap_query, str(llm_reason or "")])
+    return any(pattern.search(text) for pattern in _PERSONAL_FACTOID_PATTERNS)
