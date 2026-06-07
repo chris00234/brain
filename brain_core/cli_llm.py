@@ -1096,7 +1096,10 @@ def cli_dispatch(
 
     # Half-open: claim the single-flight probe. If we don't get it, treat the
     # same as open — another caller is already probing.
-    if snapshot is not None and snapshot.is_half_open and not _try_claim_probe(BREAKER_KIND):
+    half_open_probe_claimed = False
+    if snapshot is not None and snapshot.is_half_open:
+        half_open_probe_claimed = _try_claim_probe(BREAKER_KIND)
+    if snapshot is not None and snapshot.is_half_open and not half_open_probe_claimed:
         skipped = CliResult(
             ok=False,
             error="breaker_half_open_probe_in_flight",
@@ -1218,6 +1221,19 @@ def cli_dispatch(
         # backend cooldown -> synthetic dispatch failures -> breaker_open_count
         # SLO breach, even though no provider was actually called. Return a
         # backfillable failure to the caller, but do not open llm.dispatch.
+        # Exception: once this caller has claimed a half-open probe, it must
+        # resolve the single-flight state. If every backend is skipped by
+        # cooldown, the recovery probe could not run, so re-open with bounded
+        # cooldown instead of stranding half_open_probing until stale cleanup.
+        if half_open_probe_claimed:
+            try:
+                _record_breaker(
+                    BREAKER_KIND,
+                    ok=False,
+                    error="half_open_probe_blocked_by_backend_cooldown",
+                )
+            except Exception as exc:
+                log.warning("breaker record_result(ok=False) failed after cooldown-only probe: %s", exc)
         log.info("cli_dispatch skipped all %d backends because provider cooldowns are active", cooldown_skips)
 
     # All backends failed — enqueue to backlog if requested

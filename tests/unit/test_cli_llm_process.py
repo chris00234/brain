@@ -360,6 +360,69 @@ def test_cli_dispatch_cooldown_only_does_not_trip_global_breaker(monkeypatch):
     cli_llm._BACKEND_COOLDOWN_UNTIL.clear()
 
 
+def test_cli_dispatch_half_open_cooldown_only_resolves_probe(monkeypatch, tmp_path):
+    breakers = __import__("breakers")
+
+    monkeypatch.setattr(breakers, "AUTONOMY_DB", tmp_path / "autonomy.db")
+    monkeypatch.setattr(breakers, "_initialized", False)
+    breakers._snapshot_cache.clear()
+    monkeypatch.setattr(cli_llm, "_peek_breaker", breakers.peek_breaker)
+    monkeypatch.setattr(cli_llm, "_try_claim_probe", breakers.try_claim_probe)
+    monkeypatch.setattr(cli_llm, "_record_breaker", breakers.record_result)
+    cli_llm._BACKEND_COOLDOWN_UNTIL.clear()
+    monkeypatch.setattr(
+        cli_llm,
+        "_try_backend",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("cooldown should skip subprocess")),
+    )
+
+    for _ in range(3):
+        breakers.record_result(cli_llm.BREAKER_KIND, ok=False, error="initial outage")
+    conn = sqlite3.connect(str(breakers.AUTONOMY_DB))
+    conn.execute("UPDATE heal_breakers SET state='half_open' WHERE kind=?", (cli_llm.BREAKER_KIND,))
+    conn.commit()
+    conn.close()
+    breakers._snapshot_cache.clear()
+
+    now = cli_llm.time.time()
+    for backend, model, _desc in cli_llm.FALLBACK_CHAIN:
+        cli_llm._BACKEND_COOLDOWN_UNTIL[(backend, model)] = now + 60
+
+    r = cli_llm.cli_dispatch("hi", timeout=5)
+    snap = breakers.peek_breaker(cli_llm.BREAKER_KIND)
+
+    assert r.ok is False
+    assert "backend_cooldown" in r.error
+    assert snap.state == "open"
+    assert snap.reason == "half_open_probe_blocked_by_backend_cooldown"
+    assert snap.remaining_cooldown_s > 0
+    assert snap.trip_count == 2
+    cli_llm._BACKEND_COOLDOWN_UNTIL.clear()
+
+
+def test_cli_dispatch_successful_half_open_probe_closes_breaker(monkeypatch):
+    monkeypatch.setattr(cli_llm, "_peek_breaker", lambda kind: _fake_open_snapshot("half_open", 0.0))
+    cli_llm._BACKEND_COOLDOWN_UNTIL.clear()
+    claimed: list[str] = []
+    recorded: list[dict] = []
+    monkeypatch.setattr(cli_llm, "_try_claim_probe", lambda kind: claimed.append(kind) or True)
+    monkeypatch.setattr(cli_llm, "_record_breaker", lambda kind, **kw: recorded.append({"kind": kind, **kw}))
+    monkeypatch.setattr(
+        cli_llm,
+        "_try_backend",
+        lambda backend, model, prompt, timeout: cli_llm.CliResult(
+            ok=True, text="OK", backend=backend, model=model
+        ),
+    )
+
+    r = cli_llm.cli_dispatch("hi", timeout=5)
+
+    assert r.ok is True
+    assert claimed == [cli_llm.BREAKER_KIND]
+    assert recorded == [{"kind": cli_llm.BREAKER_KIND, "ok": True}]
+    cli_llm._BACKEND_COOLDOWN_UNTIL.clear()
+
+
 def test_cli_dispatch_slot_capacity_does_not_trip_global_breaker(monkeypatch):
     monkeypatch.setattr(cli_llm, "_peek_breaker", lambda kind: _fake_open_snapshot("closed", 0.0))
     cli_llm._BACKEND_COOLDOWN_UNTIL.clear()
