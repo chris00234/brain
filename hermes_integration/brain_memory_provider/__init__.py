@@ -283,6 +283,7 @@ _RANK_STOPWORDS = {
     "workflow",
 }
 _MIN_OVERLAP_NON_CONSTRAINT = 1
+_PREFETCH_MIN_CONFIDENCE = 0.4
 
 # Korean domain noun → English topical equivalents. The provider's overlap scorer
 # is English-biased (the Hangul tokenizer can't segment phrases), so a Korean
@@ -859,6 +860,28 @@ class BrainMemoryProvider(MemoryProvider):
         return "user:" in low and "assistant:" in low
 
     @staticmethod
+    def _result_confidence(result: dict[str, Any]) -> float | None:
+        raw = result.get("confidence")
+        if raw is None and isinstance(result.get("metadata"), dict):
+            raw = result["metadata"].get("confidence")
+        if raw is None:
+            return None
+        with contextlib.suppress(TypeError, ValueError):
+            return float(raw)
+        return None
+
+    @staticmethod
+    def _is_low_confidence_prefetch_result(result: dict[str, Any]) -> bool:
+        conf = BrainMemoryProvider._result_confidence(result)
+        if conf is None:
+            return False
+        # Direct current-truth guarantees are route-policy rows, not uncertain
+        # user-memory atoms; do not drop them due to absent/foreign confidence.
+        if BrainMemoryProvider._is_route_guarantee_row(result):
+            return False
+        return conf < _PREFETCH_MIN_CONFIDENCE
+
+    @staticmethod
     def _is_route_guarantee_row(result: dict[str, Any]) -> bool:
         """A server-injected route_guarantee (direct_current_truth). The durable
         fact must survive the summary-excluded filter."""
@@ -919,7 +942,8 @@ class BrainMemoryProvider(MemoryProvider):
             return [
                 result
                 for result in results
-                if _govern_personal_attribute_result_matches_query(query, self._result_haystack(result))
+                if not self._is_low_confidence_prefetch_result(result)
+                and _govern_personal_attribute_result_matches_query(query, self._result_haystack(result))
             ]
         # provider_prefetch policy: never inject low-authority session/reflection/
         # summary/procedure rows into a system prompt unless the user explicitly
@@ -1022,6 +1046,9 @@ class BrainMemoryProvider(MemoryProvider):
                 # empty and only a declarative answer atom is injected. The answer
                 # and the transcript share raw_events provenance, so format (turn
                 # markers) is the only generic separator.
+                rejected_noise = True
+                continue
+            if self._is_low_confidence_prefetch_result(result):
                 rejected_noise = True
                 continue
             if self._is_generic_brain_infra_noise(result, query):

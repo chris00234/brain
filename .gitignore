@@ -39,3 +39,6 @@ kanban_t_*_*.md
 **/*Credential*.md
 **/*credential*.md
 **/*setup-token*.md
+# Runtime private payloads; producers/drainers may churn these every session.
+outbox/brain-learn/
+state/ingest/

@@ -18,8 +18,9 @@ import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
+from typing import Any
 
-BRAIN_URL = "http://127.0.0.1:8791"
+BRAIN_URL = os.environ.get("BRAIN_URL", "http://127.0.0.1:8791")
 SECRET_FILE = Path("~/.brain/credentials/.personal_webhook_secret").expanduser()
 
 # 2026-05-20: BRAIN_MCP_PROFILE selects the exposed tool surface.
@@ -297,6 +298,14 @@ def handle_tools_list(params: dict) -> dict:
                             ),
                             "default": False,
                         },
+                        "compact": {
+                            "type": "boolean",
+                            "description": (
+                                "Return the compact agent-facing recall pack (default true). "
+                                "Set false when a downstream tool needs the raw /recall/v2 payload."
+                            ),
+                            "default": True,
+                        },
                     },
                     "required": ["query"],
                 },
@@ -347,7 +356,10 @@ def handle_tools_list(params: dict) -> dict:
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "correction": {"type": "string", "description": "The corrected fact (what should be true)"},
+                        "correction": {
+                            "type": "string",
+                            "description": "The corrected fact (what should be true)",
+                        },
                         "wrong_atom_ids": {
                             "type": "array",
                             "items": {"type": "string"},
@@ -668,24 +680,24 @@ def _mcp_truncate_string(value: str, limit: int) -> str:
     return value[:keep] + marker
 
 
-def _mcp_json_dumps(value) -> str:
+def _mcp_json_dumps(value: Any) -> str:
     return json.dumps(value, indent=2, ensure_ascii=False, allow_nan=False)
 
 
-def _mcp_json_safe(value):
+def _mcp_json_safe(value: Any) -> Any:
     """Return a JSON-serializable, standards-valid representation."""
-    if value is None or isinstance(value, (str, bool, int)):
+    if value is None or isinstance(value, str | bool | int):
         return value
     if isinstance(value, float):
         return value if math.isfinite(value) else str(value)
-    if isinstance(value, (list, tuple, set)):
+    if isinstance(value, list | tuple | set):
         return [_mcp_json_safe(item) for item in value]
     if isinstance(value, dict):
         return {str(_mcp_json_safe(key)): _mcp_json_safe(val) for key, val in value.items()}
     return str(value)
 
 
-def _mcp_summarize_value(value, *, string_limit: int, list_limit: int | None, state: dict):
+def _mcp_summarize_value(value: Any, *, string_limit: int, list_limit: int | None, state: dict) -> Any:
     """Return JSON-serializable data summarized before serialization.
 
     MCP clients expect content[0].text for JSON tool results to be parseable JSON.
@@ -712,17 +724,18 @@ def _mcp_summarize_value(value, *, string_limit: int, list_limit: int | None, st
     return value
 
 
-def _mcp_with_truncation_note(value):
-    if isinstance(value, dict):
-        noted = dict(value)
-    else:
-        noted = {"results": value}
+def _mcp_with_truncation_note(value: Any, *, budget: int = _MCP_TEXT_BUDGET) -> dict:
+    noted = dict(value) if isinstance(value, dict) else {"results": value}
     noted["mcp_truncated"] = True
-    noted["mcp_truncation_note"] = "MCP tool output exceeded 4000 chars; nested data was summarized before JSON serialization."
+    noted["mcp_output_budget_chars"] = budget
+    noted["mcp_truncation_strategy"] = "nested_summary_json_safe"
+    noted["mcp_truncation_note"] = (
+        "MCP tool output exceeded 4000 chars; nested data was summarized before JSON serialization."
+    )
     return noted
 
 
-def _mcp_result_preview(item, *, string_limit: int, state: dict) -> dict:
+def _mcp_result_preview(item: Any, *, string_limit: int, state: dict) -> dict:
     if not isinstance(item, dict):
         return {"content": _mcp_summarize_value(item, string_limit=string_limit, list_limit=0, state=state)}
 
@@ -747,7 +760,81 @@ def _mcp_add_result_metadata(payload: dict, original_count: int, returned_count:
     return noted
 
 
-def _mcp_json_text(value, budget: int = _MCP_TEXT_BUDGET) -> str:
+def _mcp_compact_recall_result(value: Any, *, query: str, limit: int) -> dict | str:
+    """Return a small, parseable recall packet for MCP clients.
+
+    Raw /recall/v2 rows can carry large metadata/payload fields. MCP clients mostly
+    need the answer-bearing fields, plus enough observability to know this was a
+    compacted pack. Truncation still runs after this if the compact pack exceeds
+    the transport budget.
+    """
+    if not isinstance(value, dict) or not isinstance(value.get("results"), list):
+        return value
+    compact_results = []
+    for row in value.get("results", [])[: max(0, int(limit))]:
+        if not isinstance(row, dict):
+            compact_results.append({"content": str(row)[:500]})
+            continue
+        compact: dict = {}
+        for key in (
+            "id",
+            "atom_id",
+            "title",
+            "collection",
+            "source_type",
+            "score",
+            "confidence",
+            "trust_score",
+        ):
+            if key in row and row.get(key) is not None:
+                compact[key] = row.get(key)
+        content = str(row.get("content") or row.get("text") or "").strip()
+        if content:
+            compact["content"] = _mcp_truncate_string(content.replace("\n", " "), 700)
+        compact["why_included"] = _mcp_recall_why_included(row)
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        route = metadata.get("route") or metadata.get("route_id") or metadata.get("authority_tier")
+        if route:
+            compact["authority"] = str(route)
+        compact_results.append(compact)
+    return {
+        "query": value.get("query") or query,
+        "count": value.get("count", len(value.get("results") or [])),
+        "results": compact_results,
+        "recall_pack": "compact_v1",
+        "recall_pack_fields": [
+            "id",
+            "atom_id",
+            "title",
+            "collection",
+            "source_type",
+            "score",
+            "confidence",
+            "trust_score",
+            "authority",
+            "content",
+            "why_included",
+        ],
+        "mcp_results_original_count": len(value.get("results") or []),
+        "mcp_results_returned_count": len(compact_results),
+        "mcp_results_omitted_count": max(0, len(value.get("results") or []) - len(compact_results)),
+    }
+
+
+def _mcp_recall_why_included(row: dict) -> str:
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    if str(row.get("source_type") or "").lower() == "route_guarantee":
+        return "direct route guarantee"
+    if str(metadata.get("authority_tier") or "").lower() == "direct_current_truth":
+        return "direct current-truth authority"
+    if row.get("score") is not None and row.get("confidence") is not None:
+        return "ranked by recall score and confidence"
+    if row.get("score") is not None:
+        return "ranked by recall score"
+    return "returned by /recall/v2"
+
+
+def _mcp_json_text(value: Any, budget: int = _MCP_TEXT_BUDGET) -> str:
     value = _mcp_json_safe(value)
     text = _mcp_json_dumps(value)
     if len(text) <= budget:
@@ -770,8 +857,9 @@ def _mcp_json_text(value, budget: int = _MCP_TEXT_BUDGET) -> str:
                 current_results = candidate.get("results", [])
                 if not isinstance(current_results, list):
                     current_results = []
-                next_candidate["results"] = current_results + [
-                    _mcp_summarize_value(item, string_limit=string_limit, list_limit=3, state=state)
+                next_candidate["results"] = [
+                    *current_results,
+                    _mcp_summarize_value(item, string_limit=string_limit, list_limit=3, state=state),
                 ]
                 next_candidate = _mcp_add_result_metadata(
                     next_candidate, original_count, len(next_candidate["results"])
@@ -786,9 +874,7 @@ def _mcp_json_text(value, budget: int = _MCP_TEXT_BUDGET) -> str:
                             preview_candidate["results"] = [
                                 _mcp_result_preview(item, string_limit=preview_limit, state=state)
                             ]
-                            preview_candidate = _mcp_add_result_metadata(
-                                preview_candidate, original_count, 1
-                            )
+                            preview_candidate = _mcp_add_result_metadata(preview_candidate, original_count, 1)
                             preview_text = _mcp_json_dumps(preview_candidate)
                             if len(preview_text) <= budget:
                                 candidate = preview_candidate
@@ -798,9 +884,7 @@ def _mcp_json_text(value, budget: int = _MCP_TEXT_BUDGET) -> str:
             if original_count and not candidate.get("results"):
                 # If non-result top-level data alone consumes the budget, drop it
                 # and still preserve one minimal result preview when possible.
-                bare = _mcp_add_result_metadata(
-                    _mcp_with_truncation_note({"results": []}), original_count, 0
-                )
+                bare = _mcp_add_result_metadata(_mcp_with_truncation_note({"results": []}), original_count, 0)
                 for preview_limit in (100, 50, 20, 10, 0):
                     bare_candidate = dict(bare)
                     bare_candidate["results"] = [
@@ -832,8 +916,8 @@ def _mcp_json_text(value, budget: int = _MCP_TEXT_BUDGET) -> str:
     )
 
 
-def _mcp_tool_text(result) -> str:
-    if isinstance(result, (dict, list)):
+def _mcp_tool_text(result: Any) -> str:
+    if isinstance(result, dict | list):
         return _mcp_json_text(result)
     text = str(result)
     if len(text) <= _MCP_TEXT_BUDGET:
@@ -881,6 +965,8 @@ def handle_tools_call(params: dict) -> dict:
         if exclude_already_used:
             path += "&exclude_already_used=true"
         result = _brain_request("GET", path, actor=actor)
+        if args.get("compact", True) is not False:
+            result = _mcp_compact_recall_result(result, query=q, limit=n)
 
     elif name == "brain_store":
         # 2026-04-20 MCP timeout cap: POST /memory runs ingest_classifier (LLM
@@ -1196,8 +1282,7 @@ def handle_tools_call(params: dict) -> dict:
                 result = {"error": "scope=working requires session_id"}
             else:
                 path = (
-                    f"/brain/wm/{urllib.parse.quote(sid, safe='')}/"
-                    f"{urllib.parse.quote(actor, safe='')}"
+                    f"/brain/wm/{urllib.parse.quote(sid, safe='')}/" f"{urllib.parse.quote(actor, safe='')}"
                 )
                 result = _brain_request("GET", path, actor=actor)
         elif scope == "sessions":
@@ -1232,9 +1317,7 @@ def handle_tools_call(params: dict) -> dict:
         if durability in ("session", "scratch"):
             sid = args.get("session_id")
             if not sid:
-                result = {
-                    "error": f"brain_remember durability={durability} requires session_id"
-                }
+                result = {"error": f"brain_remember durability={durability} requires session_id"}
             else:
                 key = args.get("key") or f"scratch_{int(time.time() * 1000)}"
                 # `durable=False` on /brain/wm means session-scoped; scratch
@@ -1276,7 +1359,9 @@ def handle_tools_call(params: dict) -> dict:
     elif name == "brain_think":
         mode = (args.get("mode") or "think").strip().lower()
         if mode == "decide":
-            timeout_hint = "brain_think mode=decide is LLM-backed (5-30s). Call /brain/decide via HTTP for the full run."
+            timeout_hint = (
+                "brain_think mode=decide is LLM-backed (5-30s). Call /brain/decide via HTTP for the full run."
+            )
             endpoint = "/brain/decide"
             payload = {
                 "situation": args["question"],
@@ -1389,9 +1474,9 @@ def handle_tools_call(params: dict) -> dict:
 IDLE_TIMEOUT_S = int(os.environ.get("BRAIN_MCP_IDLE_TIMEOUT_S", "0"))
 MAX_LIFETIME_S = int(os.environ.get("BRAIN_MCP_MAX_LIFETIME_S", "0"))
 POLL_INTERVAL_S = 30.0  # how often to re-check lifecycle conditions
-TRANSPORT_DEBUG = os.environ.get("BRAIN_MCP_TRANSPORT_DEBUG") == "1" or os.environ.get(
-    "OMX_MCP_TRANSPORT_DEBUG"
-) == "1"
+TRANSPORT_DEBUG = (
+    os.environ.get("BRAIN_MCP_TRANSPORT_DEBUG") == "1" or os.environ.get("OMX_MCP_TRANSPORT_DEBUG") == "1"
+)
 LOG_FILE = os.environ.get(
     "BRAIN_MCP_LOG_FILE",
     str(Path("~/server/brain/logs/brain-mcp-server.log").expanduser()),

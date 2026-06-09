@@ -1455,6 +1455,70 @@ def test_prefetch_explicit_third_person_attribute_query_is_allowed(monkeypatch):
     assert "12 oak st" in ctx.lower(), f"legit third-person address suppressed: {ctx!r}"
 
 
+def test_prefetch_drops_low_confidence_rows_even_when_topical(monkeypatch):
+    def fake_request(path, method="GET", body=None, timeout=5.0, actor=None):
+        return {
+            "results": [
+                {
+                    "id": "weak",
+                    "collection": "semantic_memory",
+                    "metadata": {"category": "fact", "confidence": 0.2},
+                    "title": "Chris address",
+                    "content": "Chris's address is 9 Unverified Way.",
+                    "score": 0.99,
+                }
+            ]
+        }
+
+    monkeypatch.setattr(provider_mod, "_brain_request", fake_request)
+    provider = BrainMemoryProvider()
+
+    assert provider.prefetch("what is my address?") == ""
+
+
+def test_prefetch_korean_entity_attribute_quality_matrix_suppresses_contamination(monkeypatch):
+    def fake_request(path, method="GET", body=None, timeout=5.0, actor=None):
+        return {
+            "results": [
+                {
+                    "id": "chris_addr_low",
+                    "collection": "semantic_memory",
+                    "metadata": {"category": "fact", "confidence": 0.25},
+                    "title": "Chris address",
+                    "content": "Chris's address is low confidence unverified text.",
+                    "score": 0.99,
+                },
+                {
+                    "id": "ellie_addr",
+                    "collection": "canonical",
+                    "metadata": {"category": "fact", "confidence": 0.9},
+                    "title": "Ellie address",
+                    "content": "Ellie's address is 12 Oak St.",
+                    "score": 0.98,
+                },
+                {
+                    "id": "chris_phone",
+                    "collection": "canonical",
+                    "metadata": {"category": "fact", "confidence": 0.9},
+                    "title": "Chris phone",
+                    "content": "Chris's phone is 555-0100.",
+                    "score": 0.97,
+                },
+            ]
+        }
+
+    monkeypatch.setattr(provider_mod, "_brain_request", fake_request)
+    provider = BrainMemoryProvider()
+
+    for q in ("크리스 주소가 뭐야?", "내 주소가 뭐야?"):
+        ctx = provider.prefetch(q)
+        low = ctx.lower()
+        assert ctx == ""
+        assert "ellie" not in low
+        assert "555-0100" not in low
+        assert "low confidence" not in low
+
+
 # ── t_2a086a4c: open-ended personal_factoid gate, off-route guarantee, usage ──
 
 

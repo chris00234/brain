@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 BRAIN_ROOT = Path(__file__).resolve().parents[2]
@@ -433,13 +435,42 @@ def test_tools_call_large_json_result_remains_parseable(monkeypatch):
     assert len(text) <= 4000
     payload = json.loads(text)
     assert payload["query"] == "large recall"
-    assert payload["mcp_truncated"] is True
-    assert "mcp_truncation_note" in payload
+    assert payload["recall_pack"] == "compact_v1"
     assert payload["results"]
     assert payload["mcp_results_original_count"] == 3
     assert payload["mcp_results_returned_count"] == len(payload["results"])
     assert payload["mcp_results_omitted_count"] == 3 - len(payload["results"])
-    assert "truncated" in payload["results"][0]["content"]
+    assert len(payload["results"][0]["content"]) < len(long_text)
+    assert payload["results"][0]["why_included"] == "returned by /recall/v2"
+    assert "why_included" in payload["recall_pack_fields"]
+    assert "metadata" not in payload["results"][0]
+
+
+def test_tools_call_recall_raw_payload_remains_available(monkeypatch):
+    def fake_request(method, path, body=None, actor=None, timeout_s=60):
+        return {
+            "query": "raw recall",
+            "results": [
+                {
+                    "id": "memory-raw",
+                    "content": "raw content",
+                    "metadata": {"private_blob": "kept when explicitly requested"},
+                }
+            ],
+        }
+
+    monkeypatch.setattr(brain_mcp_server, "_brain_request", fake_request)
+
+    result = brain_mcp_server.handle_tools_call(
+        {
+            "name": "brain_recall",
+            "arguments": {"query": "raw recall", "limit": 1, "compact": False, "agent": "codex"},
+        }
+    )
+
+    payload = json.loads(result["content"][0]["text"])
+    assert "recall_pack" not in payload
+    assert payload["results"][0]["metadata"]["private_blob"] == "kept when explicitly requested"
 
 
 def test_tools_call_large_string_result_gets_truncation_marker(monkeypatch):
@@ -526,3 +557,71 @@ def test_mcp_json_truncation_handles_non_serializable_values():
     payload = json.loads(text)
     assert payload["results"][0]["metadata"]["custom"] == "custom-value"
     assert payload["results"][0]["metadata"]["bad_float"] == "nan"
+
+
+def test_live_subprocess_tools_call_recall_uses_compact_pack_and_truncation_observability():
+    seen: list[str] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            seen.append(self.path)
+            payload = {
+                "query": "live recall",
+                "count": 12,
+                "results": [
+                    {
+                        "id": f"m-{idx}",
+                        "title": f"Live {idx}",
+                        "collection": "semantic_memory",
+                        "score": 0.9,
+                        "confidence": 0.8,
+                        "content": "important live subprocess recall content " + ("x" * 2200),
+                        "metadata": {"private_blob": "y" * 5000},
+                    }
+                    for idx in range(12)
+                ],
+            }
+            raw = json.dumps(payload).encode("utf-8")
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def log_message(self, *_args):
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        replies = _send_jsonrpc(
+            [
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "brain_recall",
+                        "arguments": {"query": "live recall", "limit": 12, "agent": "pytest"},
+                    },
+                }
+            ],
+            extra_env={"BRAIN_URL": f"http://127.0.0.1:{server.server_port}"},
+        )
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+    reply = next((r for r in replies if r.get("id") == 1), None)
+    assert reply is not None
+    payload = json.loads(reply["result"]["content"][0]["text"])
+    assert any(path.startswith("/recall/v2?q=live") for path in seen)
+    assert payload["recall_pack"] == "compact_v1"
+    assert payload["mcp_truncated"] is True
+    assert payload["mcp_output_budget_chars"] == 4000
+    assert payload["mcp_truncation_strategy"] == "nested_summary_json_safe"
+    assert payload["mcp_results_original_count"] == 12
+    assert payload["mcp_results_omitted_count"] > 0
+    assert payload["results"][0]["why_included"] == "ranked by recall score and confidence"
+    assert "private_blob" not in json.dumps(payload)
