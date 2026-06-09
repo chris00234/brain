@@ -408,3 +408,47 @@ def test_brain_tick_ignores_non_numeric_severity(monkeypatch):
     payload = json.loads(result["content"][0]["text"])
     assert payload["count"] == 1
     assert payload["observations"][0]["id"] == "good"
+
+
+def test_tools_call_large_json_result_remains_parseable(monkeypatch):
+    long_text = "x" * 2500
+
+    def fake_request(method, path, body=None, actor=None, timeout_s=60):
+        return {
+            "query": "large recall",
+            "count": 3,
+            "results": [
+                {"id": f"memory-{idx}", "content": long_text, "metadata": {"note": long_text}}
+                for idx in range(3)
+            ],
+        }
+
+    monkeypatch.setattr(brain_mcp_server, "_brain_request", fake_request)
+
+    result = brain_mcp_server.handle_tools_call(
+        {"name": "brain_recall", "arguments": {"query": "large recall", "limit": 3, "agent": "codex"}}
+    )
+
+    text = result["content"][0]["text"]
+    assert len(text) <= 4000
+    payload = json.loads(text)
+    assert payload["query"] == "large recall"
+    assert payload["mcp_truncated"] is True
+    assert "mcp_truncation_note" in payload
+    assert payload["results"]
+    assert "truncated" in payload["results"][0]["content"]
+
+
+def test_tools_call_large_string_result_gets_truncation_marker(monkeypatch):
+    def fake_request(method, path, body=None, actor=None, timeout_s=60):
+        return "x" * 5000
+
+    monkeypatch.setattr(brain_mcp_server, "_brain_request", fake_request)
+
+    result = brain_mcp_server.handle_tools_call(
+        {"name": "brain_wm_get", "arguments": {"key": "large-string", "agent": "codex"}}
+    )
+
+    text = result["content"][0]["text"]
+    assert len(text) == 4000
+    assert text.endswith("chars]")

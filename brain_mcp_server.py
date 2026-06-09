@@ -646,6 +646,118 @@ _MINIMAL_TOOL_NAMES = frozenset(
 )
 
 
+_MCP_TEXT_BUDGET = 4000
+
+
+def _mcp_truncate_marker(omitted_chars: int) -> str:
+    return f"…[truncated {omitted_chars} chars]"
+
+
+def _mcp_truncate_string(value: str, limit: int) -> str:
+    if len(value) <= limit:
+        return value
+    marker = _mcp_truncate_marker(len(value) - max(0, limit))
+    keep = max(0, limit - len(marker))
+    return value[:keep] + marker
+
+
+def _mcp_summarize_value(value, *, string_limit: int, list_limit: int | None, state: dict):
+    """Return JSON-serializable data summarized before serialization.
+
+    MCP clients expect content[0].text for JSON tool results to be parseable JSON.
+    Never cut serialized JSON bytes/chars; trim nested strings/lists instead.
+    """
+    if isinstance(value, str):
+        truncated = _mcp_truncate_string(value, string_limit)
+        if truncated != value:
+            state["truncated"] = True
+        return truncated
+    if isinstance(value, list):
+        items = value if list_limit is None else value[:list_limit]
+        if list_limit is not None and len(value) > list_limit:
+            state["truncated"] = True
+        return [
+            _mcp_summarize_value(item, string_limit=string_limit, list_limit=list_limit, state=state)
+            for item in items
+        ]
+    if isinstance(value, dict):
+        return {
+            key: _mcp_summarize_value(val, string_limit=string_limit, list_limit=list_limit, state=state)
+            for key, val in value.items()
+        }
+    return value
+
+
+def _mcp_with_truncation_note(value):
+    if isinstance(value, dict):
+        noted = dict(value)
+    else:
+        noted = {"results": value}
+    noted["mcp_truncated"] = True
+    noted["mcp_truncation_note"] = "MCP tool output exceeded 4000 chars; nested data was summarized before JSON serialization."
+    return noted
+
+
+def _mcp_json_text(value: dict | list, budget: int = _MCP_TEXT_BUDGET) -> str:
+    text = json.dumps(value, indent=2)
+    if len(text) <= budget:
+        return text
+
+    # Prefer preserving top-level keys and keeping as many `results` entries as fit.
+    if isinstance(value, dict) and isinstance(value.get("results"), list):
+        for string_limit in (800, 400, 200, 100, 50, 20):
+            state = {"truncated": True}
+            base = {
+                key: _mcp_summarize_value(val, string_limit=string_limit, list_limit=0, state=state)
+                for key, val in value.items()
+                if key != "results"
+            }
+            base["results"] = []
+            candidate = _mcp_with_truncation_note(base)
+            for item in value["results"]:
+                next_candidate = dict(candidate)
+                current_results = candidate.get("results", [])
+                if not isinstance(current_results, list):
+                    current_results = []
+                next_candidate["results"] = current_results + [
+                    _mcp_summarize_value(item, string_limit=string_limit, list_limit=3, state=state)
+                ]
+                next_text = json.dumps(next_candidate, indent=2)
+                if len(next_text) > budget:
+                    break
+                candidate = next_candidate
+            text = json.dumps(candidate, indent=2)
+            if len(text) <= budget:
+                return text
+
+    for string_limit, list_limit in ((400, 10), (200, 5), (100, 3), (50, 1), (20, 0)):
+        state = {"truncated": True}
+        summarized = _mcp_summarize_value(
+            value, string_limit=string_limit, list_limit=list_limit, state=state
+        )
+        text = json.dumps(_mcp_with_truncation_note(summarized), indent=2)
+        if len(text) <= budget:
+            return text
+
+    return json.dumps(
+        {
+            "mcp_truncated": True,
+            "mcp_truncation_note": "MCP tool output exceeded 4000 chars and could not be summarized within the budget.",
+        },
+        indent=2,
+    )
+
+
+def _mcp_tool_text(result) -> str:
+    if isinstance(result, (dict, list)):
+        return _mcp_json_text(result)
+    text = str(result)
+    if len(text) <= _MCP_TEXT_BUDGET:
+        return text
+    marker = _mcp_truncate_marker(len(text) - _MCP_TEXT_BUDGET)
+    return text[: _MCP_TEXT_BUDGET - len(marker)] + marker
+
+
 def handle_tools_call(params: dict) -> dict:
     name = params.get("name", "")
     args = params.get("arguments", {})
@@ -663,7 +775,7 @@ def handle_tools_call(params: dict) -> dict:
             f"Allowed: {sorted(_MINIMAL_TOOL_NAMES)}. Switch profile via env var "
             f"or call /memory + /recall/v2 over HTTP for the full surface."
         }
-        text = json.dumps(result, indent=2)
+        text = _mcp_tool_text(result)
         return {"content": [{"type": "text", "text": text}]}
 
     if name == "brain_recall":
@@ -1168,8 +1280,7 @@ def handle_tools_call(params: dict) -> dict:
     else:
         result = {"error": f"Unknown tool: {name}"}
 
-    text = json.dumps(result, indent=2) if isinstance(result, dict) else str(result)
-    return {"content": [{"type": "text", "text": text[:4000]}]}
+    return {"content": [{"type": "text", "text": _mcp_tool_text(result)}]}
 
 
 # MCP stdio transport — read JSON-RPC from stdin, write to stdout.
