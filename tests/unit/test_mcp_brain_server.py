@@ -436,6 +436,9 @@ def test_tools_call_large_json_result_remains_parseable(monkeypatch):
     assert payload["mcp_truncated"] is True
     assert "mcp_truncation_note" in payload
     assert payload["results"]
+    assert payload["mcp_results_original_count"] == 3
+    assert payload["mcp_results_returned_count"] == len(payload["results"])
+    assert payload["mcp_results_omitted_count"] == 3 - len(payload["results"])
     assert "truncated" in payload["results"][0]["content"]
 
 
@@ -452,3 +455,74 @@ def test_tools_call_large_string_result_gets_truncation_marker(monkeypatch):
     text = result["content"][0]["text"]
     assert len(text) == 4000
     assert text.endswith("chars]")
+    marker = text[text.rindex("…[truncated ") :]
+    omitted = int(marker.removeprefix("…[truncated ").removesuffix(" chars]"))
+    assert omitted == 5000 - (4000 - len(marker))
+
+
+def test_mcp_json_truncation_preserves_non_ascii_without_escape_expansion():
+    text = brain_mcp_server._mcp_json_text(
+        {
+            "query": "한국어",
+            "results": [{"id": "k1", "title": "제목", "collection": "메모", "content": "가나다" * 2000}],
+        }
+    )
+
+    assert len(text) <= 4000
+    assert "\\ud55c" not in text
+    payload = json.loads(text)
+    assert payload["query"] == "한국어"
+    assert payload["results"][0]["title"] == "제목"
+
+
+def test_mcp_json_truncation_preserves_minimal_preview_for_wide_result():
+    wide_result = {
+        "id": "memory-wide",
+        "title": "Wide result",
+        "score": 0.9,
+        "collection": "notes",
+        "content": "important preview " + ("x" * 3000),
+    }
+    wide_result.update({f"extra_{idx}": "y" * 200 for idx in range(80)})
+
+    text = brain_mcp_server._mcp_json_text({"query": "wide", "results": [wide_result]})
+    payload = json.loads(text)
+
+    assert len(text) <= 4000
+    assert payload["mcp_truncated"] is True
+    assert payload["mcp_results_original_count"] == 1
+    assert payload["mcp_results_returned_count"] == 1
+    assert payload["mcp_results_omitted_count"] == 0
+    assert payload["results"] == [
+        {
+            "id": "memory-wide",
+            "title": "Wide result",
+            "score": 0.9,
+            "collection": "notes",
+            "content": payload["results"][0]["content"],
+        }
+    ]
+    assert payload["results"][0]["content"].startswith("important preview")
+
+
+def test_mcp_json_truncation_handles_non_serializable_values():
+    class CustomValue:
+        def __str__(self):
+            return "custom-value"
+
+    text = brain_mcp_server._mcp_json_text(
+        {
+            "query": "safe",
+            "results": [
+                {
+                    "id": "memory-safe",
+                    "content": "ok",
+                    "metadata": {"custom": CustomValue(), "bad_float": float("nan")},
+                }
+            ],
+        }
+    )
+
+    payload = json.loads(text)
+    assert payload["results"][0]["metadata"]["custom"] == "custom-value"
+    assert payload["results"][0]["metadata"]["bad_float"] == "nan"

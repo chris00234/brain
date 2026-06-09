@@ -9,6 +9,7 @@ Usage:
 """
 
 import json
+import math
 import os
 import select
 import signal
@@ -656,9 +657,32 @@ def _mcp_truncate_marker(omitted_chars: int) -> str:
 def _mcp_truncate_string(value: str, limit: int) -> str:
     if len(value) <= limit:
         return value
-    marker = _mcp_truncate_marker(len(value) - max(0, limit))
-    keep = max(0, limit - len(marker))
+    keep = max(0, limit)
+    while True:
+        omitted = len(value) - keep
+        marker = _mcp_truncate_marker(omitted)
+        next_keep = max(0, limit - len(marker))
+        if next_keep == keep:
+            break
+        keep = next_keep
     return value[:keep] + marker
+
+
+def _mcp_json_dumps(value) -> str:
+    return json.dumps(value, indent=2, ensure_ascii=False, allow_nan=False)
+
+
+def _mcp_json_safe(value):
+    """Return a JSON-serializable, standards-valid representation."""
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else str(value)
+    if isinstance(value, (list, tuple, set)):
+        return [_mcp_json_safe(item) for item in value]
+    if isinstance(value, dict):
+        return {str(_mcp_json_safe(key)): _mcp_json_safe(val) for key, val in value.items()}
+    return str(value)
 
 
 def _mcp_summarize_value(value, *, string_limit: int, list_limit: int | None, state: dict):
@@ -698,13 +722,40 @@ def _mcp_with_truncation_note(value):
     return noted
 
 
-def _mcp_json_text(value: dict | list, budget: int = _MCP_TEXT_BUDGET) -> str:
-    text = json.dumps(value, indent=2)
+def _mcp_result_preview(item, *, string_limit: int, state: dict) -> dict:
+    if not isinstance(item, dict):
+        return {"content": _mcp_summarize_value(item, string_limit=string_limit, list_limit=0, state=state)}
+
+    preview = {}
+    for key in ("id", "title", "score", "collection"):
+        if key in item:
+            preview[key] = _mcp_summarize_value(
+                item[key], string_limit=string_limit, list_limit=0, state=state
+            )
+    if "content" in item:
+        preview["content"] = _mcp_summarize_value(
+            item["content"], string_limit=string_limit, list_limit=0, state=state
+        )
+    return preview
+
+
+def _mcp_add_result_metadata(payload: dict, original_count: int, returned_count: int) -> dict:
+    noted = dict(payload)
+    noted["mcp_results_original_count"] = original_count
+    noted["mcp_results_returned_count"] = returned_count
+    noted["mcp_results_omitted_count"] = max(0, original_count - returned_count)
+    return noted
+
+
+def _mcp_json_text(value, budget: int = _MCP_TEXT_BUDGET) -> str:
+    value = _mcp_json_safe(value)
+    text = _mcp_json_dumps(value)
     if len(text) <= budget:
         return text
 
     # Prefer preserving top-level keys and keeping as many `results` entries as fit.
     if isinstance(value, dict) and isinstance(value.get("results"), list):
+        original_count = len(value["results"])
         for string_limit in (800, 400, 200, 100, 50, 20):
             state = {"truncated": True}
             base = {
@@ -713,7 +764,7 @@ def _mcp_json_text(value: dict | list, budget: int = _MCP_TEXT_BUDGET) -> str:
                 if key != "results"
             }
             base["results"] = []
-            candidate = _mcp_with_truncation_note(base)
+            candidate = _mcp_add_result_metadata(_mcp_with_truncation_note(base), original_count, 0)
             for item in value["results"]:
                 next_candidate = dict(candidate)
                 current_results = candidate.get("results", [])
@@ -722,11 +773,45 @@ def _mcp_json_text(value: dict | list, budget: int = _MCP_TEXT_BUDGET) -> str:
                 next_candidate["results"] = current_results + [
                     _mcp_summarize_value(item, string_limit=string_limit, list_limit=3, state=state)
                 ]
-                next_text = json.dumps(next_candidate, indent=2)
+                next_candidate = _mcp_add_result_metadata(
+                    next_candidate, original_count, len(next_candidate["results"])
+                )
+                next_text = _mcp_json_dumps(next_candidate)
                 if len(next_text) > budget:
+                    # A very wide result may not fit even after nested summarization;
+                    # keep at least a minimal id/title/score/collection/content preview when possible.
+                    if not current_results:
+                        for preview_limit in (100, 50, 20, 10, 0):
+                            preview_candidate = dict(candidate)
+                            preview_candidate["results"] = [
+                                _mcp_result_preview(item, string_limit=preview_limit, state=state)
+                            ]
+                            preview_candidate = _mcp_add_result_metadata(
+                                preview_candidate, original_count, 1
+                            )
+                            preview_text = _mcp_json_dumps(preview_candidate)
+                            if len(preview_text) <= budget:
+                                candidate = preview_candidate
+                                break
                     break
                 candidate = next_candidate
-            text = json.dumps(candidate, indent=2)
+            if original_count and not candidate.get("results"):
+                # If non-result top-level data alone consumes the budget, drop it
+                # and still preserve one minimal result preview when possible.
+                bare = _mcp_add_result_metadata(
+                    _mcp_with_truncation_note({"results": []}), original_count, 0
+                )
+                for preview_limit in (100, 50, 20, 10, 0):
+                    bare_candidate = dict(bare)
+                    bare_candidate["results"] = [
+                        _mcp_result_preview(value["results"][0], string_limit=preview_limit, state=state)
+                    ]
+                    bare_candidate = _mcp_add_result_metadata(bare_candidate, original_count, 1)
+                    bare_text = _mcp_json_dumps(bare_candidate)
+                    if len(bare_text) <= budget:
+                        return bare_text
+                continue
+            text = _mcp_json_dumps(candidate)
             if len(text) <= budget:
                 return text
 
@@ -735,16 +820,15 @@ def _mcp_json_text(value: dict | list, budget: int = _MCP_TEXT_BUDGET) -> str:
         summarized = _mcp_summarize_value(
             value, string_limit=string_limit, list_limit=list_limit, state=state
         )
-        text = json.dumps(_mcp_with_truncation_note(summarized), indent=2)
+        text = _mcp_json_dumps(_mcp_with_truncation_note(summarized))
         if len(text) <= budget:
             return text
 
-    return json.dumps(
+    return _mcp_json_dumps(
         {
             "mcp_truncated": True,
             "mcp_truncation_note": "MCP tool output exceeded 4000 chars and could not be summarized within the budget.",
-        },
-        indent=2,
+        }
     )
 
 
@@ -754,8 +838,7 @@ def _mcp_tool_text(result) -> str:
     text = str(result)
     if len(text) <= _MCP_TEXT_BUDGET:
         return text
-    marker = _mcp_truncate_marker(len(text) - _MCP_TEXT_BUDGET)
-    return text[: _MCP_TEXT_BUDGET - len(marker)] + marker
+    return _mcp_truncate_string(text, _MCP_TEXT_BUDGET)
 
 
 def handle_tools_call(params: dict) -> dict:
