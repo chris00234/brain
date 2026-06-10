@@ -2928,6 +2928,7 @@ def recall_v2(
                 include_obsolete=include_obsolete,
                 as_of=as_of,
                 canonical_first=canonical_first,
+                exclude_already_used=exclude_already_used,
                 background=background,
             )
 
@@ -3300,6 +3301,11 @@ def brain_ops_compound(request: Request, req: CompoundRequest) -> dict:
                             "useful": success,
                             "agent": actor[:32],
                             "synthetic": bool(not a.get("query")),
+                            # Eval auto-growth signal: without these the
+                            # /recall/feedback wrong-answer → eval_proposals
+                            # path can never fire for compound callers.
+                            "wrong_answer": bool(a.get("wrong_answer")),
+                            "expected": (a.get("expected") or "")[:2000],
                         },
                     )
                 else:  # task
@@ -3382,8 +3388,8 @@ def search_feedback(req: SearchFeedbackRequest):
             from entity_graph import reinforce_memory
 
             reinforce_memory(req.result_id, success=req.useful)
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning("recall feedback reinforce_memory failed (best-effort): %s", exc)
 
     # Phase 7: eval auto-growth signal
     proposal_id: str | None = None
@@ -3397,8 +3403,8 @@ def search_feedback(req: SearchFeedbackRequest):
                 source_event="recall_feedback",
                 confidence=0.7,
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning("recall feedback eval proposal insert failed (best-effort): %s", exc)
 
     return {"status": "recorded", "eval_proposal_id": proposal_id}
 

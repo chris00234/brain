@@ -7264,3 +7264,66 @@ def test_recall_batch_augments_each_query_exactly_once(monkeypatch):
     assert by_query["current kanban task status"]["hits"] == []
     # 1 augment for the real query; the live-state query short-circuits first.
     assert calls == ["docker deploy 설정 선호"]
+
+
+# ── CRAG retry exclude_already_used forwarding ──────────────────────────
+
+
+def test_crag_retry_preserves_exclude_already_used(monkeypatch):
+    """The CRAG iterative retry recurses into recall_v2; it must forward
+    exclude_already_used so the retry hop re-applies the graph-constraint
+    exclusion instead of resurfacing already-used results."""
+    from routes import recall as R
+    from starlette.requests import Request
+
+    def _fake_search(query, limit, **kw):
+        return {
+            "results": [
+                {
+                    "id": "canon-docker",
+                    "collection": "canonical",
+                    "title": "Docker deploy preference",
+                    "metadata": {"category": "preference", "review_state": "accepted"},
+                    "content": "Chris deploys every service as a Docker container.",
+                    "score": 90.0,
+                }
+            ],
+            "total_candidates": 1,
+        }
+
+    monkeypatch.setattr(R.search_unified, "search_all", _fake_search)
+    R._recall_cache.clear()
+
+    exclusion_calls: list = []
+
+    def _fake_exclude(fused, **kw):
+        exclusion_calls.append(len(fused))
+        return fused, 0, 0
+
+    monkeypatch.setattr(R, "_apply_exclude_already_used", _fake_exclude)
+
+    captured: dict = {}
+
+    def fake_run_crag_retry(q, n, fused, retry_fn):
+        captured["retry_fn"] = retry_fn
+        return fused, 0, {}, None
+
+    monkeypatch.setattr(R, "_decide_use_crag", lambda q, iterative: (True, None))
+    monkeypatch.setattr(R, "_run_crag_retry", fake_run_crag_retry)
+
+    req = Request({"type": "http", "method": "GET", "path": "/recall/v2", "headers": [], "query_string": b""})
+    fn = getattr(R.recall_v2, "__wrapped__", R.recall_v2)
+    fn(
+        req,
+        "docker deployment conventions homelab",
+        n=5,
+        collection=None,
+        iterative=True,
+        exclude_already_used=True,
+    )
+    assert "retry_fn" in captured, "CRAG retry was never wired"
+    assert exclusion_calls, "initial pass never applied exclusion"
+
+    exclusion_calls.clear()
+    captured["retry_fn"]("docker deployment conventions rewritten")
+    assert exclusion_calls, "CRAG retry dropped exclude_already_used"
