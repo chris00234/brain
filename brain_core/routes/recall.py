@@ -1,9 +1,10 @@
 """Recall suite: /recall, /recall/v2, /recall/stream, /recall/batch,
 /recall/feedback, /recall/active.
 
-Extracted from server.py as-is. Shared caches (_recall_cache,
-_recall_embedding_cache) live here. Extensive imports reflect the
-original module surface.
+Extracted from server.py as-is. Request/response schemas live in
+recall_models; shared caches (_recall_cache, _recall_embedding_cache)
+live in recall_cache — both re-exported here for legacy import sites.
+Extensive imports reflect the original module surface.
 """
 
 from __future__ import annotations
@@ -11,7 +12,6 @@ from __future__ import annotations
 import contextlib
 import json
 import re
-import threading
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -29,8 +29,58 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, R
 from fastapi.responses import StreamingResponse
 from indexer import get_embedding as _get_embedding
 from metrics_buffer import metrics_buffer as _metrics_buf
-from pydantic import BaseModel, Field
 from rate_limit import limiter
+from recall_cache import (
+    _recall_cache,
+    _recall_cache_get,
+    _recall_cache_lock,
+    _recall_cache_put,
+    _recall_emb_lock,
+    _recall_embedding_cache,
+)
+from recall_cache import (
+    _recall_emb_cache_lookup as _recall_emb_cache_lookup_base,
+)
+from recall_cache import (
+    _recall_emb_cache_put as _recall_emb_cache_put_base,
+)
+from recall_models import (
+    CompoundOp,
+    CompoundRequest,
+    InjectionBlockModel,
+    RecallActiveRequest,
+    RecallActiveResponse,
+    RecallBatchRequest,
+    RecallResponse,
+    RecallResult,
+    RecallResultMetadata,
+    RecallV2Response,
+    SearchFeedbackRequest,
+)
+from recall_response_builders import (
+    _build_empty_recall_v2_response,
+    _build_meta_note,
+    _build_recall_v2_cache_key,
+    _filter_nonempty_result_lists,
+    _merge_source_timing,
+)
+
+# Compatibility contract: recall_v2 cache keys include filter_agent={agent};
+# see tests/unit/test_hermes_current_migration.py.
+
+__all__ = [
+    "CompoundOp",
+    "CompoundRequest",
+    "InjectionBlockModel",
+    "RecallActiveRequest",
+    "RecallActiveResponse",
+    "RecallBatchRequest",
+    "RecallResponse",
+    "RecallResult",
+    "RecallResultMetadata",
+    "RecallV2Response",
+    "SearchFeedbackRequest",
+]
 
 # ── Shared recall-governance layer ────────────────────────────────────────
 # Query analysis, source authority, and the multilingual tokenizer now live in
@@ -332,123 +382,6 @@ def _inject_personal_factoid_answer(q: str, fused: list[dict]) -> None:
 _hook_metrics_warned = False
 
 router = APIRouter(dependencies=[Depends(verify_bearer)])
-
-
-class RecallResultMetadata(BaseModel):
-    agent: str | None = None
-    service: str | None = None
-    type: str | None = None
-    domain: str | None = None
-    confidence: float | None = None
-    review_state: str | None = None
-    vector_score: float | None = None
-    keyword_score: float | None = None
-    id: str | None = None
-
-
-class RecallResult(BaseModel):
-    model_config = {"extra": "allow"}
-    score: float
-    source_type: str = ""
-    collection: str = ""
-    title: str = ""
-    content: str = ""
-    path: str = ""
-    trust_tier: int = 1
-    metadata: dict[str, Any] = Field(default_factory=dict)
-
-
-class RecallResponse(BaseModel):
-    query: str
-    results: list[RecallResult]
-    sources_searched: list[str]
-    total_candidates: int
-    temporal_range: dict | None = None
-    expanded_query: str | None = None
-
-
-class RecallV2Response(BaseModel):
-    query: str
-    results: list[dict[str, Any]]
-    total_candidates: int
-    hyde_used: bool = False
-    hypothetical: str | None = None
-    variants: list[str] = Field(default_factory=list)
-    rerank_applied: bool = True
-    time_decay_applied: bool = True
-    latency_ms: int = 0
-    timing: dict[str, Any] = Field(default_factory=dict)
-    # 2026-04-17 Phase 4: proactive metacognitive note. Populated only
-    # when the top-1 result triggers an uncertainty heuristic (low
-    # confidence, pending contradictions, tied top-K, no trusted
-    # alternatives). None / absent when the brain is confident — keeps
-    # high-trust recall responses clean.
-    meta_note: str | None = None
-
-
-class InjectionBlockModel(BaseModel):
-    id: str
-    title: str
-    content: str
-    source: str
-    score: float
-    priority: str
-    path: str | None = None
-    memory_id: str | None = None
-    include_reason: str | None = None
-    token_estimate: int | None = None
-    freshness: str | None = None
-    risk_flags: list[str] = Field(default_factory=list)
-    compiler_score: float | None = None
-    contract_category: str | None = None
-
-
-class RecallActiveRequest(BaseModel):
-    """Per-turn active recall payload."""
-
-    prompt: str = Field(..., max_length=8000)
-    session_id: str = Field(default="anon", max_length=128)
-    turn_idx: int = Field(default=0, ge=0, le=100000)
-    agent: str = Field(default="claude", max_length=32)
-    cwd: str | None = Field(default=None, max_length=512)
-    seen_hashes: list[str] | None = Field(default=None, max_length=200)
-
-
-class RecallActiveResponse(BaseModel):
-    blocks: list[InjectionBlockModel] = Field(default_factory=list)
-    intent: str | None = None
-    total_tokens: int = 0
-    latency_ms: int = 0
-    new_since_last_turn: bool = False
-    quality: dict = Field(default_factory=dict)
-    degraded: bool = False
-
-
-class SearchFeedbackRequest(BaseModel):
-    query: str = Field(..., min_length=1, max_length=500)
-    result_id: str = Field(..., min_length=1, max_length=200)
-    result_source: str = Field(default="", max_length=64)
-    useful: bool
-    # Forward-compat: agent identity for per-agent preference learning.
-    # Pre-2026-04 entries lack this field and are treated as agent="system"
-    # by feedback_aggregator.
-    agent: str = Field(default="system", max_length=32)
-    # Phase 7: eval auto-growth signal. When wrong_answer=true and `expected`
-    # is set, the query is appended to eval_proposals for weekly review.
-    wrong_answer: bool = Field(default=False)
-    synthetic: bool = Field(default=False)
-    expected: str = Field(default="", max_length=2000)
-
-
-class RecallBatchRequest(BaseModel):
-    queries: list[str] = Field(..., max_length=20, min_length=1)
-    n: int = Field(default=5, ge=1, le=20)
-    rerank: bool = True
-    decay: bool = True
-    agent: str = Field(default="unknown", max_length=64)
-
-
-# ── Service helpers (recall_v2 internal) ─────────────────
 
 
 def _run_crag_retry(
@@ -2635,54 +2568,6 @@ def _run_hyde_pass(
     return hypothetical, payload, elapsed_ms
 
 
-def _build_empty_recall_v2_response(
-    q: str,
-    *,
-    hyde: bool,
-    hypothetical: str | None,
-    variants: list[str],
-    expand: bool,
-    rerank: bool,
-    decay: bool,
-    t_start: float,
-    timing: dict[str, Any],
-) -> RecallV2Response:
-    """Build a no-results RecallV2Response with the metadata fields populated.
-
-    Called when every payload returned empty results — the route still
-    surfaces the query echo + flags + timing so the caller can see why
-    nothing came back (e.g. timing["search_ms"]) without an empty
-    `results` array hiding the upstream signal.
-
-    `variants` is included only when expand=True so the caller can see
-    which variants ran; otherwise the field stays empty to match the
-    pre-extraction behavior exactly.
-    """
-    return RecallV2Response(
-        query=q,
-        results=[],
-        total_candidates=0,
-        hyde_used=hyde,
-        hypothetical=hypothetical,
-        variants=variants if expand else [],
-        rerank_applied=rerank,
-        time_decay_applied=decay,
-        latency_ms=int((time.time() - t_start) * 1000),
-        timing=timing,
-    )
-
-
-def _filter_nonempty_result_lists(payloads: list[dict]) -> list[list[dict]]:
-    """Pull the `results` list out of each payload, dropping empty/missing.
-
-    Each payload from `search_unified.search_all` either has a non-empty
-    `results` list, an empty list, or is missing the key entirely. RRF
-    fusion needs only the non-empty lists; the rest would distort the
-    reciprocal-rank contributions if included as empty arrays.
-    """
-    return [p.get("results", []) for p in payloads if p.get("results")]
-
-
 def _apply_temporal_filter_inplace(
     payloads: list[dict],
     start_dt: datetime | None,
@@ -2700,71 +2585,6 @@ def _apply_temporal_filter_inplace(
     for p in payloads:
         if isinstance(p, dict) and p.get("results"):
             p["results"] = temporal.filter_by_created_at(p["results"], start_dt, end_dt)
-
-
-def _merge_source_timing(
-    timing: dict[str, Any],
-    payloads: list[dict],
-) -> None:
-    """Merge per-source timing keys from each search_all payload into `timing`.
-
-    Each payload from `search_unified.search_all` carries a "source_timing"
-    dict (rag_ms, canonical_ms, ...). When multiple variants run in parallel,
-    we take the MAX across variants since sources run in parallel inside
-    each search_all call — wall-clock for each source is the slowest one.
-
-    Mutates `timing` in place; returns None.
-    """
-    for p in payloads:
-        for k, v in p.get("source_timing", {}).items():
-            timing[k] = max(timing.get(k, 0), v)
-
-
-def _build_recall_v2_cache_key(
-    request: Request,
-    q: str,
-    n: int,
-    *,
-    hyde: bool,
-    expand: bool,
-    rerank: bool,
-    decay: bool,
-    iterative: bool,
-    collection: str | None,
-    domain: str | None,
-    agent: str | None,
-    since: str | None,
-    until: str | None,
-    entity: str | None,
-    source_type: str | None,
-    include_history: bool,
-    include_obsolete: bool,
-    as_of: str | None,
-    canonical_first: bool,
-    exclude_already_used: bool,
-) -> str:
-    """Build the response-cache key for /recall/v2.
-
-    Includes session_id + agent + active embedder adapter so concurrent
-    sessions don't share each other's spreading-activation-boosted results
-    (2026-04-16 R-3) and adapter swaps don't serve stale pre-adapter cached
-    rows (2026-04-17 LoRA A/B fix).
-    """
-    sess_hdr = request.headers.get("x-session-id", "")
-    agent_hdr = request.headers.get("x-agent", "")
-    try:
-        from indexer import _lora_embedder as _active_adapter
-
-        adapter_marker = _active_adapter[0] if _active_adapter else "base"
-    except Exception:
-        adapter_marker = "base"
-    return (
-        f"{q}:{n}:{hyde}:{expand}:{rerank}:{decay}:{iterative}:{collection}:"
-        f"{domain}:filter_agent={agent}:{since}:{until}:{entity}:{source_type}:"
-        f"{include_history}:{include_obsolete}:{as_of}:{canonical_first}:"
-        f"excl={exclude_already_used}:"
-        f"sess={sess_hdr}:agent={agent_hdr}:emb={adapter_marker}"
-    )
 
 
 # ── Routes: recall ──────────────────────────────────────
@@ -2866,196 +2686,24 @@ def recall(
     return payload
 
 
-# ── Recall v2 response cache (30s TTL) ──
-_recall_cache: dict[str, tuple[float, RecallV2Response]] = {}
-_recall_cache_lock = threading.Lock()
-_RECALL_CACHE_TTL = 30.0
-_RECALL_CACHE_MAX = 100
-# Separate lock for the semantic-similarity embedding cache. Sharing the
-# response-cache lock meant the cosine scan (O(N*dim)) ran under a contention
-# hotspot — every concurrent recall/v2 caller serialized on it.
-_recall_emb_lock = threading.Lock()
-
-
-def _recall_cache_get(key: str) -> RecallV2Response | None:
-    with _recall_cache_lock:
-        entry = _recall_cache.get(key)
-        if entry and (time.time() - entry[0]) < _RECALL_CACHE_TTL:
-            return entry[1]
-        if entry:
-            del _recall_cache[key]
-    return None
-
-
-def _recall_cache_put(key: str, response: RecallV2Response) -> None:
-    with _recall_cache_lock:
-        _recall_cache[key] = (time.time(), response)
-        if len(_recall_cache) > _RECALL_CACHE_MAX:
-            oldest = min(_recall_cache, key=lambda k: _recall_cache[k][0])
-            del _recall_cache[oldest]
-
-
-# ── Semantic query cache for /recall (embedding-similarity based, 60s TTL) ──
-_recall_embedding_cache: list[
-    tuple[float, list[float], str, dict]
-] = []  # (timestamp, embedding, query, response)
-_RECALL_EMB_TTL = 60.0
-_RECALL_EMB_MAX = 50
-_RECALL_EMB_SIM_THRESHOLD = 0.92
-
-# 2026-04-16 Tier 2: Matryoshka-style dimension truncation for the recall
-# semantic-similarity cache. multilingual-e5-large-instruct emits 1024-dim
-# vectors, and the cache's linear scan (~50 entries × 1024 dims per miss)
-# paid ~2ms of pure Python cosine work per request on top of the ~60ms
-# Ollama embed. Matryoshka Representation Learning (Kusupati 2022) shows
-# that truncating an embedding to its first k dimensions + re-normalizing
-# preserves near-full retrieval quality at a fraction of the compute.
-# 256 dims = 4× faster cosine, measured ≤2% recall loss in literature.
-# The threshold is unchanged because cosine on L2-normalized prefixes
-# stays comparable to full-vector cosine.
-_MATRYOSHKA_DIM = 256
-
-
-def _truncate_normalize(vec: list[float], dim: int = _MATRYOSHKA_DIM) -> list[float]:
-    import math
-
-    if not vec or len(vec) <= dim:
-        return vec
-    head = vec[:dim]
-    norm = math.sqrt(sum(x * x for x in head))
-    if norm <= 0:
-        return head
-    return [x / norm for x in head]
-
-
-def _cosine(a: list[float], b: list[float]) -> float:
-    import math
-
-    if not a or not b or len(a) != len(b):
-        return 0.0
-    dot = sum(x * y for x, y in zip(a, b, strict=False))
-    na = math.sqrt(sum(x * x for x in a))
-    nb = math.sqrt(sum(y * y for y in b))
-    return dot / (na * nb) if na and nb else 0.0
+# ── Recall cache compatibility wrappers ────────────────────────────────────
+# Cache state and pure helpers live in brain_core/recall_cache.py. These thin
+# wrappers preserve the historical routes.recall private seam and keep tests
+# able to monkeypatch routes.recall._get_embedding.
 
 
 def _recall_emb_cache_lookup(query: str) -> dict | None:
-    """Check semantic similarity cache. Returns cached response or None."""
-    if not query:
-        return None
-    try:
-        emb = _get_embedding(query[:200], use_cache=True, prefix="query")
-    except Exception:
-        return None
-    if not emb:
-        return None
-    # Truncate + renormalize ONCE per lookup — the cached entries are
-    # already stored in their truncated form.
-    emb_trunc = _truncate_normalize(emb)
-    now = time.time()
-    # Snapshot under lock, scan outside. The cosine loop is O(N*dim) ~50k
-    # float mults and must not run inside a contention hotspot.
-    with _recall_emb_lock:
-        _recall_embedding_cache[:] = [e for e in _recall_embedding_cache if now - e[0] < _RECALL_EMB_TTL]
-        snapshot = list(_recall_embedding_cache)
-    for _ts, cached_emb, _cached_query, resp in snapshot:
-        if _cosine(emb_trunc, cached_emb) > _RECALL_EMB_SIM_THRESHOLD:
-            return resp
-    return None
+    return _recall_emb_cache_lookup_base(query, get_embedding=_get_embedding)
 
 
 def _recall_emb_cache_put(query: str, response: dict) -> None:
-    if not query:
-        return
-    try:
-        emb = _get_embedding(query[:200], use_cache=True, prefix="query")
-    except Exception:
-        return
-    if not emb:
-        return
-    # Store only the truncated + renormalized prefix to match lookup-side.
-    emb_trunc = _truncate_normalize(emb)
-    now = time.time()
-    with _recall_emb_lock:
-        # 2026-04-16 R-4: prune by TTL at put time, not just at lookup.
-        # Previously lookup-only eviction let expired entries accumulate
-        # when reads were sparse, wasting the 50-slot budget and evicting
-        # still-valid entries prematurely.
-        _recall_embedding_cache[:] = [e for e in _recall_embedding_cache if now - e[0] < _RECALL_EMB_TTL]
-        _recall_embedding_cache.append((now, emb_trunc, query, response))
-        if len(_recall_embedding_cache) > _RECALL_EMB_MAX:
-            _recall_embedding_cache.pop(0)
+    _recall_emb_cache_put_base(query, response, get_embedding=_get_embedding)
 
 
 # ── Routes: recall v2 (HyDE + expand + rerank + time-decay + RRF) ──
 _auto_feedback_count = 0
 _auto_feedback_hour = 0  # hour (unix ts // 3600) of last reset
 _AUTO_FEEDBACK_MAX_PER_HOUR = 100
-
-
-def _build_meta_note(top_results: list[dict]) -> str | None:
-    """Compose a proactive metacognitive note when the top-1 result has
-    signals of uncertainty. Heuristic only — no LLM call, fires in <1ms.
-
-    Triggers (any):
-      1. Calibrated confidence < 0.5 on top-1
-      2. pending_contradictions > 0 on top-1
-      3. Top-2 scores within 5% — ambiguous winner
-      4. trust_tier == 0 on top-1 AND every other result <40 score
-
-    Multiple triggers combine with " · " separator. Returns None when no
-    trigger fires so high-confidence queries stay clean.
-    """
-    if not top_results:
-        return None
-    top1 = top_results[0] if isinstance(top_results[0], dict) else None
-    if top1 is None:
-        return None
-    notes: list[str] = []
-
-    # 1. Low calibrated confidence
-    try:
-        conf = float(top1.get("confidence") or 0.0)
-    except (TypeError, ValueError):
-        conf = 0.0
-    if conf and conf < 0.5:
-        notes.append(f"⚠ Low confidence ({conf:.2f}) — verify before acting")
-
-    # 2. Pending contradictions
-    try:
-        pc = int(top1.get("pending_contradictions") or 0)
-    except (TypeError, ValueError):
-        pc = 0
-    if pc > 0:
-        plural = "s" if pc > 1 else ""
-        notes.append(f"⚠ Top result has {pc} open contradiction{plural} — call brain_doubt for both sides")
-
-    # 3. Ambiguous top-2
-    if len(top_results) >= 2 and isinstance(top_results[1], dict):
-        try:
-            s1 = float(top1.get("score") or 0)
-            s2 = float(top_results[1].get("score") or 0)
-            if s1 > 0 and (s1 - s2) / s1 < 0.05:
-                notes.append(f"⚠ Ambiguous: top-2 scores within {((s1-s2)/s1)*100:.1f}%")
-        except (TypeError, ValueError):
-            pass
-
-    # 4. Untrusted top-1 with weak alternatives
-    try:
-        top1_trust = int(top1.get("trust_tier") or 0)
-        top1_score = float(top1.get("score") or 0)
-    except (TypeError, ValueError):
-        top1_trust, top1_score = 0, 0.0
-    if top1_trust == 0 and top1_score > 40:
-        others_weak = all(
-            float((r or {}).get("score") or 0) < 40 for r in top_results[1:4] if isinstance(r, dict)
-        )
-        if others_weak:
-            notes.append("⚠ No high-trust match — top result is untiered")
-
-    if not notes:
-        return None
-    return " · ".join(notes)
 
 
 def _record_auto_feedback(query: str, results: list[dict], agent: str) -> None:
@@ -3773,19 +3421,6 @@ def brain_sessions_search(
 # (NOT via subprocess or eval), so the audit trail is one route hit per
 # compound call. Hard cap 10 ops to bound latency + abuse.
 _COMPOUND_OP_ALLOWLIST = frozenset({"search", "remember", "correct", "feedback"})
-
-
-class CompoundOp(BaseModel):
-    # 2026-05-20 W3.5 round-4 defect D: cap op string length so a malformed
-    # request can't push an unbounded value into the action_audit query_text
-    # via the rejection path.
-    op: str = Field(..., max_length=64, description="One of: search, remember, correct, feedback")
-    args: dict = Field(default_factory=dict)
-
-
-class CompoundRequest(BaseModel):
-    ops: list[CompoundOp] = Field(..., min_length=1, max_length=10)
-    actor: str | None = Field(default=None, description="Calling agent (audit)")
 
 
 @router.post("/brain/ops/compound", tags=["brain"])
