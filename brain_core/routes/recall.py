@@ -96,6 +96,7 @@ __all__ = [
 # module-level aliases preserve every existing `routes.recall._is_*` /
 # `_result_*` import site; the topic-specific governance below (augment,
 # governance-inplace, retrieval-quality filter) stays here and calls them.
+from recall_governance import generic_queries as _generic_query_helpers
 from recall_governance import quality as _quality_helpers
 from recall_governance import query_analyzer as _query_analyzer
 from recall_governance import source_authority as _source_authority
@@ -165,7 +166,7 @@ from config import (
 )
 
 # Constants kept under their original names for the topic-specific governance
-# and quality-filter functions that still live in this module.
+# functions that still live in this module and for legacy compatibility aliases.
 _TRUTH_CATEGORIES = _source_authority._TRUTH_CATEGORIES
 _GENERIC_SUMMARY_MARKERS = _source_authority._GENERIC_SUMMARY_MARKERS
 _GENERIC_PROCEDURE_STOPWORDS = _query_analyzer._GENERIC_PROCEDURE_STOPWORDS
@@ -176,6 +177,10 @@ _near_duplicate_key = _quality_helpers.near_duplicate_key
 _is_near_duplicate_signature = _quality_helpers.is_near_duplicate_signature
 _quality_rank_tuple = _quality_helpers.quality_rank_tuple
 _is_conversation_transcript_row = _quality_helpers.is_conversation_transcript_row
+_GENERIC_RECIPE_QUERY_TOKENS = _generic_query_helpers.GENERIC_RECIPE_QUERY_TOKENS
+_RECIPE_RESULT_TOKENS = _generic_query_helpers.RECIPE_RESULT_TOKENS
+_is_generic_recipe_query = _generic_query_helpers.is_generic_recipe_query
+_is_recipe_result = _generic_query_helpers.is_recipe_result
 # Tool/media/runtime domain nouns whose durable answers use synonym-rich,
 # NON-literal vocabulary (Apple Calendar / macOS for "calendar", GPT Images for
 # "image", Codex-through-Hermes for "codex"). A query naming one of these is a
@@ -1896,31 +1901,6 @@ def _is_stale_generic_quality_result(result: dict, q: str) -> bool:
     # Weekly/session summary blobs are usually stale noise for concrete Brain
     # quality fixes unless the user explicitly asks for a recap.
     return _is_generic_summary_result(result) and not _is_summary_excluded_query(q)
-
-
-_GENERIC_RECIPE_QUERY_TOKENS = {"recipe", "tomato", "pasta", "sauce", "cook", "cooking", "make", "steps"}
-_RECIPE_RESULT_TOKENS = {
-    "recipe",
-    "tomato",
-    "tomatoes",
-    "pasta",
-    "sauce",
-    "garlic",
-    "basil",
-    "olive",
-    "ingredients",
-}
-
-
-def _is_generic_recipe_query(q: str) -> bool:
-    tokens = _tokenize_recall_text(q)
-    if not tokens or tokens & _PERSONAL_MEMORY_TOKENS:
-        return False
-    return "recipe" in tokens or len(tokens & _GENERIC_RECIPE_QUERY_TOKENS) >= 3
-
-
-def _is_recipe_result(result: dict) -> bool:
-    return bool(_tokenize_recall_text(_result_text(result)) & _RECIPE_RESULT_TOKENS)
 
 
 # ── Generic out-of-domain (world-knowledge) gate ─────────────────────────
