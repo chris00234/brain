@@ -807,6 +807,17 @@ def personal_factoid_result_has_strong_attribute_overlap(query: str, result_text
         has_ascii_overlap = any(t.isascii() for t in overlap)
         if has_hangul_terms and has_ascii_overlap:
             return True
+    # Disjoint-script leniency: a pure-Hangul factoid query can NEVER
+    # whole-word-overlap an English-only result — every query term is
+    # non-ASCII and every result token ASCII, so an empty overlap is a script
+    # artifact, not evidence of irrelevance. Answer None ("cannot judge") so
+    # the drop-on-False quality filter keeps the row; ranking still decides
+    # its fate. Results containing ANY Hangul token stay judgeable and keep
+    # the strict False below.
+    if not overlap and terms and all(not t.isascii() for t in terms):
+        result_tokens = content_tokens(result_text)
+        if result_tokens and all(t.isascii() for t in result_tokens):
+            return None
     return False
 
 

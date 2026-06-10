@@ -1260,6 +1260,27 @@ def test_personal_factoid_result_overlap_no_match_unrelated():
     assert qa.personal_factoid_result_has_strong_attribute_overlap(q, result) is False
 
 
+def test_personal_factoid_overlap_disjoint_script_returns_none():
+    """A pure-Hangul factoid query can NEVER whole-word-overlap an English-only
+    result — every query term is non-ASCII and every result token is ASCII, so
+    empty overlap carries zero relevance signal. The gate must answer None
+    ("cannot judge") instead of False so the quality filter keeps the row;
+    drop-on-False would erase every English answer for Korean phrasings of the
+    same durable fact."""
+    q = "Chris는 자동화 성공을 증거 없이 말하면 안 된다"
+    result = "Chris explicitly rejected claiming success without proof and wants actual submit and result confirmation."
+    assert qa.personal_factoid_result_has_strong_attribute_overlap(q, result) is None
+
+
+def test_personal_factoid_overlap_disjoint_script_keeps_false_for_korean_results():
+    """Same pure-Hangul query against a result that CONTAINS Hangul tokens stays
+    judgeable: zero overlap there is genuine evidence of irrelevance, not a
+    script artifact, so the strict False is preserved."""
+    q = "Chris는 자동화 성공을 증거 없이 말하면 안 된다"
+    result = "파타고니아의 하이킹 코스를 추천합니다: Torres del Paine W-trek."
+    assert qa.personal_factoid_result_has_strong_attribute_overlap(q, result) is False
+
+
 # ── t_ce0490ac: infra/tooling/integration prompts are IN-domain ─────────────
 # recall_v2_content_hit_pct SLO breach: project/infra/tooling/integration prompts
 # whose only domain nouns were concrete infra/client/pipeline terms (cloudflare,
