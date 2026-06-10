@@ -11,7 +11,7 @@
     "mean_rank": 1.46,
     "mrr": 0.832,
     "ndcg5": 0.866,
-    "mean_latency_ms": 331.0,
+    "mean_latency_ms": 332.0,
     "per_test": [
       {
         "query": "ghost container port",
@@ -27,7 +27,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 319,
+        "latency_ms": 350,
         "top_sources": [
           "/Users/chrischo/server/knowledge/distilled/infra/dist_for_ghost_container_port_questions_chris_does_not_treat_a_single_contai.md",
           "/Users/chrischo/.openclaw/workspace-market/TOOLS.md",
@@ -50,7 +50,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 306,
+        "latency_ms": 307,
         "top_sources": [
           "/Users/chrischo/server/knowledge/distilled/infra/dist_chris_uses_nginx_as_the_reverse_proxy_layer_for_services_like_ghost_and.md",
           "/Users/chrischo/server/knowledge/distilled/infra/dist_chris_treats_ghost_as_a_service_behind_nginx_cloudflare_proxy_ingress_an.md",
@@ -73,7 +73,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 328,
+        "latency_ms": 321,
         "top_sources": [
           "/Users/chrischo/server/knowledge/distilled/infra/dist_chris_expects_self_hosted_apps_like_vaultwarden_to_follow_a_scripted_con.md",
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/Brain System/README.md",
@@ -96,7 +96,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 311,
+        "latency_ms": 312,
         "top_sources": [
           "/Users/chrischo/server/knowledge/distilled/infra/dist_for_searxng_chris_prefers_an_explicit_versioned_nginx_server_block_with.md",
           "/Users/chrischo/server/knowledge/distilled/infra/dist_author_chris_cho_body_wires_the_running_but_unused_searxng_co.md",
@@ -119,7 +119,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 336,
+        "latency_ms": 315,
         "top_sources": [
           "/Users/chrischo/server/nginx/conf.d/minio.conf",
           "/Users/chrischo/server/minio/docker-compose.yml",
@@ -142,7 +142,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 314,
+        "latency_ms": 303,
         "top_sources": [
           "canonical/incidents/incident_cloudflare_stale_assets.md",
           "/Users/chrischo/server/knowledge/distilled/infra/dist_chris_uses_cloudflare_tunnel_in_conjunction_with_nginx_to_expose_service.md",
@@ -165,7 +165,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 306,
+        "latency_ms": 329,
         "top_sources": [
           "/Users/chrischo/.hermes/profiles/ellie/SOUL.md",
           "canonical/archived/decisions/openclaw-ellie-session-2026-03-15.md",
@@ -188,7 +188,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 304,
+        "latency_ms": 345,
         "top_sources": [
           "/Users/chrischo/.hermes/profiles/jenna/SOUL.md",
           "/Users/chrischo/server/knowledge/distilled/daily/2026-06-03.md",
@@ -211,7 +211,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 295,
+        "latency_ms": 316,
         "top_sources": [
           "/Users/chrischo/server/knowledge/distilled/infra/dist_chris_s_reliable_pattern_is_to_avoid_inferring_nginx_rate_limit_settings.md",
           "/Users/chrischo/server/knowledge/distilled/infra/dist_for_nginx_rate_limiting_questions_chris_applies_the_same_evidence_based.md",
@@ -234,7 +234,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 313,
+        "latency_ms": 371,
         "top_sources": [
           "/Users/chrischo/server/knowledge/canonical/entities/qdrant.md",
           "/Users/chrischo/server/knowledge/canonical/index.md",
@@ -257,7 +257,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 304,
+        "latency_ms": 329,
         "top_sources": [
           "/Users/chrischo/server/knowledge/distilled/infra/dist_chris_configures_ollama_as_an_embedding_only_component_in_the_brain_stac.md",
           "canonical/decisions/chris-s-openclaw-operating-model-for-planning-execution-review-and-visibility.md",
@@ -280,7 +280,7 @@
         "rank": 5,
         "rr": 0.2,
         "ndcg5": 0.387,
-        "latency_ms": 309,
+        "latency_ms": 302,
         "top_sources": [
           "canonical/archived/infra/author-chris-cho-body-brain-fastapi-server-port-8791-as-of.md",
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/Chrischodev/brain-system-architecture.md",
@@ -303,7 +303,7 @@
         "rank": 3,
         "rr": 0.333,
         "ndcg5": 0.5,
-        "latency_ms": 303,
+        "latency_ms": 304,
         "top_sources": [
           "canonical/archived/decisions/chris-requires-the-top-dashboard-area-to-always-show-the-current-cron-jo.md",
           "/Users/chrischo/.openclaw/workspace-ellie/AGENTS.md",
@@ -326,7 +326,7 @@
         "rank": 3,
         "rr": 0.333,
         "ndcg5": 0.5,
-        "latency_ms": 331,
+        "latency_ms": 306,
         "top_sources": [
           "canonical/chris/weekly/2026-W19.md",
           "/Users/chrischo/server/knowledge/distilled/decisions/brain_analysis_b8e14ba45ba7.md",
@@ -349,7 +349,7 @@
         "rank": 3,
         "rr": 0.333,
         "ndcg5": 0.5,
-        "latency_ms": 91,
+        "latency_ms": 115,
         "top_sources": [
           "/Users/chrischo/server/knowledge/canonical/entities/brain.md",
           "/Users/chrischo/server/knowledge/distilled/infra/dist_cloudflare_authentication_for_this_environment_uses_global_api_key_with.md",
@@ -375,7 +375,7 @@
         "rank": 4,
         "rr": 0.25,
         "ndcg5": 0.431,
-        "latency_ms": 388,
+        "latency_ms": 316,
         "top_sources": [
           "/Users/chrischo/server/knowledge/distilled/decisions/dist_claude_code_session_in_home_2026_04_07_8.md",
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/Chrischodev/OpenClaw/openclaw-setup.md",
@@ -398,7 +398,7 @@
         "rank": 5,
         "rr": 0.2,
         "ndcg5": 0.387,
-        "latency_ms": 335,
+        "latency_ms": 312,
         "top_sources": [
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/personal/Credential.md",
           "erl_extraction",
@@ -421,7 +421,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 321,
+        "latency_ms": 318,
         "top_sources": [
           "/Users/chrischo/server/knowledge/canonical/chris/_state.md",
           "/Users/chrischo/server/knowledge/canonical/chris/frontend-stack-preference.md",
@@ -467,7 +467,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 310,
+        "latency_ms": 311,
         "top_sources": [
           "/Users/chrischo/server/knowledge/canonical/chris/contract-first-execution-preference.md",
           "/Users/chrischo/server/knowledge/canonical/index.md",
@@ -490,7 +490,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 316,
+        "latency_ms": 319,
         "top_sources": [
           "/Users/chrischo/server/knowledge/distilled/decisions/dist_chris_continues_to_treat_canonical_memory_as_the_current_truth_layer_abo.md",
           "/Users/chrischo/server/knowledge/distilled/decisions/dist_chris_decided_the_system_should_be_layered_with_canonical_memory_on_top.md",
@@ -513,7 +513,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 317,
+        "latency_ms": 313,
         "top_sources": [
           "/Users/chrischo/server/knowledge/distilled/decisions/dist_question_claude_code_reinstated_decision_1.md",
           "canonical/decisions/decision_claude_code_reinstated.md",
@@ -536,7 +536,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 334,
+        "latency_ms": 326,
         "top_sources": [
           "/Users/chrischo/server/knowledge/canonical/infra/rag-stack-role.md",
           "/Users/chrischo/server/knowledge/distilled/infra/dist_chris_reinforced_the_architecture_that_raw_rag_remains_the_retrieval_lay.md",
@@ -559,7 +559,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 303,
+        "latency_ms": 306,
         "top_sources": [
           "/Users/chrischo/server/knowledge/distilled/decisions/dist_chris_s_personal_intelligence_system_proposal_is_to_build_a_production_g.md",
           "/Users/chrischo/server/knowledge/distilled/daily/2026-05-13.md",
@@ -582,7 +582,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 331,
+        "latency_ms": 303,
         "top_sources": [
           "/Users/chrischo/server/knowledge/distilled/chris/dist_chris_prefers_heavy_scheduled_jobs_to_avoid_9_00_am_to_6_00_pm_pacific_t.md",
           "/Users/chrischo/server/knowledge/distilled/chris/dist_chris_prefers_heavy_scheduled_jobs_to_run_outside_core_work_hours_outsi.md",
@@ -605,7 +605,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 302,
+        "latency_ms": 295,
         "top_sources": [
           "canonical/archived/decisions/he-also-set-a-docs-placement-rule-to-first-discover-any-existing-claude.md",
           "canonical/chris/weekly/2026-W22.md",
@@ -674,7 +674,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 103,
+        "latency_ms": 82,
         "top_sources": [
           "/Users/chrischo/server/knowledge/distilled/decisions/dist_chris_prefers_a_consolidated_fastapi_centered_brain_architecture_with_cl.md",
           "/Users/chrischo/.openclaw/workspace-liz/memory/2026-04-01.md",
@@ -697,7 +697,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 319,
+        "latency_ms": 315,
         "top_sources": [
           "/Users/chrischo/server/knowledge/distilled/infra/dist_chris_s_troubleshooting_pattern_for_dns_reachability_issues_is_to_valida.md",
           "canonical/incidents/incident_cloudflare_stale_assets.md",
@@ -720,7 +720,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 75,
+        "latency_ms": 74,
         "top_sources": [
           "/Users/chrischo/server/knowledge/distilled/infra/dist_for_sensitive_operational_details_like_cloudflare_api_authentication_ch.md",
           "/Users/chrischo/server/knowledge/distilled/infra/dist_browser_visit_chrome_54.md",
@@ -743,7 +743,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 310,
+        "latency_ms": 298,
         "top_sources": [
           "/Users/chrischo/server/knowledge/distilled/chris/dist_chris_prefers_heavy_scheduled_jobs_to_avoid_9_00_am_to_6_00_pm_pacific_t.md",
           "canonical/archived/decisions/chris-established-a-practical-diagnostic-rule-that-model-registration-al.md",
@@ -812,7 +812,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 297,
+        "latency_ms": 304,
         "top_sources": [
           "/Users/chrischo/server/knowledge/distilled/decisions/dist_chris_requires_task_execution_to_complete_the_original_request_fully_in.md",
           "/Users/chrischo/server/knowledge/distilled/decisions/dist_chris_expects_the_assistant_to_use_available_tools_for_execution_includ.md",
@@ -835,7 +835,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 326,
+        "latency_ms": 334,
         "top_sources": [
           "/Users/chrischo/server/knowledge/distilled/decisions/dist_chris_prefers_searching_rag_or_the_brain_recall_path_before_falling_back_1.md",
           "canonical/infra/rag-qdrant.md",
@@ -858,7 +858,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 312,
+        "latency_ms": 309,
         "top_sources": [
           "canonical/chris/weekly/2026-W15.md",
           "/Users/chrischo/server/knowledge/distilled/decisions/dist_chris_wants_duplicate_cleanup_in_the_brain_system_to_happen_automaticall_2.md",
@@ -881,7 +881,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 311,
+        "latency_ms": 358,
         "top_sources": [
           "/Users/chrischo/server/knowledge/distilled/decisions/dist_for_heartbeat_processing_chris_requires_strict_adherence_to_the_workspa.md",
           "/Users/chrischo/server/knowledge/distilled/decisions/dist_chris_enforces_a_strict_heartbeat_protocol_only_users_chrischo_openc.md",
@@ -904,7 +904,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 325,
+        "latency_ms": 305,
         "top_sources": [
           "reminders://Reminders/34",
           "calendar://Scheduled Reminders/CE2A19F2-C665-44B4-9A4F-A354B84C6698",
@@ -927,7 +927,7 @@
         "rank": 4,
         "rr": 0.25,
         "ndcg5": 0.431,
-        "latency_ms": 433,
+        "latency_ms": 436,
         "top_sources": [
           "/Users/chrischo/server/knowledge/distilled/projects/dist_chris_had_a_completed_reminder_titled_due_on_2026_03_13_stored.md",
           "erl_extraction",
@@ -950,7 +950,7 @@
         "rank": 2,
         "rr": 0.5,
         "ndcg5": 0.631,
-        "latency_ms": 367,
+        "latency_ms": 348,
         "top_sources": [
           "neo4j://entity/easter",
           "calendar://US Holidays/83FA98DE-47A5-444A-96B0-B169663ADED1",
@@ -975,7 +975,7 @@
         "rank": 5,
         "rr": 0.2,
         "ndcg5": 0.387,
-        "latency_ms": 388,
+        "latency_ms": 331,
         "top_sources": [
           "canonical/archived/decisions/chris-explicitly-told-the-assistant-to-use-available-skills-aggressively.md",
           "canonical/decisions/personal-intelligence-system-v1-architecture-proposal.md",
@@ -998,7 +998,7 @@
         "rank": 2,
         "rr": 0.5,
         "ndcg5": 0.631,
-        "latency_ms": 88,
+        "latency_ms": 78,
         "top_sources": [
           "https://blog.chrischodev.com/designing-a-rate-limiter-from-theory-to-production",
           "https://blog.chrischodev.com/restful-api-design-best-practices-for-2026",
@@ -1021,7 +1021,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 390,
+        "latency_ms": 329,
         "top_sources": [
           "canonical/archived/chris/claude-code-session-in-home-2026-03-10.md",
           "canonical/archived/infra/author-chris-cho-body-brain-fastapi-server-port-8791-as-of.md",
@@ -1044,7 +1044,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 87,
+        "latency_ms": 79,
         "top_sources": [
           "/Users/chrischo/.openclaw/workspace-jenna/memory/2026-03-18.md",
           "https://blog.chrischodev.com/building-a-self-hosted-tesla-controller-with-fleet-api",
@@ -1067,7 +1067,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 387,
+        "latency_ms": 339,
         "top_sources": [
           "canonical/archived/decisions/author-chris-cho-body-wave-1-was-destructive-in-combination-b.md",
           "canonical/archived/decisions/chris-updated-the-6-pm-email-briefing-preference-to-include-only-importa.md",
@@ -1090,7 +1090,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 360,
+        "latency_ms": 335,
         "top_sources": [
           "canonical/chris/_identity.md",
           "canonical/decisions/chris-s-openclaw-operating-model-for-planning-execution-review-and-visibility.md",
@@ -1113,7 +1113,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 451,
+        "latency_ms": 387,
         "top_sources": [
           "canonical/chris/weekly/2026-W19.md",
           "canonical/chris/_self_model.md",
@@ -1136,7 +1136,7 @@
         "rank": 4,
         "rr": 0.25,
         "ndcg5": 0.431,
-        "latency_ms": 425,
+        "latency_ms": 337,
         "top_sources": [
           "/Users/chrischo/server/knowledge/distilled/decisions/dist_claude_code_session_in_home_2026_03_10_4.md",
           "/Users/chrischo/server/knowledge/distilled/infra/dist_openclaw_sage_session_4.md",
@@ -1159,7 +1159,7 @@
         "rank": 2,
         "rr": 0.5,
         "ndcg5": 0.631,
-        "latency_ms": 409,
+        "latency_ms": 330,
         "top_sources": [
           "canonical/decisions/decision_claude_code_reinstated.md",
           "canonical/archived/decisions/openclaw-sage-session-2026-04-08.md",
@@ -1182,7 +1182,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 394,
+        "latency_ms": 335,
         "top_sources": [
           "canonical/archived/projects/chris-explicitly-asked-for-bias-free-market-analysis-he-wants-opportuni.md",
           "/Users/chrischo/.openclaw/workspace-market/MEMORY.md",
@@ -1205,7 +1205,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 431,
+        "latency_ms": 312,
         "top_sources": [
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/OpenClaw/Agent \uc6b4\uc601 \uc815\ub9ac - roles mcp skills cron.md",
           "/Users/chrischo/server/knowledge/distilled/decisions/dist_chris_s_openclaw_gateway_is_configured_on_port_18789_used_by_the_local.md",
@@ -1228,7 +1228,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 405,
+        "latency_ms": 314,
         "top_sources": [
           "/Users/chrischo/server/knowledge/canonical/incidents/incident_cloudflare_stale_assets.md",
           "/Users/chrischo/server/knowledge/distilled/infra/dist_chris_requires_frontend_deployment_reliability_controls_that_include_exp.md",
@@ -1251,7 +1251,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 407,
+        "latency_ms": 334,
         "top_sources": [
           "/Users/chrischo/server/knowledge/distilled/infra/dist_ellie_confirmed_several_current_brain_infrastructure_facts_from_live_rep.md",
           "canonical/decisions/canonical-memory-layer.md",
@@ -1274,7 +1274,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 410,
+        "latency_ms": 310,
         "top_sources": [
           "canonical/archived/decisions/chris-has-archived-mcc-and-it-should-no-longer-be-treated-as-one-of-his.md",
           "canonical/archived/infra/frontend-deployment-reliability-requires-cache-invalidation-after-deploy.md",
@@ -1297,7 +1297,7 @@
         "rank": 3,
         "rr": 0.333,
         "ndcg5": 0.5,
-        "latency_ms": 374,
+        "latency_ms": 301,
         "top_sources": [
           "/Users/chrischo/.openclaw/workspace-jenna/AGENTS.md",
           "neo4j://entity/daily synthesis",
@@ -1320,7 +1320,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 375,
+        "latency_ms": 308,
         "top_sources": [
           "/Users/chrischo/server/knowledge/canonical/design/personal_standard.md",
           "canonical/archived/decisions/openclaw-liz-session-2026-03-30.md",
@@ -1343,7 +1343,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 382,
+        "latency_ms": 337,
         "top_sources": [
           "canonical/archived/decisions/chris-expects-ui-work-to-be-pushed-to-a-high-quality-near-finished-stan.md",
           "/Users/chrischo/.openclaw/workspace-liz/memory/2026-03-11.md",
@@ -1366,7 +1366,7 @@
         "rank": 4,
         "rr": 0.25,
         "ndcg5": 0.431,
-        "latency_ms": 94,
+        "latency_ms": 71,
         "top_sources": [
           "https://blog.chrischodev.com/how-to-set-up-a-custom-domain-email-with-gmail-for-free",
           "/Users/chrischo/.openclaw/workspace-ellie/TOOLS.md",
@@ -1389,7 +1389,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 499,
+        "latency_ms": 466,
         "top_sources": [
           "canonical/chris/weekly/2026-W17.md",
           "canonical/archived/infra/chris-explicitly-reversed-an-earlier-podman-preference-and-made-docker-t.md",
@@ -1412,7 +1412,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 419,
+        "latency_ms": 320,
         "top_sources": [
           "/Users/chrischo/server/knowledge/distilled/decisions/dist_chris_wants_the_brain_system_to_be_smart_production_grade_and_self_cle_1.md",
           "canonical/chris/monthly/2026-05.md",
@@ -1435,7 +1435,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 731,
+        "latency_ms": 332,
         "top_sources": [
           "/Users/chrischo/server/knowledge/distilled/infra/dist_chris_defined_the_primary_brain_system_layout_as_server_brain_for_ba.md",
           "canonical/chris/weekly/2026-W17.md",
@@ -1458,7 +1458,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 398,
+        "latency_ms": 296,
         "top_sources": [
           "/Users/chrischo/server/knowledge/distilled/infra/dist_chris_handed_off_mac_studio_migration_planning_to_ellie_as_a_low_medium.md",
           "erl_extraction",
@@ -1481,7 +1481,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 519,
+        "latency_ms": 378,
         "top_sources": [
           "/Users/chrischo/server/knowledge/canonical/entities/openclaw.md",
           "/Users/chrischo/server/knowledge/canonical/live_state/active_goals.md",
@@ -1504,7 +1504,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 565,
+        "latency_ms": 372,
         "top_sources": [
           "/Users/chrischo/server/knowledge/canonical/entities/openclaw.md",
           "canonical/archived/decisions/openclaw-integration-should-be-done-through-selective-workflow-adaptatio.md",
@@ -1527,7 +1527,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 553,
+        "latency_ms": 379,
         "top_sources": [
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/Chrischodev/Claude Code\u1105\u1169 \u1103\u1169\u11bc\u110b\u1167\u11bc\u1109\u1161\u11bc \u1107\u116e\u11ab\u1109\u1165\u11a8 \u1112\u116e PPT \u1106\u1161\u11ab\u1103\u1173\u11af\u1100\u1175.md",
           "canonical/decisions/decision_claude_code_reinstated.md",
@@ -1550,7 +1550,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 438,
+        "latency_ms": 339,
         "top_sources": [
           "canonical/archived/decisions/chris-identified-that-openclaw-skill-visibility-enabled-state-in-the-ui.md",
           "canonical/archived/decisions/chris-wants-liz-s-skill-set-trimmed-to-remove-overlapping-or-duplicate-c.md",
@@ -1573,7 +1573,7 @@
         "rank": 0,
         "rr": 0.0,
         "ndcg5": 0.0,
-        "latency_ms": 405,
+        "latency_ms": 307,
         "top_sources": [
           "canonical/archived/decisions/for-database-access-from-a-different-machine-chris-chose-the-secure-pat.md",
           "distilled/projects/dist_chris_treats_gita_credential_access_as_sensitive_agents_may_identify_hi.md",
@@ -1596,7 +1596,7 @@
         "rank": 3,
         "rr": 0.333,
         "ndcg5": 0.5,
-        "latency_ms": 382,
+        "latency_ms": 319,
         "top_sources": [
           "canonical/archived/decisions/after-the-tesla-incident-chris-approved-a-postmortem-hardening-plan-wit.md",
           "canonical/archived/decisions/chris-requested-a-dedicated-pre-implementation-plan-for-adding-seven-bra.md",
@@ -1619,7 +1619,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 374,
+        "latency_ms": 286,
         "top_sources": [
           "canonical/archived/decisions/chris-set-a-security-workflow-where-security-guardrail-check-py-is-run.md",
           "/Users/chrischo/server/knowledge/distilled/chris/dist_claude_code_session_in_home_2026_03_10_1.md",
@@ -1642,7 +1642,7 @@
         "rank": 2,
         "rr": 0.5,
         "ndcg5": 0.631,
-        "latency_ms": 371,
+        "latency_ms": 296,
         "top_sources": [
           "/Users/chrischo/.openclaw/workspace-liz/memory/2026-03-25.md",
           "/Users/chrischo/server/knowledge/distilled/infra/dist_openclaw_jenna_session_2026_04_01_33.md",
@@ -1665,7 +1665,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 380,
+        "latency_ms": 314,
         "top_sources": [
           "/Users/chrischo/server/knowledge/distilled/projects/dist_browser_visit_chrome_53.md",
           "canonical/archived/decisions/chris-decided-to-create-a-dedicated-automation-chrome-profile-instead-of.md",
@@ -1688,7 +1688,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 407,
+        "latency_ms": 347,
         "top_sources": [
           "/Users/chrischo/server/knowledge/distilled/infra/dist_git_activity_in_chrischodev_on_2025_12_30.md",
           "/Users/chrischo/server/knowledge/distilled/infra/dist_git_activity_in_chrischodev_on_2026_02_07.md",
@@ -1711,7 +1711,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 86,
+        "latency_ms": 105,
         "top_sources": [
           "/Users/chrischo/server/knowledge/distilled/decisions/dist_chris_explicitly_re_evaluated_the_chrischodev_chatbot_stack_and_moved_th.md",
           "/Users/chrischo/server/knowledge/distilled/decisions/dist_claude_code_session_in_home_2026_04_07_6.md",
@@ -1734,7 +1734,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 384,
+        "latency_ms": 306,
         "top_sources": [
           "canonical/archived/decisions/openclaw-liz-session-2026-03-14.md",
           "canonical/archived/decisions/chris-decided-to-stop-working-on-mcc-this-is-a-direct-project-priority.md",
@@ -1757,7 +1757,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 390,
+        "latency_ms": 353,
         "top_sources": [
           "/Users/chrischo/server/knowledge/distilled/infra/dist_chris_defines_ellie_as_the_infrastructure_specialist_for_homelab_docker.md",
           "/Users/chrischo/server/knowledge/distilled/infra/dist_openclaw_ellie_session_2026_03_03_28.md",
@@ -1780,7 +1780,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 373,
+        "latency_ms": 300,
         "top_sources": [
           "/Users/chrischo/server/knowledge/distilled/decisions/dist_chris_assigns_jenna_to_personal_operations_scheduling_reminders_email.md",
           "/Users/chrischo/server/knowledge/canonical/incidents/april-2026-incidents-summary.md",
@@ -1803,7 +1803,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 391,
+        "latency_ms": 302,
         "top_sources": [
           "/Users/chrischo/server/knowledge/distilled/projects/dist_screen_time_pattern_2026_04_12.md",
           "/Users/chrischo/server/knowledge/distilled/decisions/dist_screen_time_pattern_2026_04_21.md",
@@ -1826,7 +1826,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 410,
+        "latency_ms": 348,
         "top_sources": [
           "/Users/chrischo/server/knowledge/distilled/decisions/dist_chris_wants_liz_to_behave_like_claude_code_by_continuing_pending_work_to_1.md",
           "/Users/chrischo/server/knowledge/distilled/projects/dist_claude_code_session_in_home_2026_03_10.md",
@@ -1849,7 +1849,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 409,
+        "latency_ms": 347,
         "top_sources": [
           "canonical",
           "canonical/decisions/decision_claude_code_reinstated.md",
@@ -1872,7 +1872,7 @@
         "rank": 3,
         "rr": 0.333,
         "ndcg5": 0.5,
-        "latency_ms": 399,
+        "latency_ms": 338,
         "top_sources": [
           "canonical/archived/infra/author-chris-cho-body-brain-fastapi-server-port-8791-as-of.md",
           "canonical/archived/infra/chris-explicitly-reversed-an-earlier-podman-preference-and-made-docker-t.md",
@@ -1895,7 +1895,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 373,
+        "latency_ms": 338,
         "top_sources": [
           "/Users/chrischo/server/nginx/conf.d/tesla.conf",
           "https://blog.chrischodev.com/building-a-self-hosted-tesla-controller-with-fleet-api",
@@ -1918,7 +1918,7 @@
         "rank": 2,
         "rr": 0.5,
         "ndcg5": 0.631,
-        "latency_ms": 369,
+        "latency_ms": 379,
         "top_sources": [
           "canonical/archived/decisions/git-activity-in-claw3d-on-2026-03-19.md",
           "/Users/chrischo/.openclaw/workspace-ellie/memory/2026-04-04.md",
@@ -1941,7 +1941,7 @@
         "rank": 3,
         "rr": 0.333,
         "ndcg5": 0.5,
-        "latency_ms": 363,
+        "latency_ms": 362,
         "top_sources": [
           "erl_extraction",
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/Chrischodev/OpenClaw/openclaw-setup.md",
@@ -1964,7 +1964,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 386,
+        "latency_ms": 351,
         "top_sources": [
           "/Users/chrischo/server/nginx/conf.d/default.conf",
           "/Users/chrischo/server/knowledge/distilled/infra/dist_ellie_is_designated_as_the_infrastructure_specialist_and_is_the_default.md",
@@ -1987,7 +1987,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 419,
+        "latency_ms": 349,
         "top_sources": [
           "/Users/chrischo/server/couchdb/docker-compose.yml",
           "/Users/chrischo/server/knowledge/distilled/infra/dist_claude_code_session_in_home_2026_04_07_6.md",
@@ -2010,7 +2010,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 4,
+        "latency_ms": 2,
         "top_sources": [
           "/Users/chrischo/server/knowledge/distilled/decisions/dist_claude_code_session_in_home_2026_03_10_4.md",
           "/Users/chrischo/server/knowledge/distilled/infra/dist_openclaw_sage_session_4.md",
@@ -2033,7 +2033,7 @@
         "rank": 2,
         "rr": 0.5,
         "ndcg5": 0.631,
-        "latency_ms": 385,
+        "latency_ms": 370,
         "top_sources": [
           "/Users/chrischo/.hermes/profiles/jenna/SOUL.md",
           "canonical/archived/decisions/chris-uses-outcome-based-acceptance-for-ui-work-if-the-calendar-view-ha.md",
@@ -2056,7 +2056,7 @@
         "rank": 3,
         "rr": 0.333,
         "ndcg5": 0.5,
-        "latency_ms": 6,
+        "latency_ms": 4,
         "top_sources": [
           "canonical/archived/decisions/author-chris-cho-body-wave-1-was-destructive-in-combination-b.md",
           "canonical/archived/decisions/chris-updated-the-6-pm-email-briefing-preference-to-include-only-importa.md",
@@ -2079,7 +2079,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 398,
+        "latency_ms": 372,
         "top_sources": [
           "/Users/chrischo/server/knowledge/canonical/chris/_identity.md",
           "/Users/chrischo/server/knowledge/distilled/chris/dist_investigate_why_recall_did_not_retrieve_the_korean_name_atom_while_dedup.md",
@@ -2102,7 +2102,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 380,
+        "latency_ms": 364,
         "top_sources": [
           "/Users/chrischo/server/knowledge/canonical/archived/infra/author-chris-cho-body-brain-fastapi-server-port-8791-as-of.md",
           "/Users/chrischo/server/knowledge/distilled/infra/dist_chris_s_brain_system_uses_a_multi_store_architecture_brain_server_on_po.md",
@@ -2125,7 +2125,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 401,
+        "latency_ms": 341,
         "top_sources": [
           "/Users/chrischo/server/knowledge/canonical/entities/qdrant.md",
           "/Users/chrischo/server/knowledge/canonical/infra/rag-qdrant.md",
@@ -2148,7 +2148,7 @@
         "rank": 3,
         "rr": 0.333,
         "ndcg5": 0.5,
-        "latency_ms": 400,
+        "latency_ms": 359,
         "top_sources": [
           "canonical/archived/infra/chris-explicitly-reversed-an-earlier-podman-preference-and-made-docker-t.md",
           "canonical/archived/chris/chris-corrected-the-ghost-heartbeat-target-to-use-the-real-production-ur.md",
@@ -2171,7 +2171,7 @@
         "rank": 0,
         "rr": 0.0,
         "ndcg5": 0.0,
-        "latency_ms": 407,
+        "latency_ms": 364,
         "top_sources": [
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/Chrischodev/brain-system-architecture.md",
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/Chrischodev/OpenClaw/openclaw-setup.md",
@@ -2194,7 +2194,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 120,
+        "latency_ms": 105,
         "top_sources": [
           "/Users/chrischo/server/knowledge/distilled/infra/dist_for_ghost_proxying_chris_uses_an_nginx_reverse_proxy_pattern_and_explic.md",
           "/Users/chrischo/server/nginx/conf.d/brain-api.conf",
@@ -2217,7 +2217,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 373,
+        "latency_ms": 360,
         "top_sources": [
           "canonical/chris/weekly/2026-W21.md",
           "canonical/infra/nightly-reflection-7-day-window-165-memories.md",
@@ -2240,7 +2240,7 @@
         "rank": 4,
         "rr": 0.25,
         "ndcg5": 0.431,
-        "latency_ms": 381,
+        "latency_ms": 392,
         "top_sources": [
           "canonical/archived/chris/shell-session-2026-04-08-05-25-05-26-utc-2-commands.md",
           "canonical/archived/projects/shell-session-2026-04-07-21-15-21-16-utc-295-commands.md",
@@ -2263,7 +2263,7 @@
         "rank": 3,
         "rr": 0.333,
         "ndcg5": 0.5,
-        "latency_ms": 361,
+        "latency_ms": 357,
         "top_sources": [
           "canonical/infra/brain-search-index.md",
           "https://blog.chrischodev.com/building-a-production-rag-pipeline-hybrid-search-embedding-models-and-eliminating-hallucinations",
@@ -2286,7 +2286,7 @@
         "rank": 4,
         "rr": 0.25,
         "ndcg5": 0.431,
-        "latency_ms": 397,
+        "latency_ms": 357,
         "top_sources": [
           "/Users/chrischo/server/knowledge/distilled/infra/dist_author_chris_cho_body_baselines_the_brain_dashboard_spa_so_ch.md",
           "/Users/chrischo/server/knowledge/canonical/projects/project_personal_intelligence_system_v1.md",
@@ -2309,7 +2309,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 377,
+        "latency_ms": 343,
         "top_sources": [
           "/Users/chrischo/server/knowledge/distilled/decisions/brain_analysis_b8e14ba45ba7.md",
           "/Users/chrischo/server/knowledge/distilled/infra/dist_chris_wants_services_like_uptime_kuma_deployed_as_explicit_containerized.md",
@@ -2332,7 +2332,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 389,
+        "latency_ms": 368,
         "top_sources": [
           "/Users/chrischo/server/knowledge/distilled/infra/dist_openclaw_ellie_session_2026_03_05_4.md",
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/Chrischodev/OpenClaw/openclaw-setup.md",
@@ -2355,7 +2355,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 370,
+        "latency_ms": 349,
         "top_sources": [
           "/Users/chrischo/server/docker-compose.yml",
           "canonical/archived/infra/chris-explicitly-reversed-an-earlier-podman-preference-and-made-docker-t.md",
@@ -2378,7 +2378,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 5,
+        "latency_ms": 2,
         "top_sources": [
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/OpenClaw/Agent \uc6b4\uc601 \uc815\ub9ac - roles mcp skills cron.md",
           "/Users/chrischo/server/knowledge/distilled/decisions/dist_chris_s_openclaw_gateway_is_configured_on_port_18789_used_by_the_local.md",
@@ -2401,7 +2401,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 375,
+        "latency_ms": 326,
         "top_sources": [
           "canonical/archived/decisions/for-macos-memory-analysis-chris-prefers-using-memory-pressure-compress.md",
           "/Users/chrischo/server/knowledge/canonical/projects/project_personal_intelligence_system_v1.md",
@@ -2424,7 +2424,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 338,
+        "latency_ms": 323,
         "top_sources": [
           "canonical/decisions/chris-s-openclaw-operating-model-for-planning-execution-review-and-visibility.md",
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/Brain System/README.md",
@@ -2447,7 +2447,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 358,
+        "latency_ms": 335,
         "top_sources": [
           "/Users/chrischo/server/knowledge/canonical/live_state/recent_commits.md",
           "/Users/chrischo/server/knowledge/distilled/decisions/dist_chris_liz_git_workflow_feature_work_uses_a_branch_and_pr_quick_fixes_u.md",
@@ -2470,7 +2470,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 349,
+        "latency_ms": 338,
         "top_sources": [
           "/Users/chrischo/server/knowledge/canonical/projects/project_personal_intelligence_system_v1.md",
           "erl_extraction",
@@ -2493,7 +2493,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 354,
+        "latency_ms": 357,
         "top_sources": [
           "/Users/chrischo/server/knowledge/distilled/daily/2026-05-16.md",
           "canonical/archived/infra/author-chris-cho-body-two-memory-hygiene-functions-backed-by.md",
@@ -2516,7 +2516,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 365,
+        "latency_ms": 339,
         "top_sources": [
           "canonical/archived/infra/author-chris-cho-body-two-memory-hygiene-functions-backed-by.md",
           "canonical/infra/brain-memory-dedup-strategy.md",
@@ -2539,7 +2539,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 334,
+        "latency_ms": 320,
         "top_sources": [
           "canonical/infra/nightly-reflection-7-day-window-165-memories.md",
           "/Users/chrischo/server/knowledge/distilled/chris/dist_potential_eval_signal_improvement_connect_sense_llm_usage_spike_to_t.md",
@@ -2562,7 +2562,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 344,
+        "latency_ms": 329,
         "top_sources": [
           "canonical/decisions/decision_claude_code_reinstated.md",
           "canonical/chris/weekly/2026-W21.md",
@@ -2585,7 +2585,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 338,
+        "latency_ms": 331,
         "top_sources": [
           "canonical/archived/decisions/author-chris-cho-body-wave-1-was-destructive-in-combination-b.md",
           "canonical/archived/infra/author-chris-cho-body-adds-the-structural-primitive-that-reca.md",
@@ -2608,7 +2608,7 @@
         "rank": 0,
         "rr": 0.0,
         "ndcg5": 0.0,
-        "latency_ms": 344,
+        "latency_ms": 321,
         "top_sources": [
           "/Users/chrischo/server/knowledge/distilled/daily/2026-06-03.md",
           "/Users/chrischo/server/knowledge/distilled/daily/2026-05-20.md",
@@ -2631,7 +2631,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 336,
+        "latency_ms": 341,
         "top_sources": [
           "/Users/chrischo/server/knowledge/canonical/design/personal_standard.md",
           "/Users/chrischo/.openclaw/workspace-liz/memory/2026-03-26.md",
@@ -2654,7 +2654,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 348,
+        "latency_ms": 354,
         "top_sources": [
           "canonical",
           "raw_events:raw_398d0075b71dd296",
@@ -2677,7 +2677,7 @@
         "rank": 0,
         "rr": 0.0,
         "ndcg5": 0.0,
-        "latency_ms": 77,
+        "latency_ms": 89,
         "top_sources": [
           "/Users/chrischo/server/knowledge/distilled/incidents/dist_received_at_2026_05_13t06_18_36_212679_00_00_cwd_users_chri.md",
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/Brain System/README.md",
@@ -2700,7 +2700,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 384,
+        "latency_ms": 398,
         "top_sources": [
           "/Users/chrischo/server/nginx/conf.d/minio.conf",
           "/Users/chrischo/server/minio/docker-compose.yml",
@@ -2723,7 +2723,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 376,
+        "latency_ms": 439,
         "top_sources": [
           "canonical/entities/brain_recommendations.md",
           "canonical/entities/brain.md",
@@ -2746,7 +2746,7 @@
         "rank": 2,
         "rr": 0.5,
         "ndcg5": 0.631,
-        "latency_ms": 325,
+        "latency_ms": 849,
         "top_sources": [
           "erl_extraction",
           "/Users/chrischo/.openclaw/workspace-jenna/.learnings/brain-recall-failure-2026-04-28.md",
@@ -2769,7 +2769,7 @@
         "rank": 3,
         "rr": 0.333,
         "ndcg5": 0.5,
-        "latency_ms": 321,
+        "latency_ms": 331,
         "top_sources": [
           "canonical/archived/decisions/chris-wants-proposed-changes-compared-directly-against-his-current-syste.md",
           "canonical/archived/decisions/chris-does-not-consider-acp-changes-done-until-they-pass-a-smoke-test-an.md",
@@ -2792,7 +2792,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 339,
+        "latency_ms": 953,
         "top_sources": [
           "/Users/chrischo/server/knowledge/canonical/index.md",
           "/Users/chrischo/server/knowledge/canonical/incidents/april-2026-incidents-summary.md",
@@ -2815,7 +2815,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 330,
+        "latency_ms": 620,
         "top_sources": [
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/Chrischodev/OpenClaw/openclaw-setup.md",
           "/Users/chrischo/.openclaw/workspace-liz/memory/2026-03-14.md",
@@ -2838,7 +2838,7 @@
         "rank": 2,
         "rr": 0.5,
         "ndcg5": 0.631,
-        "latency_ms": 335,
+        "latency_ms": 746,
         "top_sources": [
           "canonical/archived/decisions/chris-does-not-consider-acp-changes-done-until-they-pass-a-smoke-test-an.md",
           "canonical/incidents/april-2026-incidents-summary.md",
@@ -2861,7 +2861,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 331,
+        "latency_ms": 605,
         "top_sources": [
           "neo4j://entity/nonexistent service foobar xyz",
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/Brain System/README.md",
@@ -2884,7 +2884,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 336,
+        "latency_ms": 609,
         "top_sources": [
           "canonical/decisions/decision_claude_code_reinstated.md",
           "canonical/archived/decisions/chris-corrected-the-agent-for-giving-acknowledgement-only-cron-replies-a.md",
@@ -2907,7 +2907,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 338,
+        "latency_ms": 339,
         "top_sources": [
           "erl_extraction",
           "neo4j://entity/recipe for chocolate cake",
@@ -2930,7 +2930,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 346,
+        "latency_ms": 637,
         "top_sources": [
           "canonical/chris/weekly/2026-W19.md",
           "canonical/archived/decisions/chris-wants-a-visible-overview-section-that-always-shows-the-current-sch.md",
@@ -2953,7 +2953,7 @@
         "rank": 2,
         "rr": 0.5,
         "ndcg5": 0.631,
-        "latency_ms": 345,
+        "latency_ms": 321,
         "top_sources": [
           "canonical/archived/decisions/chris-explicitly-switched-to-codex54-and-standardized-all-agents-on-co.md",
           "/Users/chrischo/server/knowledge/distilled/projects/dist_browser_visit_chrome_23.md",
@@ -2999,7 +2999,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 335,
+        "latency_ms": 331,
         "top_sources": [
           "canonical/archived/decisions/openclaw-liz-session-2026-03-30.md",
           "/Users/chrischo/server/knowledge/distilled/decisions/dist_claude_code_session_in_home_2026_04_07.md",
@@ -3022,7 +3022,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 381,
+        "latency_ms": 385,
         "top_sources": [
           "/Users/chrischo/server/knowledge/canonical/projects/project_personal_intelligence_system_v1.md",
           "canonical/archived/infra/author-chris-cho-body-brain-fastapi-server-port-8791-as-of.md",
@@ -3045,7 +3045,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 324,
+        "latency_ms": 332,
         "top_sources": [
           "/Users/chrischo/server/knowledge/distilled/infra/dist_chris_s_homelab_service_inventory_includes_brain_brain_ui_openclaw_chr.md",
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/OpenClaw/OpenClaw \ub9c8\uc2a4\ud130 \ud50c\ub79c (7\uc77c).md",
@@ -3068,7 +3068,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 331,
+        "latency_ms": 1013,
         "top_sources": [
           "/Users/chrischo/server/knowledge/distilled/chris/dist_chris_s_openclaw_agent_setup_path_uses_openclaw_agents_add_id_works.md",
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/good_to_know/claude/Claude Code \u1107\u1166\u1109\u1173\u1110\u1173 \u1111\u1173\u1105\u1162\u11a8\u1110\u1175\u1109\u1173.md",
@@ -3091,7 +3091,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 325,
+        "latency_ms": 819,
         "top_sources": [
           "/Users/chrischo/server/knowledge/canonical/infra/infra_rag_retrieval_stack.md",
           "/Users/chrischo/server/knowledge/distilled/infra/dist_chris_created_users_chrischo_brain_system_overview_md_as_a_source_gro.md",
@@ -3114,7 +3114,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 332,
+        "latency_ms": 418,
         "top_sources": [
           "/Users/chrischo/server/knowledge/distilled/projects/dist_a_technical_trade_off_was_clarified_for_memory_interpretation_on_macos.md",
           "/Users/chrischo/server/knowledge/distilled/infra/dist_chris_s_brain_memory_system_should_be_described_by_mcp_http_entrypoints.md",
@@ -3137,7 +3137,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 340,
+        "latency_ms": 331,
         "top_sources": [
           "canonical/chris/chris-operational-preferences-for-openclaw-automation-browser-control-and-migration.md",
           "canonical/chris/weekly/2026-W19.md",
@@ -3160,7 +3160,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 355,
+        "latency_ms": 352,
         "top_sources": [
           "/Users/chrischo/server/knowledge/canonical/chris/_self_model.md",
           "/Users/chrischo/server/knowledge/canonical/chris/_identity.md",
@@ -3196,15 +3196,15 @@
   },
   "v2": {
     "total": 138,
-    "hit_source_pct": 99.3,
+    "hit_source_pct": 100.0,
     "hit_content_pct": 100.0,
     "hit_content_loose_pct": 100.0,
     "forbidden_hit_count": 0,
     "negative_pass_pct": 100.0,
-    "mean_rank": 1.63,
-    "mrr": 0.774,
-    "ndcg5": 0.827,
-    "mean_latency_ms": 468.0,
+    "mean_rank": 1.64,
+    "mrr": 0.776,
+    "ndcg5": 0.831,
+    "mean_latency_ms": 403.0,
     "per_test": [
       {
         "query": "ghost container port",
@@ -3220,7 +3220,7 @@
         "rank": 4,
         "rr": 0.25,
         "ndcg5": 0.431,
-        "latency_ms": 368,
+        "latency_ms": 347,
         "top_sources": [
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/personal/Credential.md",
           "https://blog.chrischodev.com/docker-compose-from-beginner-to-power-user",
@@ -3243,7 +3243,7 @@
         "rank": 3,
         "rr": 0.333,
         "ndcg5": 0.5,
-        "latency_ms": 383,
+        "latency_ms": 353,
         "top_sources": [
           "https://blog.chrischodev.com/building-a-self-hosted-home-server-complete-guide",
           "https://blog.chrischodev.com/docker-compose-from-beginner-to-power-user",
@@ -3266,7 +3266,7 @@
         "rank": 2,
         "rr": 0.5,
         "ndcg5": 0.631,
-        "latency_ms": 387,
+        "latency_ms": 361,
         "top_sources": [
           "erl_extraction",
           "distilled/infra/dist_for_vaultwarden_chris_prefers_standardized_docker_compose_deployment_pa.md",
@@ -3289,7 +3289,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 365,
+        "latency_ms": 342,
         "top_sources": [
           "/Users/chrischo/server/nginx/conf.d/searxng.conf",
           "/Users/chrischo/server/searxng/docker-compose.yml",
@@ -3312,7 +3312,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 374,
+        "latency_ms": 342,
         "top_sources": [
           "/Users/chrischo/server/minio/docker-compose.yml",
           "/Users/chrischo/server/nginx/conf.d/minio.conf",
@@ -3335,7 +3335,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 386,
+        "latency_ms": 339,
         "top_sources": [
           "canonical/incidents/incident_cloudflare_stale_assets.md",
           "neo4j://entity/cloudflare tunnel",
@@ -3358,7 +3358,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 381,
+        "latency_ms": 361,
         "top_sources": [
           "/Users/chrischo/.hermes/profiles/ellie/SOUL.md",
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/Chrischodev/OpenClaw/openclaw-setup.md",
@@ -3381,7 +3381,7 @@
         "rank": 2,
         "rr": 0.5,
         "ndcg5": 0.631,
-        "latency_ms": 361,
+        "latency_ms": 364,
         "top_sources": [
           "/Users/chrischo/server/knowledge/distilled/daily/2026-06-02.md",
           "/Users/chrischo/.hermes/profiles/jenna/SOUL.md",
@@ -3404,7 +3404,7 @@
         "rank": 5,
         "rr": 0.2,
         "ndcg5": 0.387,
-        "latency_ms": 357,
+        "latency_ms": 428,
         "top_sources": [
           "https://blog.chrischodev.com/designing-a-rate-limiter-from-theory-to-production",
           "/Users/chrischo/server/nginx/conf.d/couchdb.conf",
@@ -3427,7 +3427,7 @@
         "rank": 2,
         "rr": 0.5,
         "ndcg5": 0.631,
-        "latency_ms": 376,
+        "latency_ms": 367,
         "top_sources": [
           "/Users/chrischo/server/knowledge/canonical/index.md",
           "/Users/chrischo/server/knowledge/canonical/chris/_state.md",
@@ -3450,7 +3450,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 365,
+        "latency_ms": 347,
         "top_sources": [
           "canonical/entities/ollama.md",
           "canonical/decisions/chris-s-openclaw-operating-model-for-planning-execution-review-and-visibility.md",
@@ -3473,7 +3473,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 363,
+        "latency_ms": 403,
         "top_sources": [
           "/Users/chrischo/server/couchdb/docker-compose.yml",
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/Chrischodev/brain-system-architecture.md",
@@ -3496,7 +3496,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 394,
+        "latency_ms": 335,
         "top_sources": [
           "/Users/chrischo/server/glance/docker-compose.yml",
           "/Users/chrischo/server/nginx/conf.d/glance.conf",
@@ -3519,7 +3519,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 393,
+        "latency_ms": 362,
         "top_sources": [
           "/Users/chrischo/server/uptime-kuma/docker-compose.yml",
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/Chrischodev/OpenClaw/openclaw-setup.md",
@@ -3568,7 +3568,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 392,
+        "latency_ms": 347,
         "top_sources": [
           "erl_extraction",
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/Chrischodev/OpenClaw/openclaw-setup.md",
@@ -3591,7 +3591,7 @@
         "rank": 4,
         "rr": 0.25,
         "ndcg5": 0.431,
-        "latency_ms": 389,
+        "latency_ms": 377,
         "top_sources": [
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/personal/Credential.md",
           "erl_extraction",
@@ -3614,7 +3614,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 852,
+        "latency_ms": 844,
         "top_sources": [
           "/Users/chrischo/server/knowledge/canonical/index.md",
           "/Users/chrischo/server/knowledge/canonical/chris/frontend-stack-preference.md",
@@ -3637,7 +3637,7 @@
         "rank": 2,
         "rr": 0.5,
         "ndcg5": 0.631,
-        "latency_ms": 845,
+        "latency_ms": 820,
         "top_sources": [
           "atoms_hot_path: Chris\u2019s preferred frontend framework is React with TypeScript using Vite by defa",
           "canonical/chris/preferred-frontend-stack.md",
@@ -3660,7 +3660,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 356,
+        "latency_ms": 366,
         "top_sources": [
           "/Users/chrischo/server/knowledge/canonical/chris/contract-first-execution-preference.md",
           "/Users/chrischo/server/knowledge/canonical/index.md",
@@ -3683,7 +3683,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 375,
+        "latency_ms": 372,
         "top_sources": [
           "/Users/chrischo/server/knowledge/distilled/decisions/dist_chris_treats_canonical_memory_as_the_authoritative_governance_layer_abov.md",
           "/Users/chrischo/server/knowledge/distilled/infra/dist_chris_treats_canonical_memory_as_the_governance_truth_layer_and_raw_rag.md",
@@ -3706,7 +3706,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 377,
+        "latency_ms": 365,
         "top_sources": [
           "canonical/decisions/decision_claude_code_reinstated.md",
           "distilled/decisions/dist_question_claude_code_reinstated_decision.md",
@@ -3729,7 +3729,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 381,
+        "latency_ms": 711,
         "top_sources": [
           "/Users/chrischo/server/knowledge/canonical/infra/rag-stack-role.md",
           "/Users/chrischo/server/knowledge/canonical/index.md",
@@ -3752,7 +3752,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 368,
+        "latency_ms": 374,
         "top_sources": [
           "/Users/chrischo/server/knowledge/canonical/projects/project_personal_intelligence_system_v1.md",
           "canonical/archived/decisions/chris-is-currently-focused-on-building-a-personal-intelligence-system-th.md",
@@ -3775,7 +3775,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 851,
+        "latency_ms": 887,
         "top_sources": [
           "distilled/chris/dist_chris_avoids_scheduling_heavy_background_jobs_during_core_hours_preferr.md",
           "distilled/chris/dist_chris_s_scheduling_rule_is_to_avoid_heavy_background_jobs_during_9_00_am.md",
@@ -3798,7 +3798,7 @@
         "rank": 3,
         "rr": 0.333,
         "ndcg5": 0.5,
-        "latency_ms": 394,
+        "latency_ms": 346,
         "top_sources": [
           "claude_code",
           "rule",
@@ -3821,7 +3821,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 368,
+        "latency_ms": 344,
         "top_sources": [
           "distilled/infra/dist_chris_is_explicit_about_cost_control_no_extra_llm_spending_beyond_exist.md",
           "distilled/infra/dist_chris_enforces_a_strict_cost_guardrail_no_extra_llm_spending_beyond_exi.md",
@@ -3844,13 +3844,13 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 1600,
+        "latency_ms": 898,
         "top_sources": [
           "/Users/chrischo/server/knowledge/canonical/chris/preferred-frontend-stack.md",
-          "mcp",
           "erl_extraction",
           "distilled/projects/dist_chris_has_a_durable_frontend_stack_preference_for_react_vite_typescr.md",
-          "distilled/infra/dist_chris_s_default_frontend_preference_is_react_typescript_with_vite_as_t.md"
+          "distilled/infra/dist_chris_s_default_frontend_preference_is_react_typescript_with_vite_as_t.md",
+          "/Users/chrischo/server/knowledge/canonical/projects/project_personal_intelligence_system_v1.md"
         ]
       },
       {
@@ -3867,7 +3867,7 @@
         "rank": 3,
         "rr": 0.333,
         "ndcg5": 0.5,
-        "latency_ms": 1127,
+        "latency_ms": 119,
         "top_sources": [
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/Chrischodev/brain-system-architecture.md",
           "/Users/chrischo/server/knowledge/raw/inbox/raw_shell_2026_05_30_66b76a23.json",
@@ -3890,7 +3890,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 702,
+        "latency_ms": 380,
         "top_sources": [
           "distilled/infra/dist_chris_troubleshooting_posture_for_cloudflare_dns_issues_is_access_layer.md",
           "distilled/infra/dist_when_exact_cloudflare_dns_troubleshooting_steps_are_not_reliably_in_memo.md",
@@ -3913,7 +3913,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 507,
+        "latency_ms": 90,
         "top_sources": [
           "/Users/chrischo/server/knowledge/distilled/infra/dist_for_cloudflare_api_authentication_details_chris_treats_operational_cred.md",
           "/Users/chrischo/server/knowledge/distilled/infra/dist_for_sensitive_operational_details_like_cloudflare_api_authentication_ch.md",
@@ -3936,10 +3936,10 @@
         "rank": 3,
         "rr": 0.333,
         "ndcg5": 0.5,
-        "latency_ms": 1499,
+        "latency_ms": 1135,
         "top_sources": [
-          "voyager_extraction",
           "erl_extraction",
+          "voyager_extraction",
           "distilled/chris/dist_chris_s_scheduling_rule_is_to_avoid_heavy_background_jobs_during_9_00_am.md",
           "distilled/chris/dist_chris_avoids_scheduling_heavy_background_jobs_during_core_hours_preferr.md",
           "distilled/chris/dist_chris_prefers_scheduling_heavy_batch_jobs_outside_9_00_am_6_00_pm_pacifi.md"
@@ -3959,7 +3959,7 @@
         "rank": 2,
         "rr": 0.5,
         "ndcg5": 0.631,
-        "latency_ms": 382,
+        "latency_ms": 367,
         "top_sources": [
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/Chrischodev/OpenClaw/openclaw-setup.md",
           "distilled/infra/dist_chris_s_cloudflare_tunnel_architecture_preference_is_to_expose_services.md",
@@ -3982,7 +3982,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 425,
+        "latency_ms": 354,
         "top_sources": [
           "/Users/chrischo/server/knowledge/canonical/design/personal_standard.md",
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/Design Standard/DESIGN.md",
@@ -4005,7 +4005,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 365,
+        "latency_ms": 682,
         "top_sources": [
           "canonical/chris/contract-first-execution-preference.md",
           "canonical/archived/chris/chris-prefers-contract-first-execution-for-non-trivial-engineering-work.md",
@@ -4028,7 +4028,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 1605,
+        "latency_ms": 381,
         "top_sources": [
           "canonical/infra/rag-qdrant.md",
           "canonical/infra/rag-stack-role.md",
@@ -4051,7 +4051,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 417,
+        "latency_ms": 378,
         "top_sources": [
           "canonical/infra/brain-memory-dedup-strategy.md",
           "/Users/chrischo/server/knowledge/canonical/index.md",
@@ -4074,7 +4074,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 449,
+        "latency_ms": 704,
         "top_sources": [
           "distilled/decisions/dist_chris_enforces_a_strict_heartbeat_protocol_that_reads_only_users_chris.md",
           "distilled/chris/dist_chris_treats_the_heartbeat_protocol_as_strict_only_users_chrischo_op.md",
@@ -4097,7 +4097,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 339,
+        "latency_ms": 349,
         "top_sources": [
           "reminders://Reminders/34",
           "calendar://Scheduled Reminders/CE2A19F2-C665-44B4-9A4F-A354B84C6698",
@@ -4120,7 +4120,7 @@
         "rank": 2,
         "rr": 0.5,
         "ndcg5": 0.631,
-        "latency_ms": 399,
+        "latency_ms": 411,
         "top_sources": [
           "erl_extraction",
           "reminders://Reminders/36",
@@ -4143,7 +4143,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 333,
+        "latency_ms": 340,
         "top_sources": [
           "calendar://US Holidays/9F99DC50-5933-4021-B912-C02296AA7373",
           "calendar://US Holidays/83FA98DE-47A5-444A-96B0-B169663ADED1",
@@ -4168,7 +4168,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 360,
+        "latency_ms": 352,
         "top_sources": [
           "https://blog.chrischodev.com/rag-is-not-memory",
           "https://blog.chrischodev.com/building-my-personal-ai-assistant-with-openclaw",
@@ -4191,7 +4191,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 95,
+        "latency_ms": 91,
         "top_sources": [
           "https://blog.chrischodev.com/restful-api-design-best-practices-for-2026",
           "https://blog.chrischodev.com/designing-a-rate-limiter-from-theory-to-production",
@@ -4214,7 +4214,7 @@
         "rank": 5,
         "rr": 0.2,
         "ndcg5": 0.387,
-        "latency_ms": 356,
+        "latency_ms": 364,
         "top_sources": [
           "https://blog.chrischodev.com/building-a-self-hosted-home-server-complete-guide",
           "https://blog.chrischodev.com/self-hosted-remote-desktop-with-kasm-workspaces-access-your-server-from-anywhere",
@@ -4237,7 +4237,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 92,
+        "latency_ms": 99,
         "top_sources": [
           "https://blog.chrischodev.com/building-a-self-hosted-tesla-controller-with-fleet-api",
           "https://blog.chrischodev.com/restful-api-design-best-practices-for-2026",
@@ -4260,7 +4260,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 583,
+        "latency_ms": 515,
         "top_sources": [
           "/Users/chrischo/server/knowledge/canonical/chris/_self_model.md",
           "distilled/chris/dist_chris_s_email_retention_rule_is_to_keep_six_month_records_only_for_meani.md",
@@ -4283,7 +4283,7 @@
         "rank": 3,
         "rr": 0.333,
         "ndcg5": 0.5,
-        "latency_ms": 505,
+        "latency_ms": 506,
         "top_sources": [
           "erl_extraction",
           "/Users/chrischo/server/knowledge/canonical/chris/chris-cho-employment-at-git-america-inc.md",
@@ -4305,7 +4305,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 952,
+        "latency_ms": 925,
         "top_sources": [
           "/Users/chrischo/server/knowledge/canonical/entities/frontend.md"
         ]
@@ -4324,7 +4324,7 @@
         "rank": 3,
         "rr": 0.333,
         "ndcg5": 0.5,
-        "latency_ms": 371,
+        "latency_ms": 360,
         "top_sources": [
           "/Users/chrischo/server/knowledge/canonical/chris/_self_model.md",
           "canonical/decisions/decision_claude_code_reinstated.md",
@@ -4347,7 +4347,7 @@
         "rank": 3,
         "rr": 0.333,
         "ndcg5": 0.5,
-        "latency_ms": 400,
+        "latency_ms": 369,
         "top_sources": [
           "/Users/chrischo/server/knowledge/canonical/chris/_self_model.md",
           "canonical/decisions/decision_claude_code_reinstated.md",
@@ -4370,7 +4370,7 @@
         "rank": 3,
         "rr": 0.333,
         "ndcg5": 0.5,
-        "latency_ms": 372,
+        "latency_ms": 361,
         "top_sources": [
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/personal/business/automation/Business Plan - Automation Platform for Small Businesses.md",
           "erl_extraction",
@@ -4393,7 +4393,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 369,
+        "latency_ms": 411,
         "top_sources": [
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/Chrischodev/OpenClaw/openclaw-setup.md",
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/OpenClaw/Agent \uc6b4\uc601 \uc815\ub9ac - roles mcp skills cron.md",
@@ -4416,7 +4416,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 390,
+        "latency_ms": 379,
         "top_sources": [
           "canonical/incidents/incident_cloudflare_stale_assets.md",
           "/Users/chrischo/server/knowledge/canonical/incidents/april-2026-incidents-summary.md",
@@ -4439,7 +4439,7 @@
         "rank": 2,
         "rr": 0.5,
         "ndcg5": 0.631,
-        "latency_ms": 381,
+        "latency_ms": 380,
         "top_sources": [
           "erl_extraction",
           "distilled/infra/dist_chris_s_homelab_docker_setup_includes_explicit_cpu_memory_limits_on_runn.md",
@@ -4462,7 +4462,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 398,
+        "latency_ms": 387,
         "top_sources": [
           "/Users/chrischo/server/knowledge/canonical/entities/mcc.md",
           "claude_code",
@@ -4485,7 +4485,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 675,
+        "latency_ms": 359,
         "top_sources": [
           "distilled/daily/2026-04-15.md",
           "distilled/daily/2026-04-17.md",
@@ -4508,7 +4508,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 365,
+        "latency_ms": 359,
         "top_sources": [
           "/Users/chrischo/server/knowledge/canonical/design/personal_standard.md",
           "canonical/archived/decisions/openclaw-liz-session-2026-03-14.md",
@@ -4531,7 +4531,7 @@
         "rank": 3,
         "rr": 0.333,
         "ndcg5": 0.5,
-        "latency_ms": 347,
+        "latency_ms": 363,
         "top_sources": [
           "erl_extraction",
           "/Users/chrischo/.openclaw/workspace-liz/memory/2026-03-13.md",
@@ -4554,7 +4554,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 135,
+        "latency_ms": 100,
         "top_sources": [
           "runbook",
           "https://blog.chrischodev.com/how-to-set-up-a-custom-domain-email-with-gmail-for-free",
@@ -4577,7 +4577,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 965,
+        "latency_ms": 999,
         "top_sources": [
           "canonical/archived/infra/chris-explicitly-reversed-an-earlier-podman-preference-and-made-docker-t.md",
           "canonical/chris/monthly/2026-05.md",
@@ -4600,7 +4600,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 421,
+        "latency_ms": 374,
         "top_sources": [
           "canonical/archived/decisions/chris-wants-the-brain-system-to-be-smart-and-well-run-with-production-gr.md",
           "canonical/chris/monthly/2026-05.md",
@@ -4623,7 +4623,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 382,
+        "latency_ms": 387,
         "top_sources": [
           "canonical/entities/brain.md",
           "canonical/projects/project_personal_intelligence_system_v1.md",
@@ -4646,7 +4646,7 @@
         "rank": 3,
         "rr": 0.333,
         "ndcg5": 0.5,
-        "latency_ms": 363,
+        "latency_ms": 361,
         "top_sources": [
           "erl_extraction",
           "claude_code",
@@ -4669,7 +4669,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 453,
+        "latency_ms": 460,
         "top_sources": [
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/OpenClaw/OpenClaw \ub9c8\uc2a4\ud130 \ud50c\ub79c (7\uc77c).md",
           "canonical/archived/decisions/openclaw-integration-should-be-done-through-selective-workflow-adaptatio.md",
@@ -4692,7 +4692,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 475,
+        "latency_ms": 466,
         "top_sources": [
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/Chrischodev/OpenClaw/openclaw-setup.md",
           "canonical/archived/decisions/openclaw-should-not-be-configured-as-a-direct-1-1-copy-of-claude-code-o.md",
@@ -4715,7 +4715,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 461,
+        "latency_ms": 467,
         "top_sources": [
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/Chrischodev/Claude Code\u1105\u1169 \u1103\u1169\u11bc\u110b\u1167\u11bc\u1109\u1161\u11bc \u1107\u116e\u11ab\u1109\u1165\u11a8 \u1112\u116e PPT \u1106\u1161\u11ab\u1103\u1173\u11af\u1100\u1175.md",
           "canonical/decisions/decision_claude_code_reinstated.md",
@@ -4738,7 +4738,7 @@
         "rank": 3,
         "rr": 0.333,
         "ndcg5": 0.5,
-        "latency_ms": 453,
+        "latency_ms": 436,
         "top_sources": [
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/good_to_know/claude/Claude Code \u1107\u1166\u1109\u1173\u1110\u1173 \u1111\u1173\u1105\u1162\u11a8\u1110\u1175\u1109\u1173.md",
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/OpenClaw/\ud544\uc218 \uc2a4\ud0ac \uc815\ub9ac (2026-03-01).md",
@@ -4761,7 +4761,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 377,
+        "latency_ms": 388,
         "top_sources": [
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/personal/Credential.md",
           "erl_extraction",
@@ -4784,7 +4784,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 365,
+        "latency_ms": 409,
         "top_sources": [
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/Window_System/Ultimate Performance Power Plan.md",
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/good_to_know/claude/Claude Code Best Practice.md",
@@ -4807,7 +4807,7 @@
         "rank": 3,
         "rr": 0.333,
         "ndcg5": 0.5,
-        "latency_ms": 332,
+        "latency_ms": 359,
         "top_sources": [
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/good_to_know/claude/Claude Code Best Practice.md",
           "liz_learning",
@@ -4830,7 +4830,7 @@
         "rank": 3,
         "rr": 0.333,
         "ndcg5": 0.5,
-        "latency_ms": 379,
+        "latency_ms": 354,
         "top_sources": [
           "https://blog.chrischodev.com/oauth-2-0-and-jwt-authentication-a-practical-implementation-guide",
           "erl_extraction",
@@ -4853,7 +4853,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 345,
+        "latency_ms": 363,
         "top_sources": [
           "canonical/archived/chris/browser-visit-chrome.md",
           "canonical/archived/decisions/chris-decided-to-create-a-dedicated-automation-chrome-profile-instead-of.md",
@@ -4876,7 +4876,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 381,
+        "latency_ms": 386,
         "top_sources": [
           "/Users/chrischo/server/knowledge/distilled/insights/2026-04-25.md",
           "canonical/archived/incidents/git-activity-in-jenna-teacher-on-2026-03-26.md",
@@ -4899,7 +4899,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 136,
+        "latency_ms": 94,
         "top_sources": [
           "/Users/chrischo/server/knowledge/canonical/archived/decisions/git-activity-in-chrischodev-on-2026-02-14.md",
           "neo4j://entity/minimax api",
@@ -4922,7 +4922,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 366,
+        "latency_ms": 373,
         "top_sources": [
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/Chrischodev/OpenClaw/openclaw-setup.md",
           "erl_extraction",
@@ -4945,7 +4945,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 398,
+        "latency_ms": 382,
         "top_sources": [
           "distilled/infra/dist_chris_assigns_ellie_as_the_infrastructure_specialist_for_homelab_docker.md",
           "distilled/infra/dist_chris_defines_ellie_as_the_infrastructure_specialist_for_homelab_docker.md",
@@ -4968,7 +4968,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 377,
+        "latency_ms": 364,
         "top_sources": [
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/Chrischodev/OpenClaw/openclaw-setup.md",
           "/Users/chrischo/server/knowledge/canonical/incidents/april-2026-incidents-summary.md",
@@ -4991,7 +4991,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 425,
+        "latency_ms": 359,
         "top_sources": [
           "/Users/chrischo/server/knowledge/canonical/decisions/chris-screen-time-patterns-across-march-14-to-march-23-2026.md",
           "distilled/decisions/dist_screen_time_pattern_2026_03_20.md",
@@ -5014,7 +5014,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 400,
+        "latency_ms": 392,
         "top_sources": [
           "canonical/decisions/decision_claude_code_reinstated.md",
           "canonical/archived/infra/claude-code-session-in-server-2026-04-07.md",
@@ -5037,7 +5037,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 403,
+        "latency_ms": 381,
         "top_sources": [
           "canonical/decisions/decision_claude_code_reinstated.md",
           "canonical/archived/infra/claude-code-session-in-server-2026-04-07.md",
@@ -5060,7 +5060,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 400,
+        "latency_ms": 369,
         "top_sources": [
           "/Users/chrischo/server/filebrowser/docker-compose.yml",
           "erl_extraction",
@@ -5083,7 +5083,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 414,
+        "latency_ms": 373,
         "top_sources": [
           "https://blog.chrischodev.com/building-a-self-hosted-tesla-controller-with-fleet-api",
           "/Users/chrischo/server/nginx/conf.d/tesla.conf",
@@ -5106,7 +5106,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 435,
+        "latency_ms": 374,
         "top_sources": [
           "/Users/chrischo/server/claw3d/docker-compose.yml",
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/Chrischodev/OpenClaw/openclaw-setup.md",
@@ -5129,7 +5129,7 @@
         "rank": 3,
         "rr": 0.333,
         "ndcg5": 0.5,
-        "latency_ms": 441,
+        "latency_ms": 398,
         "top_sources": [
           "erl_extraction",
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/Chrischodev/OpenClaw/openclaw-setup.md",
@@ -5152,7 +5152,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 410,
+        "latency_ms": 370,
         "top_sources": [
           "/Users/chrischo/server/nginx/conf.d/default.conf",
           "/Users/chrischo/server/nginx/conf.d/personal-webhook.conf",
@@ -5175,7 +5175,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 430,
+        "latency_ms": 399,
         "top_sources": [
           "/Users/chrischo/server/couchdb/docker-compose.yml",
           "/Users/chrischo/server/knowledge/distilled/infra/dist_claude_code_session_in_home_2026_04_07_6.md",
@@ -5198,7 +5198,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 439,
+        "latency_ms": 417,
         "top_sources": [
           "/Users/chrischo/server/knowledge/distilled/decisions/dist_claude_code_session_in_home_2026_03_10_8.md",
           "/Users/chrischo/.hermes/profiles/liz/SOUL.md",
@@ -5221,7 +5221,7 @@
         "rank": 3,
         "rr": 0.333,
         "ndcg5": 0.5,
-        "latency_ms": 531,
+        "latency_ms": 407,
         "top_sources": [
           "/Users/chrischo/.hermes/profiles/jenna/SOUL.md",
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/Chrischodev/brain-system-architecture.md",
@@ -5244,7 +5244,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 2469,
+        "latency_ms": 497,
         "top_sources": [
           "/Users/chrischo/server/knowledge/distilled/decisions/dist_openclaw_sage_session_11.md",
           "/Users/chrischo/server/knowledge/distilled/infra/dist_received_at_2026_05_30t16_56_22_406519_00_00_cwd_users_chri.md",
@@ -5267,7 +5267,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 688,
+        "latency_ms": 558,
         "top_sources": [
           "/Users/chrischo/server/knowledge/canonical/chris/_self_model.md",
           "/Users/chrischo/.openclaw/workspace-jenna/.learnings/brain-recall-failure-2026-04-28.md",
@@ -5290,7 +5290,7 @@
         "rank": 5,
         "rr": 0.2,
         "ndcg5": 0.387,
-        "latency_ms": 493,
+        "latency_ms": 351,
         "top_sources": [
           "/Users/chrischo/server/brain/docker-compose.yml",
           "/Users/chrischo/server/nginx/conf.d/brain-api.conf",
@@ -5313,7 +5313,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 455,
+        "latency_ms": 357,
         "top_sources": [
           "/Users/chrischo/server/knowledge/canonical/entities/qdrant.md",
           "/Users/chrischo/server/knowledge/canonical/infra/rag-qdrant.md",
@@ -5336,7 +5336,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 427,
+        "latency_ms": 348,
         "top_sources": [
           "https://blog.chrischodev.com/docker-compose-from-beginner-to-power-user",
           "https://blog.chrischodev.com/building-a-self-hosted-home-server-complete-guide",
@@ -5359,7 +5359,7 @@
         "rank": 2,
         "rr": 0.5,
         "ndcg5": 0.631,
-        "latency_ms": 439,
+        "latency_ms": 359,
         "top_sources": [
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/good_to_know/how to use obsidian/Obsidian Complete Beginner Guide.md",
           "/Users/chrischo/server/nginx/conf.d/couchdb.conf",
@@ -5382,7 +5382,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 148,
+        "latency_ms": 122,
         "top_sources": [
           "/Users/chrischo/server/nginx/conf.d/brain-api.conf",
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/Brain System/README.md",
@@ -5405,7 +5405,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 414,
+        "latency_ms": 337,
         "top_sources": [
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/Chrischodev/brain-system-architecture.md",
           "canonical/decisions/canonical-memory-layer.md",
@@ -5428,7 +5428,7 @@
         "rank": 3,
         "rr": 0.333,
         "ndcg5": 0.5,
-        "latency_ms": 423,
+        "latency_ms": 336,
         "top_sources": [
           "erl_extraction",
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/Chrischodev/brain-system-architecture.md",
@@ -5451,7 +5451,7 @@
         "rank": 2,
         "rr": 0.5,
         "ndcg5": 0.631,
-        "latency_ms": 427,
+        "latency_ms": 334,
         "top_sources": [
           "https://blog.chrischodev.com/building-a-production-rag-pipeline-hybrid-search-embedding-models-and-eliminating-hallucinations",
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/Brain System/README.md",
@@ -5474,7 +5474,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 443,
+        "latency_ms": 366,
         "top_sources": [
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/Brain System/README.md",
           "/Users/chrischo/server/knowledge/canonical/projects/project_personal_intelligence_system_v1.md",
@@ -5497,7 +5497,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 453,
+        "latency_ms": 343,
         "top_sources": [
           "distilled/infra/dist_chris_expects_monitoring_services_like_uptime_kuma_to_be_deployed_as_con.md",
           "distilled/infra/dist_chris_uses_uptime_health_monitoring_as_a_real_verification_path_in_infra.md",
@@ -5520,7 +5520,7 @@
         "rank": 2,
         "rr": 0.5,
         "ndcg5": 0.631,
-        "latency_ms": 437,
+        "latency_ms": 365,
         "top_sources": [
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/Chrischodev/OpenClaw/openclaw-setup.md",
           "/Users/chrischo/server/knowledge/distilled/infra/dist_openclaw_ellie_session_2026_03_05_4.md",
@@ -5543,7 +5543,7 @@
         "rank": 2,
         "rr": 0.5,
         "ndcg5": 0.631,
-        "latency_ms": 418,
+        "latency_ms": 369,
         "top_sources": [
           "erl_extraction",
           "/Users/chrischo/server/docker-compose.yml",
@@ -5566,7 +5566,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 459,
+        "latency_ms": 371,
         "top_sources": [
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/Chrischodev/OpenClaw/openclaw-setup.md",
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/Brain System/README.md",
@@ -5589,7 +5589,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 387,
+        "latency_ms": 357,
         "top_sources": [
           "/Users/chrischo/server/knowledge/canonical/projects/project_personal_intelligence_system_v1.md",
           "canonical/infra/brain-memory-dedup-strategy.md",
@@ -5612,7 +5612,7 @@
         "rank": 2,
         "rr": 0.5,
         "ndcg5": 0.631,
-        "latency_ms": 390,
+        "latency_ms": 330,
         "top_sources": [
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/Brain System/README.md",
           "/Users/chrischo/server/knowledge/canonical/projects/project_personal_intelligence_system_v1.md",
@@ -5635,7 +5635,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 415,
+        "latency_ms": 346,
         "top_sources": [
           "canonical/archived/decisions/git-activity-in-knowledge-on-2026-04-05.md",
           "canonical/archived/decisions/git-activity-in-libreuiux-claude-code-on-2025-11-15.md",
@@ -5658,7 +5658,7 @@
         "rank": 2,
         "rr": 0.5,
         "ndcg5": 0.631,
-        "latency_ms": 390,
+        "latency_ms": 342,
         "top_sources": [
           "erl_extraction",
           "/Users/chrischo/server/knowledge/canonical/projects/project_personal_intelligence_system_v1.md",
@@ -5681,7 +5681,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 396,
+        "latency_ms": 337,
         "top_sources": [
           "/Users/chrischo/server/knowledge/canonical/projects/project_personal_intelligence_system_v1.md",
           "canonical/infra/brain-memory-dedup-strategy.md",
@@ -5704,7 +5704,7 @@
         "rank": 2,
         "rr": 0.5,
         "ndcg5": 0.631,
-        "latency_ms": 390,
+        "latency_ms": 333,
         "top_sources": [
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/Brain System/README.md",
           "canonical/infra/brain-memory-dedup-strategy.md",
@@ -5727,13 +5727,13 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 403,
+        "latency_ms": 402,
         "top_sources": [
           "distilled/incidents/dist_nightly_eval_regression_gate_failures_should_include_brief_explanations.md",
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/Brain System/README.md",
-          "canonical/infra/nightly-reflection-7-day-window-165-memories.md",
-          "canonical/archived/decisions/chris-wants-any-brain-fine-tuning-to-be-judged-by-measurable-eval-score.md",
-          "distilled/chris/dist_potential_eval_signal_improvement_connect_sense_llm_usage_spike_to_t.md"
+          "raw_events:raw_c14c618567d20eea",
+          "raw_events:raw_7dbba7c6ac25f651",
+          "raw_events:raw_ed07a86478e5f009"
         ]
       },
       {
@@ -5750,7 +5750,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 415,
+        "latency_ms": 329,
         "top_sources": [
           "canonical/decisions/decision_claude_code_reinstated.md",
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/Brain System/README.md",
@@ -5773,7 +5773,7 @@
         "rank": 2,
         "rr": 0.5,
         "ndcg5": 0.631,
-        "latency_ms": 382,
+        "latency_ms": 333,
         "top_sources": [
           "neo4j://entity/apple notes body extraction",
           "distilled/decisions/dist_chris_wants_apple_notes_ingestion_body_extraction_gaps_handled_by_jenna.md",
@@ -5796,7 +5796,7 @@
         "rank": 3,
         "rr": 0.333,
         "ndcg5": 0.5,
-        "latency_ms": 376,
+        "latency_ms": 332,
         "top_sources": [
           "/Users/chrischo/server/knowledge/distilled/daily/2026-05-20.md",
           "/Users/chrischo/server/knowledge/distilled/daily/2026-05-17.md",
@@ -5819,7 +5819,7 @@
         "rank": 2,
         "rr": 0.5,
         "ndcg5": 0.631,
-        "latency_ms": 395,
+        "latency_ms": 362,
         "top_sources": [
           "/Users/chrischo/.openclaw/workspace-liz/memory/2026-03-14.md",
           "/Users/chrischo/server/knowledge/canonical/design/personal_standard.md",
@@ -5842,7 +5842,7 @@
         "rank": 2,
         "rr": 0.5,
         "ndcg5": 0.631,
-        "latency_ms": 418,
+        "latency_ms": 350,
         "top_sources": [
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/Chrischodev/brain-system-architecture.md",
           "/Users/chrischo/server/knowledge/distilled/infra/dist_chris_traced_the_deeper_stability_issue_to_known_orbstack_helper_balloon.md",
@@ -5859,19 +5859,19 @@
         "forbidden_content": [],
         "forbidden_hit": false,
         "forbidden_matches": [],
-        "hit_source": false,
+        "hit_source": true,
         "hit_content": true,
         "hit_content_loose": true,
-        "rank": 0,
-        "rr": 0.0,
-        "ndcg5": 0.0,
-        "latency_ms": 103,
+        "rank": 3,
+        "rr": 0.333,
+        "ndcg5": 0.5,
+        "latency_ms": 183,
         "top_sources": [
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/Brain System/README.md",
-          "https://blog.chrischodev.com/building-a-self-hosted-tesla-controller-with-fleet-api",
+          "neo4j://entity/vite spa route collision",
+          "incident_resolution",
           "erl_extraction",
-          "/Users/chrischo/server/knowledge/distilled/chris/dist_received_at_2026_05_13t06_20_25_446390_00_00_cwd_users_chri.md",
-          "/Users/chrischo/server/knowledge/distilled/infra/dist_received_at_2026_05_13t21_45_48_054270_00_00_cwd_users_chri.md"
+          "https://blog.chrischodev.com/building-a-self-hosted-tesla-controller-with-fleet-api"
         ]
       },
       {
@@ -5888,7 +5888,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 440,
+        "latency_ms": 381,
         "top_sources": [
           "/Users/chrischo/server/minio/docker-compose.yml",
           "/Users/chrischo/server/nginx/conf.d/minio.conf",
@@ -5911,7 +5911,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 438,
+        "latency_ms": 358,
         "top_sources": [
           "/Users/chrischo/server/knowledge/canonical/live_state/launchd_services.md",
           "canonical/infra/brain-memory-dedup-strategy.md",
@@ -5934,7 +5934,7 @@
         "rank": 5,
         "rr": 0.2,
         "ndcg5": 0.387,
-        "latency_ms": 419,
+        "latency_ms": 324,
         "top_sources": [
           "erl_extraction",
           "/Users/chrischo/server/knowledge/distilled/infra/dist_a_specific_korean_root_cause_was_found_the_ko_present_progressive_form.md",
@@ -5957,7 +5957,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 387,
+        "latency_ms": 327,
         "top_sources": [
           "/Users/chrischo/server/knowledge/canonical/live_state/recent_commits.md",
           "erl_extraction",
@@ -5980,13 +5980,13 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 404,
+        "latency_ms": 408,
         "top_sources": [
-          "/Users/chrischo/server/knowledge/canonical/incidents/april-2026-incidents-summary.md",
+          "/Users/chrischo/server/knowledge/canonical/live_state/recent_commits.md",
           "canonical/incidents/april-2026-incidents-summary.md",
+          "canonical/chris/monthly/2026-05.md",
           "/Users/chrischo/server/knowledge/canonical/index.md",
-          "erl_extraction",
-          "canonical/chris/monthly/2026-05.md"
+          "raw_events:raw_0e1cc89166d2f12f"
         ]
       },
       {
@@ -6003,7 +6003,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 381,
+        "latency_ms": 330,
         "top_sources": [
           "erl_extraction",
           "neo4j://entity/today's schedule",
@@ -6026,7 +6026,7 @@
         "rank": 2,
         "rr": 0.5,
         "ndcg5": 0.631,
-        "latency_ms": 383,
+        "latency_ms": 326,
         "top_sources": [
           "erl_extraction",
           "canonical/incidents/april-2026-incidents-summary.md",
@@ -6049,7 +6049,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 390,
+        "latency_ms": 332,
         "top_sources": [
           "neo4j://entity/nonexistent service foobar xyz",
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/personal/business/automation/Business Plan - Automation Platform for Small Businesses.md",
@@ -6072,7 +6072,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 397,
+        "latency_ms": 335,
         "top_sources": [
           "neo4j://entity/agent named bartholomew",
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/Chrischodev/OpenClaw/openclaw-setup.md",
@@ -6095,7 +6095,7 @@
         "rank": 0,
         "rr": 0.0,
         "ndcg5": 0.0,
-        "latency_ms": 408,
+        "latency_ms": 325,
         "top_sources": []
       },
       {
@@ -6112,7 +6112,7 @@
         "rank": 2,
         "rr": 0.5,
         "ndcg5": 0.631,
-        "latency_ms": 898,
+        "latency_ms": 765,
         "top_sources": [
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/Chrischodev/brain-system-architecture.md",
           "/Users/chrischo/server/knowledge/distilled/infra/dist_browser_visit_chrome_18.md"
@@ -6132,7 +6132,7 @@
         "rank": 4,
         "rr": 0.25,
         "ndcg5": 0.431,
-        "latency_ms": 364,
+        "latency_ms": 326,
         "top_sources": [
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/Chrischodev/OpenClaw/openclaw-setup.md",
           "canonical/archived/decisions/chris-explicitly-switched-to-codex54-and-standardized-all-agents-on-co.md",
@@ -6155,7 +6155,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 392,
+        "latency_ms": 341,
         "top_sources": [
           "https://blog.chrischodev.com/docker-compose-from-beginner-to-power-user",
           "distilled/infra/dist_chris_set_a_default_docker_rollout_policy_deploy_services_incrementally.md",
@@ -6178,7 +6178,7 @@
         "rank": 2,
         "rr": 0.5,
         "ndcg5": 0.631,
-        "latency_ms": 383,
+        "latency_ms": 654,
         "top_sources": [
           "erl_extraction",
           "canonical/archived/decisions/openclaw-liz-session-2026-03-14.md",
@@ -6201,7 +6201,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 396,
+        "latency_ms": 348,
         "top_sources": [
           "/Users/chrischo/server/knowledge/canonical/projects/project_personal_intelligence_system_v1.md",
           "voyager_extraction",
@@ -6224,7 +6224,7 @@
         "rank": 2,
         "rr": 0.5,
         "ndcg5": 0.631,
-        "latency_ms": 465,
+        "latency_ms": 392,
         "top_sources": [
           "raw_events:raw_5d8e73d3ff7a2fd3",
           "/Users/chrischo/server/knowledge/distilled/infra/dist_chris_s_homelab_service_inventory_includes_brain_brain_ui_openclaw_chr.md"
@@ -6244,7 +6244,7 @@
         "rank": 2,
         "rr": 0.5,
         "ndcg5": 0.631,
-        "latency_ms": 380,
+        "latency_ms": 641,
         "top_sources": [
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/good_to_know/claude/Claude Code \u1107\u1166\u1109\u1173\u1110\u1173 \u1111\u1173\u1105\u1162\u11a8\u1110\u1175\u1109\u1173.md",
           "/Users/chrischo/server/knowledge/distilled/chris/dist_chris_s_openclaw_agent_setup_path_uses_openclaw_agents_add_id_works.md",
@@ -6267,7 +6267,7 @@
         "rank": 3,
         "rr": 0.333,
         "ndcg5": 0.5,
-        "latency_ms": 382,
+        "latency_ms": 353,
         "top_sources": [
           "erl_extraction",
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/project/oc-lifehub/OC-LifeHub \u1109\u1161\u110b\u1165\u11b8 \u1100\u1175\u1112\u116c\u11a8\u1109\u1165.md",
@@ -6290,7 +6290,7 @@
         "rank": 4,
         "rr": 0.25,
         "ndcg5": 0.431,
-        "latency_ms": 385,
+        "latency_ms": 328,
         "top_sources": [
           "raw_events:raw_b53b4114b2d2d655",
           "/Users/chrischo/.openclaw/workspace-ellie/memory/2026-04-16-openclaw-update.md",
@@ -6313,7 +6313,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 943,
+        "latency_ms": 849,
         "top_sources": [
           "/Users/chrischo/server/knowledge/canonical/design/personal_standard.md",
           "/Users/chrischo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian-vault/Design Standard/references/apple-hig-notes.md",
@@ -6336,7 +6336,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 860,
+        "latency_ms": 780,
         "top_sources": [
           "distilled/chris/dist_chris_rejects_abstractions_for_one_time_operations_and_prefers_inline_pr.md",
           "raw_events:raw_7e7c6950bb813aee",
@@ -6357,7 +6357,7 @@
         "rank": 1,
         "rr": 1.0,
         "ndcg5": 1.0,
-        "latency_ms": 387,
+        "latency_ms": 331,
         "top_sources": [
           "/Users/chrischo/server/knowledge/canonical/infra/brain-memory-dedup-strategy.md",
           "erl_extraction",
@@ -6368,5 +6368,5 @@
       }
     ]
   },
-  "baseline_written_at": "2026-06-09T18:37:08"
+  "baseline_written_at": "2026-06-09T18:52:24"
 }

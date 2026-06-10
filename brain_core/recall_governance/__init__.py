@@ -15,6 +15,7 @@ from .prefetch_policy import RecallPolicy, policy_for
 from .query_analyzer import (
     QueryIntent,
     analyze_query,
+    is_incident_retrospective_query,
     is_live_state_query,
     is_out_of_domain_world_knowledge_query,
     is_positive_summary_intent_query,
@@ -60,6 +61,7 @@ __all__ = [
     "is_episodic_event_log_result",
     "is_generic_summary_result",
     "is_generic_summary_title",
+    "is_incident_retrospective_query",
     "is_live_state_query",
     "is_low_authority_block",
     "is_low_authority_result",

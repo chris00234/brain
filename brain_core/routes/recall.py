@@ -3216,6 +3216,11 @@ def recall_v2(
         or _is_broad_tool_recommendation_query(query_tokens_for_governance)
         or personal_attribute_query
         or pure_personal_factoid_probe
+        # Incident/retrospective probes: the authoritative incident_resolution/
+        # postmortem row often sits just below the small n=5 inner window
+        # (pool miss, not a ranking miss) — same bounded deepening as the
+        # other governance-sensitive classes.
+        or _query_analyzer.is_incident_retrospective_query(q)
     )
     if governance_sensitive_query:
         inner_floor = (

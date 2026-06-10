@@ -310,6 +310,47 @@ def is_live_state_query(q: str) -> bool:
     )
 
 
+# Incident/retrospective query class: the query seeks a recorded failure
+# event and its resolution (incident_resolution / postmortem rows). A closed
+# class of distinctive failure-event nouns (EN+KO) — deliberately excludes
+# ubiquitous coding words (fix/bug/error) so ordinary how-to/doc queries never
+# classify. Consumers use this to DEEPEN the candidate pool (bounded floor),
+# never to filter — a false positive costs microseconds, not recall.
+_INCIDENT_RETROSPECTIVE_TOKENS = frozenset(
+    {
+        "incident",
+        "incidents",
+        "postmortem",
+        "postmortems",
+        "outage",
+        "outages",
+        "rca",
+        "rootcause",
+        "collision",
+        "collisions",
+        "regression",
+        "regressions",
+        "crash",
+        "crashed",
+        "crashes",
+        "breakage",
+        "장애",
+        "사고",
+        "충돌",
+        "회귀",
+        "크래시",
+    }
+)
+
+
+def is_incident_retrospective_query(q: str) -> bool:
+    toks = tokenize(q)
+    if toks & _INCIDENT_RETROSPECTIVE_TOKENS:
+        return True
+    lower = (q or "").lower()
+    return "root cause" in lower or "post mortem" in lower or "post-mortem" in lower
+
+
 _SUMMARY_EXCLUSION_RE = re.compile(
     r"\b(?:not|no|without|exclude|excluding|other\s+than|skip)\s+(?:a\s+|an\s+|the\s+)?(?:generic\s+|weekly\s+|session\s+)?(?:summary|summaries|summarized)\b|\b(?:summary|summaries)\s+말고\b|요약\s*(?:말고|빼고|제외)",
     re.I,
