@@ -97,6 +97,7 @@ __all__ = [
 # `_result_*` import site; the topic-specific governance below (augment,
 # governance-inplace, retrieval-quality filter) stays here and calls them.
 import recall_governance.brain_quality as _brain_quality_helpers
+import recall_governance.openclaw_workspace as _openclaw_workspace_helpers
 from recall_governance import generic_queries as _generic_query_helpers
 from recall_governance import quality as _quality_helpers
 from recall_governance import query_analyzer as _query_analyzer
@@ -230,35 +231,12 @@ _FACTOID_GATE_OFF_DOMAIN_TOKENS = frozenset(
 # brain-quality) and inject stale workspace instructions. Drop them from
 # retrieval for any query NOT actually about OpenClaw/the agents themselves;
 # durable truth lives in canonical/distilled, not these workspace files.
-_OPENCLAW_WORKSPACE_INSTRUCTION_RE = re.compile(
-    r"\.openclaw/workspace-[^/]+/(?:agents|tools)\.md\b", re.IGNORECASE
-)
-_OPENCLAW_QUERY_TOKENS = frozenset(
-    {
-        "openclaw",
-        "오픈클로",
-        "jenna",
-        "liz",
-        "ellie",
-        "sage",
-        "market",
-        "제나",
-        "리즈",
-        "엘리",
-        "세이지",
-        "마켓",
-        "agent",
-        "agents",
-        "workspace",
-        "에이전트",
-    }
-)
+_OPENCLAW_WORKSPACE_INSTRUCTION_RE = _openclaw_workspace_helpers.OPENCLAW_WORKSPACE_INSTRUCTION_RE
+_OPENCLAW_QUERY_TOKENS = _openclaw_workspace_helpers.OPENCLAW_QUERY_TOKENS
 
 
 def _is_openclaw_workspace_instruction_result(result: dict) -> bool:
-    meta = _result_metadata(result)
-    path = str(result.get("path") or meta.get("source_path") or meta.get("path") or "")
-    return bool(_OPENCLAW_WORKSPACE_INSTRUCTION_RE.search(path))
+    return _openclaw_workspace_helpers.is_openclaw_workspace_instruction_result(result)
 
 
 # ── Route-guarantee injection for /recall/v2 (mirror of active recall) ─────
