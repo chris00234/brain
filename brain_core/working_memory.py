@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sqlite3
 import sys
 import uuid
@@ -101,6 +102,45 @@ def _prune_expired() -> int:
             (now,),
         )
         return cur.rowcount
+
+
+# ── Context-noise gate ───────────────────────────────────
+# Session summaries and focus items are rendered verbatim into every boot
+# context, so harness artifacts must never be stored or surfaced as "what
+# Chris was working on": raw markup/tool-output captures
+# (<local-command-stdout>…), ANSI/SGR control residue, or an echoed
+# agent-instruction scaffold ("You are running as Claude Code inside tmux…").
+# Format/shape signals only — never topic markers.
+
+_MARKUP_TAG_RE = re.compile(r"</?[a-zA-Z][\w.:-]*(?:\s[^<>]*?)?/?>")
+# Real ESC-prefixed SGR codes, or a stripped-ESC open/close pair ("[1m…[22m").
+_SGR_CONTROL_RE = re.compile(r"\x1b\[[0-9;]*m|\[\d{1,3}(?:;\d{1,3})*m.{0,200}?\[\d{1,3}m")
+_AGENT_SCAFFOLD_RE = re.compile(
+    r"^\s*(?:you are|당신은)\s.{0,120}?(?:\b(?:agent|assistant|claude|codex|session|tmux|cli)\b"
+    r"|에이전트|어시스턴트)",
+    re.I | re.S,
+)
+
+
+def is_context_noise(content: str) -> bool:
+    """True when a working-memory row is harness/markup noise rather than a
+    human-meaningful summary or focus line. Empty beats wrong for boot-context
+    surfaces, so a row that fails this gate is neither stored (session
+    summaries) nor rendered (session summaries + manual focus)."""
+    text = (content or "").strip()
+    if not text:
+        return True
+    if _SGR_CONTROL_RE.search(text):
+        return True
+    if _AGENT_SCAFFOLD_RE.match(text):
+        return True
+    if _MARKUP_TAG_RE.match(text):
+        return True
+    stripped = _MARKUP_TAG_RE.sub("", text).strip()
+    if not stripped:
+        return True
+    # Markup-dominated: tags consume a substantial fraction of the row.
+    return (len(text) - len(stripped)) / len(text) >= 0.3
 
 
 # ── Public API ───────────────────────────────────────────
@@ -207,7 +247,7 @@ def get_working_context() -> dict:
             "ORDER BY created_at DESC",
             (now_iso,),
         ).fetchall()
-    manual_focus = [_row_to_dict(r) for r in rows]
+    manual_focus = [d for d in (_row_to_dict(r) for r in rows) if not is_context_noise(d.get("content"))]
 
     return {
         "active_goals": active_goals[:3],
@@ -274,6 +314,15 @@ def add_session_summary(content: str, agent: str = "claude", source: str = "sess
     instead. Prevents the recent-sessions list from filling with 5 copies of
     the same prompt when the outbox replays or the distiller retries.
     """
+    if is_context_noise(content):
+        log.info("session summary rejected as context noise: %.80s", content or "")
+        return {
+            "id": None,
+            "content": content,
+            "category": SESSION_SUMMARY_CATEGORY,
+            "agent": agent,
+            "skipped": "context_noise",
+        }
     norm_new = " ".join((content or "").lower().split())
     with _conn() as conn:
         latest = conn.execute(
@@ -332,7 +381,12 @@ def _evict_old_session_summaries() -> int:
 
 
 def get_session_summaries(limit: int = MAX_SESSION_SUMMARIES) -> list[dict]:
-    """Return the most recent session summaries, newest first."""
+    """Return the most recent session summaries, newest first.
+
+    Read-time context-noise filter: rows stored before the store-side gate
+    existed (raw markup captures, scaffold echoes) are suppressed here so
+    they never reach a boot context. Over-fetch gives filtering headroom.
+    """
     _prune_expired()
     now_iso = datetime.now(UTC).isoformat(timespec="seconds")
     with _conn() as conn:
@@ -340,9 +394,10 @@ def get_session_summaries(limit: int = MAX_SESSION_SUMMARIES) -> list[dict]:
             "SELECT * FROM focus_items "
             "WHERE category = ? AND (expires_at IS NULL OR expires_at >= ?) "
             "ORDER BY created_at DESC LIMIT ?",
-            (SESSION_SUMMARY_CATEGORY, now_iso, limit),
+            (SESSION_SUMMARY_CATEGORY, now_iso, limit * 2),
         ).fetchall()
-    return [_row_to_dict(r) for r in rows]
+    clean = [d for d in (_row_to_dict(r) for r in rows) if not is_context_noise(d.get("content"))]
+    return clean[:limit]
 
 
 # ── v3 session working memory (per-turn scratch, backed by session_context) ──

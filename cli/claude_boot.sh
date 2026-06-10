@@ -157,6 +157,12 @@ if [ "$BASELINE_NEEDED" = "1" ]; then
     printf '%s\n' "$RESULT"
     printf '%s' "$RESULT" > "$CACHE_FILE"
     echo "$NOW" > "$CACHE_TS"
+  elif [ "$RESULT" = "No relevant boot context found. Starting fresh." ]; then
+    # Legitimately empty boot context: inject NOTHING (an empty prefetch must
+    # not be wrapped in a visible block) and cache the emptiness so the next
+    # turns don't refetch. Not a degraded serve — no sentinel, no log entry.
+    : > "$CACHE_FILE"
+    echo "$NOW" > "$CACHE_TS"
   else
     # Fresh fetch failed or empty. Try cache fallback.
     if [ -f "$CACHE_FILE" ] && [ -f "$CACHE_TS" ]; then

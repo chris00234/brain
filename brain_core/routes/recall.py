@@ -3418,7 +3418,11 @@ def recall_v2(
     fused = _sort_and_diversify(fused, top_window=n * 2)
     fused = _apply_retrieval_quality_filter(q, fused)
     _inject_route_guarantee_results(q, fused)
-    _inject_personal_factoid_answer(q, fused)
+    if not canonical_first:
+        # canonical_first is a truth-layer-only contract (sources=["canonical"]);
+        # the factoid rescue injects raw_events FTS rows, which would leak
+        # non-canonical content into a canonical-only response.
+        _inject_personal_factoid_answer(q, fused)
     fused = _sort_and_diversify(fused, top_window=n)
 
     # Phase G3: opt-in graph-constraint exclusion. See
@@ -3480,6 +3484,7 @@ def recall_v2(
                 include_history=include_history,
                 include_obsolete=include_obsolete,
                 as_of=as_of,
+                canonical_first=canonical_first,
                 background=background,
             )
 

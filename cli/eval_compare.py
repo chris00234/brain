@@ -17,20 +17,23 @@ Usage:
 from __future__ import annotations
 
 import argparse
-from collections import Counter
 import json
 import math
+import os
 import re as _re_eval
 import sys
 import time
 import urllib.parse
 import urllib.request
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
 DEFAULT_EVAL_SET = Path("/Users/chrischo/server/brain/cli/eval_set.json")
 SECRET_FILE = Path("/Users/chrischo/.brain/credentials/.personal_webhook_secret")
-BASE = "http://127.0.0.1:8791"
+# Override with BRAIN_EVAL_BASE_URL (or --base-url) to eval a side instance of
+# changed code without touching the production server on 8791.
+BASE = os.environ.get("BRAIN_EVAL_BASE_URL", "http://127.0.0.1:8791")
 BRAIN_CORE = Path("/Users/chrischo/server/brain/brain_core")
 DIVERSITY_HIGH_COSINE_THRESHOLD = 0.92
 
@@ -759,7 +762,17 @@ def main() -> int:
         default="strict",
         help="Content metric to persist when --persist-track is set.",
     )
+    parser.add_argument(
+        "--base-url",
+        default="",
+        help="Brain server base URL (default: BRAIN_EVAL_BASE_URL env or http://127.0.0.1:8791). "
+        "Use to eval a side instance of changed code without touching production.",
+    )
     args = parser.parse_args()
+
+    if args.base_url:
+        global BASE
+        BASE = args.base_url.rstrip("/")
 
     if not SECRET_FILE.exists():
         sys.stderr.write(f"no secret file at {SECRET_FILE}\n")

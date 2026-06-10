@@ -890,7 +890,16 @@ def log_boot(agent_name, queries, sections):
         pass
 
 
+EMPTY_BOOT_CONTEXT_SENTINEL = "No relevant boot context found. Starting fresh."
+
+
 def format_boot_context(agent_name, sections):
+    # Empty boot context must not be wrapped in a visible memory block — emit
+    # only the bare sentinel (claude_boot.sh matches it exactly and injects
+    # nothing), never the header + "Loaded 0 context blocks" scaffold.
+    if not sections:
+        return EMPTY_BOOT_CONTEXT_SENTINEL
+
     lines = []
     lines.append(
         f"[Unified Boot Context] Agent: {agent_name} | {datetime.now(UTC).strftime('%Y-%m-%d %H:%M')} UTC"
@@ -904,9 +913,6 @@ def format_boot_context(agent_name, sections):
         lines.append(f"### {s['section']} — {source}{score_str}")
         lines.append(s["content"])
         lines.append("")
-
-    if not sections:
-        lines.append("No relevant boot context found. Starting fresh.")
 
     return "\n".join(lines)
 
