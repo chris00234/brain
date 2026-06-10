@@ -49,6 +49,32 @@ BRAIN_QUALITY_GENERIC_MARKERS = (
     "fastapi server",
     "port 8791",
 )
+BRAIN_QUALITY_PROMPT_MARKERS = (
+    "brain quality",
+    "brain recall",
+    "prefetch quality",
+    "recall quality",
+    "retrieval quality",
+    "brain intelligence",
+    "improve brain",
+    "actual brain",
+    "real brain",
+    "브레인 품질",
+    "브레인 지능",
+    "실제 브레인",
+    "진짜 브레인",
+    "검색품질",
+)
+
+
+def looks_like_brain_quality_prompt(lowered_prompt: str) -> bool:
+    """Prompt-shaped classifier for active-recall prehook gating.
+
+    This intentionally preserves active_recall's substring-marker behavior.
+    ``is_brain_quality_query_text`` is the token-shaped route-governance
+    classifier; future unification is a behavior change, not this extraction.
+    """
+    return any(marker in lowered_prompt for marker in BRAIN_QUALITY_PROMPT_MARKERS)
 
 
 def is_brain_quality_query_text(text: str) -> bool:

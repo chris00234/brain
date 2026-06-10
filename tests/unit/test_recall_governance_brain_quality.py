@@ -16,6 +16,13 @@ def test_routes_recall_reexports_brain_quality_constants():
     assert recall_route._BRAIN_QUALITY_GENERIC_MARKERS is brain_quality.BRAIN_QUALITY_GENERIC_MARKERS
 
 
+def test_active_recall_reexports_brain_quality_prompt_classifier():
+    import active_recall
+    from recall_governance import brain_quality
+
+    assert active_recall._looks_like_brain_quality_prompt is brain_quality.looks_like_brain_quality_prompt
+
+
 def test_brain_quality_query_classifier_detects_eval_quality_prompts():
     from recall_governance import brain_quality
 
@@ -71,3 +78,30 @@ def test_stale_generic_quality_result_respects_summary_intent():
 
     assert _is_stale_generic_quality_result(result, "brain recall quality noise")
     assert not _is_stale_generic_quality_result(result, "summarize brain recall quality noise")
+
+
+def test_brain_quality_prompt_classifier_preserves_active_recall_markers():
+    from recall_governance import brain_quality
+
+    assert brain_quality.looks_like_brain_quality_prompt("improve brain recall quality")
+    assert brain_quality.looks_like_brain_quality_prompt("brain intelligence")
+    assert brain_quality.looks_like_brain_quality_prompt("브레인 품질")
+    assert not brain_quality.looks_like_brain_quality_prompt("brain backup cron")
+    assert not brain_quality.looks_like_brain_quality_prompt("qdrant storage cleanup")
+
+
+def test_active_recall_live_state_block_uses_brain_quality_prompt_classifier():
+    import active_recall
+
+    assert active_recall._intent_blocked_by_context("live_state", "improve brain recall quality")
+    assert not active_recall._intent_blocked_by_context("live_state", "brain backup cron")
+    assert not active_recall._intent_blocked_by_context("visual", "improve brain recall quality")
+
+
+def test_prompt_and_route_brain_quality_classifiers_document_known_drift():
+    from recall_governance import brain_quality
+
+    assert brain_quality.looks_like_brain_quality_prompt("real brain improvements")
+    assert not brain_quality.is_brain_quality_query_text("real brain improvements")
+    assert not brain_quality.looks_like_brain_quality_prompt("recall noise tuning")
+    assert brain_quality.is_brain_quality_query_text("recall noise tuning")
