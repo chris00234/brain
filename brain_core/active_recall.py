@@ -99,6 +99,7 @@ except ImportError:
 from recall_governance import brain_quality as _govern_brain_quality
 from recall_governance import codex_workflow as _govern_codex_workflow
 from recall_governance import normalization as _govern_norm
+from recall_governance import openclaw_hermes as _govern_openclaw_hermes
 from recall_governance import route_guarantees as _govern_routes
 from recall_governance import source_authority as _govern_authority
 from recall_governance.query_analyzer import is_live_state_query as _govern_is_live_state_query
@@ -950,62 +951,18 @@ def _semantic_score_adjustment_for_prompt(
 _looks_like_codex_workflow_prompt = _govern_codex_workflow.looks_like_codex_workflow_prompt
 
 
-def _looks_like_openclaw_hermes_distinction_prompt(prompt: str) -> bool:
-    lower = (prompt or "").lower()
-    return (
-        "openclaw" in lower
-        and "hermes" in lower
-        and any(marker in lower for marker in ("distinction", "historical", "history", "runtime", "current"))
-    )
+_looks_like_openclaw_hermes_distinction_prompt = (
+    _govern_openclaw_hermes.looks_like_openclaw_hermes_distinction_prompt
+)
 
 
 _is_codex_current_preference_result = _govern_codex_workflow.is_codex_current_preference_result
 _is_codex_skill_sync_noise = _govern_codex_workflow.is_codex_skill_sync_noise
 
 
-def _is_openclaw_hermes_distinction_result(title: str, content: str, path: str | None) -> bool:
-    haystack = f"{title}\n{path or ''}\n{content[:800]}".lower()
-    return (
-        "openclaw" in haystack
-        and "hermes" in haystack
-        and any(
-            marker in haystack
-            for marker in (
-                "distinction",
-                "distinguish",
-                "historical",
-                "provenance",
-                "current runtime",
-                "current runtime context",
-                "hermes agent is",
-            )
-        )
-    )
-
-
-def _is_openclaw_hermes_handoff_noise(title: str, content: str, path: str | None) -> bool:
-    haystack = f"{title}\n{path or ''}\n{content[:1500]}".lower()
-    return (
-        "work kanban task t_" in haystack
-        or "acceptance probe" in haystack
-        or "focused tests passed" in haystack
-        or "review-required handoff" in haystack
-        or "dirty patch" in haystack
-        or "verdict: partial" in haystack
-        or "generic regression" in haystack
-        or "generic_recipe_knowledge_gap" in haystack
-        or "spot check" in haystack
-        or "no setup/live_state" in haystack
-    )
-
-
-def _is_broad_openclaw_hermes_theme_noise(title: str, content: str) -> bool:
-    haystack = f"{title}\n{content[:800]}".lower()
-    if _is_openclaw_hermes_distinction_result(title, content, None):
-        return False
-    return "these notes share a common theme" in haystack or (
-        "openclaw" in haystack and "hermes" in haystack and "common theme" in haystack
-    )
+_is_openclaw_hermes_distinction_result = _govern_openclaw_hermes.is_openclaw_hermes_distinction_result
+_is_openclaw_hermes_handoff_noise = _govern_openclaw_hermes.is_openclaw_hermes_handoff_noise
+_is_broad_openclaw_hermes_theme_noise = _govern_openclaw_hermes.is_broad_openclaw_hermes_theme_noise
 
 
 def _is_noisy_semantic_result(title: str, content: str, path: str | None) -> bool:
