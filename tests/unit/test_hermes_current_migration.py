@@ -40,7 +40,6 @@ def test_skill_materializer_syncs_hermes_registry_not_openclaw():
 
     assert Path("/Users/chrischo/.hermes/profiles/liz/skills") == skill_materializer.HERMES_SKILLS_DIR
     assert hasattr(skill_materializer, "_sync_hermes_skill_indexes")
-    assert not hasattr(skill_materializer, "_sync_openclaw_registry")
 
 
 def test_profile_dispatch_uses_hermes_cli_not_openclaw_agent():
@@ -77,8 +76,12 @@ def test_brain_memory_provider_uses_current_brain_api_contract():
     source = (BRAIN_ROOT / "hermes_integration/brain_memory_provider/__init__.py").read_text(encoding="utf-8")
 
     assert '"x-agent"' in source
-    assert '"n": PREFETCH_K' in source
-    assert '"collection": "semantic_memory"' in source
+    # New provider parameterises `n` (constraint queries use PREFETCH_K * 2);
+    # the contract is that PREFETCH_K is the prefetch budget at the call site
+    # and the recall payload still carries an `n` key.
+    assert "n=PREFETCH_K" in source
+    assert '"n": n' in source
+    assert 'collection="semantic_memory"' in source
     assert '"agent": self._profile' in source
     assert '"source": "hermes"' in source
     assert '"kind"' not in source

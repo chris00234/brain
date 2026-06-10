@@ -131,6 +131,117 @@ def test_process_ready_records_deferred_dispatch_attempt_without_outcome(monkeyp
     assert truth["evidence"]["terminal_has_outcome"] is True
 
 
+def test_task_evaluation_personal_factoid_gap_human_needed_is_silent(monkeypatch, tmp_path):
+    class _Result:
+        ok = True
+        text = "HUMAN_NEEDED: Chris must provide his birthday; no source can infer it."
+        error = ""
+
+    fake_cli = type(sys)("cli_llm")
+    fake_cli.dispatch = lambda **_kwargs: _Result()
+    monkeypatch.setitem(sys.modules, "cli_llm", fake_cli)
+
+    tq = TaskQueue(tmp_path / "autonomy.db")
+    sent = []
+
+    def fake_notify(body: str, *, source: str, severity: str = "warn") -> None:
+        sent.append({"body": body, "source": source, "severity": severity})
+
+    monkeypatch.setattr(tq, "_notify_chris_text", fake_notify)
+    task = tq.create_task(
+        title="Knowledge gap: what is my birthday?",
+        description="Recall returned no reliable answer for this personal factoid.",
+        assigned_agent="sage",
+        confidence=0.2,
+        metadata={"source": "gap_detector", "gap_query": "what is my birthday?"},
+    )
+
+    handled = tq._review_tasks_with_subscription_llm([task])
+    updated = tq.get_task(task["id"])
+
+    assert handled == {task["id"]}
+    assert sent == []
+    assert updated["metadata"]["task_evaluation_alert_policy"] == "silent_hold"
+    assert updated["metadata"]["task_evaluation_action"] == "held_as_silent_personal_factoid_gap"
+    assert updated["metadata"]["task_evaluation_source"] == "llm_human_needed_personal_factoid_gap"
+    assert updated["metadata"]["escalation_llm_route"] == "human_needed_silent"
+    assert any(
+        row.get("event") == "task_evaluation" and row.get("decision") == "human_needed_silent"
+        for row in updated["execution_log"]
+    )
+
+
+def test_task_evaluation_korean_personal_factoid_gap_human_needed_is_silent(monkeypatch, tmp_path):
+    class _Result:
+        ok = True
+        text = "HUMAN_NEEDED: Chris must provide the private address."
+        error = ""
+
+    fake_cli = type(sys)("cli_llm")
+    fake_cli.dispatch = lambda **_kwargs: _Result()
+    monkeypatch.setitem(sys.modules, "cli_llm", fake_cli)
+
+    tq = TaskQueue(tmp_path / "autonomy.db")
+    sent = []
+    monkeypatch.setattr(
+        tq,
+        "_notify_chris_text",
+        lambda body, *, source, severity="warn": sent.append(
+            {"body": body, "source": source, "severity": severity}
+        ),
+    )
+    task = tq.create_task(
+        title="Knowledge gap: 내 주소가 뭐야?",
+        description="Recall returned no reliable answer for this personal factoid.",
+        assigned_agent="sage",
+        confidence=0.2,
+        metadata={"source": "gap_detector", "gap_query": "내 주소가 뭐야?"},
+    )
+
+    handled = tq._review_tasks_with_subscription_llm([task])
+    updated = tq.get_task(task["id"])
+
+    assert handled == {task["id"]}
+    assert sent == []
+    assert updated["metadata"]["task_evaluation_alert_policy"] == "silent_hold"
+
+
+def test_task_evaluation_credential_gap_human_needed_still_notifies(monkeypatch, tmp_path):
+    class _Result:
+        ok = True
+        text = "HUMAN_NEEDED: Chris must provide a 2FA code for account access."
+        error = ""
+
+    fake_cli = type(sys)("cli_llm")
+    fake_cli.dispatch = lambda **_kwargs: _Result()
+    monkeypatch.setitem(sys.modules, "cli_llm", fake_cli)
+
+    tq = TaskQueue(tmp_path / "autonomy.db")
+    sent = []
+    monkeypatch.setattr(
+        tq,
+        "_notify_chris_text",
+        lambda body, *, source, severity="warn": sent.append(
+            {"body": body, "source": source, "severity": severity}
+        ),
+    )
+    task = tq.create_task(
+        title="Knowledge gap: GitHub account 2FA recovery code",
+        description="Account login blocked.",
+        assigned_agent="sage",
+        confidence=0.2,
+    )
+
+    handled = tq._review_tasks_with_subscription_llm([task])
+    updated = tq.get_task(task["id"])
+
+    assert handled == {task["id"]}
+    assert len(sent) == 1
+    assert sent[0]["source"] == "task_queue:evaluation_action_summary"
+    assert updated["metadata"]["task_evaluation_alert_policy"] == "action_summary"
+    assert updated["metadata"]["task_evaluation_source"] == "llm_human_needed"
+
+
 def test_task_evaluation_human_needed_sends_action_summary(monkeypatch, tmp_path):
     class _Result:
         ok = True

@@ -17,6 +17,7 @@ Performance: <1 second on a healthy system. Mostly network call to brain.
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sqlite3
@@ -24,6 +25,7 @@ import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.error import HTTPError
 
 BRAIN_LOGS_DIR = Path("/Users/chrischo/server/brain/logs")
 BRAIN_DB = BRAIN_LOGS_DIR / "brain.db"
@@ -49,15 +51,82 @@ def _file_mb(path: Path) -> float:
         return 0.0
 
 
-def _slo_snapshot() -> dict:
+def _http_json(path: str, *, timeout: float = 10.0) -> dict:
     import urllib.request
 
-    req = urllib.request.Request(  # noqa: S310 — local-only http://127.0.0.1:8791
-        f"{BRAIN_ENDPOINT}/brain/slos",
+    req = urllib.request.Request(  # noqa: S310 — local-only brain endpoint by default
+        f"{BRAIN_ENDPOINT}{path}",
         headers={"Authorization": f"Bearer {_bearer()}"},
     )
-    with urllib.request.urlopen(req, timeout=10) as resp:  # noqa: S310
-        return json.loads(resp.read().decode())
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+            return json.loads(resp.read().decode())
+    except HTTPError as exc:
+        if exc.code == 401:
+            return {
+                "error": "HTTP 401 from raw Brain HTTP recall path",
+                "diagnostic_hint": (
+                    "Raw HTTP bearer authentication failed. Check local Brain credentials at "
+                    f"{CREDENTIALS_FILE} and compare with the MCP server credential path; no secret value printed."
+                ),
+                "mcp_credential_path": "~/.brain/credentials/.personal_webhook_secret",
+            }
+        return {"error": f"HTTP {exc.code} from Brain HTTP path"}
+
+
+def _compact_recall_diagnostic(payload: dict, *, query: str, limit: int) -> dict:
+    raw_results = payload.get("results") if isinstance(payload, dict) else []
+    if not isinstance(raw_results, list):
+        raw_results = []
+    rows = []
+    for item in raw_results[:limit]:
+        if not isinstance(item, dict):
+            rows.append({"content": str(item)[:240]})
+            continue
+        row = {}
+        for key in (
+            "id",
+            "atom_id",
+            "title",
+            "collection",
+            "source_type",
+            "score",
+            "confidence",
+            "trust_score",
+        ):
+            if item.get(key) is not None:
+                row[key] = item.get(key)
+        content = str(item.get("content") or item.get("text") or "").replace("\n", " ").strip()
+        if content:
+            row["content_preview"] = content[:240]
+        rows.append(row)
+    return {
+        "query": payload.get("query") or query,
+        "count": payload.get("count", len(raw_results)),
+        "returned": len(rows),
+        "results": rows,
+        "diagnostic": "brain_doctor_recall_v1",
+        "safe": True,
+        "side_effects": "none: read-only GET /recall/v2",
+        **({"error": payload["error"]} if payload.get("error") else {}),
+        **({"diagnostic_hint": payload["diagnostic_hint"]} if payload.get("diagnostic_hint") else {}),
+        **(
+            {"mcp_credential_path": payload["mcp_credential_path"]}
+            if payload.get("mcp_credential_path")
+            else {}
+        ),
+    }
+
+
+def _recall_diagnostic(query: str, *, limit: int = 5) -> dict:
+    import urllib.parse
+
+    path = "/recall/v2?" + urllib.parse.urlencode({"q": query, "n": str(limit), "actor": "brain_doctor"})
+    return _compact_recall_diagnostic(_http_json(path, timeout=10.0), query=query, limit=limit)
+
+
+def _slo_snapshot() -> dict:
+    return _http_json("/brain/slos", timeout=10.0)
 
 
 def _db_sizes() -> list[dict]:
@@ -286,7 +355,21 @@ def _self_quality_snapshot() -> dict:
     return snap
 
 
-def main() -> int:
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="brain doctor", description="Brain health and recall diagnostics")
+    sub = parser.add_subparsers(dest="command")
+    recall = sub.add_parser("recall", help="Read-only compact /recall/v2 diagnostic")
+    recall.add_argument("--query", required=True, help="Query to diagnose")
+    recall.add_argument("--limit", type=int, default=5, help="Max recall rows to show")
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parse_args(argv)
+    if args.command == "recall":
+        print(json.dumps(_recall_diagnostic(args.query, limit=args.limit), indent=2, ensure_ascii=False))
+        return 0
+
     t0 = time.time()
     report: dict = {
         "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),

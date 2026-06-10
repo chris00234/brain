@@ -13,9 +13,15 @@ STATE_FILE="/Users/chrischo/server/brain/logs/.orbstack_watchdog_state"
 RESTART_STATE="/Users/chrischo/server/brain/logs/.orbstack_restart_state"
 MEM_STATE_FILE="/Users/chrischo/server/brain/logs/.orbstack_mem_watchdog_state"
 MEM_ALERT_STATE="/Users/chrischo/server/brain/logs/.orbstack_mem_alert_state"
+PORT_STATE_FILE="/Users/chrischo/server/brain/logs/.orbstack_port_watchdog_state"
 CPU_THRESHOLD=80
 MEM_RSS_THRESHOLD_MB=10240
-MEM_ALERT_COOLDOWN=3600
+# Memory alerts should be actionable, not hourly RSS noise. OrbStack Helper
+# RSS includes VM/cache/accounting overhead on macOS, so only alert when high
+# RSS coincides with real pressure/swap stress.
+MEM_ALERT_COOLDOWN=21600
+MEM_SWAP_THRESHOLD_MB=1024
+MEM_FREE_PCT_THRESHOLD=10
 CONSECUTIVE_THRESHOLD=3
 RESTART_COOLDOWN=600  # Don't restart more than once per 10 minutes
 CHAT_ID="8484060831"
@@ -41,6 +47,92 @@ send_telegram() {
 
 now_epoch() {
   date +%s
+}
+
+restart_orbstack() {
+  local reason="$1"
+  local telegram_msg="$2"
+
+  LAST_RESTART=0
+  if [ -f "$RESTART_STATE" ]; then
+    LAST_RESTART=$(cat "$RESTART_STATE" 2>/dev/null || echo 0)
+  fi
+  NOW=$(now_epoch)
+  ELAPSED=$((NOW - LAST_RESTART))
+
+  if [ "$ELAPSED" -lt "$RESTART_COOLDOWN" ]; then
+    echo "$LOG_TAG Cooldown active (${ELAPSED}s since last restart). Skipping auto-restart for ${reason}."
+    return 0
+  fi
+
+  echo "$LOG_TAG Auto-restarting OrbStack: ${reason}"
+  echo "$NOW" > "$RESTART_STATE"
+  killall OrbStack 2>/dev/null || true
+  killall "OrbStack Helper" 2>/dev/null || true
+  sleep 5
+  open -a OrbStack
+
+  local require_port_forward=false
+  if [[ "$reason" == *"localhost published-port forwarding"* ]]; then
+    require_port_forward=true
+  fi
+
+  for i in $(seq 1 60); do
+    sleep 5
+    local orb_status=""
+    local running_count="0"
+    local port_forward_ok=true
+    orb_status=$(orbctl status 2>/dev/null || true)
+    running_count=$(docker ps --format '{{.Names}}' 2>/dev/null | wc -l | tr -d '[:space:]' || echo 0)
+    if [ "$require_port_forward" = true ] && ! localhost_port_forward_healthy; then
+      port_forward_ok=false
+    fi
+    if [ "$orb_status" = "Running" ] && docker info > /dev/null 2>&1 && [ "${running_count:-0}" -ge 15 ] && [ "$port_forward_ok" = true ]; then
+      echo "$LOG_TAG OrbStack recovered after ${i}x5s; containers_running=${running_count}; port_forward_ok=${port_forward_ok}."
+      send_telegram "$telegram_msg
+복구됨 (${i}x5초, containers=${running_count}, port_forward=${port_forward_ok})"
+      return 0
+    fi
+  done
+
+  echo "$LOG_TAG FAILED: OrbStack did not recover after 300s."
+  send_telegram "🚨 *OrbStack 복구 실패*
+${reason} → 자동 재시작 시도 → 300초 후에도 복구 안 됨
+수동 확인 필요"
+  return 1
+}
+
+localhost_port_forward_healthy() {
+  local failures=0
+  local checked=0
+  local spec name port path code
+  # These are host-published ports backed by containers that should answer
+  # quickly when OrbStack's localhost forwarding layer is healthy. Use paths
+  # that are unauthenticated and cheap; public/docker-network probes remain
+  # the service-health source of truth.
+  for spec in \
+    "beszel:8090:/api/health" \
+    "loki:3100:/ready" \
+    "uptime-kuma:3001:/dashboard" \
+    "open-webui:8080:/health"; do
+    IFS=: read -r name port path <<<"$spec"
+    if ! docker inspect "$name" >/dev/null 2>&1; then
+      continue
+    fi
+    checked=$((checked + 1))
+    code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:${port}${path}" 2>/dev/null || echo 000)
+    case "$code" in
+      2*|3*) ;;
+      *)
+        failures=$((failures + 1))
+        echo "$LOG_TAG localhost forward probe failed: ${name} 127.0.0.1:${port}${path} code=${code}"
+        ;;
+    esac
+  done
+
+  # Treat two or more simultaneous published-port failures as an OrbStack
+  # forwarding-layer fault, not an individual service failure.
+  [ "$checked" -gt 0 ] && [ "$failures" -lt 2 ]
 }
 
 # ── Check 1: Docker Socket Health ────────────────────────
@@ -85,51 +177,38 @@ trap - INT TERM
 
 if [ "$docker_healthy" = false ]; then
   echo "$LOG_TAG CRITICAL: Docker socket unresponsive."
-
-  # Check cooldown — don't restart-loop
-  LAST_RESTART=0
-  if [ -f "$RESTART_STATE" ]; then
-    LAST_RESTART=$(cat "$RESTART_STATE" 2>/dev/null || echo 0)
-  fi
-  NOW=$(now_epoch)
-  ELAPSED=$((NOW - LAST_RESTART))
-
-  if [ "$ELAPSED" -lt "$RESTART_COOLDOWN" ]; then
-    echo "$LOG_TAG Cooldown active (${ELAPSED}s since last restart). Skipping auto-restart."
-    exit 0
-  fi
-
-  echo "$LOG_TAG Auto-restarting OrbStack..."
-  echo "$NOW" > "$RESTART_STATE"
-
-  # Kill and restart
-  killall OrbStack 2>/dev/null || true
-  killall "OrbStack Helper" 2>/dev/null || true
-  sleep 5
-  open -a OrbStack
-
-  # 2026-04-22: Wait 60s → 120s. Previous 60s cap gave up before OrbStack
-  # finished VM + container reconciliation after a restart (today's 11:02
-  # incident: docker socket didn't come back until ~90s).
-  for i in $(seq 1 24); do
-    sleep 5
-    if docker info > /dev/null 2>&1; then
-      echo "$LOG_TAG OrbStack recovered after ${i}x5s."
-      send_telegram "🔄 *OrbStack 자동 복구 완료*
-Docker 소켓 응답 없음 감지 → 자동 재시작 → 복구됨 (${i}x5초)"
-      exit 0
-    fi
-  done
-
-  # Failed to recover
-  echo "$LOG_TAG FAILED: OrbStack did not recover after 120s."
-  send_telegram "🚨 *OrbStack 복구 실패*
-Docker 소켓 응답 없음 → 자동 재시작 시도 → 120초 후에도 복구 안 됨
-수동 확인 필요"
-  exit 1
+  restart_orbstack "Docker socket unresponsive" "🔄 *OrbStack 자동 복구 완료*
+Docker 소켓 응답 없음 감지 → 자동 재시작"
+  exit $?
 fi
 
-# ── Check 2: High CPU (existing logic) ──────────────────
+# ── Check 2: localhost port forwarding ────────────────────
+# Docker can be healthy while OrbStack's host-published localhost forwarding
+# is wedged. This breaks local agents/probes even though service-to-service
+# Docker networking and public Cloudflare/nginx routes still work.
+if ! localhost_port_forward_healthy; then
+  PREV_PORT_COUNT=0
+  if [ -f "$PORT_STATE_FILE" ]; then
+    PREV_PORT_COUNT=$(cat "$PORT_STATE_FILE" 2>/dev/null || echo 0)
+  fi
+  NEW_PORT_COUNT=$((PREV_PORT_COUNT + 1))
+  echo "$NEW_PORT_COUNT" > "$PORT_STATE_FILE"
+
+  if [ "$NEW_PORT_COUNT" -ge "$CONSECUTIVE_THRESHOLD" ]; then
+    echo "$LOG_TAG CRITICAL: localhost published-port forwarding failed for ${NEW_PORT_COUNT} consecutive checks."
+    echo "0" > "$PORT_STATE_FILE"
+    restart_orbstack "localhost published-port forwarding reset" "🔄 *OrbStack 자동 복구 완료*
+localhost published-port forwarding reset 감지 → 자동 재시작"
+    exit $?
+  fi
+  echo "$LOG_TAG WARNING: localhost published-port forwarding failed (check ${NEW_PORT_COUNT}/${CONSECUTIVE_THRESHOLD})"
+else
+  if [ -f "$PORT_STATE_FILE" ]; then
+    echo "0" > "$PORT_STATE_FILE"
+  fi
+fi
+
+# ── Check 3: High CPU (existing logic) ──────────────────
 # Sum all OrbStack Helper processes. `ps aux | awk ...` can return multiple
 # rows; using a single row caused noisy integer parsing when helpers fork.
 read -r CPU MEM_RSS_MB <<EOF
@@ -161,13 +240,7 @@ if [ "$CPU" -gt "$CPU_THRESHOLD" ]; then
     ELAPSED=$((NOW - LAST_RESTART))
 
     if [ "$ELAPSED" -ge "$RESTART_COOLDOWN" ]; then
-      echo "$LOG_TAG Auto-restarting due to sustained high CPU..."
-      echo "$NOW" > "$RESTART_STATE"
-      killall OrbStack 2>/dev/null || true
-      killall "OrbStack Helper" 2>/dev/null || true
-      sleep 5
-      open -a OrbStack
-      send_telegram "🔄 *OrbStack 자동 재시작*
+      restart_orbstack "sustained high CPU (${CPU}%)" "🔄 *OrbStack 자동 재시작*
 CPU: ${CPU}% (${NEW_COUNT}회 연속 초과) → 자동 재시작 실행"
     else
       send_telegram "⚠️ *OrbStack Helper 고CPU 경고*
@@ -187,9 +260,24 @@ fi
 
 # ── Check 3: High RSS alert only ─────────────────────────
 # Conservative by design: no auto-restart for memory. macOS RSS can include
-# VM/cache/accounting overhead; alert after sustained high RSS so Chris can
-# decide whether to restart during a safe window.
-if [ "$MEM_RSS_MB" -gt "$MEM_RSS_THRESHOLD_MB" ]; then
+# VM/cache/accounting overhead; alert only when sustained high RSS coincides
+# with actual pressure/swap stress so Telegram does not get hourly noise.
+PRESSURE_FREE_PCT=100
+PRESSURE_OUT=$(memory_pressure 2>/dev/null || true)
+if echo "$PRESSURE_OUT" | grep -q 'System-wide memory free percentage:'; then
+  PRESSURE_FREE_PCT=$(echo "$PRESSURE_OUT" | awk -F': ' '/System-wide memory free percentage:/ { gsub(/%/, "", $2); print int($2); exit }')
+fi
+SWAP_USED_MB=0
+SWAP_OUT=$(sysctl vm.swapusage 2>/dev/null || true)
+if echo "$SWAP_OUT" | grep -q 'used ='; then
+  SWAP_USED_MB=$(echo "$SWAP_OUT" | sed -n 's/.*used = \([0-9.]*\)M.*/\1/p' | awk '{ printf "%d", $1 }')
+fi
+MEM_PRESSURE_ACTIVE=false
+if [ "$PRESSURE_FREE_PCT" -le "$MEM_FREE_PCT_THRESHOLD" ] || [ "$SWAP_USED_MB" -ge "$MEM_SWAP_THRESHOLD_MB" ]; then
+  MEM_PRESSURE_ACTIVE=true
+fi
+
+if [ "$MEM_RSS_MB" -gt "$MEM_RSS_THRESHOLD_MB" ] && [ "$MEM_PRESSURE_ACTIVE" = true ]; then
   PREV_MEM_COUNT=0
   if [ -f "$MEM_STATE_FILE" ]; then
     PREV_MEM_COUNT=$(cat "$MEM_STATE_FILE" 2>/dev/null || echo 0)
@@ -209,7 +297,8 @@ if [ "$MEM_RSS_MB" -gt "$MEM_RSS_THRESHOLD_MB" ]; then
       echo "$NOW" > "$MEM_ALERT_STATE"
       send_telegram "⚠️ *OrbStack 메모리 경고*
 Helper RSS: ${MEM_RSS_MB}MB (${NEW_MEM_COUNT}회 연속, 임계값 ${MEM_RSS_THRESHOLD_MB}MB)
-자동 재시작은 하지 않음 — pressure/swap 확인 후 수동 판단 권장"
+pressure_free=${PRESSURE_FREE_PCT}%, swap_used=${SWAP_USED_MB}MB
+자동 재시작은 하지 않음 — safe window에서 수동 판단 권장"
     else
       echo "$LOG_TAG Memory alert cooldown active (${ELAPSED}s since last alert)."
     fi
@@ -221,5 +310,5 @@ else
   if [ -f "$MEM_STATE_FILE" ]; then
     echo "0" > "$MEM_STATE_FILE"
   fi
-  echo "$LOG_TAG OK: Docker healthy, OrbStack Helper CPU=${CPU}% RSS=${MEM_RSS_MB}MB"
+  echo "$LOG_TAG OK: Docker healthy, OrbStack Helper CPU=${CPU}% RSS=${MEM_RSS_MB}MB pressure_free=${PRESSURE_FREE_PCT}% swap_used=${SWAP_USED_MB}MB"
 fi

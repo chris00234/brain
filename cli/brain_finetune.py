@@ -280,7 +280,10 @@ def main():
                     indent=2,
                 )
             )
-            return 2
+            # The weekly scheduler is allowed to discover that local LoRA
+            # training is disabled. That is an intentional no-op, not a job
+            # failure. Operators still get the explicit JSON reason in logs.
+            return 0
 
     result = train(args.pairs, args.output, dry_run=args.dry_run)
     print(json.dumps(result, indent=2))

@@ -169,7 +169,7 @@ def _heuristic_classify(
 _SAGE_PROMPT = """Classify this new memory entry for Chris's personal brain.
 
 Return ONLY a JSON object with these fields:
-  "topic_key": a short stable key like "preference:frontend_framework" or "fact:hardware:primary_machine". Same subject → same key. Max 60 chars.
+  "topic_key": a short stable key like "preference:frontend_framework" or "fact:hardware:primary_machine". Same subject → same key. Max 60 chars. Always lowercase English snake_case, even for Korean or mixed-language content — translate the topic so the same subject in any language maps to the same key (한국어 메모도 영어 키로).
   "speaker_entity": one of "chris" (Chris's own statement), "quoted:<name>" (someone else quoted by Chris), "agent:<name>" (agent inference about Chris).
   "scope": "global" (always applies), "project:<name>" (one project only), "session" (this session only).
   "provisional": true/false — true if the claim is uncertain, needs reinforcement before acting on it.

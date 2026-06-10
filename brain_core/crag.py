@@ -31,6 +31,7 @@ import re
 import statistics
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 
 log = logging.getLogger("brain.crag")
 
@@ -235,44 +236,57 @@ def _query_coverage(query: str | None, results: list[dict]) -> float | None:
     return round(covered / len(tokens), 4)
 
 
-_SOURCE_TERM_REWRITE_RULES: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
-    (
-        ("영주권", "갱신"),
-        (
-            "USCIS I-751 receipt notice",
-            "receipt notice USCIS",
-            "USCIS permanent resident receipt notice",
-        ),
-    ),
-    (
-        ("renewal", "receipt"),
-        (
-            "receipt notice",
-            "USCIS I-751 receipt notice",
-            "USCIS receipt notice renewal",
-        ),
-    ),
-    (
-        ("dinner",),
-        (
-            "저녁 약속",
-            "Kim dinner",
-            "dinner plan 저녁",
-        ),
-    ),
-    (
-        ("저녁",),
-        (
-            "저녁 약속",
-            "Kim dinner 저녁",
-            "dinner plan 저녁",
-        ),
-    ),
-)
+# Rewrite bridges are DATA, not code (2026-06-09): corpus-specific source
+# vocabulary lives in brain_core/crag_rewrites.yaml so this module stays a
+# generic mechanism. Mtime-cached, fail-open to no bridges — the generic
+# script-split and LLM rewrite paths still run when the file is absent/broken.
+_REWRITE_BRIDGES_PATH = Path(__file__).resolve().parent / "crag_rewrites.yaml"
+_bridges_cache: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] | None = None
+_bridges_mtime: float = -1.0
+
+
+def _load_rewrite_bridges(
+    path: Path | None = None,
+) -> tuple[tuple[tuple[str, ...], tuple[str, ...]], ...]:
+    """Load (when_terms, rewrites) bridges from YAML. Fail-open to ()."""
+    global _bridges_cache, _bridges_mtime
+    bridge_path = path or _REWRITE_BRIDGES_PATH
+    use_cache = path is None
+    try:
+        mtime = bridge_path.stat().st_mtime
+    except OSError:
+        return ()
+    if use_cache and _bridges_cache is not None and mtime <= _bridges_mtime:
+        return _bridges_cache
+    try:
+        import yaml
+
+        with bridge_path.open() as f:
+            raw = yaml.safe_load(f) or {}
+        bridges: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
+        for entry in raw.get("bridges") or []:
+            if not isinstance(entry, dict):
+                continue
+            when_terms = tuple(str(t).strip() for t in (entry.get("when_terms") or []) if str(t).strip())
+            rewrites = tuple(str(r).strip() for r in (entry.get("rewrites") or []) if str(r).strip())
+            if when_terms and rewrites:
+                bridges.append((when_terms, rewrites))
+        loaded = tuple(bridges)
+    except Exception as exc:
+        log.warning("crag rewrite bridges load failed (%s) — bridges disabled", exc)
+        return ()
+    if use_cache:
+        _bridges_cache = loaded
+        _bridges_mtime = mtime
+    return loaded
 
 
 def rule_based_rewrite_candidates(query: str) -> list[str]:
-    """Small deterministic source-term rewrites for zero/weak-result queries."""
+    """Small deterministic source-term rewrites for zero/weak-result queries.
+
+    Two generic mechanisms: (1) mixed-script queries split into per-script
+    variants, (2) data-driven source-term bridges from crag_rewrites.yaml.
+    """
     if not query or not query.strip():
         return []
     lowered = query.lower()
@@ -283,7 +297,7 @@ def rule_based_rewrite_candidates(query: str) -> list[str]:
     if english_words and korean_parts:
         candidates.extend([" ".join(korean_parts), " ".join(english_words)])
 
-    for needles, rewrites in _SOURCE_TERM_REWRITE_RULES:
+    for needles, rewrites in _load_rewrite_bridges():
         if all(needle.lower() in lowered for needle in needles):
             candidates.extend(rewrites)
 

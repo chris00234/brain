@@ -643,8 +643,8 @@ JOB_SCHEDULE: list[ScheduledJob] = [
     ),
     ScheduledJob(
         name="lora_ab_gate",
-        description="Phase 7: weekly LoRA A/B gate + deploy (Sun 9:30am)",
-        trigger=CronTrigger(day_of_week="sun", hour=9, minute=30),
+        description="Phase 7: weekly LoRA A/B gate + deploy (Sun 1:30am, off-hours)",
+        trigger=CronTrigger(day_of_week="sun", hour=1, minute=30),
         agent="system",
         misfire_grace=1800,
     ),
@@ -676,8 +676,9 @@ JOB_SCHEDULE: list[ScheduledJob] = [
         misfire_grace=900,
     ),
     # Phase N3: LoRA training - was missing from the cron entirely, so the
-    # A/B gate always ran against stale weights. Sat 23:30 PT is ~10h before
-    # lora_ab_gate Sun 9:30 so fresh weights are ready for the A/B decision.
+    # A/B gate always ran against stale weights. Sat 23:30 PT is ~2h before
+    # lora_ab_gate Sun 01:30 so fresh weights are ready for the A/B decision
+    # while both training and evaluation stay outside the 9am-6pm heavy-job ban.
     ScheduledJob(
         name="embed_finetune",
         description="Phase N3: weekly LoRA training on accumulated feedback pairs (Sat 23:30)",

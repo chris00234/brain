@@ -39,6 +39,7 @@ MIN_SAMPLES = 50
 MAX_EVENTS = 500  # cap — each unique query triggers one recall call
 RECALL_LIMIT = 5  # top-K to hunt result_id in
 WORKERS = 8  # parallel /recall/v2 callers
+NON_ERROR_STATUSES = {"insufficient_samples", "no_class_variance"}
 
 
 def _recall_v2(query: str, token: str) -> list[dict]:
@@ -219,7 +220,10 @@ def main() -> int:
         return 0
     result = fit_and_save(X, y)
     print(json.dumps(result, indent=2))
-    return 0 if result.get("status") == "ok" else 1
+    # A scheduled trainer with no useful feedback is a no-op, not an infra
+    # failure. Keep true training/runtime errors non-zero, but do not page on
+    # expected data-scarcity states.
+    return 0 if result.get("status") in ({"ok"} | NON_ERROR_STATUSES) else 1
 
 
 if __name__ == "__main__":

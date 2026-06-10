@@ -20,6 +20,9 @@ set -uo pipefail
 
 BRAIN_URL="${BRAIN_URL:-http://127.0.0.1:8791}"
 SECRET_FILE="$HOME/.brain/credentials/.personal_webhook_secret"
+if [ ! -r "$SECRET_FILE" ] && [ -r "$HOME/.openclaw/credentials/.personal_webhook_secret" ]; then
+  SECRET_FILE="$HOME/.openclaw/credentials/.personal_webhook_secret"
+fi
 AGENT_NAME="${BRAIN_AGENT:-claude}"
 
 PAYLOAD=""
@@ -47,7 +50,7 @@ esac
 # Dangerous-path matcher. Keep narrow: each pattern is a literal prefix.
 DENY_REASON=""
 case "$FILE_PATH" in
-  "$HOME/.brain/credentials"/*|"$HOME/.brain/credentials")
+  "$HOME/.brain/credentials"/*|"$HOME/.brain/credentials"|"$HOME/.openclaw/credentials"/*|"$HOME/.openclaw/credentials")
     DENY_REASON="Modifies OpenClaw credentials dir. Rotate via the documented credential workflow, not by direct Edit/Write."
     ;;
   "$HOME/.hermes/profiles"/*/config.yaml)

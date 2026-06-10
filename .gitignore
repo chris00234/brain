@@ -18,8 +18,16 @@ brain.db
 # Tooling caches
 .pytest_cache/
 .ruff_cache/
-# .omx is Codex workspace state — operational artifacts, not source
+# .omx/.hermes are agent workspace state — operational artifacts, not source
 .omx/
+.hermes/
+
+# Manual local backups may contain private database content and can exceed GitHub limits
+manual-backups/
+
+# Kanban validation/report artifacts may contain live private recall snippets
+kanban_t_*_*.json
+kanban_t_*_*.md
 
 # Secrets / private credential notes — never commit
 *.env
@@ -31,3 +39,6 @@ brain.db
 **/*Credential*.md
 **/*credential*.md
 **/*setup-token*.md
+# Runtime private payloads; producers/drainers may churn these every session.
+outbox/brain-learn/
+state/ingest/

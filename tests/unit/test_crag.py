@@ -242,3 +242,54 @@ def test_expand_query_uses_rule_candidate_before_llm(crag_module):
 
     assert rewritten == "저녁 약속"
     assert called is False
+
+
+# ── Data-driven rewrite bridges (crag_rewrites.yaml) ─────────────────────
+# The bridge VOCABULARY is data, not code: the loader is generic and must
+# fail-open. Fixture bridges use invented terms so these tests pin the
+# mechanism, never Chris-specific corpus vocabulary.
+
+
+def test_load_rewrite_bridges_from_fixture_yaml(crag_module, tmp_path):
+    fixture = tmp_path / "bridges.yaml"
+    fixture.write_text(
+        "version: 1\n"
+        "bridges:\n"
+        "  - when_terms: [보고서, 분기]\n"
+        "    rewrites: [quarterly report fixture, fixture report archive]\n"
+        "  - when_terms: [widget]\n"
+        "    rewrites: [widget assembly manual]\n"
+    )
+    bridges = crag_module._load_rewrite_bridges(fixture)
+    assert bridges == (
+        (("보고서", "분기"), ("quarterly report fixture", "fixture report archive")),
+        (("widget",), ("widget assembly manual",)),
+    )
+
+
+def test_rewrite_candidates_use_fixture_bridges(crag_module, tmp_path, monkeypatch):
+    fixture = tmp_path / "bridges.yaml"
+    fixture.write_text("bridges:\n  - when_terms: [보고서]\n    rewrites: [quarterly report fixture]\n")
+    monkeypatch.setattr(crag_module, "_REWRITE_BRIDGES_PATH", fixture)
+    monkeypatch.setattr(crag_module, "_bridges_cache", None)
+    monkeypatch.setattr(crag_module, "_bridges_mtime", -1.0)
+    # KO paraphrase carrying the bridge term still fires (substring match).
+    assert "quarterly report fixture" in crag_module.rule_based_rewrite_candidates("지난 분기 보고서 찾아줘")
+    # Negative control: unrelated query gets no bridge rewrites.
+    assert crag_module.rule_based_rewrite_candidates("unrelated infra question") == []
+
+
+def test_load_rewrite_bridges_fail_open_missing_and_malformed(crag_module, tmp_path):
+    assert crag_module._load_rewrite_bridges(tmp_path / "missing.yaml") == ()
+    bad = tmp_path / "bad.yaml"
+    bad.write_text("bridges:\n  - when_terms: [\n")  # malformed YAML
+    assert crag_module._load_rewrite_bridges(bad) == ()
+    # Entries missing either side are skipped, not fatal.
+    partial = tmp_path / "partial.yaml"
+    partial.write_text(
+        "bridges:\n"
+        "  - when_terms: [orphan]\n"
+        "  - rewrites: [no trigger]\n"
+        "  - when_terms: [ok]\n    rewrites: [ok rewrite]\n"
+    )
+    assert crag_module._load_rewrite_bridges(partial) == ((("ok",), ("ok rewrite",)),)

@@ -296,16 +296,29 @@ No prose, no preamble — just the summary.
 
 
 def _heuristic_summary(transcript: str) -> str | None:
-    """Last-resort fallback — used only if the LLM call fails."""
+    """Last-resort fallback — used only if the LLM call fails.
+
+    Context-noise gate: a verbatim "user message" can be a harness artifact
+    (raw <local-command-stdout> capture, ANSI residue, an echoed agent
+    scaffold). Those must never become the session summary — no summary beats
+    a garbage one rendered into every boot context.
+    """
     if not transcript or len(transcript) < 30:
         return None
+    from working_memory import is_context_noise
+
     matches = _USER_MSG_RE.findall(transcript)
     for msg in reversed(matches):
         msg = msg.strip()
-        if len(msg) > 20:
+        if len(msg) > 20 and not is_context_noise(msg):
             return msg[:SESSION_SUMMARY_MAX_LEN].strip()
     clean = transcript.strip()[:SESSION_SUMMARY_MAX_LEN].strip()
-    return clean if len(clean) > 20 else None
+    # The raw-transcript fallback is role-prefixed ("User: …"); strip the
+    # prefix so the noise gate sees the actual content shape.
+    clean = re.sub(r"^\s*(?:Human|User|Chris|Assistant|Claude|AI)\s*:\s*", "", clean, flags=re.IGNORECASE)
+    if len(clean) > 20 and not is_context_noise(clean):
+        return clean
+    return None
 
 
 def _extract_session_summary(transcript: str) -> str | None:
@@ -443,6 +456,15 @@ Rules:
 - Maximum {max_n} memories. Fewer is better. Skip ephemeral chat.
 - Only extract memories that would still be true next month.
 - Each content field must be self-contained - no pronouns referring to outside context.
+- Language: write every content/wrong_claim/right_answer field in English even when
+  the transcript is Korean or mixed — stored memories are matched against an
+  English-dominant corpus for dedup and supersession. Keep distinctive proper
+  nouns/terms in their original script when translating would lose precision
+  (e.g. "영주권 갱신 (green card renewal)").
+- Current truth only: when the transcript shows a fact CHANGED ("X was Y, now Z",
+  "이제는 Z", "switched from A to B"), extract ONLY the current state as the
+  memory and record the outdated claim as a correction (wrong_claim=old state,
+  right_answer=current state). Never store the superseded state as a memory.
 - Skip anything you already know from Chris's profile (functional components,
   conventional commits, npm, Tailwind, shadcn, etc.) - only NEW signals.
 - For corrections: look for moments where Chris told the agent/brain it was wrong,

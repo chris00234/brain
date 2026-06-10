@@ -1250,7 +1250,7 @@ def _measure_agent_session_max_mb() -> float:
     """Largest live Hermes/Codex session .jsonl file size in MB."""
     try:
         session_roots = (
-            Path("/Users/chrischo/.hermes/profiles"),
+            Path.home() / ".hermes" / "profiles",
             Path.home() / ".codex",
         )
         max_bytes = 0

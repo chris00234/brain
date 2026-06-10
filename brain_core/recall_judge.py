@@ -52,8 +52,9 @@ JUDGED_ACTOR_PLACEHOLDERS = "?, ?, ?, ?, ?, ?, ?, ?, ?"
 # slot so the scheduler thread is never blocked.
 MAX_RUN_SECONDS = 1500
 
-_PROMPT = """You are a relevance judge for a retrieval system. Given a USER QUERY and
-the top retrieved documents, score whether the documents actually answer the query.
+_PROMPT = """You are a relevance judge for a personal-memory retrieval system. Given a
+USER QUERY and the top retrieved documents, score whether the documents actually
+answer the query with CURRENT, useful memory.
 
 USER QUERY: {query}
 
@@ -66,6 +67,17 @@ Respond with ONE LINE of JSON, no prose:
 - relevance: do the docs address the query topic? (0=off-topic, 1=directly answers)
 - groundedness: are the docs concrete factual statements vs vague restatements? (0=vague, 1=specific)
 - reason: brief sentence explaining the relevance score
+
+Scoring rules (apply to BOTH scores):
+- Stale beats nothing only if marked: a doc that is superseded, archived, or
+  contradicted by a more recent doc in the set scores LOW unless the query
+  explicitly asks for history.
+- Authority: a stated current fact/preference/decision outranks a session log,
+  weekly digest, or summary that merely mentions the topic. Quoting the query's
+  own words (test fixtures, transcripts echoing the question) is NOT an answer.
+- Cross-lingual: the query and a doc may be in different languages (Korean and
+  English). Judge by meaning — a doc that answers a Korean query in English (or
+  vice versa) is fully relevant; never penalize language mismatch.
 """
 
 

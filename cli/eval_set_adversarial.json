@@ -150,5 +150,37 @@
       "gateway is impossible to verify"
     ],
     "category": "gateway_escalation_truth"
+  },
+  {
+    "query": "Where is Chris based and what timezone does he work in?",
+    "collection": "all",
+    "expected_source": "_identity",
+    "expected_content": "Irvine",
+    "expected_alternates": [
+      "PST",
+      "California"
+    ],
+    "category": "identity_canon_over_stale_provenance"
+  },
+  {
+    "query": "크리스의 한국 이름이 뭐야?",
+    "collection": "all",
+    "expected_source": "_identity",
+    "expected_content": "조대현",
+    "expected_alternates": [
+      "hangul name"
+    ],
+    "category": "identity_canon_over_stale_provenance_ko"
+  },
+  {
+    "query": "What is the best email address to reach Chris?",
+    "collection": "all",
+    "expected_source": "_identity",
+    "expected_content": "wheogus98",
+    "expected_alternates": [],
+    "forbidden_content": [
+      "custom domain email with gmail"
+    ],
+    "category": "exact_query_atom_paraphrase_robustness"
   }
 ]
