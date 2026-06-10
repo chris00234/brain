@@ -87,7 +87,8 @@
     "forbidden_content": [
       "deprecated active project"
     ],
-    "category": "stale_project_decoy"
+    "category": "stale_project_decoy",
+    "holdout_note": "holdout_honest_miss (2026-06-09 RCA): is_live_state_query correctly classifies present-marker+state queries as live-state and v2 suppresses recall by design ('empty beats wrong'). Probe intentionally collides 'current state' document title with live-state phrasing; any keyword-level exemption would be probe-specific."
   },
   {
     "query": "privacy boundary wife message raw contents should not expose",
@@ -134,7 +135,8 @@
     "forbidden_content": [
       "ingest everything indiscriminately"
     ],
-    "category": "source_pollution_negative"
+    "category": "source_pollution_negative",
+    "holdout_note": "holdout_honest_miss (2026-06-09 RCA): proper-noun distractors (Obsidian/OpenClaw) dominate embedding similarity; target preference note never mentions them and ranks outside top-30. Measures a real embedding-retrieval limitation; no generic safe fix."
   },
   {
     "query": "OpenClaw gateway running proof before escalation",
@@ -149,7 +151,8 @@
     "forbidden_content": [
       "gateway is impossible to verify"
     ],
-    "category": "gateway_escalation_truth"
+    "category": "gateway_escalation_truth",
+    "holdout_note": "fixture_data_debt (2026-06-09 RCA): 'loopback port 18789' exists only in distilled docs (no canonical source; distilled has no vector index) and the sole Qdrant-indexed source (.openclaw/workspace-ellie/TOOLS.md) vanished. Structurally unreachable for this phrasing without low-authority boosts that would regress governance."
   },
   {
     "query": "Where is Chris based and what timezone does he work in?",
