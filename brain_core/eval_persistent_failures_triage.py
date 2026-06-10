@@ -122,7 +122,7 @@ def _open_task_signatures(task_queue_obj: Any) -> set[str]:
             sig = meta.get("eval_failure_signature") if isinstance(meta, dict) else None
             if sig:
                 sigs.add(str(sig))
-        except Exception:
+        except Exception:  # noqa: S112 — malformed task row, skip
             continue
     return sigs
 
@@ -172,7 +172,7 @@ def create_persistent_failure_tasks(
     created: list[dict] = []
     skipped: list[dict] = []
     for qid, count in ranked:
-        signature = "eval_persistent_" + hashlib.sha1(qid.encode()).hexdigest()[:10]
+        signature = "eval_persistent_" + hashlib.sha1(qid.encode(), usedforsecurity=False).hexdigest()[:10]
         if signature in open_sigs:
             skipped.append({"qid": qid, "reason": "open_task_exists"})
             continue

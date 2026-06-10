@@ -181,7 +181,7 @@ def run(days: int = 30) -> dict:
             persist_status = "ok" if persist_ok else "error"
         else:
             persist_status = "skipped_empty"
-        result = {
+        return {
             "status": "ok" if persist_status != "error" else "degraded",
             "atoms_seen": len(tally),
             "labeled_atoms": labeled_atoms,
@@ -189,7 +189,6 @@ def run(days: int = 30) -> dict:
             "low_quality_persisted": persist_status,
             "window_days": days,
         }
-        return result
     finally:
         conn.close()
 

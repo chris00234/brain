@@ -743,16 +743,17 @@ def _normalize_z_in_place(
     after: dict[str, int] = {}
     if not target:
         return target, before, after
+    # S608 suppressed below: table/col come from the migration's own candidate lists, never user input.
     for col in target:
-        row = conn.execute(f"SELECT COUNT(*) FROM {table} WHERE {col} LIKE '%+00:00'").fetchone()
+        row = conn.execute(f"SELECT COUNT(*) FROM {table} WHERE {col} LIKE '%+00:00'").fetchone()  # noqa: S608
         before[col] = int(row[0] or 0)
     for col in target:
         conn.execute(
-            f"UPDATE {table} SET {col} = REPLACE({col}, '+00:00', 'Z') " f"WHERE {col} LIKE '%+00:00'"
+            f"UPDATE {table} SET {col} = REPLACE({col}, '+00:00', 'Z') WHERE {col} LIKE '%+00:00'"  # noqa: S608
         )
     conn.commit()
     for col in target:
-        row = conn.execute(f"SELECT COUNT(*) FROM {table} WHERE {col} LIKE '%+00:00'").fetchone()
+        row = conn.execute(f"SELECT COUNT(*) FROM {table} WHERE {col} LIKE '%+00:00'").fetchone()  # noqa: S608
         after[col] = int(row[0] or 0)
     return target, before, after
 

@@ -20,6 +20,7 @@ import argparse
 import json
 import re
 import sys
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -156,11 +157,8 @@ def _save_telemetry(data: dict) -> None:
     tmp.replace(TELEMETRY_PATH)
 
 
-def _iter_skill_dirs(root: Path | None = None):
-    if root is not None:
-        roots = {"liz": root}
-    else:
-        roots = hermes_profile_skill_dirs()
+def _iter_skill_dirs(root: Path | None = None) -> Iterator[tuple[str, Path]]:
+    roots = {"liz": root} if root is not None else hermes_profile_skill_dirs()
     for profile, skill_root in roots.items():
         if not skill_root.exists():
             continue

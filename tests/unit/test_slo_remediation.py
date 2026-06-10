@@ -166,7 +166,7 @@ def test_playbook_escalates_autonomous_work_visibility_gap(monkeypatch, tmp_path
 def test_playbook_escalates_consecutive_rate_limited(monkeypatch, tmp_path):
     """Stuck remediation guard: after N rate_limited cycles in a row, emit a
     human-routed escalation so a wedged SLO (e.g. logs_dir_growth_24h_mb that
-    fired 267× without resolving) cannot loop silently forever.
+    fired 267x without resolving) cannot loop silently forever.
     """
     import slo_remediation
 

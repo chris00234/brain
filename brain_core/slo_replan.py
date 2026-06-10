@@ -103,7 +103,7 @@ def find_repeat_breaches(
     2026-05-19: ``require_currently_breached`` (default True) filters out
     SLOs whose breach has already cleared. Historical trigger count alone
     was queueing tasks for healthy metrics (e.g. logs_dir_growth_24h_mb
-    fired 267× during a one-time WAL leak but has been quiet since the
+    fired 267x during a one-time WAL leak but has been quiet since the
     fix landed), stalling the top brain-quality goal on already-resolved
     work. Pass False only when you specifically want historical replay.
     """
