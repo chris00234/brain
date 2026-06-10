@@ -96,6 +96,7 @@ except ImportError:
 # active_recall is a CONSUMER of the same query-intent / source-authority /
 # route-guarantee contract used by /recall/v2 and Hermes provider prefetch, so
 # passing one surface implies passing the others.
+from recall_governance import brain_quality as _govern_brain_quality
 from recall_governance import normalization as _govern_norm
 from recall_governance import route_guarantees as _govern_routes
 from recall_governance import source_authority as _govern_authority
@@ -374,24 +375,7 @@ def _looks_like_llm_budget_prompt(lowered_prompt: str) -> bool:
     return any(marker in lowered_prompt for marker in budget_markers)
 
 
-def _looks_like_brain_quality_prompt(lowered_prompt: str) -> bool:
-    quality_markers = (
-        "brain quality",
-        "brain recall",
-        "prefetch quality",
-        "recall quality",
-        "retrieval quality",
-        "brain intelligence",
-        "improve brain",
-        "actual brain",
-        "real brain",
-        "브레인 품질",
-        "브레인 지능",
-        "실제 브레인",
-        "진짜 브레인",
-        "검색품질",
-    )
-    return any(marker in lowered_prompt for marker in quality_markers)
+_looks_like_brain_quality_prompt = _govern_brain_quality.looks_like_brain_quality_prompt
 
 
 def _looks_like_brain_ops_prompt(lowered_prompt: str) -> bool:
