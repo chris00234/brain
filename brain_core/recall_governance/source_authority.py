@@ -344,6 +344,41 @@ def is_vanished_source_result(result: dict) -> bool:
     return all(_path_is_missing(path) for path in candidates)
 
 
+# ── Query-keyed bridge atoms ───────────────────────────────────────────────
+# A "bridge" atom frames its content as the answer to ONE literal query
+# phrasing ("For the exact query X: ...", "Knowledge-gap bridge for query Y:
+# ..."). That framing is a data-level retrieval hack: the row wins recall by
+# echoing the keyed query text, masking real retrieval gaps and polluting
+# answers for every paraphrase. The detector is anchored to the LEADING
+# framing of the row text (content/title), so documents or transcripts that
+# merely mention queries, and rows quoting a user's exact words mid-text,
+# are never flagged. Format-derived, no topic/probe/value markers.
+
+# Curly quotes are intentional: real bridge atoms key their literal query in
+# either ASCII or typographic quotes. RUF001 flags them as ambiguous.
+_QUERY_KEYED_BRIDGE_LEAD_RE = re.compile(
+    r"""^\s*(?:
+        knowledge[\s-]*gap\s+(?:bridge|answer|source|resolution)
+      | (?:retrieval|korean|exact[\s-]*query|alias[\s-]*source)\s+bridge
+      | alias\s+source\s+for\s+(?:the\s+)?(?:exact\s+|normalized\s+)?query
+      | for\s+the\s+(?:exact\s+)?query\s*[`'"“‘]
+      | when\s+asked\s+[`'"“‘][^`'"”’]{1,160}[`'"”’]\s*,?\s*answer
+    )""",  # noqa: RUF001
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def is_query_keyed_bridge_result(result: dict) -> bool:
+    """True when the row's content or title LEADS with query-keyed bridge
+    framing — an answer hard-bound to one literal query phrasing."""
+    meta = result_metadata(result)
+    for field in (result.get("content"), result.get("title"), meta.get("title")):
+        lead = str(field or "").lstrip()[:240]
+        if lead and _QUERY_KEYED_BRIDGE_LEAD_RE.match(lead):
+            return True
+    return False
+
+
 # ── Historical-runtime provenance ─────────────────────────────────────────
 # OpenClaw is historical context; Hermes is the current agent runtime (the
 # durable runtime_distinction route guarantee). A row whose text/path is

@@ -78,6 +78,9 @@ from recall_governance.source_authority import (
     is_low_authority_result as _is_low_authority_result,
 )
 from recall_governance.source_authority import (
+    is_query_keyed_bridge_result as _is_query_keyed_bridge_result,
+)
+from recall_governance.source_authority import (
     is_source_or_test_file_result as _is_source_or_test_file_result,
 )
 from recall_governance.source_authority import (
@@ -308,6 +311,7 @@ def _inject_personal_factoid_answer(q: str, fused: list[dict]) -> None:
             or _is_generic_summary_result(row)
             or _is_episodic_event_log_result(row, text)
             or _is_source_or_test_file_result(row)
+            or _is_query_keyed_bridge_result(row)
         ):
             continue
         if _query_analyzer.personal_factoid_result_has_strong_attribute_overlap(q, text) is not True:
@@ -2326,8 +2330,21 @@ def _apply_recall_governance_inplace(q: str, fused: list[dict]) -> None:
             delta -= 160.0
             reasons.append("vanished_source_penalty")
 
+        # Query-keyed bridge atom: content hard-bound to one literal query
+        # phrasing ("For the exact query X: ..."). A data-level retrieval
+        # hack — it wins by echoing the keyed query, masking real gaps and
+        # polluting paraphrases. Demote decisively, never drop (the embedded
+        # fact may still be the only copy); it must also never ride the
+        # targeted answer boosts below past the source-anchored row it
+        # plagiarizes. Format-derived, no topic/probe/value markers.
+        query_keyed_bridge = _is_query_keyed_bridge_result(result)
+        if query_keyed_bridge:
+            delta -= 160.0
+            reasons.append("query_keyed_bridge_penalty")
+
         if (
             personal_attribute_binding is not None
+            and not query_keyed_bridge
             and _query_analyzer.personal_attribute_result_matches_query(q, result_text) is True
             and not _is_generic_summary_result(result)
             and not _is_source_or_test_file_result(result)
@@ -2360,6 +2377,7 @@ def _apply_recall_governance_inplace(q: str, fused: list[dict]) -> None:
                 reasons.append("personal_factoid_transcript_penalty")
             elif (
                 _query_analyzer.personal_factoid_result_has_strong_attribute_overlap(q, result_text) is True
+                and not query_keyed_bridge
                 and not _is_generic_summary_result(result)
                 and not _is_source_or_test_file_result(result)
                 # A graph-entity node ("Entity: omscs fall 2026 (concept)") restates
