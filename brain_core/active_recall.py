@@ -97,6 +97,7 @@ except ImportError:
 # route-guarantee contract used by /recall/v2 and Hermes provider prefetch, so
 # passing one surface implies passing the others.
 from recall_governance import brain_quality as _govern_brain_quality
+from recall_governance import codex_workflow as _govern_codex_workflow
 from recall_governance import normalization as _govern_norm
 from recall_governance import route_guarantees as _govern_routes
 from recall_governance import source_authority as _govern_authority
@@ -946,27 +947,7 @@ def _semantic_score_adjustment_for_prompt(
     return 0.0
 
 
-def _looks_like_codex_workflow_prompt(prompt: str) -> bool:
-    lower = (prompt or "").lower()
-    if "codex" not in lower and "코덱스" not in (prompt or ""):
-        return False
-    return any(
-        marker in lower
-        for marker in (
-            "hermes",
-            "tmux",
-            "tui",
-            "headless",
-            "steering",
-            "quality",
-            "coding",
-            "preference",
-            "recommendation",
-            "코딩",
-            "복잡한",
-            "어떻게",
-        )
-    )
+_looks_like_codex_workflow_prompt = _govern_codex_workflow.looks_like_codex_workflow_prompt
 
 
 def _looks_like_openclaw_hermes_distinction_prompt(prompt: str) -> bool:
@@ -978,36 +959,8 @@ def _looks_like_openclaw_hermes_distinction_prompt(prompt: str) -> bool:
     )
 
 
-def _is_codex_current_preference_result(title: str, content: str, path: str | None) -> bool:
-    haystack = f"{title}\n{path or ''}\n{content[:800]}".lower()
-    return (
-        "codex" in haystack
-        and "hermes" in haystack
-        and any(
-            marker in haystack
-            for marker in (
-                "tmux",
-                "tui",
-                "terminal-like",
-                "terminal like",
-                "interactive terminal",
-                "headless codex",
-            )
-        )
-        and any(marker in haystack for marker in ("prefers", "preference", "선호"))
-    )
-
-
-def _is_codex_skill_sync_noise(title: str, content: str, path: str | None) -> bool:
-    haystack = f"{title}\n{path or ''}\n{content[:800]}".lower()
-    if _is_codex_current_preference_result(title, content, path):
-        return False
-    return (
-        "codex/claude code skill" in haystack
-        or "skill sync" in haystack
-        or "skills/autonomous-ai-agents" in haystack
-        or ("codex" in haystack and "claude code" in haystack and "skill" in haystack)
-    )
+_is_codex_current_preference_result = _govern_codex_workflow.is_codex_current_preference_result
+_is_codex_skill_sync_noise = _govern_codex_workflow.is_codex_skill_sync_noise
 
 
 def _is_openclaw_hermes_distinction_result(title: str, content: str, path: str | None) -> bool:
