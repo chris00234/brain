@@ -298,6 +298,52 @@ def classify_result(result: dict) -> AuthorityTier:
     return AuthorityTier.CURATED_CANONICAL
 
 
+# ── Vanished-source provenance ─────────────────────────────────────────────
+# A row whose provenance points to an absolute LOCAL file that no longer
+# exists is a deleted/moved/retired document (e.g. a removed agent workspace).
+# Its content may remain historically true, but a living document is the more
+# authoritative source for any current query — so recall surfaces DEMOTE
+# (never drop) vanished-source rows. Purely provenance-derived: no path
+# names, roots, or topic markers. URLs, virtual ids, and relative display
+# paths are never checked. stat() results are TTL-cached so the check adds
+# microseconds, not IO storms; any stat error fails open to "not vanished".
+
+_VANISHED_CACHE_TTL_S = 300.0
+_vanished_cache: dict[str, tuple[float, bool]] = {}
+
+
+def _path_is_missing(path: str) -> bool:
+    import time
+    from pathlib import Path
+
+    now = time.monotonic()
+    cached = _vanished_cache.get(path)
+    if cached is not None and now - cached[0] < _VANISHED_CACHE_TTL_S:
+        return cached[1]
+    try:
+        missing = not Path(path).exists()
+    except OSError:
+        missing = False
+    if len(_vanished_cache) > 4096:
+        _vanished_cache.clear()
+    _vanished_cache[path] = (now, missing)
+    return missing
+
+
+def is_vanished_source_result(result: dict) -> bool:
+    """True when the row carries at least one absolute local source path and
+    NONE of its absolute path candidates exist on disk anymore."""
+    meta = result_metadata(result)
+    candidates = [
+        str(part)
+        for part in (result.get("path"), meta.get("source_path"), meta.get("path"))
+        if isinstance(part, str) and part.startswith("/")
+    ]
+    if not candidates:
+        return False
+    return all(_path_is_missing(path) for path in candidates)
+
+
 # ── Historical-runtime provenance ─────────────────────────────────────────
 # OpenClaw is historical context; Hermes is the current agent runtime (the
 # durable runtime_distinction route guarantee). A row whose text/path is

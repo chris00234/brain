@@ -81,6 +81,9 @@ from recall_governance.source_authority import (
     is_source_or_test_file_result as _is_source_or_test_file_result,
 )
 from recall_governance.source_authority import (
+    is_vanished_source_result as _is_vanished_source_result,
+)
+from recall_governance.source_authority import (
     result_category as _result_category,
 )
 from recall_governance.source_authority import (
@@ -2313,6 +2316,15 @@ def _apply_recall_governance_inplace(q: str, fused: list[dict]) -> None:
             elif low_authority:
                 delta -= 45.0
                 reasons.append("low_authority_source_penalty")
+
+        # Vanished-source provenance: the row's absolute local source file no
+        # longer exists (deleted/moved/retired doc, e.g. a removed agent
+        # workspace). Living documents outrank it for any current query —
+        # demote decisively, never drop (the content may still be the only
+        # historical record). Purely provenance-derived, no path/topic markers.
+        if _is_vanished_source_result(result):
+            delta -= 160.0
+            reasons.append("vanished_source_penalty")
 
         if (
             personal_attribute_binding is not None
