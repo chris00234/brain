@@ -98,7 +98,7 @@ def cleanup(dry_run: bool = False) -> dict:
                 if pts:
                     found = True
                     break
-            except Exception:
+            except Exception:  # noqa: S112 — best-effort point lookup; unreachable collection is not a ghost
                 continue
         if found:
             summary["live"] += 1

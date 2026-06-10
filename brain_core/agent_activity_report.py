@@ -39,8 +39,7 @@ def _normalize_agent(name: str | None) -> str:
     n = name.lower()
     if n.startswith("agent:"):
         n = n[6:]
-    n = n.replace("_", "-")
-    return n
+    return n.replace("_", "-")
 
 
 def _store_counts(brain: sqlite3.Connection, window: str) -> dict[str, int]:
@@ -50,7 +49,7 @@ def _store_counts(brain: sqlite3.Connection, window: str) -> dict[str, int]:
           FROM atoms
          WHERE created_at > datetime('now', '{window}')
          GROUP BY agent
-        """
+        """  # noqa: S608 — window is an internal literal ('-1 day' etc.), never user input
     ).fetchall()
     out: dict[str, int] = {}
     for r in rows:

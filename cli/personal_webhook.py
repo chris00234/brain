@@ -113,7 +113,7 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "personal-webhook/1.0"
 
     # quieter access log (we keep our own via logger)
-    def log_message(self, fmt: str, *args) -> None:
+    def log_message(self, fmt: str, *args: object) -> None:
         log.info("[%s] " + fmt, self.address_string(), *args)
 
     def _peer(self) -> str:

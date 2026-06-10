@@ -2332,12 +2332,10 @@ def _reap_wake_child(proc: Any) -> None:
     when its tick completes.
     """
 
-    try:
+    # Suppress: already reaped by a concurrent poll() on a subsequent wake, or
+    # the proc handle is otherwise invalid. Either way, nothing left.
+    with contextlib.suppress(Exception):
         proc.wait()
-    except Exception:
-        # Already reaped by a concurrent poll() on a subsequent wake, or
-        # the proc handle is otherwise invalid. Either way, nothing left.
-        pass
 
 
 def _wake_debounced_tick(loop: BrainLoop) -> None:

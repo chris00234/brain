@@ -90,8 +90,7 @@ def compute_diff(track: str = "extended") -> dict:
         "current_accuracy": curr.get("accuracy"),
         "delta_accuracy": (
             round(curr.get("accuracy", 0) - prev.get("accuracy", 0), 2)
-            if isinstance(curr.get("accuracy"), (int, float))
-            and isinstance(prev.get("accuracy"), (int, float))
+            if isinstance(curr.get("accuracy"), int | float) and isinstance(prev.get("accuracy"), int | float)
             else None
         ),
         "newly_failing": newly_failing,

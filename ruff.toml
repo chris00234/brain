@@ -4,6 +4,7 @@ line-length = 110
 target-version = "py313"
 extend-exclude = [
   "cli/_archive/",  # archived dead code (one-shot migrations etc.); not lint-checked
+  "archived/",      # frozen snapshots of retired services (e.g. openclaw-2026-05-23); never linted
   ".venv",
   "logs",
   "tests/smoke",
@@ -152,10 +153,19 @@ ignore = [
 "brain_core/speak_drives.py" = ["S608"]
 "brain_core/speak_urgent.py" = ["S108"]
 "brain_core/valence.py" = ["T20", "S608"]
+"brain_core/agent_activity_report.py" = ["T20"]
+"brain_core/atom_deboost_cleanup.py" = ["T20"]
+"brain_core/auto_supersede_overrides.py" = ["T20"]
+"brain_core/eval_persistent_failures_triage.py" = ["T20"]
+"brain_core/eval_regression_diff.py" = ["T20"]
+"brain_core/eval_set_path_migrator.py" = ["T20"]
+"brain_core/holdout_lifecycle_reconcile.py" = ["T20"]
+"brain_core/override_pattern_lesson_mint.py" = ["T20"]
 
 # These scripts intentionally call trusted local service endpoints or build
 # parameterized SQL from allowlisted identifiers/placeholders.
 "cli/bench_all.py" = ["S108"]
+"cli/personal_webhook.py" = ["S310"]  # urlopen targets BRAIN_URL (local brain service, bearer auth)
 "cli/brain_stale_cli.py" = ["S608"]
 "cli/lora_ab_gate.py" = ["S310"]
 "cli/ltr_train.py" = ["S310"]

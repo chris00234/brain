@@ -66,7 +66,10 @@ def _insert_atom(
         conn.commit()
 
 
-def test_belief_state_compiles_existing_signals_without_llm(tmp_path):
+def test_belief_state_compiles_existing_signals_without_llm(tmp_path, monkeypatch):
+    # _load_trend_alerts reads the production autonomy.db via brain_config_store;
+    # a live drift alert (priority 0.85) can outrank the expected first action.
+    monkeypatch.setattr("belief_state._load_trend_alerts", lambda warnings: [])
     brain_db = tmp_path / "brain.db"
     autonomy_db = tmp_path / "autonomy.db"
     _init_atoms(brain_db)
@@ -184,7 +187,10 @@ def test_belief_state_excludes_dream_conjectures_from_uncertainties(tmp_path):
     assert "real-low-confidence" in uncertainty_ids
 
 
-def test_belief_state_fails_soft_when_atoms_db_missing(tmp_path):
+def test_belief_state_fails_soft_when_atoms_db_missing(tmp_path, monkeypatch):
+    # _load_trend_alerts reads the production autonomy.db via brain_config_store,
+    # leaking live metric-drift state into this hermetic test.
+    monkeypatch.setattr("belief_state._load_trend_alerts", lambda warnings: [])
     state = build_belief_state(
         brain_db=tmp_path / "missing.db",
         task_queue_obj=TaskQueue(tmp_path / "autonomy.db"),

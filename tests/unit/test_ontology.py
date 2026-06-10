@@ -25,7 +25,7 @@ def test_relation_alias_preserves_direction():
 
 def test_creates_aliases_to_created():
     # 2026-05-26: was producing `unknown` blockers in the Neo4j ontology gate
-    # ("brain/agent creates deterministic infra lesson" × 2). Verb-tense alias
+    # ("brain/agent creates deterministic infra lesson" x 2). Verb-tense alias
     # — `creates` (present) maps to canonical `created` (past), matching the
     # existing `created_by → created` convention.
     resolved = resolve_relation_type("creates")

@@ -115,10 +115,15 @@ def test_direct_telegram_health_reads_hermes_profile_env():
 
 
 def test_gateway_does_not_start_tokenless_discord_adapter():
-    source = (HERMES_AGENT_ROOT / "gateway/config.py").read_text(encoding="utf-8")
+    # The tokenless guard lives in the Discord plugin registration: the plugin
+    # declares DISCORD_BOT_TOKEN as required_env and gates is_connected on it.
+    # (The old assertions targeted a gateway/config.py patch that was never
+    # committed upstream — it survives only in a hermes-agent stash.)
+    source = (HERMES_AGENT_ROOT / "plugins/platforms/discord/adapter.py").read_text(encoding="utf-8")
 
-    assert "discord disabled: no DISCORD_BOT_TOKEN/API key configured" in source
-    assert "discord_cfg.enabled = False" in source
+    assert 'required_env=["DISCORD_BOT_TOKEN"]' in source
+    assert "is_connected=_is_connected" in source
+    assert 'gateway_mod.get_env_value("DISCORD_BOT_TOKEN")' in source
 
 
 def test_scheduler_uses_hermes_telegram_audit_not_openclaw_audit():

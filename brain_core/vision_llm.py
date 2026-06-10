@@ -56,7 +56,7 @@ def _load_api_key() -> str:
             continue
         try:
             lines = env_file.read_text().splitlines()
-        except Exception:
+        except Exception:  # noqa: S112 — unreadable env file, try the next one
             continue
         for line in lines:
             line = line.strip()

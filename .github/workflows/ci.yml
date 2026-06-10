@@ -39,14 +39,10 @@ jobs:
           python-version: "3.14"
       - name: Install locked dependencies
         run: uv sync --frozen
-      - name: Lint hardened scope
-        run: >
-          uv run ruff check
-          brain_core/recall_governance
-          cli/bridge_atom_inventory.py
-          cli/bridge_atom_cleanup.py
-          cli/eval_compare.py
-          cli/eval_gate.py
+      # Repo-wide since 2026-06-09 (Contract 13): active source is ruff-clean;
+      # legacy debt is bounded by ruff.toml excludes (see docs/ruff-debt-taxonomy-2026-06-09.md).
+      - name: Lint (repo-wide, ruff.toml scope)
+        run: uv run ruff check .
       - name: Focused unit tests (hermetic, no Brain services)
         run: >
           uv run pytest -q -p no:cacheprovider

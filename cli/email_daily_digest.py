@@ -17,7 +17,7 @@ from pathlib import Path
 ENV_FILE = Path(os.getenv("EMAIL_MONITOR_ENV_FILE", str(Path(__file__).with_name(".email_monitor.env"))))
 
 
-def load_env_file(path: Path):
+def load_env_file(path: Path) -> None:
     if not path.exists():
         return
     for raw in path.read_text(encoding="utf-8").splitlines():
@@ -196,20 +196,19 @@ def classify(sender: str, subject: str) -> str:
     return "normal"
 
 
-def parse_date_safe(date_str: str):
+def parse_date_safe(date_str: str) -> datetime | None:
     try:
         return parsedate_to_datetime(date_str)
     except Exception:
         return None
 
 
-def main():
+def main() -> None:
     M = imaplib.IMAP4_SSL(IMAP_HOST)
     M.login(IMAP_USER, IMAP_PASS.replace(" ", ""))
     M.select("INBOX", readonly=True)
 
     # Search for today's emails (SINCE today)
-    today = datetime.now(UTC).strftime("%d-%b-%Y")
     yesterday = (datetime.now(UTC) - timedelta(days=1)).strftime("%d-%b-%Y")
     typ, data = M.search(None, f"SINCE {yesterday}")
 
