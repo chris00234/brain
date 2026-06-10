@@ -376,6 +376,8 @@ _ATTR_BIRTHDAY = "birthday"
 _ATTR_ADDRESS = "address"
 _ATTR_PHONE = "phone"
 _ATTR_LEGAL_NAME = "legal_name"
+_ATTR_EMAIL = "email"
+_ATTR_LOCATION = "location"
 _OWNER = "chris"
 _OWNER_NAMES = {"chris", "크리스", "조대현", "대현", "daehyun"}
 _SELF_RE = re.compile(r"\b(?:my|mine|myself|i|me)\b|(?<![가-힣])(?:내|제|나)(?![가-힣])", re.I)
@@ -405,6 +407,48 @@ _STOP = {
 }
 
 
+# Name-type qualifier for the legal/identity-name class: a closed linguistic
+# class of name kinds incl. script names (korean/english/hangul), allowing
+# slash-compound labels ("Korean/Hangul name").
+_NAME_QUALIFIER = (
+    r"(?:legal|full|real|maiden|korean|english|hangul|first|last|middle|given|family)"
+    r"(?:\s*/\s*(?:legal|full|real|maiden|korean|english|hangul))?"
+)
+
+# Identity-document label forms ("- **Email:** value", "Location: value",
+# "Korean/Hangul name: value"). A label-form statement names no inline
+# subject; in this owner-scoped corpus a document that NAMES THE OWNER and
+# states an attribute in label form is the owner's identity/profile doc, so
+# the fact binds to the owner. Format/shape signal per attribute class —
+# never a value or probe string.
+_LABEL_LINE_PREFIX = r"^[\s>*+-]*\**\s*"
+_ATTR_LABEL_RES = {
+    _ATTR_EMAIL: re.compile(_LABEL_LINE_PREFIX + r"e-?mail(?:\s+address)?\s*\**\s*[:\uff1a]", re.I | re.M),
+    _ATTR_LOCATION: re.compile(
+        _LABEL_LINE_PREFIX + r"(?:location|time\s*zone|timezone|거주지|위치|시간대)\s*\**\s*[:\uff1a]",
+        re.I | re.M,
+    ),
+    _ATTR_LEGAL_NAME: re.compile(
+        _LABEL_LINE_PREFIX
+        + r"(?:"
+        + _NAME_QUALIFIER
+        + r"\s+names?|(?:한국|한글|영어)\s*이름|본명)\s*\**\s*[:\uff1a]",
+        re.I | re.M,
+    ),
+    _ATTR_ADDRESS: re.compile(_LABEL_LINE_PREFIX + r"(?:address|주소)\s*\**\s*[:\uff1a]", re.I | re.M),
+    _ATTR_PHONE: re.compile(
+        _LABEL_LINE_PREFIX + r"(?:phone(?:\s*number)?|전화\s*번호|전화번호|휴대폰|핸드폰)\s*\**\s*[:\uff1a]",
+        re.I | re.M,
+    ),
+    _ATTR_BIRTHDAY: re.compile(
+        _LABEL_LINE_PREFIX
+        + r"(?:birth\s*day|birthday|date\s+of\s+birth|dob|생일|생년월일)\s*\**\s*[:\uff1a]",
+        re.I | re.M,
+    ),
+}
+_OWNER_NAME_RE = re.compile(r"\bchris\b|\bdaehyun\b|크리스|조대현|대현", re.I)
+
+
 @dataclass(frozen=True)
 class PersonalAttributeBinding:
     subject: str
@@ -413,6 +457,9 @@ class PersonalAttributeBinding:
 
 def _resolve(raw: str | None) -> str | None:
     toks = [t.strip(" .-?'\u2019").lower() for t in re.findall(r"[A-Za-z.\-]+|[가-힣]+", raw or "")]
+    # Particle-aware: a KO possessive subject is captured with its particle
+    # glued (크리스의 → 크리스), so strip it before owner-name resolution.
+    toks = [strip_korean_particle(t) for t in toks]
     if not toks:
         return None
     if any(t in _OWNER_NAMES for t in toks):
@@ -491,9 +538,9 @@ def _subject_for(text: str, attr: str, *, fact: bool = False) -> str | None:
             pats.append(
                 rf"\b({_CAP_NAME})\s+(?:phone(?:\s*number)?|telephone|mobile\s*number)\s+(?:is|are|was|were)\b"
             )
-    else:
+    elif attr == _ATTR_LEGAL_NAME:
         if not re.search(
-            r"(?:legal|full|real|maiden|korean|english|first|last|middle|given|family)\s+names?|본명|실명|성함|법적\s*이름|풀\s*네임",
+            rf"{_NAME_QUALIFIER}\s+names?|본명|실명|성함|법적\s*이름|풀\s*네임|(?:한국|한글|영어)\s*이름",
             t,
             re.I,
         ):
@@ -501,23 +548,74 @@ def _subject_for(text: str, attr: str, *, fact: bool = False) -> str | None:
         if self_subject and not fact:
             return self_subject
         pats = [
-            rf"\b({_NAME}){_APOS}s\s+(?:legal|full|real|maiden|korean|english|first|last|middle|given|family)\s+names?\b",
-            rf"\b(?:legal|full|real|maiden|korean|english|first|last|middle|given|family)\s+names?\s+of\s+({_NAME})\b",
-            rf"\b({_CAP_NAME})\s+(?:legal|full|real|maiden|korean|english|first|last|middle|given|family)\s+names?\b\??\s*$",
+            rf"\b({_NAME}){_APOS}s\s+{_NAME_QUALIFIER}\s+names?\b",
+            rf"\b{_NAME_QUALIFIER}\s+names?\s+of\s+({_NAME})\b",
+            rf"\b({_CAP_NAME})\s+{_NAME_QUALIFIER}\s+names?\b\??\s*$",
+            # KO requires a name-type qualifier — bare 이름 is a generic noun
+            # ("파일 이름" = file name) and must never bind this class.
+            r"([A-Za-z]{2,}|[가-힣]{2,4})(?:의)?\s*(?:한국|한글|영어|법적|본)\s*이름",
         ]
         if fact:
-            pats.append(
-                rf"\b({_CAP_NAME})\s+(?:legal|full|real|maiden|korean|english|first|last|middle|given|family)\s+names?\s+(?:is|are|was|were)\b"
+            pats.append(rf"\b({_CAP_NAME})\s+{_NAME_QUALIFIER}\s+names?\s+(?:is|are|was|were)\b")
+            pats.append(r"([A-Za-z]{2,}|[가-힣]{2,4})(?:의|이|가|은|는)?\s*(?:한국|한글)\s*이름은?")
+    elif attr == _ATTR_EMAIL:
+        # Anchored on the ADDRESS form, a possessive, or an identity-doc label —
+        # bare "email(s)" is a message-corpus word ("which emails to keep",
+        # "what email confirms the payment"), never the contact attribute.
+        if not (
+            re.search(
+                rf"e-?mail\s+address|이메일\s*주소|메일\s*주소|{_APOS}s\s+e-?mail|의\s*(?:이메일|메일)",
+                t,
+                re.I,
             )
+            or _ATTR_LABEL_RES[_ATTR_EMAIL].search(t)
+        ):
+            return None
+        if self_subject and not fact:
+            return self_subject
+        pats = [
+            rf"\b({_NAME}){_APOS}s\s+e-?mail(?:\s+address)?\b(?!\s+(?:about|regarding|from|to|thread|message)\b)",
+            rf"\be-?mail\s+address\s+(?:of|for)\s+({_NAME})\b",
+            rf"\be-?mail\s+address\s+(?:to\s+)?(?:reach|contact)\s+({_NAME})\b",
+            rf"\b({_CAP_NAME})\s+e-?mail\s+address\b",
+            r"([A-Za-z]{2,}|[가-힣]{2,4})의\s*(?:이메일|메일)\s*(?:주소)?",
+        ]
+        if fact:
+            pats.append(rf"\b({_NAME}){_APOS}s\s+e-?mail(?:\s+address)?\s+(?:is|are|was|were)\b")
+    else:
+        if not re.search(r"time\s*zone|timezone|location|\bbased\b|\blocated\b|위치|시간대|거주지", t, re.I):
+            return None
+        if self_subject and not fact:
+            return self_subject
+        pats = [
+            # Determiner-led subjects ("where is the database based") are
+            # things, not people — excluded so infra questions never bind.
+            rf"\bwhere\s+(?:is|are)\s+(?!the\b|a\b|an\b|this\b|that\b|it\b)({_NAME})\s+(?:based|located)\b",
+            rf"\b({_NAME}){_APOS}s\s+(?:location|time\s*zone|timezone)\b",
+            rf"\b(?:location|time\s*zone|timezone)\s+(?:of|for)\s+({_NAME})\b",
+            rf"\b(?:what|which)\s+(?:time\s*zone|timezone)\s+(?:does|is)\s+({_NAME})\b",
+            rf"\b({_CAP_NAME})(?:\s+(?:location|time\s*zone|timezone))+\??\s*$",
+            r"([A-Za-z]{2,}|[가-힣]{2,4})(?:의|은|는)?\s*(?:위치|시간대)",
+        ]
+        if fact:
+            pats.append(rf"\b({_NAME})\s+(?:is\s+|are\s+)?(?:based|located)\s+(?:in|at|out\s+of)\b")
 
     for pat in pats:
         s = _first_group_subject(pat, t)
         if s:
             return s
+    # Label-form fact fallback: an identity/profile document states attributes
+    # as "Label: value" lines with no inline subject. Bind to the OWNER only
+    # when the owner is actually named in the same text — third-party profile
+    # docs (no owner name) never bind, so subject mismatch still drops them.
+    if fact:
+        label_re = _ATTR_LABEL_RES.get(attr)
+        if label_re is not None and label_re.search(t) and _OWNER_NAME_RE.search(t):
+            return _OWNER
     return self_subject
 
 
-_ATTR_ORDER = (_ATTR_ADDRESS, _ATTR_PHONE, _ATTR_LEGAL_NAME, _ATTR_BIRTHDAY)
+_ATTR_ORDER = (_ATTR_EMAIL, _ATTR_ADDRESS, _ATTR_PHONE, _ATTR_LEGAL_NAME, _ATTR_BIRTHDAY, _ATTR_LOCATION)
 
 
 def _binding(text: str, *, fact: bool = False) -> PersonalAttributeBinding | None:

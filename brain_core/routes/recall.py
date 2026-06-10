@@ -3324,11 +3324,12 @@ def recall_v2(
         # caller does not pass collection=personal. The generic all-source path can
         # under-serve terse attribute prompts because vector/rerank candidates from
         # obsidian/experience crowd out the personal collection before the
-        # identity/attribute guard runs. Add one scoped personal-collection payload
-        # (same query, same filters) so direct personal notes/messages enter the
-        # normal RRF/governance/filter pipeline instead of special-casing answers.
+        # identity/attribute guard runs. Add one scoped payload over the durable
+        # personal + canonical stores (identity/profile docs live in canonical)
+        # so direct attribute facts enter the normal RRF/governance/filter
+        # pipeline instead of special-casing answers.
         with contextlib.suppress(Exception):
-            all_payloads.append(_run_variant(search_query, override_collections=["personal"]))
+            all_payloads.append(_run_variant(search_query, override_collections=["personal", "canonical"]))
 
     timing["search_ms"] = int((time.time() - t_search) * 1000)
     # See _merge_source_timing for the per-source timing aggregation contract
