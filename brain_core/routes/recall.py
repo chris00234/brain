@@ -97,6 +97,7 @@ __all__ = [
 # `_result_*` import site; the topic-specific governance below (augment,
 # governance-inplace, retrieval-quality filter) stays here and calls them.
 import recall_governance.brain_quality as _brain_quality_helpers
+import recall_governance.codex_workflow as _codex_workflow_helpers
 import recall_governance.openclaw_workspace as _openclaw_workspace_helpers
 from recall_governance import generic_queries as _generic_query_helpers
 from recall_governance import quality as _quality_helpers
@@ -1748,49 +1749,9 @@ def _is_openclaw_hermes_distinction_noise_result(result: dict, text: str) -> boo
     )
 
 
-def _is_codex_skill_sync_noise_result(result: dict, text: str) -> bool:
-    lower = text.lower()
-    title = str(result.get("title") or _result_metadata(result).get("document_title") or "").lower()
-    path = str(result.get("path") or _result_metadata(result).get("source_path") or "").lower()
-    haystack = f"{title}\n{path}\n{lower[:1000]}"
-    if _is_codex_hermes_tui_result(_tokenize_recall_text(haystack), haystack) and any(
-        marker in haystack for marker in ("prefers", "preference", "선호")
-    ):
-        return False
-    return (
-        "codex/claude code skill" in haystack
-        or "skills/autonomous-ai-agents" in haystack
-        or "skill sync" in haystack
-        or ("codex" in haystack and "claude code" in haystack and "skill" in haystack)
-    )
-
-
-def _is_codex_hermes_tui_query(query_tokens: set[str]) -> bool:
-    return "codex" in query_tokens and bool(
-        query_tokens
-        & {
-            "hermes",
-            "tmux",
-            "tui",
-            "headless",
-            "steering",
-            "quality",
-            "coding",
-            "preference",
-            "recommendation",
-            "어떻게",
-            "좋아",
-        }
-    )
-
-
-def _is_codex_hermes_tui_result(result_tokens: set[str], text: str) -> bool:
-    lower = text.lower()
-    return {"codex", "hermes"}.issubset(result_tokens) and (
-        bool(result_tokens & {"tmux", "tui", "headless", "interactive"})
-        or "terminal-like" in lower
-        or "terminal like" in lower
-    )
+_is_codex_skill_sync_noise_result = _codex_workflow_helpers.is_codex_skill_sync_noise_result
+_is_codex_hermes_tui_query = _codex_workflow_helpers.is_codex_hermes_tui_query
+_is_codex_hermes_tui_result = _codex_workflow_helpers.is_codex_hermes_tui_result
 
 
 def _is_old_claude_code_restriction_noise(result_tokens: set[str], text: str) -> bool:
