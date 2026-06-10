@@ -1,0 +1,102 @@
+# Brain CI — two-tier gate (Contract 11).
+#
+# Tier 1 `offline`: runs everywhere (forks, PRs, no credentials). Lints and
+# tests the recall-governance / bridge-atom / eval tooling hardened in the
+# post-stable contracts. Every module in this scope is hermetic (tmp_path
+# only — see tests/conftest.py convention), so the job needs no Brain
+# server, knowledge base, or secrets and can never fail for lack of them.
+#
+# Tier 2 `stable-gate`: the live recall-quality gate
+# (cli/eval_compare.py + cli/eval_gate.py against cli/eval_set_stable.json,
+# 138 cases, 100/100 with 0 forbidden hits). It needs the production brain
+# server on 127.0.0.1:8791, the personal knowledge base, and the webhook
+# secret — none of which exist on GitHub-hosted runners. The job therefore
+# runs only on a self-hosted runner (label: brain) and only when the
+# BRAIN_WEBHOOK_SECRET repo secret is configured. Forks and credential-less
+# clones skip it entirely instead of failing.
+#
+# Local equivalent of the full gate (see RUNBOOK.md "CI"):
+#   .venv/bin/python cli/eval_compare.py --eval-set cli/eval_set_stable.json --json --limit 138
+#   .venv/bin/python cli/eval_gate.py --eval-set cli/eval_set_stable.json \
+#       --baseline cli/eval_baseline_stable.json --track stable
+
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  offline:
+    name: offline lint + focused unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.14"
+      - name: Install locked dependencies
+        run: uv sync --frozen
+      - name: Lint hardened scope
+        run: >
+          uv run ruff check
+          brain_core/recall_governance
+          cli/bridge_atom_inventory.py
+          cli/bridge_atom_cleanup.py
+          cli/eval_compare.py
+          cli/eval_gate.py
+      - name: Focused unit tests (hermetic, no Brain services)
+        run: >
+          uv run pytest -q -p no:cacheprovider
+          tests/unit/test_bridge_atom_inventory.py
+          tests/unit/test_bridge_atom_cleanup.py
+          tests/unit/test_query_keyed_bridge_governance.py
+          tests/unit/test_source_governance.py
+          tests/unit/test_vanished_source_governance.py
+          tests/unit/test_recall_source_authority.py
+          tests/unit/test_recall_query_analyzer.py
+          tests/unit/test_recall_v2_canonical_first.py
+          tests/unit/test_recall_v2_helpers.py
+          tests/unit/test_recall_judge.py
+          tests/unit/test_recall_structural_judge.py
+          tests/unit/test_eval_gate.py
+          tests/unit/test_eval_compare_source.py
+          tests/unit/test_health_eval_tracks.py
+
+  brain-gate-check:
+    name: detect Brain credentials
+    runs-on: ubuntu-latest
+    outputs:
+      has-brain: ${{ steps.check.outputs.has-brain }}
+    steps:
+      - id: check
+        env:
+          BRAIN_WEBHOOK_SECRET: ${{ secrets.BRAIN_WEBHOOK_SECRET }}
+        run: |
+          if [ -n "$BRAIN_WEBHOOK_SECRET" ]; then
+            echo "has-brain=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has-brain=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  stable-gate:
+    name: stable recall gate (self-hosted, live server)
+    needs: brain-gate-check
+    if: needs.brain-gate-check.outputs.has-brain == 'true'
+    runs-on: [self-hosted, brain]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install locked dependencies
+        run: uv sync --frozen
+      - name: Stable eval (138 cases)
+        run: >
+          uv run python cli/eval_compare.py
+          --eval-set cli/eval_set_stable.json --json --limit 138
+      - name: Stable gate vs baseline
+        run: >
+          uv run python cli/eval_gate.py
+          --eval-set cli/eval_set_stable.json
+          --baseline cli/eval_baseline_stable.json
+          --track stable

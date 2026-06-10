@@ -169,6 +169,26 @@ sqlite3 /Users/chrischo/server/brain/logs/scheduler_history.db "SELECT * FROM jo
 4. The two-track gate splits stable vs extended — stable should never drift,
    extended is trend-only. See incident notes 2026-04-13.
 
+### CI (local vs GitHub Actions split)
+
+Three layers, weakest-to-strongest:
+
+1. **GitHub Actions `offline` job** (`.github/workflows/ci.yml`) — runs on
+   every PR/push anywhere, including forks with zero credentials. Lints and
+   runs the hermetic recall-governance / bridge-atom / eval unit modules.
+   Needs no Brain server, knowledge base, or secrets.
+2. **GitHub Actions `stable-gate` job** — the live 138-case stable gate.
+   Skipped unless the `BRAIN_WEBHOOK_SECRET` repo secret is set AND a
+   self-hosted runner with label `brain` is registered on the machine that
+   hosts the production server. It never fails for missing infra; it only
+   runs where the infra exists.
+3. **Local full CI** — `cli/ci_runner.py` (ruff repo-wide + full pytest +
+   write-boundary audits, launchd-watched) plus the manual stable gate:
+   ```bash
+   .venv/bin/python cli/eval_compare.py --eval-set cli/eval_set_stable.json --json --limit 138
+   .venv/bin/python cli/eval_gate.py --eval-set cli/eval_set_stable.json --baseline cli/eval_baseline_stable.json --track stable
+   ```
+
 ---
 
 ## 6. Qdrant outage
