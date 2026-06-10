@@ -96,6 +96,7 @@ __all__ = [
 # module-level aliases preserve every existing `routes.recall._is_*` /
 # `_result_*` import site; the topic-specific governance below (augment,
 # governance-inplace, retrieval-quality filter) stays here and calls them.
+import recall_governance.brain_quality as _brain_quality_helpers
 from recall_governance import generic_queries as _generic_query_helpers
 from recall_governance import quality as _quality_helpers
 from recall_governance import query_analyzer as _query_analyzer
@@ -1841,66 +1842,21 @@ def _is_brain_contract_result(result: dict, text: str) -> bool:
     )
 
 
-_BRAIN_QUALITY_SUBSYSTEM_TOKENS = {
-    "brain",
-    "recall",
-    "prefetch",
-    "retrieval",
-    "브레인",
-    "리콜",
-    "검색품질",
-}
-_BRAIN_QUALITY_BROAD_TOKENS = {
-    "context",
-    "noise",
-    "noisy",
-    "eval",
-    "evaluation",
-    "score",
-    "quality",
-    "fine",
-    "tuning",
-    "노이즈",
-    "평가",
-    "품질",
-    "튜닝",
-}
-_BRAIN_QUALITY_GENERIC_MARKERS = (
-    "knowledge gap bridge: brain system dependency",
-    "brain depends on fastapi brain-server",
-    "turning brain and openclaw from clever infrastructure",
-    "native qdrant",
-    "native ollama",
-    "underused tools",
-    "brain_decide",
-    "search index",
-    "qdrant vector store",
-    "fastapi server",
-    "port 8791",
-)
+_BRAIN_QUALITY_SUBSYSTEM_TOKENS = _brain_quality_helpers.BRAIN_QUALITY_SUBSYSTEM_TOKENS
+_BRAIN_QUALITY_BROAD_TOKENS = _brain_quality_helpers.BRAIN_QUALITY_BROAD_TOKENS
+_BRAIN_QUALITY_GENERIC_MARKERS = _brain_quality_helpers.BRAIN_QUALITY_GENERIC_MARKERS
 
 
 def _is_brain_quality_query(q: str) -> bool:
-    text = _augment_query_for_recall(q)
-    if "brain_decide" in (text or "").lower():
-        return True
-    tokens = _tokenize_recall_text(text)
-    return bool(tokens & _BRAIN_QUALITY_SUBSYSTEM_TOKENS) and bool(tokens & _BRAIN_QUALITY_BROAD_TOKENS)
+    return _brain_quality_helpers.is_brain_quality_query_text(_augment_query_for_recall(q))
 
 
 def _is_stale_generic_quality_result(result: dict, q: str) -> bool:
-    if not _is_brain_quality_query(q):
-        return False
-    if _is_positive_summary_intent_query(q):
-        return False
-    query_text = (q or "").lower()
-    haystack = _result_text(result).lower()
-    for marker in _BRAIN_QUALITY_GENERIC_MARKERS:
-        if marker in haystack and marker not in query_text:
-            return True
-    # Weekly/session summary blobs are usually stale noise for concrete Brain
-    # quality fixes unless the user explicitly asks for a recap.
-    return _is_generic_summary_result(result) and not _is_summary_excluded_query(q)
+    return _brain_quality_helpers.is_stale_generic_quality_result(
+        result,
+        q,
+        quality_query_text=_augment_query_for_recall(q),
+    )
 
 
 # ── Generic out-of-domain (world-knowledge) gate ─────────────────────────
