@@ -625,3 +625,61 @@ def test_live_subprocess_tools_call_recall_uses_compact_pack_and_truncation_obse
     assert payload["mcp_results_omitted_count"] > 0
     assert payload["results"][0]["why_included"] == "ranked by recall score and confidence"
     assert "private_blob" not in json.dumps(payload)
+
+
+def test_brain_feedback_schema_exposes_recall_feedback_fields():
+    tools = brain_mcp_server._minimal_tool_defs()
+    feedback = next(tool for tool in tools if tool["name"] == "brain_feedback")
+    props = feedback["inputSchema"]["properties"]
+
+    assert {"query", "result_source", "expected"} <= set(props)
+    assert "recall" in props["target_type"]["enum"]
+
+
+def test_brain_feedback_recall_posts_search_feedback_request(monkeypatch):
+    calls = []
+
+    def fake_request(method, path, body=None, actor=None, timeout_s=60):
+        calls.append((method, path, body, actor, timeout_s))
+        return {"ok": True}
+
+    monkeypatch.setattr(brain_mcp_server, "_brain_request", fake_request)
+
+    brain_mcp_server.handle_tools_call(
+        {
+            "name": "brain_feedback",
+            "arguments": {
+                "target_id": "memory_123",
+                "target_type": "recall",
+                "success": False,
+                "notes": "wrong answer",
+                "agent": "codex",
+                "query": "what should Brain recall?",
+                "result_source": "canonical",
+                "expected": "current durable fact",
+            },
+        }
+    )
+
+    assert calls == [
+        (
+            "POST",
+            "/recall/feedback",
+            {
+                "query": "what should Brain recall?",
+                "result_id": "memory_123",
+                "result_source": "canonical",
+                "useful": False,
+                "agent": "codex",
+                "synthetic": False,
+                "wrong_answer": True,
+                "expected": "current durable fact",
+            },
+            "codex",
+            60,
+        )
+    ]
+
+    from brain_core.recall_models import SearchFeedbackRequest
+
+    SearchFeedbackRequest.model_validate(calls[0][2])

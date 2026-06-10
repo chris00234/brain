@@ -405,9 +405,6 @@ def _run_crag_retry(
             expand_query as _crag_expand_query,
         )
         from brain_core.crag import (
-            score_confidence as _crag_score,
-        )
-        from brain_core.crag import (
             should_iterate as _crag_should_iterate,
         )
 
@@ -432,7 +429,7 @@ def _run_crag_retry(
                 # max.
                 second_hop = retry_fn(rewritten)
                 second_results = second_hop.results
-                second_report = _crag_score(second_results[: max(n, 5)])
+                second_report = _score_crag_first_hop(rewritten, second_results, n)
                 telemetry["second_hop_confidence"] = second_report.score
                 telemetry["iterated"] = True
                 # Pick the higher-confidence result set
