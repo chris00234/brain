@@ -1551,6 +1551,51 @@ def test_crag_retry_iterates_and_second_hop_wins(monkeypatch):
     assert out[0]["id"] == "doc_better"
 
 
+def test_crag_retry_scores_second_hop_with_same_self_rag_blend(monkeypatch):
+    """CRAG hop comparison must score both hops through _score_crag_first_hop.
+
+    First-hop scoring may blend heuristic CRAG with Self-RAG, so comparing it
+    with raw second-hop score is asymmetric. Pin the call contract directly.
+    """
+    import routes.recall as recall_route
+    from routes.recall import _run_crag_retry
+
+    _install_crag_stubs(
+        monkeypatch,
+        score_return=_FakeConfidenceReport(0.10, {"raw": True}),
+        should_iterate=True,
+        expanded_query="rewritten",
+    )
+    reports = [
+        _FakeConfidenceReport(0.30, {"hop": "first", "blended": True}),
+        _FakeConfidenceReport(0.80, {"hop": "second", "blended": True}),
+    ]
+    calls: list[tuple[str, list[dict], int]] = []
+
+    def fake_score(q: str, fused: list[dict], n: int):
+        calls.append((q, fused, n))
+        return reports.pop(0)
+
+    monkeypatch.setattr(recall_route, "_score_crag_first_hop", fake_score)
+    second_results = [{"id": "doc_better", "score": 100}]
+
+    out, _ms, tele, err = _run_crag_retry(
+        "orig q",
+        n=5,
+        fused=[{"id": "doc_1", "score": 50}],
+        retry_fn=lambda rq: _FakeSecondHop(second_results),
+    )
+
+    assert err is None
+    assert calls == [
+        ("orig q", [{"id": "doc_1", "score": 50}], 5),
+        ("rewritten", second_results, 5),
+    ]
+    assert tele["second_hop_confidence"] == 0.80
+    assert tele["selected"] == "second_hop"
+    assert out is second_results
+
+
 def test_crag_retry_iterates_but_first_hop_wins(monkeypatch):
     """If second_hop score is NOT greater than first_hop, keep the original
     fused; telemetry records selected=first_hop."""

@@ -263,6 +263,18 @@ def _minimal_tool_defs() -> list[dict]:
                     },
                     "success": {"type": "boolean"},
                     "notes": {"type": "string"},
+                    "query": {
+                        "type": "string",
+                        "description": "Original recall query when target_type=recall; omitted feedback is marked synthetic.",
+                    },
+                    "result_source": {
+                        "type": "string",
+                        "description": "Recall result source/collection when target_type=recall.",
+                    },
+                    "expected": {
+                        "type": "string",
+                        "description": "Expected answer/content for failed recall feedback; enables eval proposal growth.",
+                    },
                     "actor": {"type": "string"},
                 },
                 "required": ["target_id", "success"],
@@ -1411,14 +1423,21 @@ def handle_tools_call(params: dict) -> dict:
                 actor=actor,
             )
         elif target_type == "recall":
+            # /recall/feedback expects SearchFeedbackRequest:
+            # {query, result_id, result_source, useful, agent}. Keep this in
+            # sync with the brain_ops_compound feedback mapping in routes.recall.
             result = _brain_request(
                 "POST",
                 "/recall/feedback",
                 {
-                    "recall_id": target_id,
+                    "query": (args.get("query") or "mcp_recall_feedback")[:500],
+                    "result_id": target_id[:200],
+                    "result_source": (args.get("result_source") or "")[:64],
                     "useful": success,
-                    "notes": notes,
-                    "agent": actor,
+                    "agent": actor[:32],
+                    "synthetic": bool(not args.get("query")),
+                    "wrong_answer": bool(not success and args.get("expected")),
+                    "expected": str(args.get("expected") or "")[:2000],
                 },
                 actor=actor,
             )
