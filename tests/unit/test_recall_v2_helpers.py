@@ -6898,6 +6898,35 @@ def test_retrieval_quality_filter_drops_noise_korean_particle_glued_factoid_prob
         assert result == [], f"expected empty for particle-glued probe: {query!r}"
 
 
+def test_retrieval_quality_filter_disjoint_script_keeps_authority_drops_noise():
+    """POSITIVE (preserve): a pure-Hangul factoid probe against English-only rows
+    has structurally empty whole-word overlap (script artifact, not relevance
+    evidence). The filter falls back to source authority for that unjudgeable
+    case: the canonical durable-truth row survives, while a derived reflection
+    row with equally-unjudgeable overlap still drops as low-authority noise."""
+    from routes.recall import _apply_retrieval_quality_filter
+
+    fused = [
+        {
+            "id": "no-proof-canonical",
+            "title": "chris-explicitly-rejected-claiming-success-without-proof",
+            "collection": "canonical",
+            "metadata": {"category": "decision"},
+            "content": "Chris explicitly rejected claiming success without proof and wants actual submit and result confirmation.",
+            "score": 150.0,
+        },
+        {
+            "id": "reflection",
+            "title": "brain reflection",
+            "collection": "semantic_memory",
+            "content": "Chris profile preferences and general AI workflow notes from last session.",
+            "score": 160.0,
+        },
+    ]
+    filtered = _apply_retrieval_quality_filter("Chris는 자동화 성공을 증거 없이 말하면 안 된다", fused)
+    assert [r["id"] for r in filtered] == ["no-proof-canonical"]
+
+
 def test_retrieval_quality_filter_keeps_omscs_durable_fact_korean_particle_query():
     """POSITIVE (preserve): a KO particle-glued OMSCS query keeps the durable OMSCS
     row (ASCII overlap terms OMSCS/Fall survive cross-language) while dropping an

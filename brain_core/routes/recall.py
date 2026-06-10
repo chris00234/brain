@@ -2151,11 +2151,20 @@ def _apply_retrieval_quality_filter(q: str, fused: list[dict]) -> list[dict]:
             and _query_analyzer.personal_attribute_result_matches_query(q, result_text) is False
         ):
             continue
-        if (
-            pure_personal_factoid_probe
-            and _query_analyzer.personal_factoid_result_has_strong_attribute_overlap(q, result_text) is False
-        ):
-            continue
+        if pure_personal_factoid_probe:
+            factoid_overlap = _query_analyzer.personal_factoid_result_has_strong_attribute_overlap(
+                q, result_text
+            )
+            if factoid_overlap is False:
+                continue
+            # Disjoint-script rows answer None (a pure-Hangul probe can never
+            # whole-word-overlap an English-only row, so empty overlap is a
+            # script artifact). Where overlap is unjudgeable, fall back to
+            # source authority: durable truth surfaces stay, derived noise
+            # (reflections/sessions/summaries) drops exactly as the judgeable
+            # path would have dropped it.
+            if factoid_overlap is None and _source_authority.is_low_authority_result(result, result_text):
+                continue
         if not openclaw_targeted_query and _is_openclaw_workspace_instruction_result(result):
             continue
         if summary_excluded and _is_generic_summary_result(result):
