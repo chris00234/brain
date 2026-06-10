@@ -98,6 +98,7 @@ __all__ = [
 # governance-inplace, retrieval-quality filter) stays here and calls them.
 import recall_governance.brain_quality as _brain_quality_helpers
 import recall_governance.codex_workflow as _codex_workflow_helpers
+import recall_governance.openclaw_hermes as _openclaw_hermes_helpers
 import recall_governance.openclaw_workspace as _openclaw_workspace_helpers
 from recall_governance import generic_queries as _generic_query_helpers
 from recall_governance import quality as _quality_helpers
@@ -1676,72 +1677,19 @@ def _is_broad_tool_recommendation_noise_result(result: dict, text: str) -> bool:
     )
 
 
-def _is_openclaw_hermes_distinction_query(query_tokens: set[str]) -> bool:
-    return {"openclaw", "hermes"}.issubset(query_tokens) and bool(
-        query_tokens & {"current", "runtime", "historical", "distinction", "history"}
-    )
-
-
-def _is_openclaw_hermes_distinction_result(result_tokens: set[str], text: str) -> bool:
-    lower = text.lower()
-    return {"openclaw", "hermes"}.issubset(result_tokens) and (
-        bool(result_tokens & {"current", "runtime", "historical", "distinction"})
-        or "hermes agent is" in lower
-        or "current runtime is hermes" in lower
-    )
-
-
-def _is_openclaw_setup_noise_result(result: dict, text: str) -> bool:
-    lower = text.lower()
-    meta = _result_metadata(result)
-    title = str(result.get("title") or meta.get("document_title") or "").lower()
-    path = str(result.get("path") or meta.get("source_path") or meta.get("path") or "").lower()
-    return (
-        "openclaw multi-agent setup documentation" in title
-        or "/.openclaw/workspace-" in path
-        or "openclaw-setup" in path
-        or "sub-agent configuration" in lower
-        or ("active hours for heartbeat" in lower and "openclaw" in lower)
-        or ("openclaw setup" in lower and "current runtime is hermes" not in lower)
-    )
-
-
-def _is_openclaw_hermes_handoff_noise_result(result: dict, text: str) -> bool:
-    """True for task/test handoff rows about recall quality, not durable truth.
-
-    These rows often quote the exact OpenClaw/Hermes acceptance probe plus
-    nearby ``live_state``/setup text. They are useful run history, but they are
-    meta-evidence about this tuning task rather than the current-runtime fact
-    itself, so they should not receive the same distinction boost.
-    """
-    lower = text.lower()
-    meta = _result_metadata(result)
-    source_hint = " ".join(
-        str(part or "")
-        for part in (
-            result.get("title"),
-            result.get("path"),
-            meta.get("source_name"),
-            meta.get("source_path"),
-        )
-    ).lower()
-    marker_haystack = f"{source_hint}\n{lower[:1500]}"
-    return (
-        "work kanban task t_" in marker_haystack
-        or "acceptance probe" in marker_haystack
-        or "focused tests passed" in marker_haystack
-        or "review-required handoff" in marker_haystack
-        or "dirty patch" in marker_haystack
-        or "verdict: partial" in marker_haystack
-        or "generic regression" in marker_haystack
-        or "generic_recipe_knowledge_gap" in marker_haystack
-        or "spot check" in marker_haystack
-        or "no setup/live_state" in marker_haystack
-    )
+_is_openclaw_hermes_distinction_query = _openclaw_hermes_helpers.is_openclaw_hermes_distinction_query
+_is_openclaw_hermes_distinction_result = _openclaw_hermes_helpers.is_openclaw_hermes_distinction_token_result
+_is_openclaw_setup_noise_result = _openclaw_hermes_helpers.is_openclaw_setup_noise_result
+_is_openclaw_hermes_handoff_noise_result = _openclaw_hermes_helpers.is_openclaw_hermes_handoff_noise_result
 
 
 def _is_openclaw_hermes_distinction_noise_result(result: dict, text: str) -> bool:
-    """True for accepted non-answer rows in OpenClaw/Hermes distinction recall."""
+    """True for accepted non-answer rows in OpenClaw/Hermes distinction recall.
+
+    Stays route-local: it composes the extracted setup/handoff classifiers
+    with ``_is_live_state_snapshot_result``, which is still a route-level
+    helper.
+    """
     return (
         _is_openclaw_setup_noise_result(result, text)
         or _is_openclaw_hermes_handoff_noise_result(result, text)
