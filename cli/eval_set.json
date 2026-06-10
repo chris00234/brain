@@ -92,8 +92,14 @@
   {
     "query": "watchtower auto update schedule",
     "collection": "knowledge",
-    "expected_source": "docker-compose.yml",
-    "expected_content": "watchtower"
+    "expected_source": "semantic_memory",
+    "expected_content": "Diun",
+    "expected_alternates": [
+      "does not run Watchtower",
+      "notification-only"
+    ],
+    "_update_note": "Contract 5: old expectation (docker-compose.yml + 'watchtower') tested the SUPERSEDED state — no compose on disk defines watchtower anymore; the durable semantic truth atom states Chris does not run Watchtower and uses Diun notification-only at 8:00 AM PT. Case now pins the CURRENT truth.",
+    "_updated_at": "2026-06-10T01:35"
   },
   {
     "query": "cloudflared container image",
@@ -248,8 +254,13 @@
   {
     "query": "building personal AI assistant blog",
     "collection": "all",
-    "expected_source": "canonical",
-    "expected_content": "intelligence"
+    "expected_source": "blog.chrischodev.com",
+    "expected_content": "Personal AI Assistant",
+    "expected_alternates": [
+      "openclaw-ai-assistant-setup"
+    ],
+    "_update_note": "Contract 5: query asks for the blog; the authoritative answer is the blog.chrischodev.com post 'Building My Personal AI Assistant with OpenClaw' (live top-2). Old expected_content 'intelligence' appears in no live answer row.",
+    "_updated_at": "2026-06-10T01:35"
   },
   {
     "query": "RESTful API design blog post",
@@ -566,8 +577,10 @@
   {
     "query": "brain API nginx reverse proxy",
     "collection": "all",
-    "expected_source": "brain-api.conf",
-    "expected_content": "brain"
+    "expected_source": "nginx",
+    "expected_content": "brain",
+    "_update_note": "Contract 5: /Users/chrischo/server/nginx/conf.d/brain-api.conf exists again (created 2026-04-11, 5 proxy_pass directives) and is the authoritative source; 'nginx' matches both the live conf and canonical nginx architecture docs. Supersedes the 2026-04-17 note saying the conf did not exist.",
+    "_updated_at": "2026-06-10T01:35"
   },
   {
     "query": "canonical pipeline nightly promote",
@@ -716,8 +729,10 @@
   {
     "query": "recent changes this week",
     "collection": "all",
-    "expected_source": "experience",
-    "expected_content": ""
+    "expected_source": "live_state",
+    "expected_content": "",
+    "_update_note": "Contract 5: old 'experience' hit came from deleted ~/.openclaw workspace rows (vanished-source class, Contract 4). The purpose-built living answer is canonical/live_state/recent_commits.md (live top-1).",
+    "_updated_at": "2026-06-10T01:35"
   },
   {
     "query": "last month incidents",
@@ -734,8 +749,10 @@
   {
     "query": "changes since April",
     "collection": "all",
-    "expected_source": "experience",
-    "expected_content": ""
+    "expected_source": "incidents",
+    "expected_content": "",
+    "_update_note": "Contract 5: old 'experience' hit came from a deleted ~/.openclaw LEARNINGS file. The living authoritative answer is canonical/incidents/april-2026-incidents-summary.md (live top-2).",
+    "_updated_at": "2026-06-10T01:35"
   },
   {
     "query": "nonexistent service foobar xyz",
