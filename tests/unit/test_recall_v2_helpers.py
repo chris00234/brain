@@ -7,6 +7,7 @@ refactor verifies no behavior change.
 
 from __future__ import annotations
 
+import copy
 import sys
 from pathlib import Path
 
@@ -7045,3 +7046,221 @@ def test_retrieval_quality_filter_preserves_cost_tooling_korean_particle_query()
     ]
     filtered = _apply_retrieval_quality_filter("크리스가 유료 API 과금에서 선호하는 방식이 뭐야?", fused)
     assert [r["id"] for r in filtered] == ["cost-pref"]
+
+
+# ── Metacognitive surface observability + augmented-query single-compute ──
+# (2026-06-10 recall cleanup backlog) Swallowed metacognitive failures must
+# log a warning (observable outage, unchanged best-effort success behavior),
+# and the governance/quality-filter passes must reuse ONE precomputed
+# _augment_query_for_recall result instead of recomputing it per call/row.
+
+
+class _FakeWarnLog:
+    def __init__(self):
+        self.warnings: list[tuple] = []
+
+    def warning(self, msg, *args, **kwargs):
+        self.warnings.append((msg, args))
+
+
+def test_metacognitive_surface_pass1_failure_logs_warning(monkeypatch):
+    """Pass 1 swallowing stays best-effort but is now observable: an atoms
+    ledger outage logs exactly one warning and the helper still returns int."""
+    import atoms_store
+    from routes import recall as recall_mod
+    from routes.recall import _apply_metacognitive_surface_inplace
+
+    def _boom(*a, **k):
+        raise RuntimeError("atoms.db unavailable")
+
+    fake_log = _FakeWarnLog()
+    monkeypatch.setattr(recall_mod, "log", fake_log)
+    monkeypatch.setattr(atoms_store, "_conn", _boom)
+    monkeypatch.setattr(recall_mod, "get_vector_store", lambda: _FakeVectorStore(points=[]))
+
+    fused = [{"id": "atm_1", "collection": "semantic_memory"}]
+    ms = _apply_metacognitive_surface_inplace(fused, top_n=1)
+
+    assert isinstance(ms, int)
+    assert "confidence" not in fused[0]
+    assert len(fake_log.warnings) == 1
+    assert "confidence/trust" in fake_log.warnings[0][0]
+
+
+def test_metacognitive_surface_pass2_failure_logs_warning(monkeypatch):
+    """Pass 2 swallowing: a Qdrant outage logs exactly one warning and the
+    helper still returns int without surfacing pending_contradictions."""
+    import atoms_store
+    from routes import recall as recall_mod
+    from routes.recall import _apply_metacognitive_surface_inplace
+
+    fake_log = _FakeWarnLog()
+    monkeypatch.setattr(recall_mod, "log", fake_log)
+    monkeypatch.setattr(atoms_store, "_conn", lambda *a, **k: _FakeAtomsConnCtx(_FakeAtomsConn(rows=[])))
+    monkeypatch.setattr(
+        recall_mod, "get_vector_store", lambda: _FakeVectorStore(raise_exc=RuntimeError("qdrant down"))
+    )
+
+    fused = [{"id": "atm_1", "collection": "canonical"}]
+    ms = _apply_metacognitive_surface_inplace(fused, top_n=1)
+
+    assert isinstance(ms, int)
+    assert "pending_contradictions" not in fused[0]
+    assert len(fake_log.warnings) == 1
+    assert "pending-contradictions" in fake_log.warnings[0][0]
+
+
+def test_metacognitive_surface_happy_path_logs_no_warnings(monkeypatch):
+    """No outage → no warnings; expected-missing optional data (e.g. empty
+    contradiction set) must not produce log noise."""
+    import atoms_store
+    from routes import recall as recall_mod
+    from routes.recall import _apply_metacognitive_surface_inplace
+
+    fake_log = _FakeWarnLog()
+    monkeypatch.setattr(recall_mod, "log", fake_log)
+    conn = _FakeAtomsConn(rows=[{"chroma_id": "atm_1", "confidence": 0.8, "trust_score": 0.9}])
+    monkeypatch.setattr(atoms_store, "_conn", lambda *a, **k: _FakeAtomsConnCtx(conn))
+    monkeypatch.setattr(recall_mod, "get_vector_store", lambda: _FakeVectorStore(points=[]))
+
+    fused = [{"id": "atm_1", "collection": "semantic_memory"}]
+    _apply_metacognitive_surface_inplace(fused, top_n=1)
+
+    assert fake_log.warnings == []
+
+
+def _install_augment_counter(monkeypatch):
+    """Wrap _augment_query_for_recall with a call counter (real behavior kept)."""
+    from routes import recall as recall_mod
+
+    real_augment = recall_mod._augment_query_for_recall
+    calls: list[str] = []
+
+    def _counting(q):
+        calls.append(q)
+        return real_augment(q)
+
+    monkeypatch.setattr(recall_mod, "_augment_query_for_recall", _counting)
+    return calls
+
+
+_AUGMENT_ONCE_FUSED = [
+    {
+        "id": "canon-docker",
+        "collection": "canonical",
+        "title": "Docker deploy preference",
+        "metadata": {"category": "preference", "review_state": "accepted"},
+        "content": "Chris deploys every service as a Docker container registered in Uptime Kuma.",
+        "score": 90.0,
+    },
+    {
+        "id": "failure-note",
+        "collection": "semantic_memory",
+        "title": "recall gap note",
+        "content": "brain_recall failed to surface the deploy preference in last week's session.",
+        "score": 80.0,
+    },
+    {
+        "id": "session-noise",
+        "collection": "experience",
+        "title": "session log",
+        "content": "Weekly session summary about unrelated nginx config edits.",
+        "score": 70.0,
+    },
+]
+
+
+def test_quality_filter_computes_augmented_query_once(monkeypatch):
+    """One filter call over N rows must compute the augmentation exactly once
+    (previously: once per row via the stale-quality check plus two more)."""
+    from routes.recall import _apply_retrieval_quality_filter
+
+    calls = _install_augment_counter(monkeypatch)
+    fused = copy.deepcopy(_AUGMENT_ONCE_FUSED)
+
+    out = _apply_retrieval_quality_filter("docker deploy 설정 선호", fused)
+
+    assert any(r["id"] == "canon-docker" for r in out)
+    assert len(calls) == 1
+
+
+def test_quality_filter_precomputed_augmented_query_skips_recompute_and_matches(monkeypatch):
+    """Passing augmented_query yields zero recomputes and identical output."""
+    from routes import recall as recall_mod
+    from routes.recall import _apply_retrieval_quality_filter
+
+    q = "docker deploy 설정 선호"
+    baseline = _apply_retrieval_quality_filter(q, copy.deepcopy(_AUGMENT_ONCE_FUSED))
+
+    pre = recall_mod._augment_query_for_recall(q)
+    calls = _install_augment_counter(monkeypatch)
+    threaded = _apply_retrieval_quality_filter(q, copy.deepcopy(_AUGMENT_ONCE_FUSED), augmented_query=pre)
+
+    assert calls == []
+    assert threaded == baseline
+
+
+def test_governance_computes_augmented_query_once_and_matches_precomputed(monkeypatch):
+    """Governance computes the augmentation once (the brain-failure-note check
+    is hoisted out of the per-row loop) and the precomputed path is identical."""
+    from routes import recall as recall_mod
+    from routes.recall import _apply_recall_governance_inplace
+
+    q = "docker deploy 설정 선호"
+    baseline = copy.deepcopy(_AUGMENT_ONCE_FUSED)
+    _apply_recall_governance_inplace(q, baseline)
+    failure_row = next(r for r in baseline if r["id"] == "failure-note")
+    assert "brain_failure_note_penalty" in failure_row.get("governance", [])
+
+    calls = _install_augment_counter(monkeypatch)
+    counted = copy.deepcopy(_AUGMENT_ONCE_FUSED)
+    _apply_recall_governance_inplace(q, counted)
+    assert len(calls) == 1
+    assert counted == baseline
+
+    # Compute the precomputed value (through the counter), then clear so only
+    # governance-internal calls are counted.
+    pre = recall_mod._augment_query_for_recall(q)
+    calls.clear()
+    threaded = copy.deepcopy(_AUGMENT_ONCE_FUSED)
+    _apply_recall_governance_inplace(q, threaded, augmented_query=pre)
+    assert calls == []
+    assert threaded == baseline
+
+
+def test_recall_batch_augments_each_query_exactly_once(monkeypatch):
+    """/recall/batch threads its precomputed augmented query into governance
+    and the quality filter: one augment per query, zero for live-state gated."""
+    from routes import recall as recall_mod
+
+    def _fake_search(query, limit, **kw):
+        return {
+            "results": [
+                {
+                    "id": "canon-docker",
+                    "collection": "canonical",
+                    "title": "Docker deploy preference",
+                    "metadata": {"category": "preference", "review_state": "accepted"},
+                    "content": "Chris deploys every service as a Docker container.",
+                    "score": 90.0,
+                }
+            ]
+        }
+
+    monkeypatch.setattr(recall_mod.search_unified, "search_all", _fake_search)
+    calls = _install_augment_counter(monkeypatch)
+
+    class _Req:
+        queries = ["docker deploy 설정 선호", "current kanban task status"]
+        n = 3
+        rerank = True
+        decay = True
+        agent = "test"
+
+    out = recall_mod.recall_batch.__wrapped__(_Req(), _Req())
+
+    by_query = {entry["query"]: entry for entry in out["results"]}
+    assert [h["id"] for h in by_query["docker deploy 설정 선호"]["hits"]] == ["canon-docker"]
+    assert by_query["current kanban task status"]["hits"] == []
+    # 1 augment for the real query; the live-state query short-circuits first.
+    assert calls == ["docker deploy 설정 선호"]

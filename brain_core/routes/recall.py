@@ -780,7 +780,8 @@ def _apply_metacognitive_surface_inplace(fused: list[dict], top_n: int) -> int:
     pending_contradictions) into the top-N semantic_memory results.
 
     Two passes, both best-effort (each wrapped in try/except so a brain.db
-    or Qdrant outage doesn't break the recall response):
+    or Qdrant outage doesn't break the recall response; failures are logged
+    at warning so outages are observable instead of silently swallowed):
 
       1. Confidence + trust_score from atoms.confidence (Bayesian-updated
          ledger), optionally Platt-calibrated via confidence_calibration.
@@ -838,8 +839,8 @@ def _apply_metacognitive_surface_inplace(fused: list[dict], top_n: int) -> int:
                     r["confidence"] = row["confidence"]
                     r["confidence_raw"] = row["confidence_raw"]
                     r["trust_score_current"] = row["trust_score"]
-    except Exception:
-        pass
+    except Exception as _meta_conf_err:
+        log.warning("metacognitive confidence/trust surface failed (best-effort): %s", _meta_conf_err)
 
     # Pass 2: pending-contradictions count
     try:
@@ -872,8 +873,8 @@ def _apply_metacognitive_surface_inplace(fused: list[dict], top_n: int) -> int:
                     rid = r.get("id", "")
                     if rid and rid in contra_count:
                         r["pending_contradictions"] = contra_count[rid]
-    except Exception:
-        pass
+    except Exception as _meta_contra_err:
+        log.warning("metacognitive pending-contradictions surface failed (best-effort): %s", _meta_contra_err)
 
     return int((time.time() - t_meta) * 1000)
 
@@ -1731,15 +1732,19 @@ _BRAIN_QUALITY_BROAD_TOKENS = _brain_quality_helpers.BRAIN_QUALITY_BROAD_TOKENS
 _BRAIN_QUALITY_GENERIC_MARKERS = _brain_quality_helpers.BRAIN_QUALITY_GENERIC_MARKERS
 
 
-def _is_brain_quality_query(q: str) -> bool:
-    return _brain_quality_helpers.is_brain_quality_query_text(_augment_query_for_recall(q))
+def _is_brain_quality_query(q: str, *, augmented_query: str | None = None) -> bool:
+    if augmented_query is None:
+        augmented_query = _augment_query_for_recall(q)
+    return _brain_quality_helpers.is_brain_quality_query_text(augmented_query)
 
 
-def _is_stale_generic_quality_result(result: dict, q: str) -> bool:
+def _is_stale_generic_quality_result(result: dict, q: str, *, augmented_query: str | None = None) -> bool:
+    if augmented_query is None:
+        augmented_query = _augment_query_for_recall(q)
     return _brain_quality_helpers.is_stale_generic_quality_result(
         result,
         q,
-        quality_query_text=_augment_query_for_recall(q),
+        quality_query_text=augmented_query,
     )
 
 
@@ -1755,7 +1760,7 @@ def _is_stale_generic_quality_result(result: dict, q: str) -> bool:
 # world-knowledge. Class-level vocabulary, not probe strings.
 
 
-def _is_pure_personal_factoid_probe(q: str) -> bool:
+def _is_pure_personal_factoid_probe(q: str, *, augmented_query_tokens: set[str] | None = None) -> bool:
     """A PURE personal-fact probe: names a personal subject (Chris/my/user) with
     distinctive attribute terms, carries NO tool/media/runtime domain noun, no
     matched route guarantee, and is not an explicit summary request.
@@ -1770,19 +1775,30 @@ def _is_pure_personal_factoid_probe(q: str) -> bool:
         return False
     if _is_positive_summary_intent_query(q):
         return False
-    if _tokenize_recall_text(_augment_query_for_recall(q)) & _FACTOID_GATE_OFF_DOMAIN_TOKENS:
+    if augmented_query_tokens is None:
+        augmented_query_tokens = _tokenize_recall_text(_augment_query_for_recall(q))
+    if augmented_query_tokens & _FACTOID_GATE_OFF_DOMAIN_TOKENS:
         return False
     return not _match_route_guarantees(q)
 
 
-def _apply_retrieval_quality_filter(q: str, fused: list[dict]) -> list[dict]:
+def _apply_retrieval_quality_filter(
+    q: str, fused: list[dict], *, augmented_query: str | None = None
+) -> list[dict]:
     """Post-rank quality pass shared by raw recall and other Brain tool paths.
 
     It removes stale Brain-quality summary noise and collapses exact/near
     duplicate memories while keeping the best canonical/truth-scored row.
+
+    `augmented_query` lets callers that already computed
+    _augment_query_for_recall(q) (recall_v2, /recall/batch) pass it in so the
+    per-result loop doesn't recompute the expansion; semantics are identical.
     """
     if not fused:
         return fused
+    if augmented_query is None:
+        augmented_query = _augment_query_for_recall(q)
+    augmented_query_tokens = _tokenize_recall_text(augmented_query)
     summary_excluded = _is_summary_excluded_query(q)
     generic_recipe_query = _is_generic_recipe_query(q)
     # Genuine out-of-domain world-knowledge prompt: an anchorless recipe / generic
@@ -1805,10 +1821,10 @@ def _apply_retrieval_quality_filter(q: str, fused: list[dict]) -> list[dict]:
     # for "Calendar and Reminders"), and Korean prompts glue particles onto the
     # nouns (리마인더는/일정이랑) that no atom carries — so the literal-overlap gate
     # would wrongly EMPTY those. Genuine factoid probes (teacher/OMSCS …) keep it.
-    pure_personal_factoid_probe = _is_pure_personal_factoid_probe(q)
-    openclaw_hermes_distinction_query = _is_openclaw_hermes_distinction_query(
-        _tokenize_recall_text(_augment_query_for_recall(q))
+    pure_personal_factoid_probe = _is_pure_personal_factoid_probe(
+        q, augmented_query_tokens=augmented_query_tokens
     )
+    openclaw_hermes_distinction_query = _is_openclaw_hermes_distinction_query(augmented_query_tokens)
     # Only keep stale per-agent OpenClaw workspace instruction docs (AGENTS.md/
     # TOOLS.md) when the query is actually about OpenClaw/the agents; otherwise
     # they inject migration-era instructions over current durable truth.
@@ -1818,7 +1834,7 @@ def _apply_retrieval_quality_filter(q: str, fused: list[dict]) -> list[dict]:
         if not isinstance(result, dict):
             continue
         result_text = _result_text(result)
-        if _is_stale_generic_quality_result(result, q):
+        if _is_stale_generic_quality_result(result, q, augmented_query=augmented_query):
             continue
         if (
             personal_attribute_query
@@ -1880,15 +1896,23 @@ def _apply_retrieval_quality_filter(q: str, fused: list[dict]) -> list[dict]:
     return deduped
 
 
-def _apply_recall_governance_inplace(q: str, fused: list[dict]) -> None:
+def _apply_recall_governance_inplace(
+    q: str, fused: list[dict], *, augmented_query: str | None = None
+) -> None:
     """Server-side ranking governance for /recall/v2.
 
     Boost accepted canonical truth and durable preference/decision/correction
     rows; penalize broad weekly/summary/raptor documents for specific queries
     when a non-summary topical candidate exists. Mutates scores in place and
     annotates each touched row with a `governance` reason list for eval/debug.
+
+    `augmented_query` lets callers that already computed
+    _augment_query_for_recall(q) (recall_v2, /recall/batch) pass it in so this
+    pass doesn't recompute the expansion; semantics are identical.
     """
-    query_tokens = _tokenize_recall_text(_augment_query_for_recall(q))
+    if augmented_query is None:
+        augmented_query = _augment_query_for_recall(q)
+    query_tokens = _tokenize_recall_text(augmented_query)
     if not query_tokens or not fused:
         return
 
@@ -1907,7 +1931,8 @@ def _apply_recall_governance_inplace(q: str, fused: list[dict]) -> None:
     summary_excluded = _is_summary_excluded_query(q)
     positive_summary_intent = _is_positive_summary_intent_query(q)
     personal_attribute_binding = _query_analyzer.personal_attribute_query_binding(q)
-    pure_personal_factoid_probe = _is_pure_personal_factoid_probe(q)
+    pure_personal_factoid_probe = _is_pure_personal_factoid_probe(q, augmented_query_tokens=query_tokens)
+    brain_quality_query = _is_brain_quality_query(q, augmented_query=augmented_query)
 
     for result in fused:
         if not isinstance(result, dict):
@@ -1980,7 +2005,7 @@ def _apply_recall_governance_inplace(q: str, fused: list[dict]) -> None:
             delta -= 80.0
             reasons.append("budget_offtopic_penalty")
 
-        if _is_brain_failure_note_result(result_text) and not _is_brain_quality_query(q):
+        if _is_brain_failure_note_result(result_text) and not brain_quality_query:
             delta -= 140.0
             reasons.append("brain_failure_note_penalty")
 
@@ -2592,7 +2617,9 @@ def recall_v2(
     openclaw_hermes_distinction_query = _is_openclaw_hermes_distinction_query(query_tokens_for_governance)
     codex_hermes_tui_query = _is_codex_hermes_tui_query(query_tokens_for_governance)
     personal_attribute_query = _query_analyzer.personal_attribute_query_binding(q) is not None
-    pure_personal_factoid_probe = _is_pure_personal_factoid_probe(q)
+    pure_personal_factoid_probe = _is_pure_personal_factoid_probe(
+        q, augmented_query_tokens=query_tokens_for_governance
+    )
 
     start_dt, end_dt = temporal.parse_range(since, until)
     # ChromaDB 1.4.1 rejects string operands in $gte/$lt; filter Python-side instead.
@@ -2828,10 +2855,10 @@ def recall_v2(
         fused, decay_ms = _apply_time_decay(fused)
         timing["decay_ms"] = decay_ms
 
-    _apply_recall_governance_inplace(q, fused)
+    _apply_recall_governance_inplace(q, fused, augmented_query=search_query)
     _apply_primary_doc_boost_inplace(fused)
     fused = _sort_and_diversify(fused, top_window=n * 2)
-    fused = _apply_retrieval_quality_filter(q, fused)
+    fused = _apply_retrieval_quality_filter(q, fused, augmented_query=search_query)
     _inject_route_guarantee_results(q, fused)
     if not canonical_first:
         # canonical_first is a truth-layer-only contract (sources=["canonical"]);
@@ -2914,10 +2941,10 @@ def recall_v2(
             # CRAG retry returns rows ranked for the rewritten query. Re-apply
             # original-query governance so broad tool recommendation and other
             # preference probes keep their noise penalties after retry.
-            _apply_recall_governance_inplace(q, fused)
+            _apply_recall_governance_inplace(q, fused, augmented_query=search_query)
             _apply_primary_doc_boost_inplace(fused)
             fused = _sort_and_diversify(fused, top_window=n)
-            fused = _apply_retrieval_quality_filter(q, fused)
+            fused = _apply_retrieval_quality_filter(q, fused, augmented_query=search_query)
 
     # Parent-child expand — see _apply_parent_child_expand docstring.
     fused = _apply_parent_child_expand(fused)
@@ -3049,10 +3076,18 @@ def recall_stream(
 def recall_batch(request: Request, req: RecallBatchRequest) -> dict:
     """Batch recall — submit up to 20 queries in one HTTP call.
 
-    Returns `{"results": [{"query": q, "hits": [...]}, ...]}`. Each
-    query runs through the full /recall/v2 pipeline (rerank, decay,
-    canonical trust override, metacognition enrichment). Queries run
-    in parallel via the shared variant pool to minimize latency.
+    Returns `{"results": [{"query": q, "hits": [...]}, ...]}`. Each query
+    runs a LIGHTER single-pass pipeline than /recall/v2: the live-state
+    gate, one augmented search_all pass, then the shared governance scoring
+    (canonical trust boost, noise penalties) and retrieval-quality filter
+    (stale-summary drop, near-dup collapse). It does NOT run the v2-only
+    stages: variant fan-out/RRF, HyDE/expansion, token or cross-encoder
+    rerank, time decay, route-guarantee injection, factoid rescue, content
+    enrichment, metacognition surface, or response caching — the `rerank`/
+    `decay` request fields are accepted for payload compatibility but
+    unused on this path. Queries run in parallel via a per-request thread
+    pool (≤8 workers) to minimize latency; per-query errors are returned
+    inline as `{"query": q, "error": ...}` without failing the batch.
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -3071,8 +3106,10 @@ def recall_batch(request: Request, req: RecallBatchRequest) -> dict:
             search_q = _augment_query_for_recall(q)
             payload = _su.search_all(search_q, limit=req.n * 2, original_query=q)
             hits = payload.get("results") or []
-            _apply_recall_governance_inplace(q, hits)
-            hits = _apply_retrieval_quality_filter(q, _sort_and_diversify(hits, top_window=req.n * 2))
+            _apply_recall_governance_inplace(q, hits, augmented_query=search_q)
+            hits = _apply_retrieval_quality_filter(
+                q, _sort_and_diversify(hits, top_window=req.n * 2), augmented_query=search_q
+            )
             return {"query": q, "hits": hits[: req.n]}
         except Exception as e:
             return {"query": q, "error": str(e)[:200]}
