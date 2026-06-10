@@ -143,3 +143,49 @@ def test_crag_retry_preserves_canonical_first(monkeypatch):
     captured["retry_fn"]("docker deployment conventions canonical truth")
     assert sources_seen, "retry never searched"
     assert all(s == ["canonical"] for s in sources_seen), sources_seen
+
+
+def test_crag_retry_preserves_agent_profile_filter(monkeypatch):
+    """The CRAG retry must forward the caller's agent filter — dropping it
+    would let the retry mix other profiles' memories into a profile-scoped
+    recall (cross-profile contamination)."""
+    import search_unified
+
+    wheres_seen: list = []
+
+    def fake_search_all(query, limit, *, sources=None, where=None, **kw):
+        wheres_seen.append(where)
+        row = _canonical_row(
+            "canon1",
+            "Deployment convention: every service ships as a docker container "
+            "with Uptime Kuma registration and a Glance dashboard entry.",
+        )
+        return {"results": [row], "total_candidates": 1}
+
+    monkeypatch.setattr(search_unified, "search_all", fake_search_all)
+    R, fn = _handler()
+
+    captured: dict = {}
+
+    def fake_run_crag_retry(q, n, fused, retry_fn):
+        captured["retry_fn"] = retry_fn
+        return fused, 0, {}, None
+
+    monkeypatch.setattr(R, "_decide_use_crag", lambda q, iterative: (True, None))
+    monkeypatch.setattr(R, "_run_crag_retry", fake_run_crag_retry)
+
+    fn(
+        _req(),
+        "docker deployment conventions homelab",
+        n=5,
+        collection=None,
+        iterative=True,
+        agent="jenna",
+    )
+    assert "retry_fn" in captured, "CRAG retry was never wired"
+    assert wheres_seen and all(w == {"agent": "jenna"} for w in wheres_seen), wheres_seen
+
+    wheres_seen.clear()
+    captured["retry_fn"]("docker deployment conventions rewritten")
+    assert wheres_seen, "retry never searched"
+    assert all(w == {"agent": "jenna"} for w in wheres_seen), wheres_seen

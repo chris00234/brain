@@ -3480,6 +3480,7 @@ def recall_v2(
                 entity=entity,
                 collection=collection,
                 domain=domain,
+                agent=agent,
                 source_type=source_type,
                 include_history=include_history,
                 include_obsolete=include_obsolete,
@@ -3551,9 +3552,11 @@ def recall_v2(
 
     # Auto-feedback + action-audit dispatch — see
     # _dispatch_post_recall_side_effects docstring for the off-path dispatch
-    # contract.
-    agent = request.headers.get("x-agent") or request.query_params.get("actor") or "unknown"
-    _dispatch_post_recall_side_effects(q, fused, n, agent, background)
+    # contract. Named audit_actor, NOT `agent`: rebinding `agent` here mutated
+    # the closure cell the CRAG `_crag_retry` captures, silently replacing the
+    # caller's profile filter with the audit actor.
+    audit_actor = request.headers.get("x-agent") or request.query_params.get("actor") or "unknown"
+    _dispatch_post_recall_side_effects(q, fused, n, audit_actor, background)
 
     return response
 

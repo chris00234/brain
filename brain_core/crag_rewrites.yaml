@@ -1,0 +1,39 @@
+# crag_rewrites.yaml — data-driven source-term rewrite bridges for CRAG.
+#
+# When stage-1 retrieval is weak, rule_based_rewrite_candidates() retries with
+# deterministic rewrites BEFORE the LLM rewrite path. Each bridge fires when
+# ALL of its `when_terms` appear (case-insensitive substring) in the query;
+# its `rewrites` become candidate retry queries, in order.
+#
+# This file is DATA, not code: corpus-specific vocabulary (proper nouns,
+# source-document terms, cross-language equivalents) lives here so the rewrite
+# mechanism in brain_core/crag.py stays generic. Entry rules:
+#   - bridge TOPIC vocabulary to the corpus's SOURCE vocabulary
+#     (e.g. a residency-renewal topic to the issuing agency's document terms)
+#   - never encode an exact eval probe or a one-off failing prompt
+#   - keep rewrites short keyword queries, not sentences
+# Fail-open: a missing or malformed file disables bridges (the generic
+# script-split and LLM rewrite paths still run); it never breaks recall.
+
+version: 1
+bridges:
+  - when_terms: [영주권, 갱신]
+    rewrites:
+      - USCIS I-751 receipt notice
+      - receipt notice USCIS
+      - USCIS permanent resident receipt notice
+  - when_terms: [renewal, receipt]
+    rewrites:
+      - receipt notice
+      - USCIS I-751 receipt notice
+      - USCIS receipt notice renewal
+  - when_terms: [dinner]
+    rewrites:
+      - 저녁 약속
+      - Kim dinner
+      - dinner plan 저녁
+  - when_terms: [저녁]
+    rewrites:
+      - 저녁 약속
+      - Kim dinner 저녁
+      - dinner plan 저녁

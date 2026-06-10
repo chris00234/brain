@@ -110,6 +110,8 @@ def _load_recall_governance() -> dict[str, Any]:
             ),
             "match_route_tags": rg.matched_route_tags,
             "is_low_authority_result": sa.is_low_authority_result,
+            "is_episodic_event_log_result": sa.is_episodic_event_log_result,
+            "is_generic_summary_result": sa.is_generic_summary_result,
             "is_openclaw_historical_result": sa.is_openclaw_historical_result,
             "prefetch_policy": pp.policy_for("provider_prefetch"),
         }
@@ -134,6 +136,8 @@ _govern_personal_attribute_result_matches_query = _govern.get("personal_attribut
 _govern_personal_factoid_query_terms = _govern.get("personal_factoid_query_terms")
 _govern_personal_factoid_overlap = _govern.get("personal_factoid_result_has_strong_attribute_overlap")
 _govern_is_low_authority_result = _govern.get("is_low_authority_result")
+_govern_is_episodic_event_log = _govern.get("is_episodic_event_log_result")
+_govern_is_generic_summary = _govern.get("is_generic_summary_result")
 _govern_is_openclaw_historical_result = _govern.get("is_openclaw_historical_result")
 _GOVERN_PREFETCH_POLICY = _govern.get("prefetch_policy")
 
@@ -246,18 +250,19 @@ _LOW_SIGNAL_STATUS_QUERY_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Format/provenance markers ONLY — never event proper nouns or week-instance
+# tokens. Instance markers ("w15 ", "boston", "claude acp", "trip") penalized
+# unrelated rows that merely shared a word (e.g. a durable "Boston Dynamics"
+# preference) and rotted as new weeks/events arrived. Week-numbered summaries
+# and episodic coding/session captures are classified generically by the
+# shared source-authority contract (is_generic_summary_result's \bw\d{1,2}\b,
+# is_episodic_event_log_result), wired in via _govern_is_episodic_result.
 _EPISODIC_MARKERS = (
     "session",
     "experience",
     "message",
     "weekly/",
     "week ",
-    "w15 ",
-    "w20 ",
-    "w21 ",
-    "trip",
-    "boston",
-    "claude acp",
 )
 
 _RANK_STOPWORDS = {
@@ -1296,8 +1301,17 @@ class BrainMemoryProvider(MemoryProvider):
         # plausible. Brain canonical-first can return generic canonical pages;
         # those should not beat a directly relevant hard-filter result.
         durable = collection in {"canonical", "distilled"} or source_type in {"canonical", "distilled"}
-        episodic = collection in {"experience", "personal"} or any(
-            marker in title or marker in content or marker in path for marker in _EPISODIC_MARKERS
+        # Episodic = collection provenance, format markers, or the SHARED
+        # source-authority classifiers (episodic event/coding logs, generic
+        # week-numbered/summary-titled rows) — never event proper nouns.
+        episodic = (
+            collection in {"experience", "personal"}
+            or any(marker in title or marker in content or marker in path for marker in _EPISODIC_MARKERS)
+            or (
+                _govern_is_episodic_event_log is not None
+                and _govern_is_episodic_event_log(result, BrainMemoryProvider._result_haystack(result))
+            )
+            or (_govern_is_generic_summary is not None and _govern_is_generic_summary(result))
         )
         overlap = BrainMemoryProvider._topical_overlap(result, query)
         title_overlap = sum(1 for token in BrainMemoryProvider._query_topics(query) if token in title)

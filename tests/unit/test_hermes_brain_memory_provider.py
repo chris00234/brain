@@ -1833,3 +1833,75 @@ def test_query_topics_bridges_korean_domain_nouns_to_english():
     assert {"calendar", "reminder"} <= topics
     # A non-domain Korean fact probe yields no spurious tooling bridge tokens.
     assert "calendar" not in set(BrainMemoryProvider._query_topics("크리스 OMSCS 2026년 가을"))
+
+
+# ── Episodic demotion: provenance/format class, never event proper nouns ──
+# Regression for the _EPISODIC_MARKERS cleanup: instance markers ("boston",
+# "claude acp", "trip", week numbers) once demoted any row sharing a word.
+# Episodic demotion must come from collection provenance, format markers, or
+# the shared source-authority classifiers.
+
+
+def test_rank_score_durable_row_with_event_proper_noun_not_episodic_penalized():
+    """Negative control: a durable canonical preference mentioning a proper
+    noun that once was an episodic marker (a robotics vendor named Boston
+    Dynamics, an ACP trip note) must keep its durable rank."""
+    q = "robotics simulation tooling preference"
+    durable_with_noun = {
+        "id": "r1",
+        "title": "Robotics tooling preference",
+        "content": "Chris prefers Boston Dynamics simulation tooling for robotics trip planning experiments.",
+        "collection": "canonical",
+        "source_type": "canonical",
+        "score": 50.0,
+    }
+    durable_plain = {
+        "id": "r2",
+        "title": "Robotics tooling preference",
+        "content": "Chris prefers vendor simulation tooling for robotics planning experiments.",
+        "collection": "canonical",
+        "source_type": "canonical",
+        "score": 50.0,
+    }
+    with_noun = BrainMemoryProvider._rank_score(durable_with_noun, query=q)
+    plain = BrainMemoryProvider._rank_score(durable_plain, query=q)
+    # The proper noun must not trigger the -500 episodic penalty.
+    assert abs(with_noun - plain) < 400.0, (with_noun, plain)
+
+
+def test_rank_score_coding_event_row_episodic_penalized_via_shared_classifier():
+    """Positive control: a raw coding-event capture is demoted through the
+    shared source-authority classifier even without local marker words."""
+    q = "robotics simulation tooling preference"
+    base = {
+        "id": "raw_coding_event_123",
+        "title": "Robotics tooling note",
+        "content": "Chris prefers vendor simulation tooling for robotics planning.",
+        "collection": "raw_events",
+        "source_type": "coding_event",
+        "score": 50.0,
+    }
+    durable = dict(base, id="r2", collection="canonical", source_type="canonical")
+    assert (
+        BrainMemoryProvider._rank_score(durable, query=q) - BrainMemoryProvider._rank_score(base, query=q)
+        >= 500.0
+    )
+
+
+def test_rank_score_week_numbered_summary_episodic_penalized_generically():
+    """Positive control: a week-numbered digest row (W15/W22/any week) is
+    demoted via the shared generic-summary classifier, not a per-week marker."""
+    q = "robotics simulation tooling preference"
+    weekly = {
+        "id": "s1",
+        "title": "W22 robotics digest",
+        "content": "Chris prefers vendor simulation tooling for robotics planning.",
+        "collection": "knowledge",
+        "source_type": "note",
+        "score": 50.0,
+    }
+    plain = dict(weekly, id="s2", title="Robotics tooling preference")
+    assert (
+        BrainMemoryProvider._rank_score(plain, query=q) - BrainMemoryProvider._rank_score(weekly, query=q)
+        >= 500.0
+    )
