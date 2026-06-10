@@ -63,3 +63,26 @@ def test_routes_recall_embedding_cache_wrapper_uses_route_level_embedding_monkey
     ]
 
     recall_route._recall_embedding_cache.clear()
+
+
+def test_routes_recall_clear_caches_delegates_to_extracted_cache_state():
+    import routes.recall as recall_route
+
+    recall_route._recall_cache.clear()
+    recall_route._recall_embedding_cache.clear()
+    recall_route._recall_cache["k"] = (
+        0.0,
+        recall_route.RecallV2Response(query="q", results=[], total_candidates=0),
+    )
+    recall_route._recall_embedding_cache.append((0.0, [1.0], "q", {"ok": True}))
+
+    assert recall_route.clear_caches() == {"recall_cache_cleared": 1, "embedding_cache_cleared": 1}
+    assert recall_route._recall_cache == {}
+    assert recall_route._recall_embedding_cache == []
+
+
+def test_routes_recall_reexports_temporal_filter_helper():
+    import recall_temporal
+    import routes.recall as recall_route
+
+    assert recall_route._apply_temporal_filter_inplace is recall_temporal._apply_temporal_filter_inplace

@@ -31,18 +31,23 @@ from indexer import get_embedding as _get_embedding
 from metrics_buffer import metrics_buffer as _metrics_buf
 from rate_limit import limiter
 from recall_cache import (
-    _recall_cache,
+    _recall_cache as _recall_cache,
+)
+from recall_cache import (
     _recall_cache_get,
-    _recall_cache_lock,
     _recall_cache_put,
-    _recall_emb_lock,
-    _recall_embedding_cache,
 )
 from recall_cache import (
     _recall_emb_cache_lookup as _recall_emb_cache_lookup_base,
 )
 from recall_cache import (
     _recall_emb_cache_put as _recall_emb_cache_put_base,
+)
+from recall_cache import (
+    _recall_embedding_cache as _recall_embedding_cache,
+)
+from recall_cache import (
+    clear_caches as _clear_recall_caches,
 )
 from recall_models import (
     CompoundOp,
@@ -64,6 +69,7 @@ from recall_response_builders import (
     _filter_nonempty_result_lists,
     _merge_source_timing,
 )
+from recall_temporal import _apply_temporal_filter_inplace
 
 # Compatibility contract: recall_v2 cache keys include filter_agent={agent};
 # see tests/unit/test_hermes_current_migration.py.
@@ -80,6 +86,7 @@ __all__ = [
     "RecallResultMetadata",
     "RecallV2Response",
     "SearchFeedbackRequest",
+    "clear_caches",
 ]
 
 # ── Shared recall-governance layer ────────────────────────────────────────
@@ -2568,25 +2575,6 @@ def _run_hyde_pass(
     return hypothetical, payload, elapsed_ms
 
 
-def _apply_temporal_filter_inplace(
-    payloads: list[dict],
-    start_dt: datetime | None,
-    end_dt: datetime | None,
-) -> None:
-    """Apply Python-side temporal filter to each payload's results in place.
-
-    ChromaDB 1.4.1 can't range-filter string datetime fields, so the temporal
-    bounds get applied post-search. No-op if both bounds are None.
-
-    Mutates each payload's `results` list in place; returns None.
-    """
-    if not (start_dt or end_dt):
-        return
-    for p in payloads:
-        if isinstance(p, dict) and p.get("results"):
-            p["results"] = temporal.filter_by_created_at(p["results"], start_dt, end_dt)
-
-
 # ── Routes: recall ──────────────────────────────────────
 @router.get("/recall", response_model=RecallResponse, tags=["recall"])
 @limiter.limit("3000/minute")  # M7-WS7 + M8 follow-up: read path — same envelope as /recall/v2
@@ -3700,13 +3688,4 @@ def recall_active(request: Request, req: RecallActiveRequest) -> dict:
 
 # ── Cache management ──────────────────────────────────
 def clear_caches() -> dict:
-    """Clear recall response + embedding caches. Called by /admin/embed_adapter
-    after a LoRA adapter swap so A/B comparisons do not serve stale results.
-    """
-    with _recall_cache_lock:
-        n1 = len(_recall_cache)
-        _recall_cache.clear()
-    with _recall_emb_lock:
-        n2 = len(_recall_embedding_cache)
-        _recall_embedding_cache.clear()
-    return {"recall_cache_cleared": n1, "embedding_cache_cleared": n2}
+    return _clear_recall_caches()
