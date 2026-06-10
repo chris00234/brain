@@ -132,7 +132,7 @@
 | `llm_usage_purge` | `cron(day_of_week=sun, hour=4, minute=55)` | standard | - | 900s | Weekly purge of llm_usage.db >90 days (Sun 4:55am) |
 | `llm_usage_retention` | `cron(day=1, hour=4, minute=30)` | standard | - | 1800s | Roll up llm_usage older than 90d into llm_usage_monthly (1st of month 4:30am) |
 | `log_rotation` | `cron(hour=4, minute=0)` | standard | - | 300s | Truncate job/server logs >3d or >512KB (keeps last 100 lines) |
-| `lora_ab_gate` | `cron(day_of_week=sun, hour=9, minute=30)` | heavy | embedder, eval, qdrant | 1800s | Phase 7: weekly LoRA A/B gate + deploy (Sun 9:30am) |
+| `lora_ab_gate` | `cron(day_of_week=sun, hour=1, minute=30)` | heavy | embedder, eval, qdrant | 1800s | Phase 7: weekly LoRA A/B gate + deploy (Sun 1:30am, off-hours) |
 | `ltr_train` | `cron(day_of_week=sun, hour=4, minute=20)` | heavy | qdrant, training | 900s | Weekly LogisticRegression LtR fit on recall feedback (Sun 04:20) |
 | `memory_consolidation` | `cron(hour=3, minute=45)` | standard | - | 900s | Nightly memory tier promotion/demotion (3:45am, Phase 1D) |
 | `memory_health_report` | `cron(day_of_week=sun, hour=7, minute=35)` | standard | - | 300s | Weekly memory health report (Sunday 7:35am - staggered off eval_holdout_graduate @7:30) |
@@ -290,7 +290,7 @@
 | `llm_usage_purge` | `cron(day_of_week=sun, hour=4, minute=55)` | system | standard | - | 900s | Weekly purge of llm_usage.db >90 days (Sun 4:55am) |
 | `llm_usage_retention` | `cron(day=1, hour=4, minute=30)` | system | standard | - | 1800s | Roll up llm_usage older than 90d into llm_usage_monthly (1st of month 4:30am) |
 | `log_rotation` | `cron(hour=4, minute=0)` | system | standard | - | 300s | Truncate job/server logs >3d or >512KB (keeps last 100 lines) |
-| `lora_ab_gate` | `cron(day_of_week=sun, hour=9, minute=30)` | system | heavy | embedder, eval, qdrant | 1800s | Phase 7: weekly LoRA A/B gate + deploy (Sun 9:30am) |
+| `lora_ab_gate` | `cron(day_of_week=sun, hour=1, minute=30)` | system | heavy | embedder, eval, qdrant | 1800s | Phase 7: weekly LoRA A/B gate + deploy (Sun 1:30am, off-hours) |
 | `ltr_train` | `cron(day_of_week=sun, hour=4, minute=20)` | system | heavy | qdrant, training | 900s | Weekly LogisticRegression LtR fit on recall feedback (Sun 04:20) |
 | `memory_consolidation` | `cron(hour=3, minute=45)` | system | standard | - | 900s | Nightly memory tier promotion/demotion (3:45am, Phase 1D) |
 | `memory_health_report` | `cron(day_of_week=sun, hour=7, minute=35)` | system | standard | - | 300s | Weekly memory health report (Sunday 7:35am - staggered off eval_holdout_graduate @7:30) |
