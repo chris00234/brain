@@ -97,3 +97,44 @@ def test_retrieval_regression_honors_alternates_and_forbidden_content(tmp_path, 
     assert out["rows"][0]["alternate_hit"] is True
     assert out["rows"][1]["forbidden_hit"] is True
     assert out["rows"][1]["ok"] is False
+
+
+def test_default_eval_selection_includes_quality_gate_categories_beyond_limit(tmp_path, monkeypatch):
+    eval_set = tmp_path / "eval_set_stable.json"
+    eval_set.write_text(
+        json.dumps(
+            [
+                {"query": "baseline-1"},
+                {"query": "baseline-2"},
+                {"query": "later-stale", "category": "stale_fact_supersession"},
+                {"query": "later-noise", "category": "clean_hit_topk_noise"},
+                {"query": "later-other", "category": "non_gate_category"},
+            ]
+        )
+    )
+    monkeypatch.setattr(retrieval_regression, "DEFAULT_EVAL_SET", eval_set)
+
+    cases = retrieval_regression._load_cases(eval_set, limit=2)
+
+    assert [case["query"] for case in cases] == ["baseline-1", "baseline-2", "later-stale", "later-noise"]
+
+
+def test_search_unified_route_guarantee_hit_shape():
+    import search_unified
+
+    hits = search_unified._route_guarantee_hits(
+        "Brain recall quality noise prefetch empty summary Claude Code session canonical_first current useful context eval score"
+    )
+
+    assert hits
+    assert hits[0]["source_type"] == "route_guarantee"
+    assert hits[0]["path"] == "route_guarantee:brain_recall_prefetch_quality_eval_no_noise"
+    assert "maximize useful current memory context" in hits[0]["content"]
+
+
+def test_search_unified_identity_location_query_maps_to_identity_primary_doc():
+    import search_unified
+
+    hits = search_unified._primary_doc_hits("Where is Chris based and what timezone does he work in?")
+
+    assert any(str(hit.get("path", "")).endswith("canonical/chris/_identity.md") for hit in hits)

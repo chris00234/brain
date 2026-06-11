@@ -24,6 +24,14 @@ sys.path.insert(0, str(BRAIN_ROOT / "brain_core"))
 REPORT_FILE = BRAIN_ROOT / "logs" / "retrieval_regression.json"
 DEFAULT_EVAL_SET = BRAIN_ROOT / "cli" / "eval_set_stable.json"
 DEFAULT_MIN_PASS_RATE = 80.0
+QUALITY_GATE_CATEGORIES = frozenset(
+    {
+        "stale_fact_supersession",
+        "privacy_negative_personal_source",
+        "identity_canon_over_stale_provenance",
+        "clean_hit_topk_noise",
+    }
+)
 
 
 def _min_pass_rate() -> float:
@@ -42,7 +50,15 @@ def _load_cases(path: Path, limit: int) -> list[dict[str, Any]]:
     if not isinstance(data, list):
         raise ValueError("eval_set_root_not_list")
     cases = [r for r in data if isinstance(r, dict) and r.get("query")]
-    return cases[:limit]
+    selected = list(cases[:limit])
+    if path.resolve() == DEFAULT_EVAL_SET.resolve():
+        seen = {str(case.get("query") or "") for case in selected}
+        selected.extend(
+            case
+            for case in cases[limit:]
+            if case.get("category") in QUALITY_GATE_CATEGORIES and str(case.get("query") or "") not in seen
+        )
+    return selected
 
 
 def _normalize_collection(value: str | None) -> str | None:

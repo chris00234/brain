@@ -1025,7 +1025,9 @@ _CANONICAL_LOOKUP_PATTERNS = re.compile(
     r"\bbrowser\s+instances?\b.*\b(?:close|closed|cleanup)\b|"
     r"\b(?:sensitive\s+keys|admin\s+keys|Ghost\s+Admin|rotatable|secret\s+stores?|hardcoded)\b|"
     r"\bgateway\b.*\b(?:restart|reinstall)\b|"
-    r"\bIrvine\b.*\b(?:August\s+2024|since|residen)"
+    r"\bIrvine\b.*\b(?:August\s+2024|since|residen)|"
+    r"\bChris\b.*\b(?:based|lives?|location|timezone|time\s+zone)\b|"
+    r"\b(?:where\s+is|where\s+does)\s+Chris\b.*\b(?:based|live|work)\b"
     r")",
     re.I,
 )
@@ -1172,6 +1174,14 @@ _CANONICAL_PRIMARY_DOCS = [
                 5000,
             )
         ],
+    ),
+    (
+        re.compile(
+            r"\bChris\b.*\b(?:based|lives?|location|timezone|time\s+zone)\b|"
+            r"\b(?:where\s+is|where\s+does)\s+Chris\b.*\b(?:based|live|work)\b",
+            re.I,
+        ),
+        [("/Users/chrischo/server/knowledge/canonical/chris/_identity.md", 5000)],
     ),
     (
         re.compile(r"\bself[-\s]?learning\b.*\bmemory\s+extraction\b|\bmemory\s+extraction\b.*\blearn", re.I),
@@ -1415,6 +1425,49 @@ def _find_obsidian_doc_by_name(required_terms: tuple[str, ...]) -> str | None:
         except OSError:
             continue
     return None
+
+
+def _route_guarantee_hits(query: str) -> list[dict]:
+    """Return direct-current route guarantees as first-class search rows.
+
+    ``/recall/active`` already injects these when retrieval under-serves a
+    high-priority route. The regression runner exercises ``search_all`` directly,
+    so expose the same class-level durable facts in the unified search surface
+    instead of relying on route-specific lexical matches to retrieve their
+    backing notes.
+    """
+
+    try:
+        from recall_governance.route_guarantees import match_route_guarantees
+    except Exception:
+        return []
+
+    hits: list[dict] = []
+    for guarantee in match_route_guarantees(query):
+        source = f"route_guarantee:{guarantee.id}"
+        hits.append(
+            {
+                "id": source,
+                "source_type": "route_guarantee",
+                "source": source,
+                "collection": "route_guarantee",
+                "title": f"{guarantee.route} route guarantee",
+                "content": guarantee.text,
+                "path": source,
+                "score": 125.0,
+                "trust_tier": 3,
+                "metadata": {
+                    "route": guarantee.route,
+                    "authority": str(guarantee.authority.value),
+                    "status": guarantee.status,
+                    "source": source,
+                    "source_type": "route_guarantee",
+                    "title": f"{guarantee.route} route guarantee",
+                },
+                "governance": ["route_guarantee"],
+            }
+        )
+    return hits
 
 
 def _primary_doc_hits(query: str) -> list[dict]:
@@ -3229,6 +3282,15 @@ def search_all(
 
     if _should_suppress_chris_identity_for_query(relevance_query):
         unique = [r for r in unique if not str(r.get("path") or "").endswith("canonical/chris/_identity.md")]
+
+    route_guarantee_hits = []
+    if not collections and "canonical" in sources:
+        route_guarantee_hits = _route_guarantee_hits(relevance_query)
+    if route_guarantee_hits:
+        seen_paths = {str(r.get("path") or r.get("id") or "") for r in unique}
+        prepend = [r for r in route_guarantee_hits if str(r.get("path") or r.get("id") or "") not in seen_paths]
+        unique = prepend + unique
+        source_timing["route_guarantee_count"] = len(prepend)
 
     final_results = unique[:limit]
 
