@@ -365,7 +365,8 @@ _PROVENANCE_HISTORY_INTENT_RE = re.compile(
     re.I,
 )
 _SOURCE_EVIDENCE_INTENT_RE = re.compile(
-    r"\b(?:show|find|list|retrieve|get|cite|provide|include)\b.{0,80}\b(?:source|sources)\b"
+    r"\b(?:show|find|list|retrieve|get|cite|provide|include)\b.{0,80}\bsources\b"
+    r"|\b(?:cite|provide|include)\b.{0,80}\bsource\b"
     r"|\b(?:source|sources)\b.{0,50}\b(?:provenance|evidence|citation|citations|trace|origin|origins|links?)\b"
     r"|\b(?:source|sources)\s+(?:for|of)\b.{0,80}\b(?:memory|recall|claim|fact|answer|evidence)\b",
     re.I,

@@ -77,17 +77,31 @@ def _result_text(result: Any) -> str:
     return str(result).lower()
 
 
+def _match_text(value: str) -> str:
+    return " ".join(str(value or "").lower().split())
+
+
+def _forbidden_variants(term: str) -> list[str]:
+    normalized = _match_text(term)
+    variants = [normalized] if normalized else []
+    stripped_heading = _match_text(normalized.lstrip("# "))
+    if stripped_heading and stripped_heading not in variants:
+        variants.append(stripped_heading)
+    return variants
+
+
 def _expected_hits(case: dict[str, Any], haystack: str) -> tuple[bool, bool, bool, bool]:
-    expected_content = str(case.get("expected_content") or "").lower().strip()
-    expected_source = str(case.get("expected_source") or "").lower().strip()
+    haystack_match = _match_text(haystack)
+    expected_content = _match_text(str(case.get("expected_content") or ""))
+    expected_source = _match_text(str(case.get("expected_source") or ""))
     alternates_raw = case.get("expected_alternates") or []
-    alternates = [str(v).lower().strip() for v in alternates_raw if str(v).strip()]
+    alternates = [_match_text(str(v)) for v in alternates_raw if str(v).strip()]
     forbidden_raw = case.get("forbidden_content") or []
-    forbidden = [str(v).lower().strip() for v in forbidden_raw if str(v).strip()]
-    content_hit = bool(expected_content and expected_content in haystack)
-    source_hit = bool(expected_source and expected_source in haystack)
-    alternate_hit = any(alt in haystack for alt in alternates)
-    forbidden_hit = any(term in haystack for term in forbidden)
+    forbidden = [variant for v in forbidden_raw for variant in _forbidden_variants(str(v))]
+    content_hit = bool(expected_content and expected_content in haystack_match)
+    source_hit = bool(expected_source and expected_source in haystack_match)
+    alternate_hit = any(alt in haystack_match for alt in alternates)
+    forbidden_hit = any(term in haystack_match for term in forbidden)
     return content_hit, source_hit, alternate_hit, forbidden_hit
 
 

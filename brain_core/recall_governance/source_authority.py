@@ -76,6 +76,8 @@ _EPISODIC_LOG_TITLE_PREFIXES = (
     "coding_event:",
 )
 _EPISODIC_EVENT_COLLECTIONS = {"raw_events", "raw_event"}
+_AGENT_TRANSCRIPT_RE = re.compile(r"(?is)^\s*(?:new:\s*)?user:\s+")
+_SHELL_SESSION_RE = re.compile(r"(?is)^\s*shell session activity\b")
 # Distillation 'Summary' format: a row whose CONTENT leads with a markdown
 # Summary header ("# Summary …", "## Summary …", possibly wrapping a JSON
 # envelope) is a derived distillation-format artifact — the same secondary-format
@@ -193,12 +195,15 @@ def is_episodic_event_log_result(result: dict, text: str) -> bool:
         return True
     if collection in _EPISODIC_EVENT_COLLECTIONS:
         return True
+    content_head = str(result.get("content") or "")[:600]
     if collection in {"experience", "patterns"}:
         title = (
             str(result.get("title") or meta.get("document_title") or meta.get("title") or "").strip().lower()
         )
-        return any(title.startswith(p) for p in _EPISODIC_LOG_TITLE_PREFIXES)
-    return False
+        return any(title.startswith(p) for p in _EPISODIC_LOG_TITLE_PREFIXES) or bool(
+            _AGENT_TRANSCRIPT_RE.search(content_head) or _SHELL_SESSION_RE.search(content_head)
+        )
+    return bool(_AGENT_TRANSCRIPT_RE.search(content_head) or _SHELL_SESSION_RE.search(content_head))
 
 
 def is_source_or_test_file_result(result: dict) -> bool:

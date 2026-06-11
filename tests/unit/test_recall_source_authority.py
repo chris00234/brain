@@ -45,6 +45,16 @@ def test_low_authority_classifies_summary_reflect_session_procedure():
             "collection": "experience",
             "content": "context log",
         },
+        {
+            "title": "hermes",
+            "collection": "semantic_memory",
+            "content": "NEW: User: work kanban task t_1 Assistant: REQUEST_CHANGES on retrieval results",
+        },
+        {
+            "title": "~/server/knowledge/raw/inbox/raw_shell_2026_05_30.json",
+            "collection": "experience",
+            "content": "Shell session activity Shell session 2026-05-30 UTC: $ claude4",
+        },
     ]
     for r in low:
         assert sa.is_low_authority_result(r, _text(r)), f"expected low-authority: {r}"

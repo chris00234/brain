@@ -99,6 +99,22 @@ def test_retrieval_regression_honors_alternates_and_forbidden_content(tmp_path, 
     assert out["rows"][1]["ok"] is False
 
 
+def test_retrieval_regression_forbidden_content_matches_summary_spacing_and_title_content_variant():
+    case = {"forbidden_content": ["# Summary Claude Code session"]}
+
+    _, _, _, spaced_header = retrieval_regression._expected_hits(
+        case,
+        "# Summary  Claude Code session in server/brain",
+    )
+    _, _, _, title_content = retrieval_regression._expected_hits(
+        case,
+        "Summary Claude Code session discussed Brain recall quality",
+    )
+
+    assert spaced_header is True
+    assert title_content is True
+
+
 def test_default_eval_selection_includes_quality_gate_categories_beyond_limit(tmp_path, monkeypatch):
     eval_set = tmp_path / "eval_set_stable.json"
     eval_set.write_text(
@@ -130,6 +146,31 @@ def test_search_unified_route_guarantee_hit_shape():
     assert hits[0]["source_type"] == "route_guarantee"
     assert hits[0]["path"] == "route_guarantee:brain_recall_prefetch_quality_eval_no_noise"
     assert "maximize useful current memory context" in hits[0]["content"]
+
+
+def test_search_unified_route_guarantee_filter_drops_low_authority_residue():
+    import search_unified
+
+    route_hits = [{"source_type": "route_guarantee", "path": "route_guarantee:x"}]
+    results = [
+        {
+            "title": "Summary",
+            "content": "# Summary  Claude Code session in server/brain",
+            "collection": "canonical",
+            "path": "/Users/chrischo/server/knowledge/distilled/infra/dist_x.md",
+        },
+        {
+            "title": "Current quality standard",
+            "content": "Brain recall quality is measured by clean top-k current context.",
+            "collection": "semantic_memory",
+            "metadata": {"category": "fact"},
+            "path": "semantic://quality",
+        },
+    ]
+
+    filtered = search_unified._filter_route_low_authority_residue(results, route_hits)
+
+    assert [r["path"] for r in filtered] == ["semantic://quality"]
 
 
 def test_search_unified_identity_location_query_maps_to_identity_primary_doc():

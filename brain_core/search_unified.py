@@ -1470,6 +1470,38 @@ def _route_guarantee_hits(query: str) -> list[dict]:
     return hits
 
 
+def _filter_route_low_authority_residue(results: list[dict], route_guarantee_hits: list[dict]) -> list[dict]:
+    """Drop derived/secondary rows when a matched route guarantee is present.
+
+    Route guarantees are direct-current durable truth for a matched route. If a
+    query matches one, high-scoring session summaries, proposed notes, raw event
+    logs, and other low-authority residue should not occupy the remaining top-k
+    slots behind the guarantee. This uses the shared source-authority classifier
+    (provenance/format based), not route- or query-specific keywords.
+    """
+    if not route_guarantee_hits or not results:
+        return results
+    try:
+        from recall_governance.source_authority import is_low_authority_result, result_text
+    except Exception:
+        return results
+    filtered: list[dict] = []
+    for r in results:
+        if not isinstance(r, dict):
+            filtered.append(r)
+            continue
+        if str(r.get("source_type") or r.get("collection") or "").lower() == "route_guarantee":
+            filtered.append(r)
+            continue
+        try:
+            if is_low_authority_result(r, result_text(r)):
+                continue
+        except Exception as exc:
+            log.debug("route low-authority residue classifier failed: %s", exc)
+        filtered.append(r)
+    return filtered
+
+
 def _primary_doc_hits(query: str) -> list[dict]:
     """Inject exact local source files for file-shaped recall questions."""
     q = (query or "").lower()
@@ -3287,6 +3319,7 @@ def search_all(
     if not collections and "canonical" in sources:
         route_guarantee_hits = _route_guarantee_hits(relevance_query)
     if route_guarantee_hits:
+        unique = _filter_route_low_authority_residue(unique, route_guarantee_hits)
         seen_paths = {str(r.get("path") or r.get("id") or "") for r in unique}
         prepend = [r for r in route_guarantee_hits if str(r.get("path") or r.get("id") or "") not in seen_paths]
         unique = prepend + unique

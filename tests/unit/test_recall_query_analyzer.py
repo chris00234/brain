@@ -105,7 +105,10 @@ def test_provenance_history_intent_allows_source_evidence_without_bare_session_f
     assert qa.is_provenance_history_intent_query("retrieve the Claude session transcript")
     assert qa.is_provenance_history_intent_query("cite the sources for this recall answer")
     assert not qa.is_provenance_history_intent_query("open source Brain recall tooling preference")
+    assert not qa.is_provenance_history_intent_query("show open source Brain recall tooling preference")
     assert not qa.is_provenance_history_intent_query("source code editing preference")
+    assert not qa.is_provenance_history_intent_query("show source code editing preference")
+    assert not qa.is_provenance_history_intent_query("find open source alternatives")
     assert not qa.is_provenance_history_intent_query(
         "Brain recall quality noise prefetch empty summary Claude Code session canonical_first eval score"
     )
