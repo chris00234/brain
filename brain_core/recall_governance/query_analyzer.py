@@ -356,6 +356,20 @@ _SUMMARY_EXCLUSION_RE = re.compile(
     re.I,
 )
 _POSITIVE_SUMMARY_RE = re.compile(r"\b(?:summary|summaries|summarize|recap|digest)\b|요약", re.I)
+_SUMMARY_RESIDUE_DIAGNOSTIC_RE = re.compile(
+    r"\b(?:empty|noise|noisy|clean|top-?k|canonical[_ -]?first|prefetch|recall|retrieval)\b.*\b(?:summary|summaries|session)\b|\b(?:summary|summaries|session)\b.*\b(?:empty|noise|noisy|clean|top-?k|canonical[_ -]?first|prefetch|recall|retrieval)\b",
+    re.I,
+)
+_PROVENANCE_HISTORY_INTENT_RE = re.compile(
+    r"\b(?:provenance|evidence|history|historical|origin|origins|raw|transcript|trace|logs?)\b|\b(?:show|find|list|retrieve|get)\b.{0,80}\b(?:session|sessions)\b|출처|근거|기록|이력|세션|원문",
+    re.I,
+)
+_SOURCE_EVIDENCE_INTENT_RE = re.compile(
+    r"\b(?:show|find|list|retrieve|get|cite|provide|include)\b.{0,80}\b(?:source|sources)\b"
+    r"|\b(?:source|sources)\b.{0,50}\b(?:provenance|evidence|citation|citations|trace|origin|origins|links?)\b"
+    r"|\b(?:source|sources)\s+(?:for|of)\b.{0,80}\b(?:memory|recall|claim|fact|answer|evidence)\b",
+    re.I,
+)
 
 
 def is_summary_excluded_query(q: str) -> bool:
@@ -363,7 +377,22 @@ def is_summary_excluded_query(q: str) -> bool:
 
 
 def is_positive_summary_intent_query(q: str) -> bool:
-    return bool(_POSITIVE_SUMMARY_RE.search(q or "")) and not is_summary_excluded_query(q)
+    text = q or ""
+    if _SUMMARY_RESIDUE_DIAGNOSTIC_RE.search(text):
+        return False
+    return bool(_POSITIVE_SUMMARY_RE.search(text)) and not is_summary_excluded_query(text)
+
+
+def is_provenance_history_intent_query(q: str) -> bool:
+    """True when the user explicitly asks for source/history/session evidence.
+
+    Source-authority demotion still applies to normal current-answer recall, but
+    provenance/history queries are allowed to surface low-authority/session rows
+    because those rows are the requested evidence.
+    """
+    return bool(
+        _PROVENANCE_HISTORY_INTENT_RE.search(q or "") or _SOURCE_EVIDENCE_INTENT_RE.search(q or "")
+    ) and not is_summary_excluded_query(q)
 
 
 def query_targets_openclaw_or_agents(q: str) -> bool:

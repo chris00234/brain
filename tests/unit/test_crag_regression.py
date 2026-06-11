@@ -71,3 +71,19 @@ def test_crag_regression_treats_all_collection_as_unscoped(tmp_path, monkeypatch
 
     assert out["status"] == "ok"
     assert calls == [{"limit": 3}]
+
+
+def test_crag_confidence_corrects_high_score_window_missing_specific_query_term():
+    from crag import score_confidence, should_iterate  # type: ignore[import-not-found]
+
+    report = score_confidence(
+        [
+            {"content": "auto update schedule cron", "score": 108},
+            {"content": "schedule update job", "score": 106},
+            {"content": "automatic update cadence", "score": 105},
+        ],
+        query="watchtower auto update schedule",
+    )
+
+    assert report.components["query_coverage"] == 0.75
+    assert should_iterate(report) is True

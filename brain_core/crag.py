@@ -149,6 +149,13 @@ def score_confidence(results: list[dict], query: str | None = None) -> Confidenc
             score *= 0.30
         elif coverage < 0.50:
             score *= 0.60
+        elif coverage < 0.80 and not ce_signal_present and c_spread <= 0.0:
+            # High raw vector scores with no CE signal, no separating margin, and
+            # a missed query term are often off-target windows that happen to
+            # match generic words like "schedule" or "config". Keep complete or
+            # well-separated windows untouched, but force this ambiguous class
+            # through CRAG correction instead of silently accepting it.
+            score *= 0.70
 
     return ConfidenceReport(
         score=round(score, 4),

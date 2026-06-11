@@ -25,6 +25,64 @@
     "category": "stale_fact_supersession"
   },
   {
+    "query": "current fact should beat stale contradictory same-property memory: Chris preferred editor now",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "current",
+    "expected_alternates": [
+      "newer fact",
+      "supersession",
+      "temporal resolution"
+    ],
+    "forbidden_content": [
+      "older contradictory fact outranks current fact",
+      "stale editor preference"
+    ],
+    "category": "stale_fact_supersession"
+  },
+  {
+    "query": "history of Chris preferred editor old and new facts provenance",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "history",
+    "expected_alternates": [
+      "older fact",
+      "provenance",
+      "previous"
+    ],
+    "category": "stale_fact_supersession"
+  },
+  {
+    "query": "same entity different property should survive stale supersession filter",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "different property",
+    "expected_alternates": [
+      "unrelated property",
+      "preserved",
+      "same entity"
+    ],
+    "forbidden_content": [
+      "dropped unrelated property"
+    ],
+    "category": "stale_fact_supersession"
+  },
+  {
+    "query": "크리스 현재 선호 도구가 이전 모순 기억보다 우선해야 해",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "현재",
+    "expected_alternates": [
+      "current",
+      "newer fact",
+      "stale"
+    ],
+    "forbidden_content": [
+      "오래된 모순 기억이 현재 사실보다 우선"
+    ],
+    "category": "stale_fact_supersession"
+  },
+  {
     "query": "Chris 지금 active project 뭐 있어?",
     "collection": "all",
     "expected_source": "canonical/chris/_state.md",

@@ -52,6 +52,12 @@ _LOW_AUTHORITY_PROVENANCE_MARKERS = (
     "/sessions/",
     "session_summary",
     "session-summary",
+    "session summary",
+    "claude_code_session",
+    "claude-code-session",
+    "claude code session",
+    "raw_cc",
+    "raw-cc",
     "/weekly",
     "weekly_",
     "/summaries/",
@@ -60,6 +66,7 @@ _LOW_AUTHORITY_PROVENANCE_MARKERS = (
     "voyager",
     "raptor",
 )
+_PROPOSED_REVIEW_STATES = {"proposed", "proposal", "pending", "draft"}
 _EPISODIC_LOG_TITLE_PREFIXES = (
     "### details",
     "### context",
@@ -211,9 +218,15 @@ def is_low_authority_result(result: dict, text: str) -> bool:
 
     Composes the summary and distilled-brain-analysis classifiers with episodic
     event/coding-session logs and reflection / session / weekly / procedure /
-    voyager provenance markers, plus the distillation 'Summary'-shaped content
-    format (a row whose content leads with a '# Summary' header).
+    voyager provenance markers, plus proposed/draft review states and the
+    distillation 'Summary'-shaped content format (a row whose content leads with
+    a '# Summary' header).
     """
+    meta = result_metadata(result)
+    review_state = str(meta.get("review_state") or result.get("review_state") or "").lower()
+    status = str(meta.get("status") or result.get("status") or "").lower()
+    if review_state in _PROPOSED_REVIEW_STATES or status in _PROPOSED_REVIEW_STATES:
+        return True
     if (
         is_generic_summary_result(result)
         or is_distilled_brain_analysis_result(result, text)
@@ -221,7 +234,6 @@ def is_low_authority_result(result: dict, text: str) -> bool:
         or _SUMMARY_CONTENT_HEADER_RE.match(str(result.get("content") or ""))
     ):
         return True
-    meta = result_metadata(result)
     title = str(result.get("title") or meta.get("document_title") or meta.get("title") or "").strip().lower()
     if title in {"reasoning", "recap", "digest"} or title.startswith("### summary"):
         return True
@@ -409,6 +421,12 @@ _LOW_AUTHORITY_BLOCK_MARKERS = (
     "/sessions/",
     "session_summary",
     "session-summary",
+    "session summary",
+    "claude_code_session",
+    "claude-code-session",
+    "claude code session",
+    "raw_cc",
+    "raw-cc",
     "brain-reflect",
     "/reflect",
     "reflection",
@@ -429,15 +447,44 @@ def is_generic_summary_title(title: str) -> bool:
 
 def is_low_authority_block(block: Any) -> bool:
     """True for derived/secondary InjectionBlocks (summary/reflection/session/
-    procedure). Duck-typed on ``.title``/``.source``/``.path`` (or dict keys)."""
+    procedure/proposed). Duck-typed on ``.title``/``.source``/``.path``/
+    ``.content``/``.metadata`` (or dict keys)."""
 
     def _attr(name: str) -> str:
         if isinstance(block, dict):
             return str(block.get(name) or "")
         return str(getattr(block, name, "") or "")
 
+    def _metadata() -> dict[str, Any]:
+        meta = block.get("metadata") if isinstance(block, dict) else getattr(block, "metadata", None)
+        return meta if isinstance(meta, dict) else {}
+
     title = _attr("title")
     if is_generic_summary_title(title):
         return True
-    haystack = f"{_attr('source')}\n{title}\n{_attr('path')}".lower()
+    if _SUMMARY_CONTENT_HEADER_RE.match(_attr("content")):
+        return True
+    meta = _metadata()
+    review_state = str(meta.get("review_state") or _attr("review_state")).lower()
+    status = str(meta.get("status") or _attr("status")).lower()
+    if review_state in _PROPOSED_REVIEW_STATES or status in _PROPOSED_REVIEW_STATES:
+        return True
+    haystack = "\n".join(
+        str(part or "")
+        for part in (
+            _attr("source"),
+            title,
+            _attr("path"),
+            _attr("collection"),
+            _attr("content")[:500],
+            meta.get("id"),
+            meta.get("path"),
+            meta.get("type"),
+            meta.get("source_type"),
+            meta.get("source_path"),
+            meta.get("source_name"),
+            meta.get("document_type"),
+            meta.get("document_title"),
+        )
+    ).lower()
     return any(marker in haystack for marker in _LOW_AUTHORITY_BLOCK_MARKERS)

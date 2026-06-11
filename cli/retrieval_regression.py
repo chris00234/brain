@@ -45,6 +45,13 @@ def _load_cases(path: Path, limit: int) -> list[dict[str, Any]]:
     return cases[:limit]
 
 
+def _normalize_collection(value: str | None) -> str | None:
+    normalized = str(value or "").strip()
+    if not normalized or normalized.lower() in {"all", "*"}:
+        return None
+    return normalized
+
+
 def _result_text(result: Any) -> str:
     if isinstance(result, dict):
         parts = [result.get(k) for k in ("title", "content", "path", "source", "collection", "source_type")]
@@ -52,6 +59,20 @@ def _result_text(result: Any) -> str:
         parts.extend(meta.get(k) for k in ("path", "source", "source_type", "title"))
         return " ".join(str(p) for p in parts if p).lower()
     return str(result).lower()
+
+
+def _expected_hits(case: dict[str, Any], haystack: str) -> tuple[bool, bool, bool, bool]:
+    expected_content = str(case.get("expected_content") or "").lower().strip()
+    expected_source = str(case.get("expected_source") or "").lower().strip()
+    alternates_raw = case.get("expected_alternates") or []
+    alternates = [str(v).lower().strip() for v in alternates_raw if str(v).strip()]
+    forbidden_raw = case.get("forbidden_content") or []
+    forbidden = [str(v).lower().strip() for v in forbidden_raw if str(v).strip()]
+    content_hit = bool(expected_content and expected_content in haystack)
+    source_hit = bool(expected_source and expected_source in haystack)
+    alternate_hit = any(alt in haystack for alt in alternates)
+    forbidden_hit = any(term in haystack for term in forbidden)
+    return content_hit, source_hit, alternate_hit, forbidden_hit
 
 
 def _search(query: str, collection: str | None, top_k: int) -> list[Any]:
@@ -79,19 +100,20 @@ def run(eval_set: Path = DEFAULT_EVAL_SET, *, limit: int = 20, top_k: int = 5) -
         query = str(case.get("query") or "")
         expected_content = str(case.get("expected_content") or "").lower().strip()
         expected_source = str(case.get("expected_source") or "").lower().strip()
-        collection = str(case.get("collection") or "").strip() or None
+        collection = _normalize_collection(case.get("collection"))
         t0 = time.time()
         try:
             results = _search(query, collection, top_k)
             haystack = "\n".join(_result_text(r) for r in results)
-            content_hit = bool(expected_content and expected_content in haystack)
-            source_hit = bool(expected_source and expected_source in haystack)
-            ok = content_hit or source_hit
+            content_hit, source_hit, alternate_hit, forbidden_hit = _expected_hits(case, haystack)
+            ok = (content_hit or source_hit or alternate_hit) and not forbidden_hit
             error = ""
         except Exception as exc:
             results = []
             content_hit = False
             source_hit = False
+            alternate_hit = False
+            forbidden_hit = False
             ok = False
             error = str(exc)[:200]
         rows.append(
@@ -102,6 +124,8 @@ def run(eval_set: Path = DEFAULT_EVAL_SET, *, limit: int = 20, top_k: int = 5) -
                 "expected_source": expected_source,
                 "content_hit": content_hit,
                 "source_hit": source_hit,
+                "alternate_hit": alternate_hit,
+                "forbidden_hit": forbidden_hit,
                 "ok": ok,
                 "result_count": len(results),
                 "latency_ms": int((time.time() - t0) * 1000),

@@ -2593,6 +2593,76 @@ def test_recall_governance_promotes_specific_preference_over_weekly_summary():
     assert "generic_summary_penalty" in fused[0]["governance"]
 
 
+def test_recall_governance_demotes_proposed_claude_session_tail_for_normal_brain_quality_query():
+    from routes.recall import _apply_recall_governance_inplace, _apply_retrieval_quality_filter
+
+    query = (
+        "Brain recall quality noise prefetch empty summary Claude Code session "
+        "canonical_first current useful context eval score"
+    )
+    fused = [
+        {
+            "id": "cb9dfc5db5ef0575cb04c4fd91dd42cf",
+            "title": "Summary",
+            "collection": "canonical",
+            "metadata": {"review_state": "proposed", "source_name": "raw_cc_home_2026_04_07"},
+            "content": (
+                "# Summary Claude Code session in home (2026-04-07)\n"
+                "Distilled from claude_code_session evidence about Brain recall quality eval score."
+            ),
+            "score": 250.0,
+        },
+        {
+            "id": "accepted-quality-pref",
+            "title": "Brain recall quality route guarantee",
+            "collection": "canonical",
+            "source_type": "route_guarantee",
+            "metadata": {"category": "preference", "review_state": "accepted"},
+            "content": (
+                "Chris judges Brain recall and prefetch quality by measurable eval scores: "
+                "maximize useful current memory context while suppressing stale or noisy rows."
+            ),
+            "score": 180.0,
+        },
+    ]
+
+    _apply_recall_governance_inplace(query, fused)
+    fused.sort(key=lambda r: float(r["score"]), reverse=True)
+    assert fused[0]["id"] == "accepted-quality-pref"
+    assert "low_authority_source_penalty" in fused[1].get("governance", [])
+
+    filtered = _apply_retrieval_quality_filter(query, fused)
+    assert [r["id"] for r in filtered] == ["accepted-quality-pref"]
+
+
+def test_recall_governance_allows_claude_session_residue_for_provenance_intent():
+    from routes.recall import _apply_retrieval_quality_filter
+
+    query = "show source provenance for Brain recall quality Claude Code session summary evidence"
+    fused = [
+        {
+            "id": "session-evidence",
+            "title": "Summary",
+            "collection": "canonical",
+            "metadata": {"review_state": "proposed", "source_name": "raw_cc_home_2026_04_07"},
+            "content": "# Summary Claude Code session in home\nBrain recall quality eval score source evidence.",
+            "score": 250.0,
+        },
+        {
+            "id": "accepted-quality-pref",
+            "title": "Brain recall quality route guarantee",
+            "collection": "canonical",
+            "source_type": "route_guarantee",
+            "metadata": {"category": "preference", "review_state": "accepted"},
+            "content": "Chris judges Brain recall quality by measurable eval scores.",
+            "score": 180.0,
+        },
+    ]
+
+    filtered = _apply_retrieval_quality_filter(query, fused)
+    assert {r["id"] for r in filtered} == {"session-evidence", "accepted-quality-pref"}
+
+
 def test_recall_governance_prefers_accepted_canonical_truth_for_image_generation():
     from routes.recall import _apply_recall_governance_inplace
 
@@ -3980,6 +4050,75 @@ def test_retrieval_quality_filter_removes_openclaw_hermes_acceptance_handoff_noi
     )
 
     assert [result["id"] for result in filtered] == ["distinction"]
+
+
+def test_retrieval_quality_filter_drops_route_guarantee_summary_residue():
+    """Matched route guarantees make derived brain-analysis/session residue
+    redundant. The filter should keep direct durable truth and suppress the
+    secondary analysis row that only restates/query-quotes the route.
+    """
+    from routes.recall import _apply_retrieval_quality_filter
+
+    fused = [
+        {
+            "id": "route_guarantee:openclaw_historical_hermes_current_runtime",
+            "title": "runtime_distinction route guarantee",
+            "collection": "canonical",
+            "source_type": "route_guarantee",
+            "metadata": {"authority_tier": "direct_current_truth", "category": "fact"},
+            "content": "OpenClaw is historical context; Hermes is Chris's current agent runtime.",
+            "score": 270.0,
+        },
+        {
+            "id": "dist_brain_analysis_470daeff3e9f",
+            "title": "Analysis (part 2)",
+            "collection": "canonical",
+            "metadata": {"subtype": "brain-analysis", "source_name": "brain_reasoning_api"},
+            "content": (
+                '---json {"id": "dist_brain_analysis_470daeff3e9f", '
+                '"subtype": "brain-analysis"} --- ## Question What is the Hermes vs '
+                "OpenClaw historical runtime distinction? ## Analysis Hermes and OpenClaw "
+                "historical/current runtime distinction discussion with adjacent session residue."
+            ),
+            "score": 260.0,
+        },
+        {
+            "id": "current-runtime-fact",
+            "title": "Current Hermes runtime decision",
+            "collection": "semantic_memory",
+            "metadata": {"category": "decision"},
+            "content": "Hermes is Chris's current agent runtime; OpenClaw is historical context.",
+            "score": 120.0,
+        },
+    ]
+
+    filtered = _apply_retrieval_quality_filter("Is Chris using OpenClaw now or Hermes now?", fused)
+
+    assert [result["id"] for result in filtered] == [
+        "route_guarantee:openclaw_historical_hermes_current_runtime",
+    ]
+
+
+def test_retrieval_quality_filter_keeps_route_summary_when_summary_requested():
+    """Positive-summary intent is explicit permission to retrieve summaries;
+    route-residue suppression must not make summary questions empty.
+    """
+    from routes.recall import _apply_retrieval_quality_filter
+
+    fused = [
+        {
+            "id": "dist_brain_analysis_470daeff3e9f",
+            "title": "Analysis (part 2)",
+            "collection": "canonical",
+            "metadata": {"subtype": "brain-analysis"},
+            "content": "Analysis summary of OpenClaw and Hermes current runtime history.",
+            "score": 260.0,
+        }
+    ]
+
+    filtered = _apply_retrieval_quality_filter("summarize the OpenClaw Hermes runtime history", fused)
+
+    assert [result["id"] for result in filtered] == ["dist_brain_analysis_470daeff3e9f"]
 
 
 def test_recall_governance_openclaw_historical_loses_to_current_hermes_runtime():

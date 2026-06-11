@@ -67,6 +67,7 @@ def test_codex_route_requires_codex_token_and_support():
 
 def test_runtime_distinction_needs_both_runtimes_and_a_distinction_cue():
     assert "runtime_distinction" in _routes("OpenClaw vs Hermes runtime distinction")
+    assert "runtime_distinction" in _routes("Is Chris using OpenClaw now or Hermes now?")
     assert "runtime_distinction" in _routes("오픈클로랑 헤르메스 현재 런타임 차이 알려줘")
     # both runtimes but a SETUP question (no distinction cue) → must NOT match
     assert "runtime_distinction" not in _routes("OpenClaw and Hermes setup guide")

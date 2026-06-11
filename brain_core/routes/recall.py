@@ -117,6 +117,9 @@ from recall_governance.query_analyzer import (
     is_positive_summary_intent_query as _is_positive_summary_intent_query,
 )
 from recall_governance.query_analyzer import (
+    is_provenance_history_intent_query as _is_provenance_history_intent_query,
+)
+from recall_governance.query_analyzer import (
     is_summary_excluded_query as _is_summary_excluded_query,
 )
 from recall_governance.route_guarantees import (
@@ -157,6 +160,15 @@ from recall_governance.source_authority import (
 )
 from recall_governance.source_authority import (
     result_text as _result_text,
+)
+from recall_governance.temporal_resolution import (
+    TEMPORAL_RESOLUTION_PENALTY as _TEMPORAL_RESOLUTION_PENALTY,
+)
+from recall_governance.temporal_resolution import (
+    is_temporal_history_prompt as _is_temporal_history_prompt,
+)
+from recall_governance.temporal_resolution import (
+    stale_conflict_pairs as _stale_conflict_pairs,
 )
 from vector_store import get_vector_store
 
@@ -268,6 +280,30 @@ def _route_guarantee_served_by_results(guarantee, fused: list[dict]) -> bool:
         if not _is_durable_truth_result(result):
             continue
         if len(gtokens & _tokenize_recall_text(_result_text(result))) >= need:
+            return True
+    return False
+
+
+def _is_matched_route_low_authority_residue(result: dict, text: str, guarantees) -> bool:
+    """True for derived rows that merely echo a matched route guarantee.
+
+    When a query matches a durable route guarantee, low-authority summaries,
+    distilled analysis, session logs, and other secondary artifacts that share
+    the guarantee's distinctive vocabulary are redundant/noisy: the route
+    guarantee (or a direct durable truth row) carries the current answer. Generic
+    authority + route-token overlap; no route-specific probe strings.
+    """
+    if not guarantees or not _is_low_authority_result(result, text):
+        return False
+    if _is_durable_truth_result(result):
+        return False
+    result_tokens = _tokenize_recall_text(text)
+    for guarantee in guarantees:
+        gtokens = _guarantee_tokens(guarantee)
+        if not gtokens:
+            continue
+        needed = max(3, int(0.4 * len(gtokens)))
+        if len(gtokens & result_tokens) >= needed:
             return True
     return False
 
@@ -1800,12 +1836,15 @@ def _apply_retrieval_quality_filter(
         augmented_query = _augment_query_for_recall(q)
     augmented_query_tokens = _tokenize_recall_text(augmented_query)
     summary_excluded = _is_summary_excluded_query(q)
+    positive_summary_intent = _is_positive_summary_intent_query(q)
+    provenance_history_intent = _is_provenance_history_intent_query(q)
     generic_recipe_query = _is_generic_recipe_query(q)
     # Genuine out-of-domain world-knowledge prompt: an anchorless recipe / generic
     # how-to with NO matched durable route. A named-runtime/tool/cost topic the OOD
     # classifier flags only because it pairs two anchors (OpenClaw + Hermes) carries
     # a matched route guarantee and is exempted, keeping its distinction rows.
-    out_of_domain_query = _is_out_of_domain_world_knowledge_query(q) and not _match_route_guarantees(q)
+    matched_route_guarantees = _match_route_guarantees(q)
+    out_of_domain_query = _is_out_of_domain_world_knowledge_query(q) and not matched_route_guarantees
     # Personal-attribute identity/attribute guard: a self/possessive attribute
     # query ("what is my address?", "when is Chris's birthday?", "내 주소가 뭐야?",
     # "what is Ellie's phone number?") targets ONE identity's ONE attribute. Keep
@@ -1834,7 +1873,15 @@ def _apply_retrieval_quality_filter(
         if not isinstance(result, dict):
             continue
         result_text = _result_text(result)
-        if _is_stale_generic_quality_result(result, q, augmented_query=augmented_query):
+        if not provenance_history_intent and _is_stale_generic_quality_result(
+            result, q, augmented_query=augmented_query
+        ):
+            continue
+        if (
+            not positive_summary_intent
+            and not provenance_history_intent
+            and _is_matched_route_low_authority_residue(result, result_text, matched_route_guarantees)
+        ):
             continue
         if (
             personal_attribute_query
@@ -1930,6 +1977,7 @@ def _apply_recall_governance_inplace(
     codex_hermes_tui_query = _is_codex_hermes_tui_query(query_tokens)
     summary_excluded = _is_summary_excluded_query(q)
     positive_summary_intent = _is_positive_summary_intent_query(q)
+    provenance_history_intent = _is_provenance_history_intent_query(q)
     personal_attribute_binding = _query_analyzer.personal_attribute_query_binding(q)
     pure_personal_factoid_probe = _is_pure_personal_factoid_probe(q, augmented_query_tokens=query_tokens)
     brain_quality_query = _is_brain_quality_query(q, augmented_query=augmented_query)
@@ -2021,12 +2069,12 @@ def _apply_recall_governance_inplace(
         # voyager/meta rows for any query not explicitly asking for a summary.
         # One contract serves every recall class; the per-intent branches below
         # remain as sharper, topic-specific reinforcements.
-        if not positive_summary_intent:
+        if not (positive_summary_intent or provenance_history_intent):
             if _is_durable_truth_result(result):
                 delta += 30.0
                 reasons.append("durable_truth_priority")
             elif low_authority:
-                delta -= 45.0
+                delta -= 90.0
                 reasons.append("low_authority_source_penalty")
 
         # Vanished-source provenance: the row's absolute local source file no
@@ -2198,6 +2246,46 @@ def _apply_recall_governance_inplace(
         if delta:
             result["score"] = float(result.get("score") or 0.0) + delta
             result["governance"] = list(dict.fromkeys([*result.get("governance", []), *reasons]))
+
+
+def _apply_temporal_resolution_inplace(fused: list[dict]) -> None:
+    """Read-time entity-property temporal resolution (Zep/Graphiti soft
+    invalidation, APEX-MEM retrieval-time resolution): when two LIVE durable
+    rows assert conflicting values about the same subject — write-time
+    supersession missed the pair — the newer statement is the current truth
+    and the older must not outrank it. Demote the older decisively, never
+    drop (same contract as vanished_source/query_keyed_bridge), once per row,
+    and annotate for eval/debug. Structural signals only (shared token frame
+    + polarity flip / numeric mismatch / value-token swap); no topic markers,
+    no LLM, no IO. Detection contract: recall_governance/temporal_resolution.
+    """
+    demoted: set[int] = set()
+    for older_idx, newer_idx in _stale_conflict_pairs(fused):
+        if older_idx in demoted:
+            continue
+        demoted.add(older_idx)
+        older = fused[older_idx]
+        existing_reasons = older.get("governance", [])
+        if "temporal_resolution_stale_penalty" in existing_reasons:
+            continue
+        older["score"] = float(older.get("score") or 0.0) - _TEMPORAL_RESOLUTION_PENALTY
+        older["governance"] = list(dict.fromkeys([*existing_reasons, "temporal_resolution_stale_penalty"]))
+        older.setdefault("_debug", {})["temporally_contradicted_by"] = str(fused[newer_idx].get("id") or "")
+
+
+def _should_apply_temporal_resolution(
+    q: str,
+    *,
+    include_history: bool,
+    include_obsolete: bool,
+    as_of: str | None,
+) -> bool:
+    """Temporal resolution is for current-truth recall only.
+
+    Historical/provenance surfaces keep un-demoted ordering, whether the caller
+    expressed that intent via explicit params or plain text query markers.
+    """
+    return not (include_history or include_obsolete or as_of or _is_temporal_history_prompt(q))
 
 
 def _apply_primary_doc_boost_inplace(fused: list[dict]) -> None:
@@ -2856,6 +2944,15 @@ def recall_v2(
         timing["decay_ms"] = decay_ms
 
     _apply_recall_governance_inplace(q, fused, augmented_query=search_query)
+    # Temporal resolution is a current-truth contract; historical/provenance
+    # queries keep the un-demoted ordering so older rows stay queryable.
+    if _should_apply_temporal_resolution(
+        q,
+        include_history=include_history,
+        include_obsolete=include_obsolete,
+        as_of=as_of,
+    ):
+        _apply_temporal_resolution_inplace(fused)
     _apply_primary_doc_boost_inplace(fused)
     fused = _sort_and_diversify(fused, top_window=n * 2)
     fused = _apply_retrieval_quality_filter(q, fused, augmented_query=search_query)
@@ -2943,6 +3040,13 @@ def recall_v2(
             # original-query governance so broad tool recommendation and other
             # preference probes keep their noise penalties after retry.
             _apply_recall_governance_inplace(q, fused, augmented_query=search_query)
+            if _should_apply_temporal_resolution(
+                q,
+                include_history=include_history,
+                include_obsolete=include_obsolete,
+                as_of=as_of,
+            ):
+                _apply_temporal_resolution_inplace(fused)
             _apply_primary_doc_boost_inplace(fused)
             fused = _sort_and_diversify(fused, top_window=n)
             fused = _apply_retrieval_quality_filter(q, fused, augmented_query=search_query)

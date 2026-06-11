@@ -209,6 +209,15 @@ def test_summary_shaped_content_is_low_authority_even_in_canonical():
         "x",
     )
     # such a row is therefore NOT durable truth despite canonical+preference
+    assert sa.is_low_authority_result(
+        {
+            "title": "p",
+            "collection": "canonical",
+            "metadata": {"category": "preference"},
+            "content": "# Summary distilled preference body.",
+        },
+        "x",
+    )
     assert not sa.is_durable_truth_result(
         {
             "title": "p",
@@ -234,4 +243,42 @@ def test_summary_shaped_content_is_low_authority_even_in_canonical():
             "content": "Chris prefers existing subscriptions over new paid API billing.",
         },
         "x",
+    )
+
+
+def test_proposed_and_claude_code_session_residue_are_low_authority():
+    proposed = {
+        "title": "Chris wants recall eval score improvements",
+        "collection": "canonical",
+        "metadata": {"category": "preference", "review_state": "proposed"},
+        "content": "Chris wants recall quality judged by measurable eval scores.",
+    }
+    assert sa.is_low_authority_result(proposed, sa.result_text(proposed))
+    assert not sa.is_durable_truth_result(proposed)
+
+    distilled_session = {
+        "id": "cb9dfc5db5ef0575cb04c4fd91dd42cf",
+        "title": "Summary",
+        "collection": "canonical",
+        "metadata": {"source_name": "raw_cc_home_2026_04_07", "review_state": "proposed"},
+        "content": (
+            "# Summary Claude Code session in home (2026-04-07)\n"
+            "Distilled from claude_code_session evidence."
+        ),
+    }
+    assert sa.is_low_authority_result(distilled_session, sa.result_text(distilled_session))
+    assert sa.classify_result(distilled_session) == AuthorityTier.DERIVED_SUMMARY
+
+
+def test_block_level_authority_uses_content_for_summary_and_claude_session_residue():
+    assert sa.is_low_authority_block(
+        {
+            "title": "Chris wants eval score improvements",
+            "source": "canonical",
+            "path": "",
+            "content": "# Summary Claude Code session in home\nDistilled from claude_code_session evidence.",
+        }
+    )
+    assert sa.is_low_authority_block(
+        {"title": "durable-looking title", "source": "raw_cc_home_2026_04_07", "content": "clean text"}
     )

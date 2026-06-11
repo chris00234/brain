@@ -234,14 +234,18 @@ def test_known_drift_result_classifiers_disagree_on_markers():
 
 
 def test_known_drift_prompt_gate_is_substring_query_gate_is_token():
-    """The active prompt gate matches "current" inside "currently"; the route
-    query gate tokenizes and finds no marker token. Documented, not unified."""
+    """Both gates now recognize currently/now, but the route gate remains
+    token-shaped rather than substring-shaped for other marker words."""
     from recall_governance import openclaw_hermes
     from recall_governance.normalization import tokenize
 
     prompt = "openclaw hermes currently?"
     assert openclaw_hermes.looks_like_openclaw_hermes_distinction_prompt(prompt)
-    assert not openclaw_hermes.is_openclaw_hermes_distinction_query(tokenize(prompt))
+    assert openclaw_hermes.is_openclaw_hermes_distinction_query(tokenize(prompt))
+
+    substring_only = "openclaw hermes precurrent migration"
+    assert openclaw_hermes.looks_like_openclaw_hermes_distinction_prompt(substring_only)
+    assert not openclaw_hermes.is_openclaw_hermes_distinction_query(tokenize(substring_only))
 
 
 def test_known_drift_route_handoff_noise_reads_metadata_active_does_not():

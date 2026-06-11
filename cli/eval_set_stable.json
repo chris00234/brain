@@ -63,8 +63,14 @@
   {
     "query": "qdrant current retrieval substrate",
     "collection": "all",
-    "expected_source": "canonical/infra/rag-qdrant.md",
-    "expected_content": "Native Qdrant v1.17 is the current Brain retrieval substrate"
+    "expected_source": "canonical",
+    "expected_content": "Native Qdrant v1.17 is the active Brain retrieval substrate",
+    "expected_alternates": [
+      "Qdrant is the current vector database substrate",
+      "canonical memory remains the governance layer above raw retrieval"
+    ],
+    "_updated_at": "2026-06-11T22:55",
+    "_update_note": "Live corpus canonicalized current retrieval substrate in _self_model.md and canonical/entities/qdrant.md; fixture should test accepted current truth, not a retired path/string."
   },
   {
     "query": "ollama model configuration",
@@ -880,5 +886,128 @@
     "collection": "all",
     "expected_source": "canonical",
     "expected_content": "dedup"
+  },
+  {
+    "query": "stale fact correction superseded memory canonical layer",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "stale recall",
+    "expected_alternates": [
+      "supersession",
+      "accepted-truth",
+      "governance layer"
+    ],
+    "category": "stale_fact_supersession",
+    "_promoted_from": "eval_set_adversarial.json",
+    "_promoted_at": "2026-06-11",
+    "_promotion_evidence": "passed 3 consecutive live runs against /recall/v2"
+  },
+  {
+    "query": "current fact should beat stale contradictory same-property memory: Chris preferred editor now",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "current",
+    "expected_alternates": [
+      "newer fact",
+      "supersession",
+      "temporal resolution"
+    ],
+    "forbidden_content": [
+      "older contradictory fact outranks current fact",
+      "stale editor preference"
+    ],
+    "category": "stale_fact_supersession",
+    "_promoted_from": "eval_set_adversarial.json",
+    "_promoted_at": "2026-06-11",
+    "_promotion_evidence": "passed 3 consecutive live runs against /recall/v2"
+  },
+  {
+    "query": "history of Chris preferred editor old and new facts provenance",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "history",
+    "expected_alternates": [
+      "older fact",
+      "provenance",
+      "previous"
+    ],
+    "category": "stale_fact_supersession",
+    "_promoted_from": "eval_set_adversarial.json",
+    "_promoted_at": "2026-06-11",
+    "_promotion_evidence": "passed 3 consecutive live runs against /recall/v2"
+  },
+  {
+    "query": "크리스 현재 선호 도구가 이전 모순 기억보다 우선해야 해",
+    "collection": "all",
+    "expected_source": "canonical",
+    "expected_content": "현재",
+    "expected_alternates": [
+      "current",
+      "newer fact",
+      "stale"
+    ],
+    "forbidden_content": [
+      "오래된 모순 기억이 현재 사실보다 우선"
+    ],
+    "category": "stale_fact_supersession",
+    "_promoted_from": "eval_set_adversarial.json",
+    "_promoted_at": "2026-06-11",
+    "_promotion_evidence": "passed 3 consecutive live runs against /recall/v2"
+  },
+  {
+    "query": "privacy boundary wife message raw contents should not expose",
+    "collection": "all",
+    "expected_source": "distilled",
+    "expected_content": "should not retrieve or expose live plaintext passwords",
+    "expected_alternates": [
+      "security boundary",
+      "credential questions should be handled through recovery guidance",
+      "should not retrieve or expose"
+    ],
+    "forbidden_content": [
+      "raw spouse message text",
+      "raw wife message body",
+      "full imessage transcript"
+    ],
+    "category": "privacy_negative_personal_source",
+    "_promoted_from": "eval_set_adversarial.json",
+    "_promoted_at": "2026-06-11",
+    "_promotion_evidence": "passed 3 consecutive live runs against /recall/v2"
+  },
+  {
+    "query": "Where is Chris based and what timezone does he work in?",
+    "collection": "all",
+    "expected_source": "_identity",
+    "expected_content": "Irvine",
+    "expected_alternates": [
+      "PST",
+      "California"
+    ],
+    "category": "identity_canon_over_stale_provenance",
+    "_promoted_from": "eval_set_adversarial.json",
+    "_promoted_at": "2026-06-11",
+    "_promotion_evidence": "passed 3 consecutive live runs against /recall/v2"
+  },
+  {
+    "query": "Brain recall quality noise prefetch empty summary Claude Code session canonical_first current useful context eval score",
+    "collection": "all",
+    "expected_source": "route_guarantee:brain_recall_prefetch_quality_eval_no_noise",
+    "expected_content": "maximize useful current memory context while suppressing stale or noisy rows",
+    "expected_alternates": [
+      "brain_recall_quality route guarantee",
+      "measurable eval scores",
+      "브레인 리콜"
+    ],
+    "forbidden_content": [
+      "# Summary Claude Code session",
+      "claude_code_session",
+      "raw_cc_home_2026_04_07",
+      "review_state\": \"proposed\"",
+      "Distilled from claude_code_session evidence"
+    ],
+    "category": "clean_hit_topk_noise",
+    "_promoted_from": "t_59713e94",
+    "_promoted_at": "2026-06-11",
+    "_promotion_evidence": "pins clean top-k, not just top-1, for normal recall/prefetch route guarantee queries"
   }
 ]

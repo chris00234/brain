@@ -406,6 +406,171 @@ def test_semantic_blocks_requires_prompt_overlap(monkeypatch):
     assert blocks == []
 
 
+def test_semantic_blocks_omit_proposed_and_session_residue_for_normal_prefetch(monkeypatch):
+    fake_search = types.SimpleNamespace(
+        search_all=lambda *args, **kwargs: {
+            "results": [
+                {
+                    "id": "proposed-brain-quality",
+                    "title": "Brain recall quality draft",
+                    "content": "Brain recall quality noise prefetch empty summary canonical_first eval score draft.",
+                    "score": 99,
+                    "collection": "canonical",
+                    "metadata": {"review_state": "proposed"},
+                },
+                {
+                    "id": "claude-session-summary",
+                    "title": "Session summary",
+                    "content": "Claude Code session discussed Brain recall quality noise prefetch eval score.",
+                    "score": 98,
+                    "collection": "canonical",
+                    "path": "/sessions/claude_code_session.md",
+                },
+                {
+                    "id": "current-brain-quality",
+                    "title": "brain_recall_quality route guarantee",
+                    "content": "Brain recall quality uses eval score and suppresses noisy prefetch residue.",
+                    "score": 90,
+                    "collection": "canonical",
+                    "metadata": {"category": "fact", "review_state": "accepted"},
+                },
+            ]
+        }
+    )
+    monkeypatch.setitem(sys.modules, "search_unified", fake_search)
+
+    prompt = "Brain recall quality noise prefetch empty summary Claude Code session canonical_first current useful context eval score"
+    blocks = active_recall._semantic_blocks(prompt, [], set(), limit=5)
+
+    assert [block.memory_id for block in blocks] == ["current-brain-quality"]
+    assert active_recall._is_low_authority_block(
+        active_recall.InjectionBlock(
+            id="draft",
+            title="Brain recall quality draft",
+            content="draft Brain recall quality",
+            source="semantic:canonical",
+            score=0.99,
+            priority="high",
+            metadata={"review_state": "proposed"},
+        )
+    )
+
+
+def test_build_injection_brain_quality_keeps_route_guarantee_without_noisy_residue(monkeypatch):
+    fake_search = types.SimpleNamespace(
+        search_all=lambda *args, **kwargs: {
+            "results": [
+                {
+                    "id": "proposed-brain-quality",
+                    "title": "Brain recall quality draft",
+                    "content": "Brain recall quality noise prefetch empty summary canonical_first eval score draft.",
+                    "score": 99,
+                    "collection": "canonical",
+                    "metadata": {"status": "pending"},
+                },
+                {
+                    "id": "claude-session-summary",
+                    "title": "Summary",
+                    "content": "Claude Code session summary about Brain recall quality prefetch noise.",
+                    "score": 98,
+                    "collection": "canonical",
+                    "path": "/sessions/claude_code_session.md",
+                },
+            ]
+        }
+    )
+    monkeypatch.setitem(sys.modules, "search_unified", fake_search)
+
+    prompt = "Brain recall quality noise prefetch empty summary Claude Code session canonical_first current useful context eval score"
+    result = active_recall.build_injection(prompt=prompt, session_id="t-brain-quality-clean-hit", turn_idx=0)
+    titles = [block["title"] for block in result["blocks"]]
+    memory_ids = {block.get("memory_id") for block in result["blocks"]}
+
+    assert result["degraded"] is False
+    assert any(title == "brain_recall_quality route guarantee" for title in titles)
+    assert "proposed-brain-quality" not in memory_ids
+    assert "claude-session-summary" not in memory_ids
+
+
+def _semantic_fact_block(
+    *,
+    block_id: str,
+    content: str,
+    created_at: str,
+    score: float = 0.95,
+    priority: str = "high",
+) -> active_recall.InjectionBlock:
+    return active_recall.InjectionBlock(
+        id=block_id,
+        title=block_id,
+        content=content,
+        source="semantic:semantic_memory",
+        score=score,
+        priority=priority,
+        memory_id=block_id,
+        created_at=created_at,
+        collection="semantic_memory",
+        metadata={"category": "fact", "created_at": created_at},
+    )
+
+
+def test_prefetch_temporal_resolution_demotes_older_same_property_fact():
+    older = _semantic_fact_block(
+        block_id="old-editor",
+        content="Chris uses Vim as default editor.",
+        created_at="2026-01-01T00:00:00Z",
+    )
+    newer = _semantic_fact_block(
+        block_id="new-editor",
+        content="Chris uses Neovim as default editor.",
+        created_at="2026-06-01T00:00:00Z",
+        score=0.90,
+    )
+
+    resolved = active_recall._apply_temporal_resolution_to_blocks(
+        "What editor does Chris use now?", [older, newer]
+    )
+
+    assert resolved[0].id == "new-editor"
+    assert resolved[-1].id == "old-editor"
+    assert resolved[-1].priority == "low"
+    assert "temporal_resolution_stale" in resolved[-1].risk_flags
+    assert resolved[-1].metadata["temporal_resolution"] == "stale_conflict_demoted"
+
+
+def test_prefetch_temporal_resolution_preserves_history_queries_and_unrelated_properties():
+    older = _semantic_fact_block(
+        block_id="old-editor",
+        content="Chris uses Vim as default editor.",
+        created_at="2026-01-01T00:00:00Z",
+    )
+    newer = _semantic_fact_block(
+        block_id="new-editor",
+        content="Chris uses Neovim as default editor.",
+        created_at="2026-06-01T00:00:00Z",
+    )
+    browser = _semantic_fact_block(
+        block_id="browser",
+        content="Chris uses Arc as default browser.",
+        created_at="2026-05-01T00:00:00Z",
+    )
+
+    history = active_recall._apply_temporal_resolution_to_blocks(
+        "Chris editor history 과거에는 뭘 썼어?",
+        [older, newer, browser],
+    )
+    assert [block.id for block in history] == ["old-editor", "new-editor", "browser"]
+    assert all("temporal_resolution_stale" not in block.risk_flags for block in history)
+
+    current = active_recall._apply_temporal_resolution_to_blocks(
+        "크리스가 지금 쓰는 에디터 뭐야?",
+        [older, browser, newer],
+    )
+    assert [block.id for block in current][:2] == ["browser", "new-editor"]
+    assert current[-1].id == "old-editor"
+    assert "temporal_resolution_stale" not in browser.risk_flags
+
+
 # ── Budget enforcement ───────────────────────────────────
 
 

@@ -103,7 +103,20 @@ from recall_governance import openclaw_hermes as _govern_openclaw_hermes
 from recall_governance import route_guarantees as _govern_routes
 from recall_governance import source_authority as _govern_authority
 from recall_governance.query_analyzer import is_live_state_query as _govern_is_live_state_query
+from recall_governance.query_analyzer import (
+    is_positive_summary_intent_query as _is_positive_summary_intent_query,
+)
+from recall_governance.query_analyzer import (
+    is_provenance_history_intent_query as _is_provenance_history_intent_query,
+)
 from recall_governance.route_guarantees import RouteGuarantee
+from recall_governance.temporal_resolution import (
+    TEMPORAL_RESOLUTION_PENALTY as _TEMPORAL_RESOLUTION_PENALTY,
+)
+from recall_governance.temporal_resolution import (
+    is_temporal_history_prompt as _is_temporal_history_prompt,
+)
+from recall_governance.temporal_resolution import stale_conflict_pairs as _stale_conflict_pairs
 
 log = logging.getLogger("brain.active_recall")
 
@@ -153,6 +166,9 @@ class InjectionBlock:
     risk_flags: list[str] = field(default_factory=list)
     compiler_score: float | None = None
     contract_category: str | None = None
+    created_at: str | None = None
+    collection: str | None = None
+    metadata: dict | None = None
 
     def to_dict(self) -> dict:
         out = {
@@ -177,6 +193,12 @@ class InjectionBlock:
             out["compiler_score"] = self.compiler_score
         if self.contract_category:
             out["contract_category"] = self.contract_category
+        if self.created_at:
+            out["created_at"] = self.created_at
+        if self.collection:
+            out["collection"] = self.collection
+        if self.metadata:
+            out["metadata"] = dict(self.metadata)
         return out
 
 
@@ -862,19 +884,27 @@ def _semantic_blocks(
             title, content, r.get("path")
         ):
             priority = "critical"
-        blocks.append(
-            InjectionBlock(
-                id=h,
-                title=title,
-                content=content,
-                source=f"semantic:{collection}" if collection else "semantic",
-                score=norm_score,
-                priority=priority,
-                path=r.get("path"),
-                # 2026-04-18: propagate real ChromaDB id for reinforce_on_access.
-                memory_id=r.get("id"),
-            )
+        block = InjectionBlock(
+            id=h,
+            title=title,
+            content=content,
+            source=f"semantic:{collection}" if collection else "semantic",
+            score=norm_score,
+            priority=priority,
+            path=r.get("path"),
+            # 2026-04-18: propagate real ChromaDB id for reinforce_on_access.
+            memory_id=r.get("id"),
+            created_at=r.get("created_at") or (r.get("metadata") or {}).get("created_at"),
+            collection=collection,
+            metadata=r.get("metadata") if isinstance(r.get("metadata"), dict) else None,
         )
+        if _is_low_authority_block(block):
+            if not (_is_provenance_history_intent_query(prompt) or _is_positive_summary_intent_query(prompt)):
+                continue
+            block.priority = "low"
+            block.score = min(block.score, 0.39)
+            block.risk_flags = list(dict.fromkeys([*block.risk_flags, "low_authority_provenance"]))
+        blocks.append(block)
     # Search variants finish in nondeterministic order. Do not let two fast,
     # generic rows from the base prompt consume a small classifier max_blocks
     # budget before a deterministic rescue/preference variant arrives.
@@ -882,6 +912,52 @@ def _semantic_blocks(
         blocks,
         key=lambda b: (PRIORITY_ORDER.get(b.priority, 9), -b.score),
     )[:limit]
+
+
+def _temporal_result_from_block(block: InjectionBlock) -> dict:
+    metadata = dict(getattr(block, "metadata", None) or {})
+    created_at = getattr(block, "created_at", None)
+    if created_at and "created_at" not in metadata:
+        metadata["created_at"] = created_at
+    return {
+        "id": getattr(block, "memory_id", None) or getattr(block, "id", ""),
+        "title": getattr(block, "title", ""),
+        "content": getattr(block, "content", ""),
+        "collection": getattr(block, "collection", None)
+        or str(getattr(block, "source", "")).removeprefix("semantic:"),
+        "created_at": created_at,
+        "metadata": metadata,
+        "score": getattr(block, "score", 0),
+    }
+
+
+def _apply_temporal_resolution_to_blocks(prompt: str, blocks: list) -> list:
+    """Provider-prefetch twin of /recall/v2 temporal resolution.
+
+    Active recall is the strictest injection surface: stale current-truth rows
+    should not consume scarce prompt budget when a newer contradictory durable
+    row is present. History/provenance prompts keep original ordering so older
+    rows remain queryable.
+    """
+    if _is_temporal_history_prompt(prompt):
+        return blocks
+    temporal_rows = [_temporal_result_from_block(block) for block in blocks]
+    stale_indexes = {older_idx for older_idx, _newer_idx in _stale_conflict_pairs(temporal_rows)}
+    if not stale_indexes:
+        return blocks
+    resolved: list[InjectionBlock] = []
+    for idx, block in enumerate(blocks):
+        if idx not in stale_indexes:
+            resolved.append(block)
+            continue
+        metadata = dict(block.metadata or {})
+        metadata["temporal_resolution"] = "stale_conflict_demoted"
+        block.metadata = metadata
+        block.score = max(0.0, block.score - (_TEMPORAL_RESOLUTION_PENALTY / 100.0))
+        block.priority = "low"
+        block.risk_flags = list(dict.fromkeys([*block.risk_flags, "temporal_resolution_stale"]))
+        resolved.append(block)
+    return sorted(resolved, key=lambda b: (PRIORITY_ORDER.get(b.priority, 9), -b.score))
 
 
 def _is_generic_summary_title(title: str) -> bool:
@@ -1916,6 +1992,8 @@ def build_injection(
         guarantee_blocks = _route_guarantee_blocks(prompt, filtered, seen_set)
         if guarantee_blocks:
             filtered = guarantee_blocks + filtered
+
+        filtered = _apply_temporal_resolution_to_blocks(prompt, filtered)
 
         if (
             _confidence_sentinel_enabled()

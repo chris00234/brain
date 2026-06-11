@@ -48,3 +48,52 @@ def test_retrieval_regression_honors_min_pass_rate_env(tmp_path, monkeypatch):
 
     assert out["status"] == "breached"
     assert out["min_pass_rate"] == 1.0
+
+
+def test_retrieval_regression_treats_all_collection_as_unscoped(tmp_path, monkeypatch):
+    eval_set = tmp_path / "eval.json"
+    eval_set.write_text(json.dumps([{"query": "q", "collection": "all", "expected_content": "needle"}]))
+    calls = []
+    fake = ModuleType("search_unified")
+
+    def search_all(query, **kwargs):
+        calls.append(kwargs)
+        return [{"content": "needle"}]
+
+    fake.search_all = search_all  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "search_unified", fake)
+    monkeypatch.setattr(retrieval_regression, "REPORT_FILE", tmp_path / "report.json")
+
+    out = retrieval_regression.run(eval_set, limit=1, top_k=3)
+
+    assert out["status"] == "ok"
+    assert calls == [{"limit": 3}]
+
+
+def test_retrieval_regression_honors_alternates_and_forbidden_content(tmp_path, monkeypatch):
+    eval_set = tmp_path / "eval.json"
+    eval_set.write_text(
+        json.dumps(
+            [
+                {"query": "alternate", "expected_content": "needle", "expected_alternates": ["fallback"]},
+                {"query": "forbidden", "expected_content": "needle", "forbidden_content": ["leak"]},
+            ]
+        )
+    )
+    fake = ModuleType("search_unified")
+
+    def search_all(query, **kwargs):
+        if query == "alternate":
+            return [{"content": "fallback"}]
+        return [{"content": "needle plus leak"}]
+
+    fake.search_all = search_all  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "search_unified", fake)
+    monkeypatch.setattr(retrieval_regression, "REPORT_FILE", tmp_path / "report.json")
+
+    out = retrieval_regression.run(eval_set, limit=2, top_k=3)
+
+    assert out["passed"] == 1
+    assert out["rows"][0]["alternate_hit"] is True
+    assert out["rows"][1]["forbidden_hit"] is True
+    assert out["rows"][1]["ok"] is False
