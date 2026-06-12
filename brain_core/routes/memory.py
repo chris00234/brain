@@ -1026,11 +1026,17 @@ def brain_doubt(limit: int = Query(default=20, ge=1, le=100)) -> dict:
         "low_confidence_atoms": [...]  # atoms.confidence < 0.4, active tier
         "pending_contradictions": [...]  # unresolved semantic_contradictions
         "stale_canonical": [...]  # canonical notes >180d without review
+        "open_loops": {...}  # unresolved commitments / waiting-on items
       }
     """
     import sqlite3 as _sql
 
-    out: dict = {"low_confidence_atoms": [], "pending_contradictions": [], "stale_canonical": []}
+    out: dict = {
+        "low_confidence_atoms": [],
+        "pending_contradictions": [],
+        "stale_canonical": [],
+        "open_loops": {"items": [], "total": 0, "stale_count": 0},
+    }
 
     # Low-confidence atoms
     try:
@@ -1083,7 +1089,50 @@ def brain_doubt(limit: int = Query(default=20, ge=1, le=100)) -> dict:
     except Exception:
         pass
 
+    # Open-loop / commitment doubt surface. Best-effort and read-only: a
+    # failed scan must not break existing low-confidence/contradiction output.
+    try:
+        from brain_core.open_loops import open_loop_snapshot
+
+        out["open_loops"] = open_loop_snapshot(
+            brain_db_path=BRAIN_DIR / "logs" / "brain.db",
+            autonomy_db_path=BRAIN_DIR / "logs" / "autonomy.db",
+            limit=limit,
+        )
+    except Exception:
+        pass
+
     return out
+
+
+@router.get("/brain/open-loops", tags=["autonomy"])
+def brain_open_loops(
+    limit: int = Query(default=20, ge=1, le=100),
+    stale_days: int = Query(default=14, ge=1, le=365),
+) -> dict:
+    """Unresolved commitments, follow-ups, waiting-on items, and stale tasks."""
+    try:
+        from brain_core.open_loops import open_loop_snapshot
+
+        return open_loop_snapshot(
+            brain_db_path=BRAIN_DIR / "logs" / "brain.db",
+            autonomy_db_path=BRAIN_DIR / "logs" / "autonomy.db",
+            limit=limit,
+            stale_days=stale_days,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=_safe_http_detail("open_loops", e)) from e
+
+
+@router.get("/brain/replacement-readiness", tags=["autonomy"])
+def brain_replacement_readiness() -> dict:
+    """Capability readiness gate for Brain as Chris-memory substitute."""
+    try:
+        from brain_core.brain_replacement_readiness import readiness_snapshot
+
+        return readiness_snapshot()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=_safe_http_detail("replacement_readiness", e)) from e
 
 
 @router.post("/brain/consolidate", tags=["autonomy"])
