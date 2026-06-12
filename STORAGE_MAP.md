@@ -21,7 +21,7 @@ Authoritative list of every on-disk store brain owns. Anything not listed here i
 | `schema_versions.db` | ~12 KB | Migration version gate for brain.db. | `schema_versions` | none (always grows by version count, currently 11) | `brain_core/schema_versions.py`, `brain_core/migrations_brain_db.py` |
 | `self_heal_state.db` | ~12 KB | Self-healing dispatcher state — signal dedup, recent actions, heal history. | `heal_state`, `heal_log` | none (low write rate) | `brain_core/self_heal.py` |
 
-**Total SQLite footprint:** ~643 MB. `embedding_cache.db` (397 MB) is the bulk; `brain.db` / `autonomy.db` / `metrics_history.db` are each ~80 MB and the latter two trim to steady-state under retention.
+**Total SQLite footprint (re-measured 2026-06-11):** ~1.5 GB. `brain.db` 553 MB (growth driver: `entry_chunks` 211 MB + `action_audit` 118 MB + `entry_documents` 77 MB — atoms itself is only 4 MB), `autonomy.db` 571 MB (driver: `decision_ledger` 375 MB of large JSON columns), `metrics_history.db` 198 MB, `embedding_cache.db` 191 MB. The per-row sizes in the table above are from 2026-04 and stale; see `docs/architecture-db-map-2026-06-11.md` for the current breakdown. Two DBs exist that are missing rows above: `llm_backlog.db` (deferred LLM work queue, `brain_core/llm_backlog.py`) and `profile_hypotheses.db` (profile hypothesis store). Three 0-byte stray `.db` files exist at `~/server/brain/brain.db`, `data/brain.db`, `data/autonomy.db` (recreated ~Apr 27 by an unidentified writer — find the creator before deleting, per the staleness rule).
 
 **Retention policy summary** (defined in `brain_core/db_maintenance.py`):
 - Hot audit trails (write-only, no SELECT outside maintenance): 14d — `autonomy_decisions`, `metrics_snapshots`.
@@ -67,7 +67,7 @@ The field is set by `ingest_mirror.py` when a NEW atom on the same `topic_key + 
 
 | Service | Endpoint | Role |
 |---|---|---|
-| Qdrant | `http://127.0.0.1:6333` (native, v1.17 source-build) | Vector store. 7 collections: `canonical`, `semantic_memory`, `experience`, `knowledge`, `code`, `personal`, `obsidian`. Legacy names (`semantic_contradictions`, `canonical_raptor`, `experience_compressed`, `context`, `patterns`) are aliased to their target collection via payload discriminators. int8 scalar quantization, HNSW m=16 / ef_construct=128, named `dense`/`contextual`/`raptor` vectors on canonical + `sparse` (BM25) on every collection. |
+| Qdrant | `http://127.0.0.1:6333` (native, v1.17 source-build) | Vector store. 9 collections (re-checked 2026-06-11, ~86.7K points): `canonical`, `semantic_memory`, `experience`, `knowledge`, `code`, `personal`, `obsidian`, `distilled`, `healthcheck_probe`. Shadow chunks (`*__shadow_v2`) share the physical collection behind a payload discriminator. Legacy names (`semantic_contradictions`, `canonical_raptor`, `experience_compressed`, `context`, `patterns`) are aliased to their target collection via payload discriminators. int8 scalar quantization, HNSW m=16 / ef_construct=128, named `dense`/`contextual`/`raptor` vectors on canonical + `sparse` (BM25) on every collection. |
 | Ollama | `http://127.0.0.1:11434` (native) | Embedder only. Model: `blaifa/multilingual-e5-large-instruct` (1024-dim). No LLM inference. |
 | Neo4j | `bolt://127.0.0.1:7687` (native) | Entity graph + 2-hop expansion + `MemoryAccess` utility scoring (Zep/Graphiti pattern). No auth (localhost). |
 
@@ -82,4 +82,5 @@ Anything that looks like persistent state but is not in this map is a candidate 
 
 ## History
 
+- 2026-06-11 — Re-measured during the architecture/DB structural quality pass: corrected total footprint (~1.5 GB), noted `llm_backlog.db` / `profile_hypotheses.db`, Qdrant collection list updated to 9, stray 0-byte root/data `.db` files flagged. Full inventory: `docs/architecture-db-map-2026-06-11.md`.
 - 2026-04-14 — File created. Two 0-byte stray files (`~/server/brain/brain.db`, `~/server/brain/autonomy.db`) deleted along with 9 stale `~/.openclaw/openclaw.json.bak*` config backups. Part of Phase 0 of the active brain cortical engine migration (`~/.claude/plans/atomic-chasing-liskov.md`).

@@ -11,9 +11,8 @@ Known drift (intentionally NOT unified here — unification is a behavior
 change, not an extraction):
 
 - Prompt vs query gate: ``looks_like_openclaw_hermes_distinction_prompt`` is
-  substring-based (so "currently" matches the "current" marker);
-  ``is_openclaw_hermes_distinction_query`` is token-based over the same
-  marker set.
+  substring-based; ``is_openclaw_hermes_distinction_query`` is token-based over
+  the same current/runtime/history marker family plus explicit ``now``.
 - Distinction result: the active ``is_openclaw_hermes_distinction_result`` is
   substring-based over ``title\\npath\\ncontent[:800]`` and accepts
   "distinguish"/"provenance" but needs a "current runtime" bigram; the route
@@ -100,7 +99,7 @@ def is_broad_openclaw_hermes_theme_noise(title: str, content: str) -> bool:
 def is_openclaw_hermes_distinction_query(query_tokens: set[str]) -> bool:
     """Route query classifier (token-shaped)."""
     return {"openclaw", "hermes"}.issubset(query_tokens) and bool(
-        query_tokens & {"current", "runtime", "historical", "distinction", "history"}
+        query_tokens & {"current", "currently", "now", "runtime", "historical", "distinction", "history"}
     )
 
 

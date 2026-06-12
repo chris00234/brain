@@ -91,9 +91,30 @@ def test_summary_intent_and_exclusion():
     assert qa.is_summary_excluded_query("요약 말고 직접 알려줘")
     # exclusion wins over positive intent even when both cues appear
     assert not qa.is_positive_summary_intent_query("summary 말고 알려줘")
+    # Diagnostic quality probes can mention summary/session as residue labels
+    # without requesting summary rows as the answer.
+    assert not qa.is_positive_summary_intent_query(
+        "Brain recall quality noise prefetch empty summary Claude Code session canonical_first eval score"
+    )
 
 
-# ── Composite QueryIntent ──────────────────────────────────────────────────
+def test_provenance_history_intent_allows_source_evidence_without_bare_session_false_positive():
+    assert qa.is_provenance_history_intent_query(
+        "show source provenance for Brain recall quality Claude Code session summary evidence"
+    )
+    assert qa.is_provenance_history_intent_query("retrieve the Claude session transcript")
+    assert qa.is_provenance_history_intent_query("cite the sources for this recall answer")
+    assert not qa.is_provenance_history_intent_query("open source Brain recall tooling preference")
+    assert not qa.is_provenance_history_intent_query("show open source Brain recall tooling preference")
+    assert not qa.is_provenance_history_intent_query("source code editing preference")
+    assert not qa.is_provenance_history_intent_query("show source code editing preference")
+    assert not qa.is_provenance_history_intent_query("find open source alternatives")
+    assert not qa.is_provenance_history_intent_query(
+        "Brain recall quality noise prefetch empty summary Claude Code session canonical_first eval score"
+    )
+
+
+# ── QueryIntent composite ──────────────────────────────────────────────────
 
 
 def test_analyze_query_populates_intent_flags_and_route_tags():

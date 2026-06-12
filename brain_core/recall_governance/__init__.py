@@ -47,8 +47,15 @@ from .source_authority import (
     result_metadata,
     result_text,
 )
+from .temporal_resolution import (
+    TEMPORAL_RESOLUTION_PENALTY,
+    is_conflicting_statement_pair,
+    is_temporal_history_prompt,
+    stale_conflict_pairs,
+)
 
 __all__ = [
+    "TEMPORAL_RESOLUTION_PENALTY",
     "AuthorityTier",
     "QueryIntent",
     "RecallPolicy",
@@ -56,6 +63,7 @@ __all__ = [
     "analyze_query",
     "classify_result",
     "guarantee_tokens",
+    "is_conflicting_statement_pair",
     "is_declarative_route_guarantee",
     "is_distilled_brain_analysis_result",
     "is_durable_truth_result",
@@ -72,6 +80,7 @@ __all__ = [
     "is_query_keyed_bridge_result",
     "is_source_or_test_file_result",
     "is_summary_excluded_query",
+    "is_temporal_history_prompt",
     "is_vanished_source_result",
     "match_route_guarantees",
     "matched_route_tags",
@@ -82,5 +91,6 @@ __all__ = [
     "result_category",
     "result_metadata",
     "result_text",
+    "stale_conflict_pairs",
     "tokenize",
 ]

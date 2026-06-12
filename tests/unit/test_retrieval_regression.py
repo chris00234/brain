@@ -48,3 +48,134 @@ def test_retrieval_regression_honors_min_pass_rate_env(tmp_path, monkeypatch):
 
     assert out["status"] == "breached"
     assert out["min_pass_rate"] == 1.0
+
+
+def test_retrieval_regression_treats_all_collection_as_unscoped(tmp_path, monkeypatch):
+    eval_set = tmp_path / "eval.json"
+    eval_set.write_text(json.dumps([{"query": "q", "collection": "all", "expected_content": "needle"}]))
+    calls = []
+    fake = ModuleType("search_unified")
+
+    def search_all(query, **kwargs):
+        calls.append(kwargs)
+        return [{"content": "needle"}]
+
+    fake.search_all = search_all  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "search_unified", fake)
+    monkeypatch.setattr(retrieval_regression, "REPORT_FILE", tmp_path / "report.json")
+
+    out = retrieval_regression.run(eval_set, limit=1, top_k=3)
+
+    assert out["status"] == "ok"
+    assert calls == [{"limit": 3}]
+
+
+def test_retrieval_regression_honors_alternates_and_forbidden_content(tmp_path, monkeypatch):
+    eval_set = tmp_path / "eval.json"
+    eval_set.write_text(
+        json.dumps(
+            [
+                {"query": "alternate", "expected_content": "needle", "expected_alternates": ["fallback"]},
+                {"query": "forbidden", "expected_content": "needle", "forbidden_content": ["leak"]},
+            ]
+        )
+    )
+    fake = ModuleType("search_unified")
+
+    def search_all(query, **kwargs):
+        if query == "alternate":
+            return [{"content": "fallback"}]
+        return [{"content": "needle plus leak"}]
+
+    fake.search_all = search_all  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "search_unified", fake)
+    monkeypatch.setattr(retrieval_regression, "REPORT_FILE", tmp_path / "report.json")
+
+    out = retrieval_regression.run(eval_set, limit=2, top_k=3)
+
+    assert out["passed"] == 1
+    assert out["rows"][0]["alternate_hit"] is True
+    assert out["rows"][1]["forbidden_hit"] is True
+    assert out["rows"][1]["ok"] is False
+
+
+def test_retrieval_regression_forbidden_content_matches_summary_spacing_and_title_content_variant():
+    case = {"forbidden_content": ["# Summary Claude Code session"]}
+
+    _, _, _, spaced_header = retrieval_regression._expected_hits(
+        case,
+        "# Summary  Claude Code session in server/brain",
+    )
+    _, _, _, title_content = retrieval_regression._expected_hits(
+        case,
+        "Summary Claude Code session discussed Brain recall quality",
+    )
+
+    assert spaced_header is True
+    assert title_content is True
+
+
+def test_default_eval_selection_includes_quality_gate_categories_beyond_limit(tmp_path, monkeypatch):
+    eval_set = tmp_path / "eval_set_stable.json"
+    eval_set.write_text(
+        json.dumps(
+            [
+                {"query": "baseline-1"},
+                {"query": "baseline-2"},
+                {"query": "later-stale", "category": "stale_fact_supersession"},
+                {"query": "later-noise", "category": "clean_hit_topk_noise"},
+                {"query": "later-other", "category": "non_gate_category"},
+            ]
+        )
+    )
+    monkeypatch.setattr(retrieval_regression, "DEFAULT_EVAL_SET", eval_set)
+
+    cases = retrieval_regression._load_cases(eval_set, limit=2)
+
+    assert [case["query"] for case in cases] == ["baseline-1", "baseline-2", "later-stale", "later-noise"]
+
+
+def test_search_unified_route_guarantee_hit_shape():
+    import search_unified
+
+    hits = search_unified._route_guarantee_hits(
+        "Brain recall quality noise prefetch empty summary Claude Code session canonical_first current useful context eval score"
+    )
+
+    assert hits
+    assert hits[0]["source_type"] == "route_guarantee"
+    assert hits[0]["path"] == "route_guarantee:brain_recall_prefetch_quality_eval_no_noise"
+    assert "maximize useful current memory context" in hits[0]["content"]
+
+
+def test_search_unified_route_guarantee_filter_drops_low_authority_residue():
+    import search_unified
+
+    route_hits = [{"source_type": "route_guarantee", "path": "route_guarantee:x"}]
+    results = [
+        {
+            "title": "Summary",
+            "content": "# Summary  Claude Code session in server/brain",
+            "collection": "canonical",
+            "path": "/Users/chrischo/server/knowledge/distilled/infra/dist_x.md",
+        },
+        {
+            "title": "Current quality standard",
+            "content": "Brain recall quality is measured by clean top-k current context.",
+            "collection": "semantic_memory",
+            "metadata": {"category": "fact"},
+            "path": "semantic://quality",
+        },
+    ]
+
+    filtered = search_unified._filter_route_low_authority_residue(results, route_hits)
+
+    assert [r["path"] for r in filtered] == ["semantic://quality"]
+
+
+def test_search_unified_identity_location_query_maps_to_identity_primary_doc():
+    import search_unified
+
+    hits = search_unified._primary_doc_hits("Where is Chris based and what timezone does he work in?")
+
+    assert any(str(hit.get("path", "")).endswith("canonical/chris/_identity.md") for hit in hits)

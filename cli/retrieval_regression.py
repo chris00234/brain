@@ -24,6 +24,14 @@ sys.path.insert(0, str(BRAIN_ROOT / "brain_core"))
 REPORT_FILE = BRAIN_ROOT / "logs" / "retrieval_regression.json"
 DEFAULT_EVAL_SET = BRAIN_ROOT / "cli" / "eval_set_stable.json"
 DEFAULT_MIN_PASS_RATE = 80.0
+QUALITY_GATE_CATEGORIES = frozenset(
+    {
+        "stale_fact_supersession",
+        "privacy_negative_personal_source",
+        "identity_canon_over_stale_provenance",
+        "clean_hit_topk_noise",
+    }
+)
 
 
 def _min_pass_rate() -> float:
@@ -42,7 +50,22 @@ def _load_cases(path: Path, limit: int) -> list[dict[str, Any]]:
     if not isinstance(data, list):
         raise ValueError("eval_set_root_not_list")
     cases = [r for r in data if isinstance(r, dict) and r.get("query")]
-    return cases[:limit]
+    selected = list(cases[:limit])
+    if path.resolve() == DEFAULT_EVAL_SET.resolve():
+        seen = {str(case.get("query") or "") for case in selected}
+        selected.extend(
+            case
+            for case in cases[limit:]
+            if case.get("category") in QUALITY_GATE_CATEGORIES and str(case.get("query") or "") not in seen
+        )
+    return selected
+
+
+def _normalize_collection(value: str | None) -> str | None:
+    normalized = str(value or "").strip()
+    if not normalized or normalized.lower() in {"all", "*"}:
+        return None
+    return normalized
 
 
 def _result_text(result: Any) -> str:
@@ -52,6 +75,34 @@ def _result_text(result: Any) -> str:
         parts.extend(meta.get(k) for k in ("path", "source", "source_type", "title"))
         return " ".join(str(p) for p in parts if p).lower()
     return str(result).lower()
+
+
+def _match_text(value: str) -> str:
+    return " ".join(str(value or "").lower().split())
+
+
+def _forbidden_variants(term: str) -> list[str]:
+    normalized = _match_text(term)
+    variants = [normalized] if normalized else []
+    stripped_heading = _match_text(normalized.lstrip("# "))
+    if stripped_heading and stripped_heading not in variants:
+        variants.append(stripped_heading)
+    return variants
+
+
+def _expected_hits(case: dict[str, Any], haystack: str) -> tuple[bool, bool, bool, bool]:
+    haystack_match = _match_text(haystack)
+    expected_content = _match_text(str(case.get("expected_content") or ""))
+    expected_source = _match_text(str(case.get("expected_source") or ""))
+    alternates_raw = case.get("expected_alternates") or []
+    alternates = [_match_text(str(v)) for v in alternates_raw if str(v).strip()]
+    forbidden_raw = case.get("forbidden_content") or []
+    forbidden = [variant for v in forbidden_raw for variant in _forbidden_variants(str(v))]
+    content_hit = bool(expected_content and expected_content in haystack_match)
+    source_hit = bool(expected_source and expected_source in haystack_match)
+    alternate_hit = any(alt in haystack_match for alt in alternates)
+    forbidden_hit = any(term in haystack_match for term in forbidden)
+    return content_hit, source_hit, alternate_hit, forbidden_hit
 
 
 def _search(query: str, collection: str | None, top_k: int) -> list[Any]:
@@ -79,19 +130,20 @@ def run(eval_set: Path = DEFAULT_EVAL_SET, *, limit: int = 20, top_k: int = 5) -
         query = str(case.get("query") or "")
         expected_content = str(case.get("expected_content") or "").lower().strip()
         expected_source = str(case.get("expected_source") or "").lower().strip()
-        collection = str(case.get("collection") or "").strip() or None
+        collection = _normalize_collection(case.get("collection"))
         t0 = time.time()
         try:
             results = _search(query, collection, top_k)
             haystack = "\n".join(_result_text(r) for r in results)
-            content_hit = bool(expected_content and expected_content in haystack)
-            source_hit = bool(expected_source and expected_source in haystack)
-            ok = content_hit or source_hit
+            content_hit, source_hit, alternate_hit, forbidden_hit = _expected_hits(case, haystack)
+            ok = (content_hit or source_hit or alternate_hit) and not forbidden_hit
             error = ""
         except Exception as exc:
             results = []
             content_hit = False
             source_hit = False
+            alternate_hit = False
+            forbidden_hit = False
             ok = False
             error = str(exc)[:200]
         rows.append(
@@ -102,6 +154,8 @@ def run(eval_set: Path = DEFAULT_EVAL_SET, *, limit: int = 20, top_k: int = 5) -
                 "expected_source": expected_source,
                 "content_hit": content_hit,
                 "source_hit": source_hit,
+                "alternate_hit": alternate_hit,
+                "forbidden_hit": forbidden_hit,
                 "ok": ok,
                 "result_count": len(results),
                 "latency_ms": int((time.time() - t0) * 1000),

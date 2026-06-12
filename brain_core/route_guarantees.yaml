@@ -43,7 +43,7 @@ routes:
         - [openclaw, 오픈클로]
         - [hermes, 헤르메스]
       support_any:
-        [current, runtime, historical, history, distinction, difference, 현재, 과거, 런타임, 차이, 구분, 역사]
+        [current, currently, now, runtime, historical, history, distinction, difference, 현재, 과거, 런타임, 차이, 구분, 역사]
     guarantee_facts:
       - id: openclaw_historical_hermes_current_runtime
         authority: direct_current_truth
